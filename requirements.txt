@@ -1,0 +1,11 @@
+pyyaml>=6.0
+paramiko>=2.11
+pytest>=7.0
+pandas>=2.0
+# Validation
+pydantic>=2.0
+# Add your LangGraph SDK here when ready, e.g.:
+# langgraph>=0.0.1
+requests>=2.28
+# Add your LangGraph SDK here when ready, e.g.:
+# langgraph>=0.0.1
