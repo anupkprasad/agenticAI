@@ -69,20 +69,6 @@ The project includes a small LLM wrapper `agentic/llm.py` that prefers a non-str
 
 If your LLM server runs on a remote host (for example: `ruili@172.22.149.139:11434`), create an SSH tunnel so the CLI can talk to it at `localhost:11434`.
 
-Example using the included helper script (uses `~/.ssh/id_ed25519` by default):
-
-```bash
-./scripts/tunnel_llm.sh ruili 172.22.149.139 11434 11434 ~/.ssh/id_ed25519 background
-# or manual forward:
-# ssh -N -L 11434:localhost:11434 -i ~/.ssh/id_ed25519 ruili@172.22.149.139
-```
-
-Then call the CLI with the LLM flags:
-
-```bash
-python scripts/run_agent.py --use-llm --llm-base-url http://localhost:11434 --llm-model gpt-oss:120b --prompt "setup a simulation for ./my.pdb"
-```
-
 ### Handling streamed responses
 
 Some LLM servers stream partial output as NDJSON fragments which the CLI logs to `--llm-log`. The wrapper tries to reassemble these fragments but for best results ask the model to return a single compact JSON object or use the non-streaming `/api/generate` endpoint.

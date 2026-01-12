@@ -1,0 +1,4 @@
+# Analysis agent config
+reports:
+  default_format: summary
+  enable_plots: false

@@ -1,13 +1,13 @@
 """Pydantic schemas for validated tool-call objects returned by the LLM.
 
 These models are intentionally small and permissive: we validate the
-presence and basic types for common actions (plan_simulation / run_simulation_setup)
+presence and basic types for common actions (setup_simulation / run_simulation_setup)
 and provide a general `ToolCall` model for unknown actions.
 """
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
-from pydantic import BaseModel, Field, ValidationError, validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 
 class PlanSimulationParams(BaseModel):
@@ -16,7 +16,7 @@ class PlanSimulationParams(BaseModel):
     engine: Optional[str] = Field(None, description="MD engine name (gromacs, namd, etc)")
     steps: Optional[int] = Field(None, description="Number of MD steps / frames to run")
 
-    @validator("pdb", "wdir")
+    @field_validator("pdb", "wdir", mode="before")
     def not_empty(cls, v: str) -> str:
         if not v or not isinstance(v, str):
             raise ValueError("must be a non-empty string")
@@ -24,16 +24,18 @@ class PlanSimulationParams(BaseModel):
 
 
 class ToolCall(BaseModel):
-    name: str = Field(..., description="Tool/action name e.g. plan_simulation")
+    name: str = Field(..., description="Tool/action name e.g. setup_simulation")
     args: Dict[str, Any] = Field(default_factory=dict)
     id: Optional[str] = None
+    agent: Optional[str] = Field(None, description="Suggested agent to handle this tool_call")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional metadata (confidence, provenance)")
 
     def validate_args(self) -> Optional[ValidationError]:
         """Validate args for known tool names and coerce where possible.
 
         Returns a ValidationError if validation fails, otherwise None.
         """
-        if self.name in ("plan_simulation", "run_simulation_setup"):
+        if self.name in ("setup_simulation", "run_simulation_setup"):
             try:
                 params = PlanSimulationParams(**self.args)
                 # replace with validated / coerced values

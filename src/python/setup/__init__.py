@@ -1,6 +1,5 @@
-"""Setup module for pseudoKin - preparation and initialization"""
+"""Setup module for simulation setup - preparation and initialization"""
 
-from .af3_prep import *
 from .sim_setup import *
 
-__all__ = ['af3_prep', 'sim_setup']
+__all__ = ['sim_setup']

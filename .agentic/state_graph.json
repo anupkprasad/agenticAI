@@ -1,0 +1,38 @@
+{
+  "nodes": {
+    "n1": {
+      "type": "prompt",
+      "payload": {
+        "prompt": "Prepare simulation setup for /home/anup/workspace/temp/sim_test/0.pdb in working directory  the pdb file already preprocessed so please setup simulation only",
+        "context": {}
+      },
+      "ts": 1768244223.8492641
+    },
+    "n2": {
+      "type": "global_plan",
+      "payload": {
+        "plan": {
+          "content": "MOCK_LLM_RESPONSE: would send: Prepare simulation setup for /home/anup/workspace/temp/sim_test/0.pdb in working directory the pdb file already preprocessed so please setup simulation only",
+          "tool_calls": [],
+          "validation_errors": {}
+        }
+      },
+      "ts": 1768244241.9024284
+    },
+    "n3": {
+      "type": "proposal",
+      "payload": {
+        "agent": "simulation",
+        "tool_calls": []
+      },
+      "ts": 1768244259.9714265
+    }
+  },
+  "edges": [
+    {
+      "src": "n1",
+      "dst": "n2",
+      "label": "planned"
+    }
+  ]
+}

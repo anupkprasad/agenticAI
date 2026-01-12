@@ -95,5 +95,5 @@ def call_simulation_setup(pdb_file, wdir):
         "message": f"Simulation setup completed for {pdb_file} in {wdir}"}
 
 if __name__ == "__main__":
-    wdir = '/mnt/mydrive/pseudokinase/pseudoNcontrol_AF3/0_MD_simulation/batch_sim_6/test/'
+    wdir = '/home/anup/workspace/temp/sim_test/'
     call_simulation_setup(wdir=wdir, pdb_file="0.pdb")

@@ -1,0 +1,26 @@
+---
+prompt: Prepare simulation setup for /home/anup/workspace/temp/sim_test/0.pdb in working directory /home/anup/workspace/temp/sim_test
+{ "tool_calls": [ { "name": "submit_job", "arguments": { "command": "gmx mdrun -s 0.pdb", "working_dir": "/home/anup/workspace/temp/sim_test", "queue": "compute" } } ] }
+[
+  {
+    "name": "submit_job",
+    "args": {},
+    "id": "5f7d71e3-d126-4412-9877-578add93d147",
+    "agent": null,
+    "metadata": null
+  }
+]
+---
+EXECUTE
+{
+  "name": "submit_job",
+  "args": {},
+  "id": "5f7d71e3-d126-4412-9877-578add93d147",
+  "agent": "hpc",
+  "metadata": null
+}
+RESULT
+{
+  "status": "submitted",
+  "job_id": "MOCK-12345"
+}

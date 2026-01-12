@@ -1,0 +1,4 @@
+# Preprocessor agent config
+steps:
+  - clean_pdb: true
+  - rename_chains: false

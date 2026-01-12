@@ -1,6 +1,6 @@
-# agenticAI — Molecular Dynamics agentic project template
+# AgenticAI — Molecular Dynamics agentic workflow
 
-This repository is a minimal scaffold for an agentic AI system (using LangGraph-style agents) to prepare, submit, retrieve and analyze molecular dynamics simulations on an HPC cluster.
+This repository is an agentic AI system (using LangGraph-style agents) to prepare, submit/retrieve (on HPC) and analyze molecular dynamics simulations.
 
 What's included
 - `agentic/agents.py` — minimal agent classes and integration points for LangGraph.

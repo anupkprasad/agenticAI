@@ -202,17 +202,55 @@ class LLMClient:
         except Exception:
             parsed = None
 
-        # 2) Try to find explicit JSON blob in compacted text
+        # 2) Try to find explicit JSON blob in compacted text. Many servers
+        # stream NDJSON or wrap a JSON payload inside another JSON field; try
+        # to locate a smaller JSON substring that contains 'tool_calls' and
+        # parse that specifically using a simple brace-matching approach.
         if parsed is None:
             try:
-                # greedy first { to last } in compact text
-                first = compact.find("{")
-                last = compact.rfind("}")
-                if first != -1 and last != -1 and last > first:
-                    candidate = compact[first:last+1]
-                    # try a quick cleanup of common streaming artifacts
-                    candidate = re.sub(r"\s+", " ", candidate)
-                    parsed = json.loads(candidate)
+                search_target = None
+                # prefer the quoted key if present, otherwise the bare name
+                if '"tool_calls"' in compact:
+                    search_target = '"tool_calls"'
+                elif 'tool_calls' in compact:
+                    search_target = 'tool_calls'
+
+                if search_target:
+                    pos = compact.find(search_target)
+                    # find opening brace before the key
+                    start = compact.rfind('{', 0, pos)
+                    if start != -1:
+                        # simple brace matcher to find the matching close
+                        depth = 0
+                        end = -1
+                        for i in range(start, len(compact)):
+                            ch = compact[i]
+                            if ch == '{':
+                                depth += 1
+                            elif ch == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    end = i
+                                    break
+                        if end != -1:
+                            candidate = compact[start:end+1]
+                            candidate = re.sub(r"\s+", " ", candidate)
+                            # Try direct parse, then try unescaping common escapes
+                            tried = [candidate]
+                            tried.append(candidate.replace('\\"', '"'))
+                            try:
+                                tried.append(candidate.encode('utf-8').decode('unicode_escape'))
+                            except Exception:
+                                pass
+                            if candidate.startswith('"') and candidate.endswith('"'):
+                                tried.append(candidate[1:-1])
+                            parsed = None
+                            for cand in tried:
+                                try:
+                                    parsed = json.loads(cand)
+                                    break
+                                except Exception:
+                                    parsed = None
             except Exception:
                 parsed = None
 
@@ -238,11 +276,14 @@ class LLMClient:
         if not tool_calls:
             # Map a few common action keywords to internal tool names
             action_map = {
-                "run_simulation_setup": "plan_simulation",
-                "prepare_simulation": "plan_simulation",
-                "prepare a simulation": "plan_simulation",
-                "plan_simulation": "plan_simulation",
-                "simulation_setup": "plan_simulation",
+                # Preserve explicit tool names when the model uses them.
+                    "run_simulation_setup": "run_simulation_setup",
+                    # Prefer the clearer internal name 'setup_simulation' so the
+                    # planner's intent is obvious to users (avoid 'plan_simulation').
+                    "prepare_simulation": "setup_simulation",
+                    "prepare a simulation": "setup_simulation",
+                    "plan_simulation": "setup_simulation",
+                    "simulation_setup": "setup_simulation",
                 "submit_job": "submit_job",
                 "submit": "submit_job",
                 "download_results": "download_results",
@@ -261,8 +302,11 @@ class LLMClient:
             if detected:
                 # Extract params: look for a pdb filename and a working dir
                 params = {}
-                # pdb: look for something that ends with .pdb
-                m = re.search(r"([\w\-/]+\.pdb)", compact, flags=re.IGNORECASE)
+                # pdb: look for something that ends with .pdb and starts
+                # with a slash (absolute paths). This avoids accidentally
+                # capturing fragments like 'for/home/...' when the LLM
+                # includes natural language around the path.
+                m = re.search(r"(/[\w\-/]+\.pdb)", compact, flags=re.IGNORECASE)
                 if m:
                     params["pdb"] = m.group(1)
 
@@ -276,7 +320,20 @@ class LLMClient:
                     # fallback: try to find the most plausible absolute path in compact text
                     m3 = re.search(r"(/[^\s\n\"']+(/[^\s\n\"']+)*)", compact)
                     if m3:
-                        params.setdefault("wdir", m3.group(1))
+                        candidate_wdir = m3.group(1)
+                        # Strip streaming artifacts like trailing '.Reply' and common punctuation
+                        candidate_wdir = re.sub(r"(\.Reply)$", "", candidate_wdir)
+                        # Use double-quoted string to avoid unterminated literal issues
+                        candidate_wdir = candidate_wdir.rstrip(".,;:\\'\"")
+                        # If the candidate is a pdb path, prefer the containing directory
+                        if candidate_wdir.lower().endswith('.pdb'):
+                            try:
+                                import os
+
+                                candidate_wdir = os.path.dirname(candidate_wdir)
+                            except Exception:
+                                pass
+                        params.setdefault("wdir", candidate_wdir)
 
                 # Also try to extract bash-like VAR="..." assignments (e.g. PDB="/path/0.pdb")
                 assigns = dict(re.findall(r"([A-Za-z0-9_]+)\s*=\s*\"([^\"]+)\"", compact))
@@ -369,6 +426,15 @@ class LLMClient:
                         continue
                     # try known shapes
                     if isinstance(obj, dict):
+                        # Some servers stream a wrapper object with a 'message'
+                        # field whose 'content' contains the assistant tokens
+                        # (sometimes split across several events). Prefer
+                        # appending that when available so we reconstruct the
+                        # original assistant content cleanly.
+                        msg = obj.get('message') if isinstance(obj.get('message'), dict) else None
+                        if msg and msg.get('content'):
+                            pieces.append(msg.get('content'))
+                            continue
                         # common top-level response
                         if obj.get("response"):
                             pieces.append(obj.get("response"))

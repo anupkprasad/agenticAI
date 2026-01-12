@@ -1,0 +1,77 @@
+---
+prompt: Prepare simulation setup for /home/anup/workspace/temp/sim_test/0.pdb in working directory /home/anup/workspace/temp/sim_test
+{ "tool_calls": [ { "name": "clean_pdb", "args": { "pdb_path": "/home/anup/workspace/temp/sim_test/0.pdb", "output_path": "/home/anup/workspace/temp/sim_test/0_cleaned.pdb" } }, { "name": "rename_chains", "args": { "pdb_path": "/home/anup/workspace/temp/sim_test/0_cleaned.pdb", "rename": false, "output_path": "/home/anup/workspace/temp/sim_test/0_processed.pdb" } }, { "name": "prepare_simulation", "args": { "pdb_path": "/home/anup/workspace/temp/sim_test/0_processed.pdb", "working_directory": "/home/anup/workspace/temp/sim_test", "simulation_type": "molecular_dynamics", "force_field": "amber99sb", "solvent_model": "tip3p" } } ] }
+[
+  {
+    "name": "clean_pdb",
+    "args": {
+      "pdb_path": "/home/anup/workspace/temp/sim_test/0.pdb",
+      "output_path": "/home/anup/workspace/temp/sim_test/0_cleaned.pdb"
+    },
+    "id": "0728bc71-ffa4-4ef3-bd33-b11f581cb793",
+    "agent": null,
+    "metadata": null
+  },
+  {
+    "name": "rename_chains",
+    "args": {
+      "pdb_path": "/home/anup/workspace/temp/sim_test/0_cleaned.pdb",
+      "rename": false,
+      "output_path": "/home/anup/workspace/temp/sim_test/0_processed.pdb"
+    },
+    "id": "c88509b6-9c28-4543-a9cf-5db0929d95af",
+    "agent": null,
+    "metadata": null
+  },
+  {
+    "name": "prepare_simulation",
+    "args": {
+      "pdb_path": "/home/anup/workspace/temp/sim_test/0_processed.pdb",
+      "working_directory": "/home/anup/workspace/temp/sim_test",
+      "simulation_type": "molecular_dynamics",
+      "force_field": "amber99sb",
+      "solvent_model": "tip3p"
+    },
+    "id": "594a7294-039b-4ece-ad8f-591ec2c54d47",
+    "agent": null,
+    "metadata": null
+  }
+]
+---
+EXECUTE
+{
+  "name": "clean_pdb",
+  "args": {
+    "pdb_path": "/home/anup/workspace/temp/sim_test/0.pdb",
+    "output_path": "/home/anup/workspace/temp/sim_test/0_cleaned.pdb"
+  },
+  "id": "0728bc71-ffa4-4ef3-bd33-b11f581cb793",
+  "agent": "preprocessor",
+  "metadata": null
+}
+EXECUTE
+{
+  "name": "rename_chains",
+  "args": {
+    "pdb_path": "/home/anup/workspace/temp/sim_test/0_cleaned.pdb",
+    "rename": false,
+    "output_path": "/home/anup/workspace/temp/sim_test/0_processed.pdb"
+  },
+  "id": "c88509b6-9c28-4543-a9cf-5db0929d95af",
+  "agent": "preprocessor",
+  "metadata": null
+}
+EXECUTE
+{
+  "name": "prepare_simulation",
+  "args": {
+    "pdb_path": "/home/anup/workspace/temp/sim_test/0_processed.pdb",
+    "working_directory": "/home/anup/workspace/temp/sim_test",
+    "simulation_type": "molecular_dynamics",
+    "force_field": "amber99sb",
+    "solvent_model": "tip3p"
+  },
+  "id": "594a7294-039b-4ece-ad8f-591ec2c54d47",
+  "agent": "preprocessor",
+  "metadata": null
+}
