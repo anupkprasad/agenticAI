@@ -1,18 +1,34 @@
-# AgenticAI — Molecular Dynamics agentic workflow
+# AgenticAI — Molecular Dynamics LangGraph Workflow
 
-This repository is an agentic AI system (using LangGraph-style agents) to prepare, submit/retrieve (on HPC) and analyze molecular dynamics simulations.
+This repository provides a clean, LangGraph-based agentic AI system for molecular dynamics simulation workflows. The system uses a state-driven approach to orchestrate MD simulation preparation, execution planning, and analysis with human-in-the-loop capabilities.
 
-What's included
-- `agentic/agents.py` — minimal agent classes and integration points for LangGraph.
-- `config/config.yaml` — example configuration for HPC credentials and simulation defaults.
-- `agentic/hpc/slurm_template.sh` — sample SLURM script template.
-- `scripts/run_agent.py` — small CLI to exercise agents locally (no real HPC calls by default).
-- `requirements.txt` — minimal Python dependencies to get started.
-- `tests/test_agents.py` — small pytest test to validate the skeleton.
+## What's included
 
-Quick start
+### Core LangGraph Architecture
+- `agentic/md_workflow.py` — Main LangGraph StateGraph workflow orchestration
+- `agentic/md_supervisor.py` — Finite-state controller for workflow routing
+- `agentic/md_state.py` — Central state management with TypedDict
+- `agentic/preprocessing_agent.py` — PDB preprocessing with LLM-powered planning
+- `agentic/setup_agent.py` — Simulation system setup with adaptive protocols
+- `agentic/human_checkpoints.py` — Human-in-the-loop intervention points
+- `agentic/llm.py` — LLM client with mock mode for testing
+- `run_md_workflow.py` — Clean command-line interface
 
-1. Create a Python virtualenv and install dependencies:
+### Custom Analysis Tools (Preserved)
+- `src/python/analysis/` — Your MD analysis utilities and scripts
+- `src/python/setup/` — Your simulation setup tools
+- `src/python/utilities/` — Your utility functions
+- `src/tcl/` — VMD TCL scripts for visualization
+- `scripts/` — Directory for additional custom scripts
+
+### Documentation & Configuration
+- `requirements.txt` — Python dependencies including LangGraph
+- `setup.py` — Package installation configuration
+- `docs/` — User guides and workflow documentation
+
+## Quick start
+
+1. **Set up Python environment:**
 
 ```bash
 python -m venv .venv
@@ -20,26 +36,99 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-2. Edit `config/config.yaml` with your HPC credentials and desired defaults.
-
-3. Run the local CLI to see a dry run:
+2. **Run a basic workflow (test mode):**
 
 ```bash
-python scripts/run_agent.py setup --pdb example.pdb
-python scripts/run_agent.py prepare-job --out job.sh
-python scripts/run_agent.py analyze --data results/
+python run_md_workflow.py --goal "I need to run an MD simulation of protein test.pdb in water with 150mM NaCl" --no-human-loop
 ```
 
-Integration with LangGraph
+3. **Run with LLM planning enabled:**
 
-The `agentic/agents.py` file contains clear placeholders and a `create_langgraph_agent` hook where you can instantiate real LangGraph agents and attach them to the classes. The current code is intentionally minimal and safe to run locally without an LLM.
+```bash
+python run_md_workflow.py \
+  --goal "Prepare MD simulation for my_protein.pdb with AMBER force field" \
+  --use-llm \
+  --llm-base-url http://localhost:11434
+```
 
-Next steps
-- Replace placeholders in agent methods with real logic to call MD tools (GROMACS, NAMD, OpenMM).
-- Implement secure job submission using SSH/SFTP (the `HPCJobAgent` includes starting points).
-- Swap the placeholder LangGraph integration with the actual LangGraph SDK (update `requirements.txt` as needed).
+4. **Run with human checkpoints:**
 
-Documentation
-- Full user manual: `docs/USER_GUIDE.md` — contains installation steps, the full CLI reference, LLM/tunnel instructions, examples, and troubleshooting.
+```bash
+python run_md_workflow.py \
+  --goal "Setup MD simulation for complex_protein.pdb with custom protocols" \
+  --use-llm
+```
 
-License: choose a license for your project.
+## LangGraph Architecture
+
+The workflow uses a clean LangGraph StateGraph with the following nodes:
+
+1. **Input Validation** — Extract PDB files and validate user goals
+2. **Preprocessing** — Clean PDB structure, remove waters, fix residues
+3. **Setup** — Generate topology, add solvent/ions, create MDP protocols
+4. **Human Checkpoints** — Optional approval points for critical decisions
+5. **Final Report** — Comprehensive workflow completion summary
+
+### State Management
+
+The workflow maintains a single `MDState` TypedDict containing:
+- Input files and user goals
+- Preprocessing results and cleaned structures
+- Simulation setup parameters and generated files
+- Execution logs and validation reports
+- Error handling and human feedback
+
+## Configuration Options
+
+The workflow provides sensible GROMACS defaults:
+- **Force Field**: AMBER99SB-ILDN
+- **Water Model**: TIP3P  
+- **Human-in-the-Loop**: Configurable checkpoints
+- **Working Directory**: Automatically managed
+- **Logging**: Structured workflow logs
+
+## Command-Line Interface
+
+```bash
+python run_md_workflow.py [OPTIONS]
+
+Required:
+  --goal TEXT                 Natural language description of your MD simulation goal
+
+Optional:
+  --use-llm                   Enable LLM-powered planning (default: mock mode)
+  --llm-model TEXT           LLM model name (default: llama3.1)
+  --llm-base-url TEXT        LLM endpoint URL (default: http://localhost:11434)
+  --no-human-loop           Disable human checkpoints for autonomous execution
+  --force-field TEXT         Override default force field (default: amber99sb-ildn)
+  --water-model TEXT         Override default water model (default: tip3p)
+  --working-dir PATH         Specify working directory (default: current directory)
+  --log-file PATH           Specify log file location (default: ./md_workflow.log)
+```
+
+## Integration with Your Custom Tools
+
+The `src/` directory structure is preserved for your custom analysis and utility scripts:
+
+- **`src/python/analysis/`** — Add your MD analysis tools here
+- **`src/python/setup/`** — Add custom simulation setup utilities
+- **`src/tcl/`** — VMD scripts and TCL utilities
+- **`scripts/`** — Additional custom scripts and tools
+
+The LangGraph workflow can be extended to call your custom tools by modifying the agent nodes.
+
+## Next Steps
+
+- **HPC Integration**: Extend with job submission and monitoring agents
+- **Analysis Pipeline**: Add post-simulation analysis agents  
+- **Custom Protocols**: Integrate your simulation setup tools from `src/`
+- **Real LLM**: Connect to your preferred LLM endpoint for intelligent planning
+
+## Documentation
+
+- Full workflow guide: `docs/workflow.md`
+- User manual: `docs/USER_GUIDE.md`
+
+## License
+
+Choose a license for your project.

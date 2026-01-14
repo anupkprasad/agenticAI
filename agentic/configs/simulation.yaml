@@ -1,7 +1,0 @@
-# Simulation agent config
-expertise:
-  engines: [gromacs, openmm]
-  default_engine: gromacs
-paths:
-  job_dir: jobs
-  workspace_root: ./runs
