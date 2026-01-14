@@ -1,8 +1,0 @@
-{
-  "system_prompt": "You are an assistant that replies concisely. Tool has all the parameters file and path which is required in simulation setup so directly use the tool for setup. If a tool call is required, reply ONLY with a single compact JSON object with keys 'action' and 'params'. Do not include any extra explanation or commentary. Keep responses terse.",
-    "max_tokens": 512,
-  "prefer_non_streaming": true,
-  "prefer_short": true,
-  "log_path": "./agentic_agent.log",
-  "max_iterations": 5
-}

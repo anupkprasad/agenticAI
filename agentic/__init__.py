@@ -1,9 +1,10 @@
-"""Top-level agentic package: exported helpers and agents.
+"""Top-level agentic package: LangGraph MD workflow components.
 
-This module exposes the `agent_from_name` factory for async agent
-construction and keeps backwards compatibility with the older `agents`
-module where convenient.
+This module exposes the main workflow components for the MD simulation pipeline.
 """
-from .agent_creator import agent_from_name, AgentCreator
+from .md_workflow import MDWorkflow
+from .md_supervisor import MDSupervisor
+from .md_state import MDState
+from .llm import LLMClient
 
-__all__ = ["agent_from_name", "AgentCreator"]
+__all__ = ["MDWorkflow", "MDSupervisor", "MDState", "LLMClient"]

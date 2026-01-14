@@ -47,6 +47,8 @@ class LLMClient:
         self.model = model
         self.base_url = base_url
         self._client = None
+        self._is_mock_mode = False  # Track if we're in mock mode
+        
         # load optional configuration (system prompt, tokens) from agentic/config.json
         self.config = {}
         try:
@@ -63,6 +65,7 @@ class LLMClient:
         self.tools: Optional[List[Any]] = kwargs.pop("tools", None)
         if ChatOllama is None:
             logger.info("ChatOllama client not available; LLMClient will run in mock mode or HTTP-fallback if base_url provided")
+            self._is_mock_mode = True
         else:
             # Instantiate the underlying client. Keyword args are passed through.
             self._client = ChatOllama(model=model, base_url=base_url, **kwargs)
@@ -352,11 +355,8 @@ class LLMClient:
                 })
         # Validate parsed tool_calls using pydantic schemas when available
         validation_errors = {}
-        try:
-            from agentic.schemas import ToolCall as ToolCallModel
-        except Exception:
-            ToolCallModel = None
-
+        ToolCallModel = None  # Schemas module no longer exists
+        
         validated_calls = []
         if ToolCallModel is not None:
             for tc in tool_calls:

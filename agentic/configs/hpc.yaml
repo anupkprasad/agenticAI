@@ -1,5 +1,0 @@
-# HPC agent config
-queues:
-  - compute
-  - debug
-default_queue: compute

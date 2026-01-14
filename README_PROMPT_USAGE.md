@@ -1,82 +1,206 @@
-# Using the prompt-driven CLI for simulation setup
+# LangGraph MD Workflow Usage Guide
 
-This project uses a single, prompt-driven CLI entrypoint: `scripts/run_agent.py`.
-The CLI always takes a natural-language `--prompt` which the planner (LLM) uses
-to produce a compact plan expressed as tool_calls (for example `setup_simulation`).
+This project uses a clean LangGraph-based workflow for molecular dynamics simulation preparation. The system uses natural language goals to orchestrate preprocessing, setup, and simulation planning with optional human-in-the-loop checkpoints.
 
-This short guide shows common usages to prepare simulation setups using prompts.
+## Core Command Interface
 
-Prerequisites
-- Run from the project root (where `scripts/` lives).
-- Activate the project's virtualenv if you use one (example):
+The main entry point is `run_md_workflow.py`, which takes natural language goals and executes a state-driven LangGraph workflow.
+
+### Prerequisites
+
+- Run from the project root directory
+- Activate the virtual environment:
 
 ```bash
 source .venv/bin/activate
 ```
 
-Core flags
-- `--prompt`   : (required) natural language instruction to the planner.
-- `--use-llm`  : enable contacting a local/remote LLM via `LLMClient`.
-- `--llm-base-url` : base URL for an LLM endpoint (e.g. `http://host:11434`).
-- `--llm-log`  : path to append raw LLM responses and the parsed `invoke_result`.
-- `--auto-approve` : run planned actions without interactive confirmation.
-- `--dry-run`  : print planned actions only; do not execute them.
+### Essential Flags
 
-Examples
+- `--goal` : (required) Natural language description of your MD simulation
+- `--use-llm` : Enable LLM-powered intelligent planning
+- `--llm-base-url` : LLM endpoint URL (e.g., `http://localhost:11434`)
+- `--llm-model` : LLM model name (default: `llama3.1`)
+- `--no-human-loop` : Disable human checkpoints for autonomous execution
+- `--force-field` : Override force field (default: `amber99sb-ildn`)
+- `--water-model` : Override water model (default: `tip3p`)
+- `--working-dir` : Specify working directory
+- `--log-file` : Specify log file location
 
-1) Preview (dry-run) — scan a folder and show planned setups without running:
+## Common Usage Examples
 
-```bash
-python3 scripts/run_agent.py \
-  --prompt "Scan the folder /home/anup/workspace/temp/sim_test for PDB files and prepare simulation setups for each" \
-  --dry-run --use-llm --llm-base-url http://172.22.149.139:11434 --llm-log ./agentic_agent.log
-```
+### 1. Basic Test Run (Mock Mode)
 
-2) Execute automatically (no prompts) — scan a folder and run setups for each PDB:
+Test the workflow without LLM using built-in mock responses:
 
 ```bash
-python3 scripts/run_agent.py \
-  --prompt "Scan the folder /home/anup/workspace/temp/sim_test for PDB files and prepare simulation setups for each" \
-  --use-llm --llm-base-url http://172.22.149.139:11434 --llm-log ./agentic_agent.log --auto-approve
+python run_md_workflow.py \
+  --goal "I need to run an MD simulation of protein my_protein.pdb in water with 150mM NaCl" \
+  --no-human-loop
 ```
 
-3) Prepare a single PDB in a specific working directory:
+### 2. LLM-Powered Workflow
+
+Use LLM for intelligent preprocessing and setup planning:
 
 ```bash
-python3 scripts/run_agent.py \
-  --prompt "Prepare simulation setup for /home/anup/workspace/temp/sim_test/0.pdb in working directory /home/anup/workspace/temp/sim_test" \
-  --use-llm --llm-base-url http://172.22.149.139:11434 --auto-approve
+python run_md_workflow.py \
+  --goal "Prepare MD simulation for membrane_protein.pdb in POPC lipid bilayer" \
+  --use-llm \
+  --llm-base-url http://localhost:11434
 ```
 
-Notes and behavior
-- The planner returns tool_calls. The CLI focuses on `setup_simulation` (and synonyms).
-- If a tool_call contains only `wdir` (no `pdb`), the CLI scans that directory for
-  `*.pdb` files and executes `plan_simulation` for each discovered file.
-- `--dry-run` prints the planned tool_calls (and any per-PDB expansion) without executing.
-- `--auto-approve` skips interactive confirmations and runs the setups immediately.
-- Raw LLM responses and the parsed `invoke_result` are appended to the file given
-  with `--llm-log` for auditing and debugging.
+### 3. Interactive with Human Checkpoints
 
-Real setup vs fallback
-- The simulation agent will try to lazy-import the real `call_simulation_setup` (if
-  your project provides it). When available, the real implementation is invoked from
-  inside the workdir and receives the PDB basename (to avoid exposing absolute paths
-  to downstream tools). If import or execution fails, the agent falls back to a
-  lightweight/safe skeleton setup to keep development/test flows working.
+Run with human approval at critical decision points:
 
-If you want a strict mode that fails when the real setup is not available, say so
-and I can add a `--require-real-setup` flag that will make the CLI error out instead
-of silently falling back.
+```bash
+python run_md_workflow.py \
+  --goal "Setup complex MD simulation for protein_complex.pdb with custom force field" \
+  --use-llm \
+  --llm-base-url http://localhost:11434
+```
 
-Troubleshooting
-- If a downstream tool complains about paths (e.g. Rosetta errors mentioning ".///...")
-  make sure you're running the project with the virtualenv and that any real setup
-  implementation expects relative/basename input (the agent already runs the real
-  setup from inside the `wdir`).
-- Inspect `./agentic_agent.log` (or whatever path you pass to `--llm-log`) for the
-  planner's raw response and the parsed tool_calls.
+### 4. Custom Configuration
 
-Contact
-- If you want, I can add example unit tests that mock the planner and the real
-  setup to verify the behavior (dry-run, auto-approve, fallback). I can also add
-  the `--require-real-setup` flag.
+Override defaults for specific simulation requirements:
+
+```bash
+python run_md_workflow.py \
+  --goal "MD simulation of DNA-protein complex in 100mM KCl solution" \
+  --use-llm \
+  --force-field amber14sb \
+  --water-model tip4pew \
+  --working-dir ./dna_simulations
+```
+
+### 5. Batch Processing Example
+
+Process multiple PDB files in a directory:
+
+```bash
+for pdb in /path/to/pdbs/*.pdb; do
+  python run_md_workflow.py \
+    --goal "Prepare MD simulation for $(basename $pdb) in water with physiological salt" \
+    --use-llm \
+    --no-human-loop \
+    --working-dir "./sims/$(basename $pdb .pdb)"
+done
+```
+
+## Workflow Stages
+
+The LangGraph workflow progresses through these stages:
+
+1. **Input Validation** — Extract PDB file references from natural language goal
+2. **Preprocessing** — Clean PDB structure using LLM-generated adaptive plans
+3. **Setup** — Generate simulation system with protocols based on LLM analysis
+4. **Human Checkpoints** — Optional approval for preprocessing/setup decisions
+5. **Final Report** — Comprehensive summary of generated files and next steps
+
+## Human-in-the-Loop Interactions
+
+When human checkpoints are enabled, you'll be prompted at key decision points:
+
+```
+Human Checkpoint: Preprocessing Review
+=====================================
+The preprocessing agent has analyzed your PDB and suggests:
+- Removing 150 water molecules
+- Adding missing hydrogen atoms
+- Fixing 2 non-standard residues
+
+Options:
+- approve: Continue with current plan
+- retry: Rerun preprocessing with different parameters  
+- modify: Provide specific modifications
+
+Your choice [approve/retry/modify]: approve
+```
+
+## State Management
+
+The workflow maintains a comprehensive state including:
+- **Input**: Original PDB files and user goals
+- **Preprocessing**: Cleaned structures, topology files, processing logs
+- **Setup**: System coordinates, MDP protocols, simulation parameters
+- **Validation**: Error reports, warnings, human feedback
+- **Output**: File paths, execution logs, completion status
+
+## Output Files
+
+The workflow generates standard GROMACS files:
+- `processed.gro` — Cleaned and processed structure
+- `topol.top` — Molecular topology
+- `*.mdp` — Simulation parameter files (minimization, NVT, NPT, production)
+- `system.gro` — Final solvated system coordinates
+
+## Integration with Custom Tools
+
+The workflow can be extended to use your custom tools in `src/`:
+
+- **Analysis Tools**: `src/python/analysis/` — Your MD analysis scripts
+- **Setup Utilities**: `src/python/setup/` — Custom simulation preparation tools
+- **TCL Scripts**: `src/tcl/` — VMD visualization and analysis scripts
+
+## Error Handling
+
+The workflow provides comprehensive error handling:
+- **Validation Errors**: Missing files, invalid PDB structures
+- **Processing Errors**: Failed preprocessing or setup steps
+- **LLM Errors**: Fallback to mock mode if LLM unavailable
+- **Human Override**: Ability to modify or retry failed steps
+
+## Logging and Debugging
+
+Detailed logs are saved to `md_workflow.log` (or specified file):
+- Workflow progression and routing decisions
+- LLM interactions and generated plans
+- File operations and validations
+- Error messages and warnings
+
+## Troubleshooting
+
+### LLM Connection Issues
+If LLM is unavailable, the system automatically falls back to mock mode:
+```
+2026-01-13 14:22:09,405 - agentic.llm - INFO - ChatOllama client not available; LLMClient will run in mock mode
+```
+
+### File Path Issues
+Ensure PDB files are accessible and use absolute paths in goals:
+```bash
+python run_md_workflow.py \
+  --goal "Prepare simulation for /full/path/to/protein.pdb in water"
+```
+
+### Permission Issues
+Make sure the working directory is writable:
+```bash
+chmod 755 /path/to/working/directory
+```
+
+## Advanced Usage
+
+### Custom LLM Endpoints
+```bash
+# Local Ollama
+python run_md_workflow.py --goal "..." --llm-base-url http://localhost:11434
+
+# Remote LLM service
+python run_md_workflow.py --goal "..." --llm-base-url https://api.example.com/v1
+
+# Different model
+python run_md_workflow.py --goal "..." --llm-model codellama:13b
+```
+
+### Development and Testing
+```bash
+# Test workflow logic without LLM
+python run_md_workflow.py --goal "test simulation" --no-human-loop
+
+# Debug with verbose logging
+python run_md_workflow.py --goal "..." --use-llm --log-file debug.log
+```
+
+This LangGraph-based approach provides a clean, extensible framework for MD simulation workflows with intelligent planning and human oversight capabilities.

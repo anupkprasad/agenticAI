@@ -1,0 +1,25 @@
+
+; NVT equilibration
+title       = NVT equilibration
+integrator  = md
+nsteps      = 50000    ; 100 ps
+dt          = 0.002    ; 2 fs
+nstxout     = 1000
+nstvout     = 1000
+nstenergy   = 1000
+nstlog      = 1000
+continuation = no
+constraint_algorithm = lincs
+constraints = all-bonds
+nstlist     = 10
+ns_type     = grid
+pbc         = xyz
+cutoff-scheme = Verlet
+coulombtype = PME
+rcoulomb    = 1.0
+rvdw        = 1.0
+tcoupl      = V-rescale
+tc-grps     = System
+tau_t       = 0.1
+ref_t       = 300
+pcoupl      = no
