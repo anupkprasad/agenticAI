@@ -1,18 +1,47 @@
-# AgenticAI — Molecular Dynamics LangGraph Workflow
+# AgenticAI — Enhanced LLM-Powered MD Workflow
 
-This repository provides a clean, LangGraph-based agentic AI system for molecular dynamics simulation workflows. The system uses a state-driven approach to orchestrate MD simulation preparation, execution planning, and analysis with human-in-the-loop capabilities.
+This repository provides an advanced, LLM-powered agentic AI system for molecular dynamics simulation workflows. The system uses intelligent reasoning to understand complex user requests and dynamically orchestrate MD simulation preparation, execution, and analysis with human-in-the-loop capabilities.
+
+## 🚀 Enhanced Features
+
+### 🧠 **LLM-Powered Supervisor**
+- **Natural Language Understanding**: Interprets complex requests like "PDB already preprocessed" or "analyze existing trajectories"
+- **Intelligent Routing**: Makes dynamic decisions about which agents to call and when to skip steps
+- **Reasoning Transparency**: Provides clear explanations for all routing decisions
+- **Fallback Compatibility**: Gracefully falls back to heuristic routing when LLM unavailable
+
+### 🎯 **Smart Workflow Orchestration** 
+- **Automatic Step Skipping**: Skips preprocessing if user indicates data is already clean
+- **Context-Aware Routing**: Routes based on user intent, current state, and agent capabilities
+- **Enhanced Error Handling**: Intelligent troubleshooting and recovery suggestions
+- **Configuration-Driven**: YAML-based agent registry for easy extensibility
 
 ## What's included
 
-### Core LangGraph Architecture
-- `agentic/md_workflow.py` — Main LangGraph StateGraph workflow orchestration
-- `agentic/md_supervisor.py` — Finite-state controller for workflow routing
-- `agentic/md_state.py` — Central state management with TypedDict
-- `agentic/preprocessing_agent.py` — PDB preprocessing with LLM-powered planning
-- `agentic/setup_agent.py` — Simulation system setup with adaptive protocols
-- `agentic/human_checkpoints.py` — Human-in-the-loop intervention points
-- `agentic/llm.py` — LLM client with mock mode for testing
-- `run_md_workflow.py` — Clean command-line interface
+### Enhanced Workflow Features
+
+#### **🧠 LLM-Powered Supervisor (`md_supervisor.py`)**
+- **Natural Language Understanding**: Interprets complex requests like "PDB already preprocessed"
+- **Intelligent Routing**: Dynamic decisions about which agents to call and when to skip steps  
+- **Enhanced Input Validation**: Extracts PDB paths, parameters, and requirements from natural language
+- **Reasoning Transparency**: Clear explanations for all routing decisions
+- **Fallback Compatibility**: Graceful fallback to heuristic routing when LLM unavailable
+
+#### **🎯 Smart Workflow Orchestration (`md_workflow.py`)**
+- **Automatic Step Skipping**: Skips preprocessing if user indicates data is already clean
+- **Context-Aware Routing**: Routes based on user intent, current state, and agent capabilities
+- **Enhanced Final Reports**: LLM-generated comprehensive workflow summaries
+- **Configuration-Driven**: YAML-based agent registry for easy extensibility
+
+## Key Enhancements Made
+
+✅ **Merged intelligent features into existing `md_supervisor.py` and `md_workflow.py`**  
+✅ **Maintained original naming convention (removed "intelligent" prefixes)**  
+✅ **Backward compatibility with existing workflow interface**  
+✅ **LLM-powered routing with heuristic fallback**  
+✅ **Enhanced input validation and parameter extraction**  
+✅ **Comprehensive logging and reasoning transparency**  
+✅ **Configuration-driven agent registry**
 
 ### Custom Analysis Tools (Preserved)
 - `src/python/analysis/` — Your MD analysis utilities and scripts

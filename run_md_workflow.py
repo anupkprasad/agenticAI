@@ -1,4 +1,4 @@
-"""Simplified LangGraph-based MD Runner"""
+"""Enhanced LangGraph-based MD Runner with LLM-Powered Supervisor"""
 import argparse
 import sys
 import os
@@ -61,7 +61,7 @@ def main(argv=None):
                        help="Use LLM for intelligent planning (recommended)")
     parser.add_argument("--llm-model", default="gpt-oss:120b",
                        help="LLM model to use")
-    parser.add_argument("--llm-base-url", default=None,
+    parser.add_argument("--llm-base-url", default="http://172.22.149.139:11434",
                        help="LLM API base URL")
     parser.add_argument("--no-human-loop", action="store_true",
                        help="Skip human checkpoints (auto-approve)")
