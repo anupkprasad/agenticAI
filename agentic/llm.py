@@ -28,18 +28,15 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-# Try a couple of likely import locations for ChatOllama; if not installed,
+# Try to import the correct ollama client; if not installed,
 # we'll operate in a mock mode but will attempt HTTP calls to base_url if given.
-ChatOllama = None
+ollama_client = None
 try:
-    # Common package name for Ollama Python client (if present)
-    from ollama import ChatOllama  # type: ignore
+    # Use the correct ollama Client class
+    import ollama
+    ollama_client = ollama
 except Exception:
-    try:
-        # If a different import path is used by the user-provided snippet
-        from ChatOllama import ChatOllama  # type: ignore
-    except Exception:
-        ChatOllama = None
+    ollama_client = None
 
 
 class LLMClient:
@@ -63,12 +60,23 @@ class LLMClient:
         self.system_prompt = kwargs.pop("system_prompt", self.config.get("system_prompt"))
         # Optional tool list (for compatibility with tool-using frameworks)
         self.tools: Optional[List[Any]] = kwargs.pop("tools", None)
-        if ChatOllama is None:
-            logger.info("ChatOllama client not available; LLMClient will run in mock mode or HTTP-fallback if base_url provided")
+        if ollama_client is None:
+            logger.info("ollama client not available; LLMClient will run in mock mode or HTTP-fallback if base_url provided")
             self._is_mock_mode = True
         else:
-            # Instantiate the underlying client. Keyword args are passed through.
-            self._client = ChatOllama(model=model, base_url=base_url, **kwargs)
+            # Use the ollama client with base_url if provided
+            try:
+                # Create a client instance if base_url is provided
+                if base_url:
+                    self._client = ollama.Client(host=base_url)
+                else:
+                    self._client = ollama_client  # Use the module directly
+                self._is_mock_mode = False
+                logger.info(f"ollama client initialized with model: {model}, base_url: {base_url}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize ollama client: {e}")
+                self._client = None
+                self._is_mock_mode = True
 
     def prompt(self, prompt: str, system: Optional[str] = None, **kwargs) -> str:
         """Send a prompt to the LLM and return a text response.
@@ -91,30 +99,42 @@ class LLMClient:
             self._last_raw_response = f"MOCK_LLM_RESPONSE: would send: {prompt[:200]}"
             return f"MOCK_LLM_RESPONSE: would send: {prompt[:200]}"
 
-        # Try common APIs
+        # Try ollama API first
         try:
-            if hasattr(self._client, "create"):
-                sysp = system if system is not None else self.system_prompt
-                out = self._client.create(prompt, system=sysp) if self.system_prompt is not None else self._client.create(prompt)
-            elif hasattr(self._client, "chat"):
-                # some clients expect a list of messages
-                msgs = []
-                sysp = system if system is not None else self.system_prompt
-                if sysp:
-                    msgs.append({"role": "system", "content": sysp})
-                msgs.append({"role": "user", "content": prompt})
-                out = self._client.chat(msgs)
-            elif hasattr(self._client, "generate"):
-                out = self._client.generate(prompt)
+            # Prepare system prompt
+            sysp = system if system is not None else self.system_prompt
+            
+            # Use ollama chat API
+            messages = []
+            if sysp:
+                messages.append({"role": "system", "content": sysp})
+            messages.append({"role": "user", "content": prompt})
+            
+            # Call ollama chat
+            if hasattr(self._client, "chat"):
+                # If using ollama.Client instance
+                out = self._client.chat(model=self.model, messages=messages)
             else:
-                # last resort: call the object
-                out = self._client(prompt)
+                # If using ollama module directly
+                out = ollama_client.chat(model=self.model, messages=messages)
+                
         except Exception as e:
-            logger.exception("LLM call failed")
-            self._last_raw_response = f"LLM_ERROR: {e}"
-            return f"LLM_ERROR: {e}"
+            logger.exception("ollama call failed; trying fallback HTTP")
+            # Fallback to HTTP call if ollama direct call fails
+            if self.base_url:
+                try:
+                    sysp = system if system is not None else self.system_prompt
+                    return self._http_call(prompt, system=sysp, **kwargs)
+                except Exception as e2:
+                    logger.exception("HTTP LLM call also failed; falling back to mock")
+                    self._last_raw_response = f"HTTP_LLM_ERROR: {e2}"
+                    return f"MOCK_LLM_RESPONSE: would send: {prompt[:200]}"
+            else:
+                logger.exception("LLM call failed and no base_url for HTTP fallback")
+                self._last_raw_response = f"LLM_ERROR: {e}"
+                return f"LLM_ERROR: {e}"
 
-        # Normalize different return shapes
+        # Normalize ollama response format
         try:
             if isinstance(out, str):
                 # record raw string response
@@ -126,14 +146,28 @@ class LLMClient:
                     self._last_raw_response = json.dumps(out)
                 except Exception:
                     self._last_raw_response = str(out)
-                # common keys
+                    
+                # Handle ollama chat response format
+                if "message" in out and isinstance(out["message"], dict):
+                    if "content" in out["message"]:
+                        return out["message"]["content"]
+                        
+                # common keys for other formats
                 for k in ("text", "response", "content"):
                     if k in out:
                         return out[k]
+                        
                 # openai-style
                 if "choices" in out and out["choices"]:
                     c = out["choices"][0]
                     return c.get("text") or c.get("message", {}).get("content", str(out))
+                    
+            # Handle ollama response objects (with .message.content attribute)
+            if hasattr(out, 'message') and hasattr(out.message, 'content'):
+                content = out.message.content
+                self._last_raw_response = str(out)
+                return content
+                
             # fallback to string conversion
             return str(out)
         except Exception:

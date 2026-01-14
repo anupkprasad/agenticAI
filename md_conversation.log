@@ -1,17 +1,18 @@
 ================================================================================
-NEW MD WORKFLOW SESSION STARTED - 2026-01-14 11:58:33
-Session ID: 20260114_115833
+NEW MD WORKFLOW SESSION STARTED - 2026-01-14 17:07:45
+Session ID: 20260114_170744
 ================================================================================
 
-🎯 USER PROMPT [2026-01-14 11:58:33]:
-   Goal: prepare MD simulation for /home/anup/workspace/agenticAI/working_dir/0.pdb in water with 150mM NaCl
+🎯 USER PROMPT [2026-01-14 17:07:45]:
+   Goal: MD simulation of protein pdb /home/anup/workspace/agenticAI/working_dir/0.pdb in 100mM KCl solution
    Configuration: {
-    "force_field": "amber99sb-ildn",
-    "water_model": "tip3p",
-    "human_in_loop": true
+    "force_field": "amber14sb",
+    "water_model": "tip4pew",
+    "human_in_loop": true,
+    "working_directory": "/home/anup/workspace/agenticAI/working_dir"
 }
 
-🎛️  SUPERVISOR ROUTING [2026-01-14 11:58:33]:
+🎛️  SUPERVISOR ROUTING [2026-01-14 17:07:45]:
    Current State Summary:
      ❌ raw_pdb: Not set
      ❌ cleaned_pdb: Not set
@@ -21,7 +22,7 @@ Session ID: 20260114_115833
    📍 Routing to: input_validation
    💭 Reasoning: No input PDB file found, need to validate input
 
-🎛️  SUPERVISOR ROUTING [2026-01-14 11:58:33]:
+🎛️  SUPERVISOR ROUTING [2026-01-14 17:07:45]:
    Current State Summary:
      ✅ raw_pdb: /home/anup/workspace/agenticAI/working_dir/0.pdb
      ❌ cleaned_pdb: Not set
@@ -31,7 +32,7 @@ Session ID: 20260114_115833
    📍 Routing to: input_validation
    💭 Reasoning: Extracted PDB: /home/anup/workspace/agenticAI/working_dir/0.pdb, Working directory set to: /home/anup/workspace/agenticAI/working_dir
 
-🎛️  SUPERVISOR ROUTING [2026-01-14 11:58:33]:
+🎛️  SUPERVISOR ROUTING [2026-01-14 17:07:45]:
    Current State Summary:
      ✅ raw_pdb: /home/anup/workspace/agenticAI/working_dir/0.pdb
      ❌ cleaned_pdb: Not set
@@ -41,7 +42,7 @@ Session ID: 20260114_115833
    📍 Routing to: input_validation
    💭 Reasoning: Confirmed PDB file exists: /home/anup/workspace/agenticAI/working_dir/0.pdb
 
-🎛️  SUPERVISOR ROUTING [2026-01-14 11:58:33]:
+🎛️  SUPERVISOR ROUTING [2026-01-14 17:07:45]:
    Current State Summary:
      ✅ raw_pdb: /home/anup/workspace/agenticAI/working_dir/0.pdb
      ❌ cleaned_pdb: Not set
@@ -51,10 +52,10 @@ Session ID: 20260114_115833
    📍 Routing to: preprocess
    💭 Reasoning: Raw PDB needs preprocessing (cleaning, fixing)
 
-🤖 PDB CLEANING AGENT (preprocessing) STARTING [2026-01-14 11:58:33]:
+🤖 PDB CLEANING AGENT (preprocessing) STARTING [2026-01-14 17:07:45]:
    Input Data Summary:
      • raw_pdb: /home/anup/workspace/agenticAI/working_dir/0.pdb
-     • user_goal: prepare MD simulation for /home/anup/workspace/agenticAI/working_dir/0.pdb in water with 150mM NaCl
+     • user_goal: MD simulation of protein pdb /home/anup/workspace/agenticAI/working_dir/0.pdb in 100mM KCl solution
      • force_field: amber99sb-ildn
      • water_model: tip3p
 
@@ -73,18 +74,20 @@ Session ID: 20260114_115833
       "waters_present": false
 }
 
-🔀 MOCK LLM INTERACTION (preprocessing) [2026-01-14 11:58:51]:
+🧠 LLM INTERACTION (preprocessing) [2026-01-14 17:08:43]:
    📝 Prompt:
       You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed preprocessing plan for GROMACS simulation.
       
-              User Goal: prepare MD simulation for /home/anup/workspace/agenticAI/working_dir/0.pdb in water with 150mM NaCl
+              User Goal: MD simulation of protein pdb /home/anup/workspace/agenticAI/working_dir/0.pdb in 100mM KCl solution
       ... [+36 more lines]
    💭 Response:
-      MOCK_LLM_RESPONSE: would send: You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed preprocessing plan for GROMACS simulation. User Goal: prepare MD simulation for /h
+      **REASONING** | Issue | Why it matters | How we will address it | |-------|----------------|------------------------| | **Multiple chains (12)** | GROMACS treats each chain as a separate “molecule” in the topology. Keeping all chains is fine if the biological assembly really contains them; otherwise we may want to drop unused chains to keep the system size reasonable. | We will let the user decide – the script below includes a *chain‑selection* step (`grep` on the PDB) that can be commented out if the full assembly is required. | | **Alternate location identifiers (ALTLOC)** | Atoms with more than one conformer are encoded with `ALTLOC` letters. If left unchanged, `pdb2gmx` will abort or keep the first‐occurring conformation only, which may not be the intended one. | Use `pdbtools` (`pdb_selaltloc`) to keep the highest‑occupancy conformer (`-alt A`) and discard the rest. | | **Heteroatoms / waters** | The analysis reports none, so no removal is needed, but we keep the step in the pipeline for robustness (`grep -v '^HETATM'`). | | **Protonation states** | At physiological pH (≈7.0) side‑chain ionisation of HIS, ASP, GLU, CYS, LYS, ARG must be set. `pdb2gmx` will ask for protonation of histidines; we will use the “standard” (HID/HIE) choice unless the user knows otherwise. | Use the `-ignore` option for unknown residues and supply a pH‐dependent list if needed (`-pH 7.0`). | | **Missing residues** | None reported, so we do not need to model gaps. If they appeared later, tools such as `modeller` or `pdbfixer` would be required. | | **Force field** | Amber99SB‑ILDN is well‑parameterised for proteins and works with TIP3P water (default for this FF). | `pdb2gmx -ff amber99sb-ildn -water tip3p`. | | **Box and solvation** | We need a rectangular (or dodecahedral) box with at least 1.0 nm buffer to avoid protein–image interactions. | `editconf -d 1.0 -bt dodecahedron`. | | **Ion concentration (100 mM KCl)** | After solvation we replace water molecules with the appropriate number of K⁺ and Cl⁻ ions to achieve the target molarity. | Compute number of ions from box volume (GROMACS `genion` does this automatically with the `-conc` flag). | | **Position restraints** | During the equilibration phases we restrain heavy atoms to allow water/ions to relax while the protein stays close to its initial conformation. | `pdb2gmx` automatically generates `posre.itp`; we will include it in the MD‑prep topology. | | **Energy minimisation → NVT → NPT → Production** | Standard MD workflow; each step needs its own `grompp`/`mdrun` input files. | Provide ready‑to‑run `mdp` snippets. | --- **COMMANDS** Below is a **single‑script‑style** workflow you can copy‑paste into a Bash file (e.g. `prepare_gmx.sh`). All commands assume you are in the directory containing `0.pdb`. Adjust paths if needed. ```bash #!/usr/bin/env bash set -euo pipefail # ------------------------------------------------------------------ # 0. USER SETTINGS # ------------------------------------------------------------------ PDB_IN="/home/anup/workspace/agenticAI/working_dir/0.pdb" FF="amber99sb-ildn" WATER_MODEL="tip3p" BOX_TYPE="dodecahedron" # or "cubic" BOX_BUFFER="1.0" # nm distance from protein to box edge ION_CONC="0.1" # M (100 mM) POSRES_FORCE="1000" # kJ mol-1 nm-2 (default from pdb2gmx) MDP_DIR="mdp_files" # directory that holds the .mdp files (create if missing) # ------------------------------------------------------------------ # ------------------------------------------------------------------ # 1. Clean PDB: remove HETATM (if any) and keep only the highest‑occupancy ALTLOC # ------------------------------------------------------------------ module load pdbtools # if on a cluster, otherwise ensure pdb_selaltloc is in $PATH clean_pdb="0_clean.pdb" pdb_selaltloc -a A "$PDB_IN" | \ grep -v '^HETATM' > "$clean_pdb" echo "=> Clean PDB written to $clean_pdb" # ------------------------------------------------------------------ # 2. OPTIONAL: keep only selected chains (uncomment & edit if you want a subset) # ------------------------------------------------------------------ # CHAIN_SELECTION="A B C" # space‑separated list of chains to keep # grep -E "^ATOM |^TER " "$clean_pdb" | \ # awk -v chains="$CHAIN_SELECTION" ' # BEGIN{ split(chains,keep," "); for(i in keep) keep_set[keep[i]]=1 } # { if($0 ~ /^ATOM/){ if(keep_set[substr($0,22,1)]) print } # else if($0 ~ /^TER/){ if(keep_set[substr($0,22,1)]) print } # }' > 0_selected.pdb # clean_pdb="0_selected.pdb" # ------------------------------------------------------------------ # 3. Generate topology & processed structure (pdb2gmx) # ------------------------------------------------------------------ gmx pdb2gmx -f "$clean_pdb" -o processed.gro -p topol.top \ -ff "$FF" -water "$WATER_MODEL" -ignh \ -ter -merge all \ << EOF 1 # choose the first force‑field option (amber99sb‑ildn) 1 # choose the first water model (tip3p) EOF echo "=> Topology (topol.top) and processed structure (processed.gro) created." # ------------------------------------------------------------------ # 4. Define simulation box # ------------------------------------------------------------------ gmx editconf -f processed.gro -o boxed.gro \ -c -d "$BOX_BUFFER" -bt "$BOX_TYPE" echo "=> Box defined (boxed.gro)." # ------------------------------------------------------------------ # 5. Solvate with TIP3P water # ------------------------------------------------------------------ gmx solvate -cp boxed.gro -cs tip3p.gro -o solvated.gro -p topol.top echo "=> System solvated (solvated.gro)." # ------------------------------------------------------------------ # 6. Prepare ion‑addition .tpr (energy minimisation first, required for genion) # ------------------------------------------------------------------ # Create a minimal EM .mdp if not already present mkdir -p "$MDP_DIR" cat > "$MDP_DIR/em.mdp" << EOF integrator = steep emtol = 1000.0 emstep = 0.01 nsteps = 50000 nstlist = 1 cutoff-scheme = Verlet ns_type = grid coulombtype = PME rcoulomb = 1.0 rvdw = 1.0 pbc = xyz EOF gmx grompp -f "$MDP_DIR/em.mdp" -c solvated.gro -p topol.top -o em.tpr -maxwarn 2 # ------------------------------------------------------------------ # 7. Add K⁺ and Cl⁻ to reach 100 mM # ------------------------------------------------------------------ gmx genion -s em.tpr -p topol.top -pname K -nname CL -neutral -conc "$ION_CONC" \ -o ionized.gro << EOF SOL EOF echo "=> Ions added (ionized.gro)." # ------------------------------------------------------------------ # 8. Energy minimisation (final) # ------------------------------------------------------------------ gmx grompp -f "$MDP_DIR/em.mdp" -c ionized.gro -p topol.top -o em_ion.tpr -maxwarn 2 gmx mdrun -deffnm em_ion # ------------------------------------------------------------------ # 9. NVT equilibration (300 K, 100 ps) # ------------------------------------------------------------------ cat > "$MDP_DIR/nvt.mdp" << EOF title = NVT equilibration define = -DPOSRES ; position restraints integrator = md dt = 0.002 nsteps = 50000 ; 100 ps nstxout = 1000 nstvout = 1000 nstenergy = 1000 nstlog = 1000 continuation = no constraint_algorithm = lincs constraints = h-bonds lincs_iter = 1 lincs_order = 4 cutoff-scheme = Verlet ns_type = grid nstlist = 10 rcoulomb = 1.0 rvdw = 1.0 coulombtype = PME pme_order = 4 fourierspacing = 0.16 tcoupl = V-rescale tc-grps = Protein Non-Protein tau_t = 0.1 0.1 ref_t = 300 300 pcoupl = no EOF gmx grompp -f "$MDP_DIR/nvt.mdp" -c em_ion.gro -r em_ion.gro -p topol.top -o nvt.tpr -maxwarn 2 gmx mdrun -deffnm nvt # ------------------------------------------------------------------ # 10. NPT equilibration (300 K, 1 bar, 100 ps) # ------------------------------------------------------------------ cat > "$MDP_DIR/npt.mdp" << EOF title = NPT equilibration define = -DPOSRES integrator = md dt = 0.002 nsteps = 50000 ; 100 ps nstxout = 1000 nstvout = 1000 nstenergy = 1000 nstlog = 1000 continuation = yes constraint_algorithm = lincs constraints = h-bonds lincs_iter = 1 lincs_order = 4 cutoff-scheme = Verlet ns_type = grid nstlist = 10 rcoulomb = 1.0 rvdw = 1.0 coulombtype = PME pme_order = 4 fourierspacing = 0.16 tcoupl = V-rescale tc-grps = Protein Non-Protein tau_t = 0.1 0.1 ref_t = 300 300 pcoupl = Parrinello-Rahman pcoupltype = isotropic tau_p = 2.0 ref_p = 1.0 compressibility = 4.5e-5 EOF gmx grompp -f "$MDP_DIR/npt.mdp" -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt.tpr -maxwarn 2 gmx mdrun -deffnm npt # ------------------------------------------------------------------ # 11. Production MD (e.g., 100 ns, 2 fs timestep) # ------------------------------------------------------------------ cat > "$MDP_DIR/md.mdp" << EOF title = Production MD integrator = md dt = 0.002 nsteps = 50000000 ; 100 ns nstxout = 5000 nstvout = 5000 nstenergy = 1000 nstlog = 1000 continuation = yes constraint_algorithm = lincs constraints = h-bonds lincs_iter = 1 lincs_order = 4 cutoff-scheme = Verlet ns_type = grid nstlist = 10 rcoulomb = 1.0 rvdw = 1.0 coulombtype = PME pme_order = 4 fourierspacing = 0.16 tcoupl = V-rescale tc-grps = Protein Non-Protein tau_t = 0.1 0.1 ref_t = 300 300 pcoupl = Parrinello-Rahman pcoupltype = isotropic tau_p = 2.0 ref_p = 1.0 compressibility = 4.5e-5 EOF gmx grompp -f "$MDP_DIR/md.mdp" -c npt.gro -t npt.cpt -p topol.top -o md.tpr -maxwarn 2 gmx mdrun -deffnm md echo "=== PREPARATION COMPLETE ===" ``` **Explanation of key commands** | Step | Command | What it does | |------|---------|--------------| | **1** | `pdb_selaltloc -a A` | Keeps only atoms with ALTLOC *A* (or the highest‑occupancy conformer). | | **2** (optional) | `grep`/`awk` on chain IDs | Allows you to drop unwanted chains. | | **3** | `gmx pdb2gmx` | Generates the protein topology (`topol.top`), a processed coordinate file (`processed.gro`), and position‑restraint file (`posre.itp`). | | **4** | `gmx editconf` | Centers the protein and places it in a dodecahedral box with a 1 nm buffer. | | **5** | `gmx solvate` | Adds TIP3P water molecules, updating the topology’s `#define` of water. | | **6** | `gmx grompp` (EM) | Prepares a temporary `em.tpr` needed for `genion`. | | **7** | `gmx genion -conc 0.1` | Replaces water with K⁺ and Cl⁻ to reach 0.1 M (100 mM) while also neutralising the system. | | **8** | `gmx mdrun -deffnm em_ion` | Performs energy minimisation on the ionised system. | | **9‑10** | `gmx grompp` + `gmx mdrun` (NVT/NPT) | Equilibrates temperature (300 K) and pressure (1 bar) with position restraints on protein heavy atoms. | | **11** | `gmx grompp` + `gmx mdrun` (production) | Starts the unrestrained production MD run. | --- **EXPECTED_OUTPUTS** | File | Description | |------|-------------| | `0_clean.pdb` | PDB after ALTLOC filtering and removal of HETATM entries. | | `processed.gro` | GROMACS coordinate file after `pdb2gmx`. | | `topol.top` | Full topology (includes force‑field, water model, ions, and `posre.itp`). | | `boxed.gro` | Boxed protein (no solvent yet). | | `solvated.gro` | Protein + TIP3P water (no ions). | | `em.tpr` / `em_ion.tpr` | Input files for energy minimisation (pre‑ and post‑ion addition). | | `ionized.gro` | Final system containing protein, water, K⁺ and Cl⁻ at 100 mM. | | `em_ion.gro`, `em_ion.edr`, `em_ion.log` | Energy‑minimised structure and logs. | | `nvt.gro`, `nvt.cpt`, `nvt.log`, `nvt.edr` | NVT equilibration outputs. | | `npt.gro`, `npt.cpt`, `npt.log`, `npt.edr` | NPT equilibration outputs. | | `md.gro`, `md.xtc`, `md.trr`, `md.log`, `md.edr`, `md.cpt` | Production MD trajectory, energies, checkpoint, etc. | | `mdp_files/*.mdp` | The input parameter files used for each stage (EM, NVT, NPT, MD). | --- **VALIDATION_CHECKS** 1. **PDB cleaning** ```bash grep '^ATOM' 0_clean.pdb | wc -l # should be the same as original atom count minus any ALTLOC duplicates ``` Verify that no `HETATM` lines remain (`grep HETATM 0_clean.pdb` → no output). 2. **Topology consistency** ```bash grep -i 'K' topol.top # should list a line like "K 1" grep -i 'CL' topol.top # should list a line like "CL 1" ``` Ensure `posre.itp` is included (`grep posre topol.top`). 3. **Box size & ion concentration** ```bash gmx energy -f md.edr -o density.xvg <<< "Density" ``` The density should be close to ~1000 kg m⁻³ for a protein‑water system. For ion count, compute expected number: ```bash vol=$(gmx energy -f md.edr -o volume.xvg <<< "Volume" | tail -1 | awk '{print $2}') # volume is in nm^3; convert to liters: vol_L = vol*1e-24 # expected ion pairs = conc (mol/L) * vol_L * Avogadro ``` Compare with the number of K⁺/Cl⁻ entries in the final `.gro` (`grep K ionized.gro | wc -l`). 4. **Energy minimisation convergence** Plot the potential energy: ```bash gmx energy -f em_ion.edr -o potem.xvg <<< "Potential" ``` The curve should flatten and the maximum force (`max-force.xvg`) should be < 1000 kJ mol⁻¹ nm⁻¹. 5. **Temperature & pressure stability** (during equilibration) ```bash gmx energy -f nvt.edr -o temperature.xvg <<< "Temperature" gmx energy -f npt.edr -o pressure.xvg <<< "Pressure" ``` Temperature should hover around 300 K (±5 K); pressure around 1 bar (±0.5 bar). 6. **Trajectory sanity** Visualise a few frames: ```bash gmx trjconv -s md.tpr -f md.xtc -o md_centered.gro -center -pbc mol <<< "0" ``` Load `md_centered.gro` + `md.xtc` in VMD or PyMOL; verify the protein remains intact, no broken bonds, and ions are distributed uniformly. 7. **Performance check** (optional) ```bash gmx mdrun -deffnm md -nt 4 -dlb yes ``` Ensure the run finishes without warnings about missing parameters or LINCS failures. If any of the above checks fail, revisit the corresponding step (e.g., re‑run `pdb_selaltloc` with a different ALTLOC, adjust box buffer, or increase the number of minimisation steps). --- **That’s the full preprocessing pipeline** – from raw PDB to a ready‑to‑run production MD system of your 12‑chain protein in a 100 mM KCl solution using the Amber99SB‑ILDN force field. Feel free to adapt the box type, equilibration lengths, or ion concentration as your project requires. Happy simulating!
 
 ⚡ AGENT ACTION (preprocessing):
    🎬 Action: Executing preprocessing commands
-   📊 plan_commands: []
+   📊 plan_commands: [
+      "gmx pdb2gmx -f \"$clean_pdb\" -o processed.gro -p topol.top \\ -ff \"$FF\" -water \"$WATER_MODEL\" -ignh \\ -ter -merge all \\ << EOF 1 # choose the first force\u2011field option (amber99sb\u2011ildn) 1 # choose the first water model (tip3p) EOF echo \"=> Topology (topol.top) and processed structure (processed.gro) created.\" # ------------------------------------------------------------------ # 4. Define simulation box # ------------------------------------------------------------------ gmx editconf -f processed.gro -o boxed.gro \\ -c -d \"$BOX_BUFFER\" -bt \"$BOX_TYPE\" echo \"=> Box defined (boxed.gro).\" # ------------------------------------------------------------------ # 5. Solvate with TIP3P water # ------------------------------------------------------------------ gmx solvate -cp boxed.gro -cs tip3p.gro -o solvated.gro -p topol.top echo \"=> System solvated (solvated.gro).\" # ------------------------------------------------------------------ # 6. Prepare ion\u2011addition .tpr (energy minimisation first, required for genion) # ------------------------------------------------------------------ # Create a minimal EM .mdp if not already present mkdir -p \"$MDP_DIR\" cat > \"$MDP_DIR/em.mdp\" << EOF integrator = steep emtol = 1000.0 emstep = 0.01 nsteps = 50000 nstlist = 1 cutoff-scheme = Verlet ns_type = grid coulombtype = PME rcoulomb = 1.0 rvdw = 1.0 pbc = xyz EOF gmx grompp -f \"$MDP_DIR/em.mdp\" -c solvated.gro -p topol.top -o em.tpr -maxwarn 2 # ------------------------------------------------------------------ # 7. Add K\u207a and Cl\u207b to reach 100 mM # ------------------------------------------------------------------ gmx genion -s em.tpr -p topol.top -pname K -nname CL -neutral -conc \"$ION_CONC\" \\ -o ionized.gro << EOF SOL EOF echo \"=> Ions added (ionized.gro).\" # ------------------------------------------------------------------ # 8. Energy minimisation (final) # ------------------------------------------------------------------ gmx grompp -f \"$MDP_DIR/em.mdp\" -c ionized.gro -p topol.top -o em_ion.tpr -maxwarn 2 gmx mdrun -deffnm em_ion # ------------------------------------------------------------------ # 9. NVT equilibration (300 K, 100 ps) # ------------------------------------------------------------------ cat > \"$MDP_DIR/nvt.mdp\" << EOF title = NVT equilibration define = -DPOSRES ; position restraints integrator = md dt = 0.002 nsteps = 50000 ; 100 ps nstxout = 1000 nstvout = 1000 nstenergy = 1000 nstlog = 1000 continuation = no constraint_algorithm = lincs constraints = h-bonds lincs_iter = 1 lincs_order = 4 cutoff-scheme = Verlet ns_type = grid nstlist = 10 rcoulomb = 1.0 rvdw = 1.0 coulombtype = PME pme_order = 4 fourierspacing = 0.16 tcoupl = V-rescale tc-grps = Protein Non-Protein tau_t = 0.1 0.1 ref_t = 300 300 pcoupl = no EOF gmx grompp -f \"$MDP_DIR/nvt.mdp\" -c em_ion.gro -r em_ion.gro -p topol.top -o nvt.tpr -maxwarn 2 gmx mdrun -deffnm nvt # ------------------------------------------------------------------ # 10. NPT equilibration (300 K, 1 bar, 100 ps) # ------------------------------------------------------------------ cat > \"$MDP_DIR/npt.mdp\" << EOF title = NPT equilibration define = -DPOSRES integrator = md dt = 0.002 nsteps = 50000 ; 100 ps nstxout = 1000 nstvout = 1000 nstenergy = 1000 nstlog = 1000 continuation = yes constraint_algorithm = lincs constraints = h-bonds lincs_iter = 1 lincs_order = 4 cutoff-scheme = Verlet ns_type = grid nstlist = 10 rcoulomb = 1.0 rvdw = 1.0 coulombtype = PME pme_order = 4 fourierspacing = 0.16 tcoupl = V-rescale tc-grps = Protein Non-Protein tau_t = 0.1 0.1 ref_t = 300 300 pcoupl = Parrinello-Rahman pcoupltype = isotropic tau_p = 2.0 ref_p = 1.0 compressibility = 4.5e-5 EOF gmx grompp -f \"$MDP_DIR/npt.mdp\" -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt.tpr -maxwarn 2 gmx mdrun -deffnm npt # ------------------------------------------------------------------ # 11. Production MD (e.g., 100 ns, 2 fs timestep) # ------------------------------------------------------------------ cat > \"$MDP_DIR/md.mdp\" << EOF title = Production MD integrator = md dt = 0.002 nsteps = 50000000 ; 100 ns nstxout = 5000 nstvout = 5000 nstenergy = 1000 nstlog = 1000 continuation = yes constraint_algorithm = lincs constraints = h-bonds lincs_iter = 1 lincs_order = 4 cutoff-scheme = Verlet ns_type = grid nstlist = 10 rcoulomb = 1.0 rvdw = 1.0 coulombtype = PME pme_order = 4 fourierspacing = 0.16 tcoupl = V-rescale tc-grps = Protein Non-Protein tau_t = 0.1 0.1 ref_t = 300 300 pcoupl = Parrinello-Rahman pcoupltype = isotropic tau_p = 2.0 ref_p = 1.0 compressibility = 4.5e-5 EOF gmx grompp -f \"$MDP_DIR/md.mdp\" -c npt.gro -t npt.cpt -p topol.top -o md.tpr -maxwarn 2 gmx mdrun -deffnm md echo \"=== PREPARATION COMPLETE ===\" ``` **Explanation of key commands** | Step | Command | What it does | |------|---------|--------------| | **1** | `pdb_selaltloc -a A` | Keeps only atoms with ALTLOC *A* (or the highest\u2011occupancy conformer). | | **2** (optional) | `grep`/`awk` on chain IDs | Allows you to drop unwanted chains. | | **3** | `gmx pdb2gmx` | Generates the protein topology (`topol.top`), a processed coordinate file (`processed.gro`), and position\u2011restraint file (`posre.itp`). | | **4** | `gmx editconf` | Centers the protein and places it in a dodecahedral box with a 1 nm buffer. | | **5** | `gmx solvate` | Adds TIP3P water molecules, updating the topology\u2019s `#define` of water. | | **6** | `gmx grompp` (EM) | Prepares a temporary `em.tpr` needed for `genion`. | | **7** | `gmx genion -conc 0.1` | Replaces water with K\u207a and Cl\u207b to reach 0.1 M (100 mM) while also neutralising the system. | | **8** | `gmx mdrun -deffnm em_ion` | Performs energy minimisation on the ionised system. | | **9\u201110** | `gmx grompp` + `gmx mdrun` (NVT/NPT) | Equilibrates temperature (300 K) and pressure (1 bar) with position restraints on protein heavy atoms. | | **11** | `gmx grompp` + `gmx mdrun` (production) | Starts the unrestrained production MD run. | --- **EXPECTED_OUTPUTS** | File | Description | |------|-------------| | `0_clean.pdb` | PDB after ALTLOC filtering and removal of HETATM entries. | | `processed.gro` | GROMACS coordinate file after `pdb2gmx`. | | `topol.top` | Full topology (includes force\u2011field, water model, ions, and `posre.itp`). | | `boxed.gro` | Boxed protein (no solvent yet). | | `solvated.gro` | Protein + TIP3P water (no ions). | | `em.tpr` / `em_ion.tpr` | Input files for energy minimisation (pre\u2011 and post\u2011ion addition). | | `ionized.gro` | Final system containing protein, water, K\u207a and Cl\u207b at 100 mM. | | `em_ion.gro`, `em_ion.edr`, `em_ion.log` | Energy\u2011minimised structure and logs. | | `nvt.gro`, `nvt.cpt`, `nvt.log`, `nvt.edr` | NVT equilibration outputs. | | `npt.gro`, `npt.cpt`, `npt.log`, `npt.edr` | NPT equilibration outputs. | | `md.gro`, `md.xtc`, `md.trr`, `md.log`, `md.edr`, `md.cpt` | Production MD trajectory, energies, checkpoint, etc. | | `mdp_files/*.mdp` | The input parameter files used for each stage (EM, NVT, NPT, MD). | --- **VALIDATION_CHECKS** 1. **PDB cleaning** ```bash grep '^ATOM' 0_clean.pdb | wc -l # should be the same as original atom count minus any ALTLOC duplicates ``` Verify that no `HETATM` lines remain (`grep HETATM 0_clean.pdb` \u2192 no output). 2. **Topology consistency** ```bash grep -i 'K' topol.top # should list a line like \"K 1\" grep -i 'CL' topol.top # should list a line like \"CL 1\" ``` Ensure `posre.itp` is included (`grep posre topol.top`). 3. **Box size & ion concentration** ```bash gmx energy -f md.edr -o density.xvg <<< \"Density\" ``` The density should be close to ~1000 kg m\u207b\u00b3 for a protein\u2011water system. For ion count, compute expected number: ```bash vol=$(gmx energy -f md.edr -o volume.xvg <<< \"Volume\" | tail -1 | awk '{print $2}') # volume is in nm^3; convert to liters: vol_L = vol*1e-24 # expected ion pairs = conc (mol/L) * vol_L * Avogadro ``` Compare with the number of K\u207a/Cl\u207b entries in the final `.gro` (`grep K ionized.gro | wc -l`). 4. **Energy minimisation convergence** Plot the potential energy: ```bash gmx energy -f em_ion.edr -o potem.xvg <<< \"Potential\" ``` The curve should flatten and the maximum force (`max-force.xvg`) should be < 1000 kJ mol\u207b\u00b9 nm\u207b\u00b9. 5. **Temperature & pressure stability** (during equilibration) ```bash gmx energy -f nvt.edr -o temperature.xvg <<< \"Temperature\" gmx energy -f npt.edr -o pressure.xvg <<< \"Pressure\" ``` Temperature should hover around 300 K (\u00b15 K); pressure around 1 bar (\u00b10.5 bar). 6. **Trajectory sanity** Visualise a few frames: ```bash gmx trjconv -s md.tpr -f md.xtc -o md_centered.gro -center -pbc mol <<< \"0\" ``` Load `md_centered.gro` + `md.xtc` in VMD or PyMOL; verify the protein remains intact, no broken bonds, and ions are distributed uniformly. 7. **Performance check** (optional) ```bash gmx mdrun -deffnm md -nt 4 -dlb yes ``` Ensure the run finishes without warnings about missing parameters or LINCS failures. If any of the above checks fail, revisit the corresponding step (e.g., re\u2011run `pdb_selaltloc` with a different ALTLOC, adjust box buffer, or increase the number of minimisation steps). --- **That\u2019s the full preprocessing pipeline** \u2013 from raw PDB to a ready\u2011to\u2011run production MD system of your 12\u2011chain protein in a 100 mM KCl solution using the Amber99SB\u2011ILDN force field. Feel free to adapt the box type, equilibration lengths, or ion concentration as your project requires. Happy simulating!"
+]
 
 📁 FILE OPERATION (preprocessing):
    Operation: create
@@ -98,13 +101,13 @@ Session ID: 20260114_115833
    Status: ✅ SUCCESS
    Details: Simulated topology file created
 
-🏁 PDB CLEANING AGENT (preprocessing) ✅ COMPLETED [2026-01-14 11:58:51]:
+🏁 PDB CLEANING AGENT (preprocessing) ✅ COMPLETED [2026-01-14 17:08:43]:
    📤 Output Summary:
      • cleaned_pdb: /home/anup/workspace/agenticAI/working_dir/processed.gro
      • topology: /home/anup/workspace/agenticAI/working_dir/topol.top
      • execution_log: Simulated execution - commands would run here
 
-🎛️  SUPERVISOR ROUTING [2026-01-14 11:58:51]:
+🎛️  SUPERVISOR ROUTING [2026-01-14 17:08:43]:
    Current State Summary:
      ✅ raw_pdb: /home/anup/workspace/agenticAI/working_dir/0.pdb
      ✅ cleaned_pdb: /home/anup/workspace/agenticAI/working_dir/processed.gro
@@ -114,11 +117,11 @@ Session ID: 20260114_115833
    📍 Routing to: setup
    💭 Reasoning: Need to setup simulation system (solvation, ions)
 
-🤖 SYSTEM SETUP AGENT (setup) STARTING [2026-01-14 11:58:51]:
+🤖 SYSTEM SETUP AGENT (setup) STARTING [2026-01-14 17:08:43]:
    Input Data Summary:
      • raw_pdb: /home/anup/workspace/agenticAI/working_dir/0.pdb
      • cleaned_pdb: /home/anup/workspace/agenticAI/working_dir/processed.gro
-     • user_goal: prepare MD simulation for /home/anup/workspace/agenticAI/working_dir/0.pdb in water with 150mM NaCl
+     • user_goal: MD simulation of protein pdb /home/anup/workspace/agenticAI/working_dir/0.pdb in 100mM KCl solution
      • force_field: amber99sb-ildn
      • water_model: tip3p
 
@@ -140,7 +143,7 @@ Session ID: 20260114_115833
    🎬 Action: Executing setup commands
    📊 plan_protocols: 
 
-🏁 SYSTEM SETUP AGENT (setup) ✅ COMPLETED [2026-01-14 11:59:09]:
+🏁 SYSTEM SETUP AGENT (setup) ✅ COMPLETED [2026-01-14 17:09:27]:
    📤 Output Summary:
      • cleaned_pdb: /home/anup/workspace/agenticAI/working_dir/processed.gro
      • topology: /home/anup/workspace/agenticAI/working_dir/topol.top
@@ -152,7 +155,7 @@ Session ID: 20260114_115833
        - md: /home/anup/workspace/agenticAI/working_dir/md.mdp
      • execution_log: Simulated setup execution
 
-🎛️  SUPERVISOR ROUTING [2026-01-14 11:59:09]:
+🎛️  SUPERVISOR ROUTING [2026-01-14 17:09:27]:
    Current State Summary:
      ✅ raw_pdb: /home/anup/workspace/agenticAI/working_dir/0.pdb
      ✅ cleaned_pdb: /home/anup/workspace/agenticAI/working_dir/processed.gro
@@ -162,7 +165,7 @@ Session ID: 20260114_115833
    📍 Routing to: final_report
    💭 Reasoning: All workflow steps completed, generating final report
 
-🎯 WORKFLOW COMPLETION [2026-01-14 11:59:09]:
+🎯 WORKFLOW COMPLETION [2026-01-14 17:09:27]:
    Status: ✅ SUCCESS
    📋 Summary:
       Workflow completed with 0 errors and 0 warnings
@@ -170,6 +173,6 @@ Session ID: 20260114_115833
    ⚠️  Errors: 0
    ⚠️  Warnings: 0
 ================================================================================
-SESSION 20260114_115833 COMPLETED - 2026-01-14 11:59:09
+SESSION 20260114_170744 COMPLETED - 2026-01-14 17:09:27
 ================================================================================
 

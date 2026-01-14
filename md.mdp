@@ -1,0 +1,27 @@
+
+; Production MD
+title       = Production MD
+integrator  = md
+nsteps      = 50000000  ; 100 ns
+dt          = 0.002     ; 2 fs
+nstxout     = 5000      ; save coords every 10 ps
+nstvout     = 5000      ; save velocities every 10 ps
+nstenergy   = 1000      ; save energies every 2 ps
+nstlog      = 1000      ; save log every 2 ps
+continuation = yes
+constraint_algorithm = lincs
+constraints = all-bonds
+nstlist     = 10
+cutoff-scheme = Verlet
+coulombtype = PME
+rcoulomb    = 1.0
+rvdw        = 1.0
+tcoupl      = V-rescale
+tc-grps     = System
+tau_t       = 0.1
+ref_t       = 300
+pcoupl      = Parrinello-Rahman
+pcoupltype  = isotropic
+tau_p       = 2.0
+ref_p       = 1.0
+compressibility = 4.5e-5

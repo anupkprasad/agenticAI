@@ -128,33 +128,33 @@ class MDWorkflow:
         """Generate final workflow report."""
         
         report = f"""
-MD Workflow Completion Report
-============================
+        MD Workflow Completion Report
+        ============================
 
-User Goal: {state.get('user_goal')}
-Status: {'Completed' if not state.get('errors') else 'Completed with errors'}
+        User Goal: {state.get('user_goal')}
+        Status: {'Completed' if not state.get('errors') else 'Completed with errors'}
 
-Input Files:
-- Original PDB: {state.get('raw_pdb')}
+        Input Files:
+        - Original PDB: {state.get('raw_pdb')}
 
-Preprocessing:
-- Cleaned structure: {state.get('cleaned_pdb')}
-- Force field: {state.get('force_field')}
-- Water model: {state.get('water_model')}
+        Preprocessing:
+        - Cleaned structure: {state.get('cleaned_pdb')}
+        - Force field: {state.get('force_field')}
+        - Water model: {state.get('water_model')}
 
-Setup:
-- Final coordinates: {state.get('coordinates')}
-- Topology: {state.get('topology')}
-- MDP files generated: {len(state.get('mdp_files', {}))}
+        Setup:
+        - Final coordinates: {state.get('coordinates')}
+        - Topology: {state.get('topology')}
+        - MDP files generated: {len(state.get('mdp_files', {}))}
 
-Errors: {len(state.get('errors', []))}
-Warnings: {len(state.get('warnings', []))}
+        Errors: {len(state.get('errors', []))}
+        Warnings: {len(state.get('warnings', []))}
 
-Next Steps:
-- Review generated files in {state.get('working_directory')}
-- Submit job to HPC system (not yet implemented)
-- Run analysis pipeline (not yet implemented)
-"""
+        Next Steps:
+        - Review generated files in {state.get('working_directory')}
+        - Submit job to HPC system (not yet implemented)
+        - Run analysis pipeline (not yet implemented)
+        """
         
         state["final_report"] = report
         state["next_node"] = None  # End workflow
