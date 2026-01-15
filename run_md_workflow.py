@@ -1,4 +1,4 @@
-"""Simplified LangGraph-based MD Runner"""
+"""Enhanced LangGraph-based MD Runner with LLM-Powered Supervisor"""
 import argparse
 import sys
 import os

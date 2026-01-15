@@ -78,6 +78,40 @@ class LLMClient:
                 self._client = None
                 self._is_mock_mode = True
 
+    @property
+    def available(self) -> bool:
+        """Check if LLM client is available and not in mock mode."""
+        return not self._is_mock_mode and self._client is not None
+        try:
+            import os, json as _json
+            cfg_path = os.path.join(os.path.dirname(__file__), "config.json")
+            if os.path.exists(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as fh:
+                    self.config = _json.load(fh)
+        except Exception:
+            self.config = {}
+        # allow passing a system_prompt directly via kwargs
+        self.system_prompt = kwargs.pop("system_prompt", self.config.get("system_prompt"))
+        # Optional tool list (for compatibility with tool-using frameworks)
+        self.tools: Optional[List[Any]] = kwargs.pop("tools", None)
+        if ollama_client is None:
+            logger.info("ollama client not available; LLMClient will run in mock mode or HTTP-fallback if base_url provided")
+            self._is_mock_mode = True
+        else:
+            # Use the ollama client with base_url if provided
+            try:
+                # Create a client instance if base_url is provided
+                if base_url:
+                    self._client = ollama.Client(host=base_url)
+                else:
+                    self._client = ollama_client  # Use the module directly
+                self._is_mock_mode = False
+                logger.info(f"ollama client initialized with model: {model}, base_url: {base_url}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize ollama client: {e}")
+                self._client = None
+                self._is_mock_mode = True
+
     def prompt(self, prompt: str, system: Optional[str] = None, **kwargs) -> str:
         """Send a prompt to the LLM and return a text response.
 

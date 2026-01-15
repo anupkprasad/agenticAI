@@ -1,4 +1,9 @@
-"""Main LangGraph MD Workflow"""
+"""
+LLM-Powered MD Workflow with Intelligent Routing
+
+This module implements the complete MD workflow that uses LLM reasoning
+for dynamic routing and agent coordination.
+"""
 import logging
 from typing import Dict, Any, Optional
 from langgraph.graph import StateGraph, END
@@ -13,20 +18,25 @@ logger = logging.getLogger(__name__)
 
 class MDWorkflow:
     """
-    LangGraph-based MD simulation workflow with human-in-the-loop capabilities.
+    Complete MD workflow with LLM-powered supervisor and agent coordination.
+    Maintains compatibility with existing workflow while adding intelligent features.
     """
     
     def __init__(self, llm_client: Optional[LLMClient] = None):
-        self.llm = llm_client or LLMClient(model="llama3.1")
+        self.llm = llm_client or LLMClient(model="llama3:8b")
         
-        # Initialize agents
-        self.supervisor = MDSupervisor()
+        # Initialize supervisor with LLM capabilities
+        self.supervisor = MDSupervisor(llm_client=self.llm)
+        
+        # Initialize existing agents
         self.preprocessor = PreprocessingAgent(self.llm)
         self.setup_agent = SimulationSetupAgent(self.llm)
         self.checkpoints = HumanCheckpoints()
         
         # Build the graph
         self.graph = self._build_graph()
+        
+        logger.info("MD workflow initialized with LLM-powered supervisor")
         
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph workflow."""
@@ -125,7 +135,72 @@ class MDWorkflow:
             return next_node
     
     def _final_report_node(self, state: MDState) -> MDState:
-        """Generate final workflow report."""
+        """Generate enhanced final workflow report using LLM when available."""
+        
+        # Try LLM-powered report generation first
+        if self.llm.available:
+            try:
+                report = self._generate_llm_report(state)
+                state["final_report"] = report
+            except Exception as e:
+                logger.warning(f"LLM report generation failed: {e}, using fallback")
+                report = self._generate_fallback_report(state)
+                state["final_report"] = report
+        else:
+            # Use fallback report
+            report = self._generate_fallback_report(state)
+            state["final_report"] = report
+            
+        state["next_node"] = None  # End workflow
+        state["workflow_complete"] = True
+        
+        logger.info("MD Workflow completed")
+        logger.info(report)
+        
+        return state
+    
+    def _generate_llm_report(self, state: MDState) -> str:
+        """Generate comprehensive report using LLM analysis."""
+        
+        # Collect workflow summary
+        summary = self._generate_workflow_summary(state)
+        
+        prompt = f"""
+Generate a comprehensive MD simulation workflow report based on the execution summary.
+
+WORKFLOW EXECUTION SUMMARY:
+{summary}
+
+USER ORIGINAL GOAL:
+{summary.get('user_goal', 'Not specified')}
+
+AGENTS UTILIZED:
+{', '.join(summary.get('agents_used', []))}
+
+ERRORS/WARNINGS:
+- Errors: {summary.get('total_errors', 0)}
+- Warnings: {summary.get('total_warnings', 0)}
+
+FINAL OUTPUTS:
+{summary.get('final_outputs', {})}
+
+Create a professional report that includes:
+1. Executive Summary
+2. Workflow Path Taken
+3. Key Results and Outputs
+4. Issues Encountered and Resolutions
+5. Recommendations for Next Steps
+6. File Locations and Usage Instructions
+
+Make it clear and actionable for the user.
+"""
+        
+        report = self.llm.prompt(prompt, system="You are an expert MD simulation workflow reporter. Create clear, professional reports.")
+        
+        return report
+    
+    def _generate_fallback_report(self, state: MDState) -> str:
+        """Generate standard report when LLM is not available."""
         
         report = f"""
         MD Workflow Completion Report
@@ -156,13 +231,41 @@ class MDWorkflow:
         - Run analysis pipeline (not yet implemented)
         """
         
-        state["final_report"] = report
-        state["next_node"] = None  # End workflow
+        return report
+    
+    def _generate_workflow_summary(self, state: MDState) -> Dict[str, Any]:
+        """Generate a summary of the entire workflow execution."""
         
-        logger.info("MD Workflow completed")
-        logger.info(report)
+        summary = {
+            "user_goal": state.get("user_goal", "Not specified"),
+            "agents_used": [],
+            "total_errors": len(state.get("errors", [])),
+            "total_warnings": len(state.get("warnings", [])),
+            "supervisor_decisions": [],
+            "final_outputs": {},
+            "execution_path": state.get("execution_path", [])
+        }
         
-        return state
+        # Collect agent usage
+        for agent in ["preprocessing", "setup", "hpc", "analysis"]:
+            if state.get(f"{agent}_completed"):
+                summary["agents_used"].append(agent)
+        
+        # Collect supervisor decisions
+        if "supervisor_reasoning" in state:
+            summary["supervisor_decisions"] = state.get("all_supervisor_decisions", [])
+        
+        # Collect final outputs
+        output_keys = [
+            "cleaned_pdb", "topology", "coordinates", 
+            "job_id", "analysis_results", "final_plots"
+        ]
+        
+        for key in output_keys:
+            if state.get(key):
+                summary["final_outputs"][key] = state[key]
+        
+        return summary
     
     def visualize_workflow(self, output_file: str = "current_workflow.png") -> bool:
         """
