@@ -2,14 +2,26 @@
 """
 Universal Ligand Preprocessor for Agentic AI Workflow
 Supports ATP, GTP, ADP, NAD, NADH, and any other ligands
+
+This script handles:
+1. Automatic ligand type detection from PDB files
+2. Addition of missing hydrogen atoms using multiple methods
+3. Generation of topology files for molecular dynamics simulations
 """
 
+# Standard library imports
 import os
 import sys
 import subprocess
 import logging
 import argparse
 from pathlib import Path
+
+# Third-party imports (imported conditionally in methods where used)
+# rdkit - for molecular manipulation and hydrogen addition
+# openbabel - alternative hydrogen addition method
+# reduce - protein structure optimization tool
+# pdb2pqr - protonation state assignment
 
 class LigandPreprocessor:
     """Add hydrogens to any ligand and generate topology"""
@@ -291,11 +303,11 @@ def main():
         description="Universal Ligand Preprocessor for Agentic AI Workflow",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  python ligand_preprocessor.py ATP.pdb                     # Auto-detect ATP
-  python ligand_preprocessor.py GTP.pdb --ligand GTP        # Specify ligand type  
-  python ligand_preprocessor.py custom.pdb --ligand NAD --charge -1  # Custom charge
-  python ligand_preprocessor.py --list                      # List supported ligands
+    Examples:
+    python ligand_preprocessor.py ATP.pdb                     # Auto-detect ATP
+    python ligand_preprocessor.py GTP.pdb --ligand GTP        # Specify ligand type  
+    python ligand_preprocessor.py custom.pdb --ligand NAD --charge -1  # Custom charge
+    python ligand_preprocessor.py --list                      # List supported ligands
         """
     )
     
@@ -334,3 +346,111 @@ Examples:
 
 if __name__ == "__main__":
     main()
+
+# ====================================================================
+# COMPREHENSIVE USE CASES AND EXAMPLES
+# ====================================================================
+
+"""
+=== QUICK START GUIDE ===
+
+1. Basic Usage (Auto-detection):
+   python ligand_preprocessor.py ATP.pdb
+   
+2. Specify Ligand Type:
+   python ligand_preprocessor.py my_molecule.pdb --ligand ATP --charge -4
+   
+3. List Supported Ligands:
+   python ligand_preprocessor.py --list
+
+=== DETAILED USE CASES ===
+
+# Case 1: Process ATP with auto-detection
+processor = LigandPreprocessor("working_dir")
+success = processor.process_ligand("ATP.pdb")
+
+# Case 2: Process custom ligand with specified parameters
+processor = LigandPreprocessor("working_dir")
+success = processor.process_ligand("custom_ligand.pdb", ligand_name="NAD", charge=-1)
+
+# Case 3: Just add hydrogens without topology generation
+processor = LigandPreprocessor("working_dir")
+pdb_with_h = processor.add_hydrogens(Path("ATP.pdb"))
+
+=== SUPPORTED LIGANDS DATABASE ===
+This script automatically detects and handles these common ligands:
+
+Nucleotides:
+  - ATP (Adenosine Triphosphate, charge: -4)
+  - ADP (Adenosine Diphosphate, charge: -3) 
+  - AMP (Adenosine Monophosphate, charge: -2)
+  - GTP, GDP, GMP (Guanosine nucleotides)
+  - CTP, CDP (Cytidine nucleotides)
+  - UTP, UDP (Uridine nucleotides)
+  - TTP, dATP, dGTP, dCTP, dTTP (Deoxy nucleotides)
+
+Cofactors:
+  - NAD/NADH (Nicotinamide Adenine Dinucleotide)
+  - NADP/NADPH (NAD Phosphate)
+  - FAD/FADH2 (Flavin Adenine Dinucleotide)
+  - FMN (Flavin Mononucleotide)
+  - CoA (Coenzyme A)
+
+=== HYDROGEN ADDITION METHODS ===
+The script tries multiple methods in order:
+
+1. reduce: Professional protein structure optimization
+2. openbabel: Chemical informatics toolkit
+3. rdkit: Cheminformatics and machine learning
+4. pdb2pqr: Protonation state assignment at specific pH
+
+=== OUTPUT FILES ===
+After successful processing, you'll get:
+- {ligand}_H.pdb: Original PDB with added hydrogens
+- {ligand}.itp: GROMACS topology file
+- {ligand}.gro: GROMACS coordinate file
+- {ligand}_params.txt: Force field parameters summary
+
+=== ERROR HANDLING ===
+The script gracefully handles:
+- Missing hydrogen addition tools (tries alternatives)
+- Unknown ligand types (uses default charge 0)
+- File I/O errors
+- Topology generation failures
+
+=== INTEGRATION WITH MD WORKFLOW ===
+This preprocessor integrates with the Agentic AI molecular dynamics workflow:
+
+from ligand_preprocessor import LigandPreprocessor
+
+# In your MD workflow
+processor = LigandPreprocessor(working_directory)
+if processor.process_ligand("ligand.pdb"):
+    print("Ligand ready for MD simulation!")
+else:
+    print("Preprocessing failed, check logs")
+
+=== CUSTOMIZATION ===
+To add new ligand types, extend the ligand_properties dictionary:
+
+processor.ligand_properties['CUSTOM'] = {
+    'charge': -2, 
+    'name': 'Custom Ligand Name'
+}
+
+=== DEPENDENCIES ===
+Required: Python 3.6+, pathlib
+Optional (for hydrogen addition): rdkit, openbabel, reduce, pdb2pqr
+Required for topology: ligand_topology_generator.py in same directory
+
+=== TESTING WITH ATP ===
+Test the script with the provided ATP.pdb file:
+
+python ligand_preprocessor.py ATP.pdb
+
+Expected output:
+- Detection of ATP ligand type
+- Addition of missing hydrogens
+- Generation of topology files for GROMACS
+- Success message with file locations
+"""
