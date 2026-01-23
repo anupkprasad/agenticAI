@@ -8,8 +8,8 @@ import logging
 import yaml
 import os
 from typing import Any, Dict, List, Optional, Tuple
-from .md_state import MDState
-from .conversation_logger import log_supervisor_routing
+from .state import MDState
+from .utils import log_supervisor_routing
 from .llm import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,9 @@ class MDSupervisor:
     """
     
     def __init__(self, llm_client: Optional[LLMClient] = None, config_path: Optional[str] = None):
-        self.llm = llm_client or LLMClient(model="llama3:8b")
+        if llm_client is None:
+            raise ValueError("llm_client is required. Pass LLMClient from main script.")
+        self.llm = llm_client
         
         # Load agent registry and configuration
         if config_path is None:
@@ -92,7 +94,6 @@ class MDSupervisor:
         
         self.supervisor_config = {
             "llm_config": {
-                "model": "llama3:8b",
                 "system_prompt": "You are an expert MD workflow supervisor."
             },
             "conversation": {
@@ -124,6 +125,13 @@ class MDSupervisor:
     
     def _llm_supervisor_routing(self, state: MDState) -> MDState:
         """LLM-powered intelligent routing logic."""
+        # First, check if we need input validation
+        if not state.get("raw_pdb"):
+            state["next_node"] = "input_validation"
+            log_supervisor_routing(state, "input_validation", "Input validation required - PDB path not yet extracted")
+            logger.info("LLM Supervisor routing to: input_validation (PDB extraction needed)")
+            return state
+        
         user_goal = state.get("user_goal", "")
         current_state_summary = self._get_state_summary(state)
         
@@ -460,17 +468,25 @@ ISSUES: [list any problems or missing information]
                 if value.lower() in ['not_specified', 'not specified', 'none']:
                     continue
                     
-                # Map LLM output to state variables
+                # Map LLM output to state variables (handle both uppercase and lowercase)
                 mapping = {
                     'pdb_path': 'raw_pdb',
+                    'pdb_file': 'raw_pdb',
                     'working_dir': 'working_directory',
+                    'working_directory': 'working_directory',
                     'force_field': 'force_field',
                     'water_model': 'water_model',
-                    'user_intent': 'user_intent_analysis'
+                    'user_intent': 'user_intent_analysis',
+                    'data_stage': 'data_stage'
                 }
                 
                 state_key = mapping.get(key, key)
-                extracted[state_key] = value
+                # For mapped keys, use the mapped state key; otherwise keep as is
+                if key in mapping:
+                    extracted[state_key] = value
+                elif state_key == key and key not in mapping:
+                    # Only add unmapped keys if they're not in the mapping
+                    extracted[state_key] = value
                 
         except Exception as e:
             logger.error(f"Error parsing input analysis: {e}")

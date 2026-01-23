@@ -2,9 +2,9 @@
 
 This module exposes the main workflow components for the MD simulation pipeline.
 """
-from .md_workflow import MDWorkflow
-from .md_supervisor import MDSupervisor
-from .md_state import MDState
+from .workflow import MDWorkflow
+from .supervisor import MDSupervisor
+from .state import MDState
 from .llm import LLMClient
 
 __all__ = ["MDWorkflow", "MDSupervisor", "MDState", "LLMClient"]

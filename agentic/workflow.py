@@ -7,10 +7,10 @@ for dynamic routing and agent coordination.
 import logging
 from typing import Dict, Any, Optional
 from langgraph.graph import StateGraph, END
-from .md_state import MDState
-from .md_supervisor import MDSupervisor
-from .preprocessing_agent import PreprocessingAgent
-from .setup_agent import SimulationSetupAgent
+from .state import MDState
+from .supervisor import MDSupervisor
+from .preprocess import PreprocessingAgent
+from .simsetup import SimulationSetupAgent
 from .human_checkpoints import HumanCheckpoints
 from .llm import LLMClient
 
@@ -23,7 +23,9 @@ class MDWorkflow:
     """
     
     def __init__(self, llm_client: Optional[LLMClient] = None):
-        self.llm = llm_client or LLMClient(model="llama3:8b")
+        if llm_client is None:
+            raise ValueError("llm_client is required. Pass LLMClient from main script.")
+        self.llm = llm_client
         
         # Initialize supervisor with LLM capabilities
         self.supervisor = MDSupervisor(llm_client=self.llm)
@@ -278,7 +280,7 @@ Make it clear and actionable for the user.
             bool: True if successful, False otherwise
         """
         try:
-            from .workflow_visualizer import WorkflowVisualizer
+            from .utils import WorkflowVisualizer
             visualizer = WorkflowVisualizer()
             return visualizer.visualize_workflow(output_file, use_actual_graph=True)
         except Exception as e:
@@ -293,7 +295,7 @@ Make it clear and actionable for the user.
             Dict with nodes, edges, and other workflow metadata
         """
         try:
-            from .workflow_visualizer import WorkflowVisualizer
+            from .utils import WorkflowVisualizer
             visualizer = WorkflowVisualizer()
             G = visualizer.extract_actual_workflow_graph()
             
@@ -429,7 +431,7 @@ Make it clear and actionable for the user.
             bool: True if successful, False otherwise
         """
         try:
-            from .workflow_visualizer import WorkflowVisualizer
+            from .utils import WorkflowVisualizer
             visualizer = WorkflowVisualizer()
             return visualizer.visualize_workflow(self.graph, output_file)
         except ImportError:

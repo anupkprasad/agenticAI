@@ -18,29 +18,39 @@ class ConversationLogger:
     Creates a comprehensive record of the entire workflow execution.
     """
     
-    def __init__(self, log_file: str = "md_conversation.log"):
+    def __init__(self, log_file: str = "agent_conversation.log"):
         self.log_file = log_file
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # Set up the conversation logger
         self.logger = logging.getLogger("md_conversation")
-        self.logger.setLevel(logging.INFO)
+        self.logger.setLevel(logging.DEBUG)  # Capture all levels
+        self.logger.propagate = False  # Don't propagate to root logger
         
         # Remove existing handlers to avoid duplication
         for handler in self.logger.handlers[:]:
             self.logger.removeHandler(handler)
         
-        # Create file handler
+        # Create file handler with proper buffering
         handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
-        handler.setLevel(logging.INFO)
+        handler.setLevel(logging.DEBUG)
         
         # Create detailed formatter - timestamps only on major sections
         formatter = logging.Formatter('%(message)s')
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
         
+        # Store handler for flushing
+        self.file_handler = handler
+        
         # Start session
         self._log_session_start()
+        self._flush()
+    
+    def _flush(self):
+        """Flush the file handler to ensure data is written immediately."""
+        if hasattr(self, 'file_handler'):
+            self.file_handler.flush()
     
     def _timestamp(self) -> str:
         """Get current timestamp for major events."""
@@ -52,6 +62,7 @@ class ConversationLogger:
         self.logger.info(f"NEW MD WORKFLOW SESSION STARTED - {self._timestamp()}")
         self.logger.info(f"Session ID: {self.session_id}")
         self.logger.info("="*80)
+        self._flush()
     
     def log_user_prompt(self, goal: str, config: Dict[str, Any]):
         """Log the initial user prompt and configuration."""
@@ -60,6 +71,7 @@ class ConversationLogger:
         self.logger.info(f"   Goal: {goal}")
         self.logger.info(f"   Configuration: {json.dumps(config, indent=4)}")
         self.logger.info("")
+        self._flush()
     
     def log_supervisor_routing(self, current_state: Dict[str, Any], next_node: str, reasoning: str = ""):
         """Log supervisor routing decisions."""
@@ -85,6 +97,7 @@ class ConversationLogger:
         if warnings:
             self.logger.info(f"   ⚠️  Warnings: {warnings}")
         self.logger.info("")
+        self._flush()
     
     def log_agent_start(self, agent_name: str, agent_type: str, input_data: Dict[str, Any]):
         """Log when an agent starts processing."""
@@ -98,6 +111,7 @@ class ConversationLogger:
             if value:
                 self.logger.info(f"     • {field}: {value}")
         self.logger.info("")
+        self._flush()
     
     def log_llm_interaction(self, agent_name: str, prompt: str, response: str, is_mock: bool = False):
         """Log LLM interactions with prompts and responses."""
@@ -120,6 +134,7 @@ class ConversationLogger:
         if len(response_lines) > 2:
             self.logger.info(f"      ... [+{len(response_lines)-2} more lines]")
         self.logger.info("")
+        self._flush()
     
     def log_agent_action(self, agent_name: str, action: str, details: Dict[str, Any]):
         """Log specific actions taken by agents."""
@@ -133,6 +148,7 @@ class ConversationLogger:
             else:
                 self.logger.info(f"   📊 {key}: {value}")
         self.logger.info("")
+        self._flush()
     
     def log_file_operation(self, agent_name: str, operation: str, file_path: str, success: bool, details: str = ""):
         """Log file operations (creation, reading, validation)."""
@@ -144,6 +160,7 @@ class ConversationLogger:
         if details:
             self.logger.info(f"   Details: {details}")
         self.logger.info("")
+        self._flush()
     
     def log_human_checkpoint(self, checkpoint_type: str, context: Dict[str, Any], user_choice: str, feedback: str = ""):
         """Log human checkpoint interactions."""
@@ -154,6 +171,7 @@ class ConversationLogger:
         if feedback:
             self.logger.info(f"   💬 User Feedback: {feedback}")
         self.logger.info("")
+        self._flush()
     
     def log_agent_completion(self, agent_name: str, agent_type: str, output_data: Dict[str, Any], success: bool):
         """Log when an agent completes processing."""
@@ -181,6 +199,7 @@ class ConversationLogger:
             self.logger.info(f"   ⚠️  Issues: {issues}")
         
         self.logger.info("")
+        self._flush()
     
     def log_workflow_completion(self, final_state: Dict[str, Any], success: bool, summary: str):
         """Log the completion of the entire workflow."""
@@ -208,11 +227,14 @@ class ConversationLogger:
         warnings = final_state.get('warnings', [])
         self.logger.info(f"   ⚠️  Errors: {len(errors)}")
         self.logger.info(f"   ⚠️  Warnings: {len(warnings)}")
+        self.logger.info("="*80)
+        self._flush()
         
         self.logger.info("="*80)
         self.logger.info(f"SESSION {self.session_id} COMPLETED - {self._timestamp()}")
         self.logger.info("="*80)
         self.logger.info("")
+        self._flush()
 
     def log_error(self, context: str, error: Exception, details: Dict[str, Any] = None):
         """Log errors with full context."""
@@ -221,16 +243,31 @@ class ConversationLogger:
         if details:
             self.logger.error(f"   Details: {json.dumps(details, indent=6)}")
         self.logger.error("")
+        self._flush()
 
 # Global conversation logger instance
 _conversation_logger: Optional[ConversationLogger] = None
+_log_file_override: Optional[str] = None
 
 def get_conversation_logger(log_file: str = "md_conversation.log") -> ConversationLogger:
     """Get or create the global conversation logger instance."""
-    global _conversation_logger
+    global _conversation_logger, _log_file_override
+    
+    # Use the override if set
+    if _log_file_override:
+        log_file = _log_file_override
+    
     if _conversation_logger is None or _conversation_logger.log_file != log_file:
         _conversation_logger = ConversationLogger(log_file)
     return _conversation_logger
+
+def set_log_file(log_file: str):
+    """Set the log file path for the conversation logger."""
+    global _log_file_override
+    _log_file_override = log_file
+    # Reset the global logger so it will be recreated with the new file
+    global _conversation_logger
+    _conversation_logger = None
 
 def log_user_prompt(goal: str, config: Dict[str, Any]):
     """Convenience function to log user prompt."""

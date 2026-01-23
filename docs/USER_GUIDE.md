@@ -53,14 +53,14 @@ AgenticAI is an advanced molecular dynamics simulation workflow system that uses
 
 ## Core Components
 
-### 1. Enhanced MD Supervisor (`agentic/md_supervisor.py`)
+### 1. Enhanced MD Supervisor (`agentic/supervisor.py`)
 
 The heart of the intelligent system that makes routing decisions:
 
 ```python
-from agentic.md_supervisor import MDSupervisor
+from agentic.supervisor import MDSupervisor
 
-supervisor = MDSupervisor()  # Auto-detects LLM availability
+supervisor = MDSupervisor(llm_client=llm)  # Requires LLMClient instance
 
 # The supervisor analyzes user intent and routes accordingly
 state = supervisor.supervisor_node(state)
@@ -72,14 +72,16 @@ state = supervisor.supervisor_node(state)
 - `_llm_routing_decision()`: Core LLM decision-making
 - Graceful fallback to heuristic routing when LLM unavailable
 
-### 2. Enhanced MD Workflow (`agentic/md_workflow.py`)
+### 2. Enhanced MD Workflow (`agentic/workflow.py`)
 
 Complete workflow orchestration with intelligent routing:
 
 ```python
-from agentic.md_workflow import MDWorkflow
+from agentic.workflow import MDWorkflow
+from agentic.llm import LLMClient
 
-workflow = MDWorkflow()
+llm = LLMClient(model="gpt-oss:20b", base_url="http://localhost:11434")
+workflow = MDWorkflow(llm_client=llm)
 
 result = workflow.run(
     user_goal="My PDB is already preprocessed, just run MD simulation"
@@ -126,49 +128,69 @@ pip install -r requirements.txt
 
 ### Enhanced Workflow Examples
 
-The enhanced system understands natural language and can intelligently skip steps based on user input:
+The enhanced system understands natural language and can intelligently skip steps based on user input. All generated files (MDP files, topology, coordinates) are created in the specified working directory.
 
 #### 1. Skip Preprocessing (Already Clean PDB)
 
 ```bash
-python run_md_workflow.py --goal "My PDB is already preprocessed, just set up simulation" --use-llm
+python run_agenticAIWork.py \
+  --goal "My PDB is already preprocessed, just set up simulation" \
+  --use-llm \
+  --working-dir /data/my_project
 ```
 
-**What happens:** LLM recognizes preprocessing is not needed and routes directly to simulation setup.
+**What happens:** LLM recognizes preprocessing is not needed and routes directly to simulation setup in `/data/my_project`.
 
 #### 2. Analysis Only
 
 ```bash
-python run_md_workflow.py --goal "I have existing trajectories and want RMSD analysis" --use-llm
+python run_agenticAIWork.py \
+  --goal "I have existing trajectories in /results/run1 and want RMSD analysis" \
+  --use-llm \
+  --working-dir /results/run1
 ```
 
 **What happens:** LLM skips preprocessing, setup, and HPC steps, routing directly to analysis.
 
-#### 3. Full Pipeline
+#### 3. Full Pipeline with Custom Directory
 
 ```bash
-python run_md_workflow.py --goal "Run complete MD simulation from raw PDB" --pdb-path /path/to/protein.pdb --use-llm
+python run_agenticAIWork.py \
+  --goal "Run complete MD simulation from raw PDB" \
+  --pdb-path /data/structures/protein.pdb \
+  --use-llm \
+  --working-dir /scratch/md_runs/experiment1
 ```
 
-**What happens:** LLM recognizes need for full pipeline and routes through all steps.
+**What happens:** LLM recognizes need for full pipeline and routes through all steps, creating all files in `/scratch/md_runs/experiment1`.
 
-#### 4. Custom Parameters
+#### 4. HPC with Ollama Integration
 
 ```bash
-python run_md_workflow.py \
+# First connect to HPC GPU node
+srun --jobid=42162557 --pty bash
+conda activate ~/conda_envs/ollama_env/
+
+# Run workflow with LLM support
+python run_agenticAIWork.py \
   --goal "MD simulation with CHARMM force field and 20ns runtime" \
-  --pdb-path /path/to/protein.pdb \
+  --pdb-path /home/user/protein.pdb \
   --force-field charmm36 \
-  --use-llm
+  --use-llm \
+  --llm-base-url http://127.0.0.1:11434 \
+  --llm-model gpt-oss:20b \
+  --working-dir /scratch/user/md_project
 ```
 
 ### Programmatic Usage
 
 ```python
-from agentic.md_workflow import MDWorkflow
+from agentic.workflow import MDWorkflow
+from agentic.llm import LLMClient
 
-# Create workflow instance
-workflow = MDWorkflow()
+# Create LLM client (optional, can work without LLM)
+llm = LLMClient(model="gpt-oss:20b", base_url="http://localhost:11434")
+workflow = MDWorkflow(llm_client=llm)
 
 # Run with natural language goal
 result = workflow.run(
@@ -196,7 +218,7 @@ Create or modify `agentic/configs/intelligent_supervisor.yaml`:
 ```yaml
 supervisor:
   llm_config:
-    model: "llama3:8b"
+    model: "gpt-oss:20b"
     system_prompt: "You are an expert MD workflow supervisor"
   conversation:
     log_all_interactions: true
@@ -241,10 +263,10 @@ The enhanced system maintains full backward compatibility:
 
 ```bash
 # Old style usage still works
-python run_md_workflow.py --pdb /path/to/protein.pdb --no-human-loop
+python run_agenticAIWork.py --pdb /path/to/protein.pdb --no-human-loop
 
 # Enhanced usage with LLM
-python run_md_workflow.py --goal "Natural language description" --use-llm
+python run_agenticAIWork.py --goal "Natural language description" --use-llm
 ```
 
 ### Logging and Monitoring
@@ -257,20 +279,82 @@ All decisions and reasoning are logged:
 2026-01-14 18:05:23 - LLM_REASONING: User indicated PDB is already preprocessed, skipping to simulation setup
 ```
 
+## Source Code Organization
+
+### Core Workflow Components (agentic/)
+
+- **supervisor.py** - LLM-powered intelligent routing and decision making
+- **workflow.py** - LangGraph-based workflow orchestration
+- **state.py** - Workflow state management (MDState TypedDict)
+- **llm.py** - LLM client with fallback capability
+- **human_checkpoints.py** - Human-in-the-loop approval gates
+
+### Agent Modules (agentic/)
+
+- **preprocess/** - PDB preprocessing agent
+  - `preprocessing_agent.py` - Water removal, residue fixing, hydrogen addition
+- **simsetup/** - Simulation setup agent
+  - `setup_agent.py` - Topology and MDP file generation
+- **hpc/** - HPC execution agent (stub for future development)
+- **analysis/** - MD analysis agent (stub for future development)
+
+### Shared Utilities (agentic/utils/)
+
+- **conversation_logger.py** - LLM interaction logging
+- **workflow_visualizer.py** - Workflow graph visualization
+- **log_utils.py** - Logging configuration and helpers
+
+### Analysis Tools (src/)
+
+- **python/analysis/** - MD trajectory analysis utilities
+- **python/setup/** - Simulation setup tools
+- **python/utilities/** - Protein utilities
+- **tcl/** - VMD visualization scripts
+  - *(Future: SLURM job scripts, container management)*
+  
+- **src/analysis/** - Post-simulation analysis
+  - `motif_reader.py` - Protein motif analysis
+  - `charge_volume.py` - Electrostatic property calculations
+
+### Working Directory Structure
+
+All workflow outputs are generated in the user-specified working directory:
+
+```
+/your/working/dir/
+├── preprocessed.pdb          # Cleaned PDB file
+├── system.gro               # GROMACS coordinates
+├── topol.top               # GROMACS topology
+├── mdout.mdp               # Simulation parameters
+├── logs/                   # Execution logs
+└── agent_conversation.log  # LLM interaction log
+```
+
 ## Project Structure
 
 ```
 agenticAI/
 ├── agentic/                          # Core workflow system
-│   ├── md_supervisor.py              # Enhanced LLM-powered supervisor
-│   ├── md_workflow.py               # Enhanced LangGraph workflow
-│   ├── md_state.py                  # Workflow state management
-│   ├── llm.py                       # LLM client with fallback
-│   ├── preprocessing_agent.py        # PDB preprocessing agent
-│   ├── setup_agent.py              # Simulation setup agent
+│   ├── supervisor.py                 # LLM-powered supervisor (routing decisions)
+│   ├── workflow.py                  # LangGraph workflow orchestration
+│   ├── state.py                     # Workflow state management (MDState TypedDict)
+│   ├── llm.py                       # LLM client with fallback capability
 │   ├── human_checkpoints.py         # Human-in-the-loop checkpoints
-│   ├── conversation_logger.py       # Conversation logging
-│   ├── workflow_visualizer.py       # Workflow visualization
+│   ├── preprocess/                  # Agent: PDB preprocessing
+│   │   ├── __init__.py
+│   │   └── preprocessing_agent.py
+│   ├── simsetup/                    # Agent: Simulation setup
+│   │   ├── __init__.py
+│   │   └── setup_agent.py
+│   ├── hpc/                         # Agent: HPC execution (stub)
+│   │   └── __init__.py
+│   ├── analysis/                    # Agent: MD analysis (stub)
+│   │   └── __init__.py
+│   ├── utils/                       # Shared utilities
+│   │   ├── __init__.py
+│   │   ├── conversation_logger.py   # Conversation logging (agent_conversation.log)
+│   │   ├── workflow_visualizer.py   # Workflow visualization
+│   │   └── log_utils.py             # Logging utilities
 │   └── configs/                     # Configuration files
 │       └── intelligent_supervisor.yaml
 ├── docs/
@@ -280,30 +364,38 @@ agenticAI/
 │   └── enhanced_workflow_examples.py # Usage examples
 ├── tests/
 │   └── test_enhanced_workflow.py   # Test suite
-├── src/                            # Custom analysis tools
-│   ├── python/                     # Python utilities
+├── src/                            # Source files organized by function
+│   ├── preprocess/                 # Molecular preprocessing utilities
+│   │   └── ligand_preprocessor.py  # Ligand hydrogen addition
+│   ├── simsetup/                   # Simulation setup utilities  
+│   │   └── ligand_topology_generator.py # GROMACS topology generation
+│   ├── hpc/                        # HPC and cluster tools (future)
+│   ├── analysis/                   # Post-simulation analysis
+│   │   ├── motif_reader.py         # Protein motif analysis
+│   │   └── charge_volume.py        # Electrostatic calculations
+│   ├── python/                     # Legacy Python utilities
 │   └── tcl/                        # VMD scripts
-├── working_dir/                    # Simulation files
-├── run_md_workflow.py             # Main CLI interface
+├── working_dir/                    # Default test workspace
+├── run_agenticAIWork.py           # Main CLI interface
 ├── requirements.txt               # Python dependencies
 └── README.md                      # Project overview
 ```
 
-## Migration from Previous Versions
+## Architecture Updates
 
-The enhanced system maintains backward compatibility while adding LLM capabilities:
+Recent restructuring improved code organization while maintaining functionality:
 
 ### What Changed
-- ✅ **md_supervisor.py**: Enhanced with LLM-powered routing
-- ✅ **md_workflow.py**: Added intelligent final reports  
-- ✅ **Removed redundant files**: All "intelligent_*" files merged into existing ones
-- ✅ **Clean architecture**: Single source of truth for each component
+- ✅ **Module Renaming**: Removed `md_` prefix from core files (`supervisor.py`, `workflow.py`, `state.py`)
+- ✅ **Directory Organization**: Created agent-specific directories (preprocess/, simsetup/, hpc/, analysis/)
+- ✅ **Utilities Package**: Consolidated shared utilities in `agentic/utils/`
+- ✅ **Centralized Configuration**: All defaults now in `run_agenticAIWork.py` entry point
 
 ### What Stayed the Same
-- ✅ **CLI interface**: `run_md_workflow.py` works exactly as before
+- ✅ **CLI interface**: `run_agenticAIWork.py` works exactly as before
 - ✅ **Agent interfaces**: Existing agents work without changes
 - ✅ **State management**: Same MDState structure
-- ✅ **Configuration**: Existing configs still supported
+- ✅ **Configuration**: Agent registry YAML configuration still supported
 
 ## Troubleshooting
 

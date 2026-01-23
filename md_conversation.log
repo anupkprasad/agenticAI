@@ -1,0 +1,124 @@
+================================================================================
+NEW MD WORKFLOW SESSION STARTED - 2026-01-23 18:19:20
+Session ID: 20260123_181920
+================================================================================
+🤖 PDB PREPROCESSING WITH LLM TOOL CALLING AGENT (preprocessing) STARTING [2026-01-23 18:19:20]:
+   Input Data Summary:
+     • raw_pdb: /tmp/tmpb21pi7hb/test.pdb
+     • user_goal: Preprocess ATP.pdb for MD simulation
+     • force_field: amber99sb-ildn
+     • water_model: tip3p
+
+🔀 MOCK LLM INTERACTION (preprocessing.planning) [2026-01-23 18:19:20]:
+   📝 Prompt:
+      You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed, step-by-step preprocessing plan.
+      
+      **PDB Information:**
+      ... [+50 more lines]
+   💭 Response:
+      MOCK_LLM_RESPONSE: would send: You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed, step-by-step preprocessing plan. **PDB Information:** - File: /tmp/tmpb21pi7hb/test.pdb - User Go
+
+⚡ AGENT ACTION (preprocessing):
+   🎬 Action: Generated preprocessing plan
+   📊 steps: 0
+   📊 reasoning: MOCK_LLM_RESPONSE: would send: You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed, step-by-step preprocessing plan. **PDB Information:** - File: /tmp/t
+
+🏁 PDB PREPROCESSING AGENT (preprocessing) ❌ FAILED [2026-01-23 18:19:20]:
+   📤 Output Summary:
+     • cleaned_pdb: /tmp/tmpb21pi7hb/test.pdb
+     • topology: /tmp/tmpb21pi7hb/topol.top
+   ⚠️  Issues: ['No topology file generated - GROMACS preparation may have failed']
+
+================================================================================
+NEW MD WORKFLOW SESSION STARTED - 2026-01-23 18:19:52
+Session ID: 20260123_181952
+================================================================================
+🤖 PDB PREPROCESSING WITH LLM TOOL CALLING AGENT (preprocessing) STARTING [2026-01-23 18:19:52]:
+   Input Data Summary:
+     • raw_pdb: /tmp/tmpk5ebo4et/test.pdb
+     • user_goal: Preprocess ATP.pdb for MD simulation
+     • force_field: amber99sb-ildn
+     • water_model: tip3p
+
+🔀 MOCK LLM INTERACTION (preprocessing.planning) [2026-01-23 18:19:52]:
+   📝 Prompt:
+      You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed, step-by-step preprocessing plan.
+      
+      **PDB Information:**
+      ... [+50 more lines]
+   💭 Response:
+      MOCK_LLM_RESPONSE: would send: You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed, step-by-step preprocessing plan. **PDB Information:** - File: /tmp/tmpk5ebo4et/test.pdb - User Go
+
+⚡ AGENT ACTION (preprocessing):
+   🎬 Action: Generated preprocessing plan
+   📊 steps: 0
+   📊 reasoning: MOCK_LLM_RESPONSE: would send: You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed, step-by-step preprocessing plan. **PDB Information:** - File: /tmp/t
+
+🏁 PDB PREPROCESSING AGENT (preprocessing) ❌ FAILED [2026-01-23 18:19:52]:
+   📤 Output Summary:
+     • cleaned_pdb: /tmp/tmpk5ebo4et/test.pdb
+     • topology: /tmp/tmpk5ebo4et/topol.top
+   ⚠️  Issues: ['No topology file generated - GROMACS preparation may have failed']
+
+================================================================================
+NEW MD WORKFLOW SESSION STARTED - 2026-01-23 18:21:42
+Session ID: 20260123_182142
+================================================================================
+🤖 PDB PREPROCESSING WITH LLM TOOL CALLING AGENT (preprocessing) STARTING [2026-01-23 18:21:42]:
+   Input Data Summary:
+     • raw_pdb: /tmp/tmpvmc_3jv6/test.pdb
+     • user_goal: Preprocess ATP.pdb for MD simulation
+     • force_field: amber99sb-ildn
+     • water_model: tip3p
+
+🔀 MOCK LLM INTERACTION (preprocessing.planning) [2026-01-23 18:21:42]:
+   📝 Prompt:
+      You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed, step-by-step preprocessing plan.
+      
+      **PDB Information:**
+      ... [+50 more lines]
+   💭 Response:
+      MOCK_LLM_RESPONSE: would send: You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed, step-by-step preprocessing plan. **PDB Information:** - File: /tmp/tmpvmc_3jv6/test.pdb - User Go
+
+⚡ AGENT ACTION (preprocessing):
+   🎬 Action: Generated preprocessing plan
+   📊 steps: 0
+   📊 reasoning: MOCK_LLM_RESPONSE: would send: You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed, step-by-step preprocessing plan. **PDB Information:** - File: /tmp/t
+
+🏁 PDB PREPROCESSING AGENT (preprocessing) ❌ FAILED [2026-01-23 18:21:42]:
+   📤 Output Summary:
+     • cleaned_pdb: /tmp/tmpvmc_3jv6/test.pdb
+     • topology: /tmp/tmpvmc_3jv6/topol.top
+   ⚠️  Issues: ['No topology file generated - GROMACS preparation may have failed']
+
+================================================================================
+NEW MD WORKFLOW SESSION STARTED - 2026-01-23 18:23:56
+Session ID: 20260123_182356
+================================================================================
+🤖 PDB PREPROCESSING WITH LLM TOOL CALLING AGENT (preprocessing) STARTING [2026-01-23 18:23:56]:
+   Input Data Summary:
+     • raw_pdb: /tmp/tmpl3k5wedv/test.pdb
+     • user_goal: Preprocess ATP.pdb for MD simulation
+     • force_field: amber99sb-ildn
+     • water_model: tip3p
+
+🔀 MOCK LLM INTERACTION (preprocessing.planning) [2026-01-23 18:24:14]:
+   📝 Prompt:
+      You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed, step-by-step preprocessing plan.
+      
+      **PDB Information:**
+      ... [+50 more lines]
+   💭 Response:
+      MOCK_LLM_RESPONSE: would send: You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed, step-by-step preprocessing plan. **PDB Information:** - File: /tmp/tmpl3k5wedv/test.pdb - User Go
+
+⚡ AGENT ACTION (preprocessing):
+   🎬 Action: Generated preprocessing plan
+   📊 steps: 0
+   📊 reasoning: MOCK_LLM_RESPONSE: would send: You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed, step-by-step preprocessing plan. **PDB Information:** - File: /tmp/t
+
+🏁 PDB PREPROCESSING AGENT (preprocessing) ❌ FAILED [2026-01-23 18:24:14]:
+   📤 Output Summary:
+     • cleaned_pdb: /tmp/tmpl3k5wedv/test.pdb
+     • topology: /tmp/tmpl3k5wedv/topol.top
+   ⚠️  Issues: ['No topology file generated - GROMACS preparation may have failed']
+

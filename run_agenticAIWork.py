@@ -7,10 +7,10 @@ import logging
 from datetime import datetime
 from typing import Dict, Any
 
-from agentic.md_workflow import MDWorkflow
+from agentic.workflow import MDWorkflow
 from agentic.llm import LLMClient
-from agentic.conversation_logger import (
-    get_conversation_logger, log_user_prompt, log_workflow_completion
+from agentic.utils import (
+    get_conversation_logger, log_user_prompt, log_workflow_completion, set_log_file
 )
 
 # Set up logging
@@ -59,9 +59,9 @@ def main(argv=None):
                        help="Natural language description of simulation goal")
     parser.add_argument("--use-llm", action="store_true", 
                        help="Use LLM for intelligent planning (recommended)")
-    parser.add_argument("--llm-model", default="gpt-oss:120b",
+    parser.add_argument("--llm-model", default="gpt-oss:20b",
                        help="LLM model to use")
-    parser.add_argument("--llm-base-url", default="http://172.22.149.139:11434",
+    parser.add_argument("--llm-base-url", default="http://localhost:11434",
                        help="LLM API base URL")
     parser.add_argument("--no-human-loop", action="store_true",
                        help="Skip human checkpoints (auto-approve)")
@@ -95,8 +95,11 @@ def main(argv=None):
     if args.working_dir:
         config["working_directory"] = args.working_dir
 
+    # Set up logging with the specified log file
+    set_log_file("agent_conversation.log")
+    
     # Initialize conversation logger
-    conversation_logger = get_conversation_logger("md_conversation.log")
+    conversation_logger = get_conversation_logger("agent_conversation.log")
     
     # Log user prompt
     log_user_prompt(args.goal, config)
@@ -142,7 +145,7 @@ def main(argv=None):
             for warning in final_state["warnings"]:
                 print(f"  - {warning}")
         
-        print(f"\nFull conversation log saved to: md_conversation.log")
+        print(f"\nFull conversation log saved to: agent_conversation.log")
         
         # Return appropriate exit code
         return 0 if not final_state.get("errors") else 1

@@ -11,9 +11,9 @@ import sys
 from typing import Optional
 
 class OllamaChat:
-    def __init__(self, base_url: str = "http://127.0.0.1:11434", model: str = "gpt-oss:20b"):
-        self.base_url = base_url
-        self.model = model
+    def __init__(self, base_url: str = None, model: str = None):
+        self.base_url = base_url or "http://127.0.0.1:11434"
+        self.model = model or "gpt-oss:20b"
         self.chat_url = f"{base_url}/api/chat"
         self.generate_url = f"{base_url}/api/generate"
         self.conversation_history = []
@@ -177,18 +177,24 @@ class OllamaChat:
 
 def main():
     """Main function"""
-    # Default configuration
-    base_url = "http://127.0.0.1:11434"
-    model = "gpt-oss:20b"
+    import os
     
-    # Allow command line arguments to override defaults
+    # Get defaults from environment or use fallbacks
+    base_url = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434")
+    model = os.getenv("LLM_MODEL", "gpt-oss:20b")
+    
+    # Allow command line arguments to override
     if len(sys.argv) > 1:
         if sys.argv[1] in ['-h', '--help']:
-            print("Usage: python ollama_llm_chat.py [model_name]")
-            print("Example: python ollama_llm_chat.py llama2")
-            print("Default model: gpt-oss:20b")
+            print("Usage: python ollama_llm_chat.py [base_url] [model]")
+            print("Example: python ollama_llm_chat.py http://localhost:11434 llama2")
+            print(f"Default base_url: {os.getenv('LLM_BASE_URL', 'http://127.0.0.1:11434')}")
+            print(f"Default model: {os.getenv('LLM_MODEL', 'gpt-oss:20b')}")
             return
-        model = sys.argv[1]
+        if len(sys.argv) > 1:
+            base_url = sys.argv[1]
+        if len(sys.argv) > 2:
+            model = sys.argv[2]
     
     # Create and start chat
     chat = OllamaChat(base_url=base_url, model=model)

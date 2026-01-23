@@ -6,7 +6,7 @@ dependency is not available, so the rest of the codebase can remain testable.
 
 Example usage:
     from agentic.llm import LLMClient
-    llm = LLMClient(model="gpt-oss:120b", base_url="http://172.22.149.139:11434")
+    llm = LLMClient(model="gpt-oss:20b", base_url="http://localhost:11434")
     resp = llm.prompt("Summarize the following PDB: ...")
     print(resp)
 """

@@ -1,8 +1,8 @@
 """Human-in-the-Loop Checkpoint Nodes"""
 import logging
 from typing import Dict, Any
-from .md_state import MDState
-from .conversation_logger import log_human_checkpoint
+from .state import MDState
+from .utils import log_human_checkpoint
 
 logger = logging.getLogger(__name__)
 

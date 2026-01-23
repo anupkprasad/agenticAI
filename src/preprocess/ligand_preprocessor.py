@@ -231,8 +231,8 @@ class LigandPreprocessor:
     def generate_topology(self, pdb_file_with_h, ligand_name, charge):
         """Generate topology after adding hydrogens"""
         try:
-            # Import the topology generator
-            sys.path.append(str(self.working_dir))
+            # Import the topology generator from simsetup module
+            sys.path.append(str(self.working_dir.parent / 'simsetup'))
             from ligand_topology_generator import LigandTopologyGenerator
             
             generator = LigandTopologyGenerator(self.working_dir)
@@ -441,7 +441,7 @@ processor.ligand_properties['CUSTOM'] = {
 === DEPENDENCIES ===
 Required: Python 3.6+, pathlib
 Optional (for hydrogen addition): rdkit, openbabel, reduce, pdb2pqr
-Required for topology: ligand_topology_generator.py in same directory
+Required for topology: ../simsetup/ligand_topology_generator.py
 
 === TESTING WITH ATP ===
 Test the script with the provided ATP.pdb file:

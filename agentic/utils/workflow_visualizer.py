@@ -82,11 +82,16 @@ class WorkflowVisualizer:
             
         try:
             # Import and instantiate the actual workflow
-            from .md_workflow import MDWorkflow
-            from .llm import LLMClient
+            from ..workflow import MDWorkflow
+            from ..llm import LLMClient
+            import os
+            
+            # Get model and base_url from environment, use defaults
+            model = os.getenv("LLM_MODEL", "gpt-oss:20b")
+            base_url = os.getenv("LLM_BASE_URL", "http://localhost:11434")
             
             # Create a minimal LLM client for graph construction
-            llm_client = LLMClient(model="test")
+            llm_client = LLMClient(model=model, base_url=base_url)
             workflow_instance = MDWorkflow(llm_client)
             
             # Access the compiled LangGraph

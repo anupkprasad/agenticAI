@@ -2,9 +2,9 @@
 import logging
 import os
 from typing import Dict, Any, List
-from .md_state import MDState
-from .llm import LLMClient
-from .conversation_logger import (
+from ..state import MDState
+from ..llm import LLMClient
+from ..utils import (
     log_agent_start, log_llm_interaction, log_agent_action, 
     log_file_operation, log_agent_completion
 )
@@ -64,7 +64,7 @@ class SimulationSetupAgent:
                 
         except Exception as e:
             logger.error(f"Setup failed: {e}")
-            from .conversation_logger import log_error
+            from ..utils import log_error
             log_error("setup_agent.setup_node", e, {"state": state})
             state["errors"].append(f"Setup error: {str(e)}")
             state["next_node"] = "supervisor"

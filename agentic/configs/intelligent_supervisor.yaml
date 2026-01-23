@@ -87,7 +87,6 @@ workflow:
 
 supervisor:
   llm_config:
-    model: "gpt-oss:120b"
     temperature: 0.1  # Low temperature for consistent routing decisions
     max_tokens: 500
     system_prompt: |
