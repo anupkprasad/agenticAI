@@ -73,6 +73,8 @@ class MDWorkflow:
                 "input_validation": "input_validation",
                 "preprocess": "preprocess", 
                 "setup": "setup",
+                "planner": "supervisor",  # planner is a sub-agent invoked within supervisor
+                "programmer": "supervisor",  # programmer is a sub-agent invoked via planner
                 "hpc": "hpc",
                 "analysis": "analysis",
                 "final_report": "final_report",
