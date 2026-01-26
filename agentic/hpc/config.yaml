@@ -1,0 +1,21 @@
+ssh:
+  host: null
+  user: null
+  port: 22
+  key_path: null
+
+paths:
+  remote_work_dir: "~/md_jobs"
+  local_download_dir: "./working_dir"
+
+commands:
+  submit: "sbatch {job_script}"
+  status: "squeue -j {job_id}"
+  cancel: "scancel {job_id}"
+
+download:
+  patterns:
+    - "*.xtc"
+    - "*.gro"
+    - "*.log"
+    - "*.out"

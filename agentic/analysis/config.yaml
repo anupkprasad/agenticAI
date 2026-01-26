@@ -1,0 +1,7 @@
+metrics:
+  - rmsd
+  - rmsf
+  - energy
+plots: true
+output_dir: "./working_dir/analysis"
+use_mdanalysis: true

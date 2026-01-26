@@ -1,7 +1,5 @@
-"""HPC Submission and Job Management Module
+"""HPC agent package for AgenticAI MD workflow."""
 
-This module handles job submission to HPC clusters and job status monitoring.
-Placeholder for future HPC integration.
-"""
+from .hpc_agent import MDHPCAgent
 
-__all__ = []
+__all__ = ["MDHPCAgent"]

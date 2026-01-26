@@ -27,6 +27,7 @@ class MDState(TypedDict):
     setup_issues: List[str]
     
     # HPC stage
+    hpc_action: Optional[str]
     job_script: Optional[str]
     job_id: Optional[str]
     job_status: Optional[str]
@@ -34,6 +35,8 @@ class MDState(TypedDict):
     hpc_report: Optional[str]
     
     # Analysis stage
+    analysis_action: Optional[str]
+    analysis_request: Optional[str]
     analysis_results: Dict[str, Any]
     figures: List[str]
     conclusions: Optional[str]

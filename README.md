@@ -47,8 +47,10 @@ This repository provides an advanced, LLM-powered agentic AI system for molecula
 ### Agent Framework (Modular Design)
 - `agentic/preprocess/` — Preprocessing Agent: PDB cleaning, water removal, hydrogen addition
 - `agentic/simsetup/` — Setup Agent: Topology and MDP file generation
-- `agentic/hpc/` — HPC Agent: Job submission and remote execution (stub)
-- `agentic/analysis/` — Analysis Agent: MD trajectory analysis (stub)
+- `agentic/hpc/` — HPC Agent: Job submission, monitoring, and downloads
+- `agentic/analysis/` — Analysis Agent: MD trajectory analysis and reports
+- `agentic/planner/` — Planner Agent: LLM-guided execution planning
+- `agentic/programmer/` — Programmer Agent: Script generation
 - `agentic/utils/` — Shared utilities: logging, visualization, helper functions
 
 ### Custom Analysis Tools

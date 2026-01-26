@@ -1,7 +1,5 @@
-"""Simulation Analysis Module
+"""Analysis agent package for AgenticAI MD workflow."""
 
-This module handles post-simulation analysis, trajectory processing, and result generation.
-Includes motif analysis, charge volume calculations, and other analysis tools.
-"""
+from .analysis_agent import MDAnalysisAgent
 
-__all__ = []
+__all__ = ["MDAnalysisAgent"]

@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .state import MDState
 from .utils import log_supervisor_routing
 from .llm import LLMClient
+from .planner import MDPlanner
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,9 @@ class MDSupervisor:
         if llm_client is None:
             raise ValueError("llm_client is required. Pass LLMClient from main script.")
         self.llm = llm_client
+        
+        # Initialize planner (programmer initialized by planner)
+        self.planner = MDPlanner(llm_client=self.llm)
         
         # Load agent registry and configuration
         if config_path is None:
@@ -151,6 +155,27 @@ class MDSupervisor:
         
         logger.info(f"LLM Supervisor routing to: {next_agent}")
         logger.debug(f"Reasoning: {reasoning}")
+        
+        # After input validation, route to planner
+        if not state.get("execution_plan"):
+            state["next_node"] = "planner"
+            log_supervisor_routing(
+                state, "planner",
+                "Input validated. Routing to planner to create detailed execution plan."
+            )
+            logger.info("LLM Supervisor routing to: planner")
+            return state
+        
+        # Check if plan needs approval
+        if state.get("plan_awaiting_approval"):
+            # Plan will be reviewed and supervisor will provide feedback
+            state["next_node"] = "planner"
+            state["supervisor_action"] = "review_plan"
+            log_supervisor_routing(
+                state, "planner",
+                "Supervisor reviewing plan for approval."
+            )
+            return state
         
         return state
     

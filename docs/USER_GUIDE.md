@@ -156,30 +156,22 @@ python run_agenticAIWork.py \
 
 ```bash
 python run_agenticAIWork.py \
-  --goal "Run complete MD simulation from raw PDB" \
-  --pdb-path /data/structures/protein.pdb \
+  --goal "Run complete MD simulation from raw PDB at /data/structures/protein.pdb" \
   --use-llm \
   --working-dir /scratch/md_runs/experiment1
 ```
 
 **What happens:** LLM recognizes need for full pipeline and routes through all steps, creating all files in `/scratch/md_runs/experiment1`.
 
-#### 4. HPC with Ollama Integration
+#### 4. HPC Submission & Monitoring
 
 ```bash
-# First connect to HPC GPU node
-srun --jobid=42162557 --pty bash
-conda activate ~/conda_envs/ollama_env/
-
-# Run workflow with LLM support
 python run_agenticAIWork.py \
-  --goal "MD simulation with CHARMM force field and 20ns runtime" \
-  --pdb-path /home/user/protein.pdb \
-  --force-field charmm36 \
+  --goal "Submit MD job for /home/user/protein.pdb and monitor on cluster; download outputs when complete" \
   --use-llm \
-  --llm-base-url http://127.0.0.1:11434 \
-  --llm-model gpt-oss:20b \
   --working-dir /scratch/user/md_project
+
+Configure SSH and cluster settings in agentic/hpc/config.yaml (host, user, key, remote_work_dir).
 ```
 
 ### Programmatic Usage
@@ -295,8 +287,14 @@ All decisions and reasoning are logged:
   - `preprocessing_agent.py` - Water removal, residue fixing, hydrogen addition
 - **simsetup/** - Simulation setup agent
   - `setup_agent.py` - Topology and MDP file generation
-- **hpc/** - HPC execution agent (stub for future development)
-- **analysis/** - MD analysis agent (stub for future development)
+- **hpc/** - HPC execution agent
+  - `hpc_agent.py` - SLURM submission, monitoring, downloads (Paramiko if available)
+- **analysis/** - MD analysis agent
+  - `analysis_agent.py` - LLM-guided planning with MDAnalysis fallback
+ - **planner/** - Planning agent
+   - `planner_agent.py` - Creates execution plans, coordinates with programmer
+ - **programmer/** - Script generation agent
+   - `programmer_agent.py` - Generates scripts for MD tasks
 
 ### Shared Utilities (agentic/utils/)
 
@@ -346,10 +344,20 @@ agenticAI/
 │   ├── simsetup/                    # Agent: Simulation setup
 │   │   ├── __init__.py
 │   │   └── setup_agent.py
-│   ├── hpc/                         # Agent: HPC execution (stub)
-│   │   └── __init__.py
-│   ├── analysis/                    # Agent: MD analysis (stub)
-│   │   └── __init__.py
+│   ├── hpc/                         # Agent: HPC execution
+│   │   ├── __init__.py
+│   │   ├── hpc_agent.py
+│   │   └── config.yaml
+│   ├── analysis/                    # Agent: MD analysis
+│   │   ├── __init__.py
+│   │   ├── analysis_agent.py
+│   │   └── config.yaml
+│   ├── planner/                     # Agent: Planner
+│   │   ├── __init__.py
+│   │   └── planner_agent.py
+│   ├── programmer/                  # Agent: Programmer
+│   │   ├── __init__.py
+│   │   └── programmer_agent.py
 │   ├── utils/                       # Shared utilities
 │   │   ├── __init__.py
 │   │   ├── conversation_logger.py   # Conversation logging (agent_conversation.log)
@@ -446,7 +454,7 @@ Global LLM & prompt flags (available for CLI subcommands):
 
 Common subcommands: `setup`, `prepare-job`, `submit`, `download`, `analyze`.
 
-See `scripts/run_agent.py` for the exact argument names and behaviors.
+See `run_agenticAIWork.py` for available arguments. The supervisor extracts PDB paths from your `--goal` text.
 
 ## LLM integration & tunneling
 
@@ -473,23 +481,22 @@ Some LLM servers stream partial output as NDJSON fragments which the CLI logs to
 
 ## Examples
 
-1. Dry-run setup with LLM assistance (tunneled server):
+1. Setup with LLM assistance:
 
 ```bash
 # Start tunnel first, then:
-python scripts/run_agent.py --use-llm --llm-base-url http://localhost:11434 --llm-model gpt-oss:120b --prompt "setup a simulation for ./em_wc.pdb" --llm-log logs/llm_responses.log
+python run_agenticAIWork.py --use-llm --llm-base-url http://localhost:11434 --llm-model gpt-oss:20b --goal "setup a simulation for ./em_wc.pdb" --working-dir ./working_dir
 ```
 
-2. Non-LLM dry-run:
+2. Non-LLM run:
 
 ```bash
-python scripts/run_agent.py setup --pdb ./em_wc.pdb
+python run_agenticAIWork.py --goal "setup a simulation for ./em_wc.pdb" --no-human-loop
 ```
 
 ## Troubleshooting
 
-- Module import errors when running `scripts/run_agent.py` directly: run it from the project root or ensure the project root is on `PYTHONPATH`. The script prepends the project root to `sys.path` when run directly.
-- If the LLM returns many small JSON fragments, prefer `/api/generate` with `stream=false`, or inspect `logs/llm_responses.log` to see raw fragments.
+- If the LLM returns streamed fragments, prefer non-streaming endpoints or check logs.
 - If `pytest` isn't found, install dev dependencies in your venv: `pip install pytest`.
 
 ## Contributing and next steps

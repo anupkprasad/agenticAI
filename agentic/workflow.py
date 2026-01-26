@@ -13,6 +13,8 @@ from .preprocess import PreprocessingAgent
 from .simsetup import SimulationSetupAgent
 from .human_checkpoints import HumanCheckpoints
 from .llm import LLMClient
+from .hpc import MDHPCAgent
+from .analysis import MDAnalysisAgent
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,8 @@ class MDWorkflow:
         self.preprocessor = PreprocessingAgent(self.llm)
         self.setup_agent = SimulationSetupAgent(self.llm)
         self.checkpoints = HumanCheckpoints()
+        self.hpc_agent = MDHPCAgent(self.llm)
+        self.analysis_agent = MDAnalysisAgent(self.llm)
         
         # Build the graph
         self.graph = self._build_graph()
@@ -51,8 +55,11 @@ class MDWorkflow:
         workflow.add_node("input_validation", self.supervisor.input_validation_node)
         workflow.add_node("preprocess", self.preprocessor.preprocess_node)
         workflow.add_node("setup", self.setup_agent.setup_node)
+        workflow.add_node("hpc", self.hpc_agent.hpc_node)
+        workflow.add_node("analysis", self.analysis_agent.analysis_node)
         workflow.add_node("human_preprocess_check", self.checkpoints.human_preprocess_check)
         workflow.add_node("human_setup_check", self.checkpoints.human_setup_check)
+        workflow.add_node("human_hpc_check", self.checkpoints.human_hpc_check)
         workflow.add_node("final_report", self._final_report_node)
         
         # Set entry point
@@ -66,6 +73,8 @@ class MDWorkflow:
                 "input_validation": "input_validation",
                 "preprocess": "preprocess", 
                 "setup": "setup",
+                "hpc": "hpc",
+                "analysis": "analysis",
                 "final_report": "final_report",
                 END: END
             }
@@ -125,13 +134,7 @@ class MDWorkflow:
         next_node = state.get("next_node")
         
         # Handle special cases
-        if next_node == "hpc":
-            # HPC not implemented yet - go to final report
-            return "final_report"
-        elif next_node == "analysis":
-            # Analysis not implemented yet - go to final report  
-            return "final_report"
-        elif next_node is None:
+        if next_node is None:
             return END
         else:
             return next_node
