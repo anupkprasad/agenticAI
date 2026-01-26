@@ -85,6 +85,10 @@ Graph Structure:
 │   └── Input analysis & PDB extraction
 ├── supervisor
 │   └── LLM-powered routing decision
+├── planner
+│   └── LLM-guided execution plan (invoked via supervisor)
+├── programmer
+│   └── Script generation for required steps (invoked via planner)
 ├── preprocessing
 │   └── PDB cleaning & protonation
 ├── setup
@@ -171,6 +175,8 @@ workflow.add_node("final_report", self._final_report_node)
 Each `add_node()` call registers:
 - **Node name** (string): Unique identifier used in routing
 - **Handler function** (callable): Method that processes the state and returns updated state
+
+Note: The `planner` and `programmer` agents operate as sub-agents invoked within supervisor/planning flow and are not registered as separate LangGraph nodes in the current implementation. They update state with plans and generated scripts and then route back through `supervisor`.
 
 #### Step 3: Set Entry Point
 
@@ -364,6 +370,18 @@ return workflow.compile()
                           ┌───▼────┐
                           │  END    │
                           └─────────┘
+
+          ┌───────────────────────────────────────────────────────────────┐
+          │        Sub-Agents (invoked via supervisor/planner)            │
+          │   ┌────────────┐      ┌──────────────┐                        │
+          │   │  planner   │ ───► │ programmer   │                        │
+          │   └────────────┘      └──────────────┘                        │
+          │        ▲                         │                            │
+          │        └───────────────◄────────┘                            │
+          │  (plan creation)   (script generation & review)               │
+          │                                                           │   │
+          │        After review: planner ───► supervisor (route)          │
+          └───────────────────────────────────────────────────────────────┘
 ```
 
 ### State Mutation Pattern
@@ -414,6 +432,12 @@ invoke(initial_state)
         │   ├─► Human Check (if human_in_loop=True)
         │   │   └─► Supervisor (loops back)
         │   └─► Supervisor (loops back)
+        │
+        ├─► Planner (LLM plan creation, invoked via supervisor)
+        │   └─► Supervisor (review plan, may request Programmer)
+        │
+        ├─► Programmer (generate scripts requested by plan)
+        │   └─► Planner (script review) → Supervisor
         │
         └─► Final Report
             └─► END (workflow complete)
@@ -493,6 +517,18 @@ The central state object flows through the entire workflow with these key fields
 ```
 
 #### Setup Results
+#### Planning & Script Generation
+```python
+{
+    "execution_plan": dict,            # Structured plan with steps/resources/risks
+    "plan_version": int,               # Plan iteration/version
+    "plan_awaiting_approval": bool,    # Whether supervisor/human review is pending
+    "plan_for_review": dict,           # Plan summary for review checkpoints
+    "programmer_scripts": list[str],   # Script types requested by plan
+    "generated_scripts": dict,         # Map of script_type → {file_path, preview, purpose}
+    "scripts_awaiting_review": bool,   # Planner review pending
+}
+```
 ```python
 {
     "coordinates": str,                  # Solvated .gro file path
@@ -931,7 +967,42 @@ Input: state with cleaned_pdb
 
 ---
 
-### 5. HPC Agent Node
+### 5. Planner Agent
+
+**File:** `agentic/planner/planner_agent.py`
+
+**Purpose:** Create a detailed, ordered execution plan using LLM reasoning and domain knowledge.
+
+**Implementation Summary:**
+- Builds planning context from current `MDState` and knowledge resources
+- Produces `execution_plan` with steps, resource requirements, risks
+- Sets `state["plan_awaiting_approval"] = True` and routes to `supervisor` for review
+- Coordinates human approval when `human_in_loop=True`
+
+**Entry:** `MDPlanner.planner_node(state)`
+
+**Routing:** Sets `state["next_node"] = "supervisor"` after plan creation
+
+---
+
+### 6. Programmer Agent
+
+**File:** `agentic/programmer/programmer_agent.py`
+
+**Purpose:** Generate scripts and parameter files requested by the plan (e.g., SLURM job scripts, GROMACS MDP).
+
+**Implementation Summary:**
+- Reads `execution_plan.programmer_scripts` and produces artifacts into `/tmp/md_scripts`
+- Updates `state["generated_scripts"]` and `state["scripts_awaiting_review"] = True`
+- Routes back to `planner` for script review coordination and then to `supervisor`
+
+**Entry:** `MDProgrammer.programmer_node(state)`
+
+**Routing:** Sets `state["next_node"] = "planner"` for review, then `supervisor`
+
+---
+
+### 7. HPC Agent Node
 
 **File:** `agentic/hpc/hpc_agent.py`
 
@@ -949,7 +1020,7 @@ Input: state with cleaned_pdb
 
 ---
 
-### 6. Analysis Agent Node
+### 8. Analysis Agent Node
 
 **File:** `agentic/analysis/analysis_agent.py`
 
@@ -966,7 +1037,7 @@ Input: state with cleaned_pdb
 
 ---
 
-### 7. Final Report Node
+### 9. Final Report Node
 
 **File:** `agentic/workflow.py` (Lines 220-250)
 
@@ -1255,42 +1326,51 @@ Exit 2: Invalid arguments or configuration
 ┌──────────────────────────────────────┐
 │     CLI Entry (run_agenticAIWork.py) │
 └─────────────┬──────────────────────┘
-              │
-              ▼
+        │
+        ▼
     ┌─────────────────────┐
     │  LLMClient          │
     │  (Ollama HTTP)      │
     └─────────────────────┘
-              │
-              ▼
-    ┌─────────────────────────────┐
-    │  MDWorkflow                 │
-    │  ├─ supervisor              │
-    │  ├─ preprocess_agent        │
-    │  ├─ setup_agent             │
-    │  └─ StateGraph (LangGraph)  │
-    └──────────┬──────────────────┘
-               │
-        ┌──────▼──────┐
-        │ MDState      │  (Central State Container)
-        │ (TypedDict)  │
-        └──────────────┘
-               │
-        ┌──────▼────────────────┐
-        │  Node Execution Loop  │
-        │  ├─ input_validation  │
-        │  ├─ supervisor (LLM)  │
-        │  ├─ agents            │
-        │  └─ final_report      │
-        └──────┬────────────────┘
-               │
-        ┌──────▼────────────┐
-        │ Output Files       │
-        │ └─ working_dir/   │
-        │    ├─ *.gro       │
-        │    ├─ *.top       │
-        │    └─ *.mdp       │
-        └────────────────────┘
+        │
+        ▼
+    ┌──────────────────────────────────────────────┐
+    │  MDWorkflow                                  │
+    │  ├─ supervisor                               │
+    │  ├─ preprocess_agent                         │
+    │  ├─ setup_agent                              │
+    │  ├─ hpc_agent                                │
+    │  ├─ analysis_agent                           │
+    │  ├─ human_checkpoints (pre, setup, hpc)      │
+    │  ├─ planner (sub-agent, invoked via routing) │
+    │  ├─ programmer (sub-agent, via planner)      │
+    │  └─ StateGraph (LangGraph)                   │
+    └──────────┬───────────────────────────────────┘
+         │
+     ┌──────▼──────┐
+     │ MDState      │  (Central State Container)
+     │ (TypedDict)  │
+     └──────────────┘
+         │
+     ┌──────▼──────────────────────────────┐
+     │  Node Execution Loop                │
+     │  ├─ input_validation                │
+     │  ├─ supervisor (LLM)                │
+     │  ├─ preprocess                      │
+     │  ├─ setup                           │
+     │  ├─ hpc + human_hpc_check (optional)│
+     │  ├─ analysis                        │
+     │  ├─ planner/programmer (sub-agents) │
+     │  └─ final_report                    │
+     └──────┬──────────────────────────────┘
+         │
+     ┌──────▼────────────┐
+     │ Output Files       │
+     │ └─ working_dir/   │
+     │    ├─ *.gro       │
+     │    ├─ *.top       │
+     │    └─ *.mdp       │
+     └────────────────────┘
 ```
 
 ---
