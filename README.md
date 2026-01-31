@@ -170,13 +170,22 @@ conda activate ~/conda_envs/ollama_env/
 # 3. Verify Ollama server and available models
 curl -s http://127.0.0.1:11434/api/tags
 
-# 4. Run AgenticAI workflow with LLM
+# 4. IMPORTANT: Prevent bytecode cache issues on NFS
+export PYTHONDONTWRITEBYTECODE=1
+
+# 5. Run AgenticAI workflow with LLM
 python run_agenticAIWork.py \
-  --goal "MD simulation for protein.pdb in project directory" \
+  --goal "I want to just preprocess the pdb file working_dir/ATP.pdb" \
   --use-llm \
   --llm-base-url http://127.0.0.1:11434 \
   --llm-model gpt-oss:20b \
-  --working-dir /path/to/project/directory
+  --working-dir working_dir \
+  --no-human-loop
+
+# Alternative: Use a local environment to avoid NFS issues
+# bash quick_setup_local.sh
+# source /tmp/agenticai_local/bin/activate
+# python run_agenticAIWork.py --goal "..." --use-llm --llm-base-url http://127.0.0.1:11434 --no-human-loop
 ```
 
 ## Integration with Your Custom Tools

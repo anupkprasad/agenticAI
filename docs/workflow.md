@@ -1,3 +1,11 @@
+# User high level plan
+supervisor-planner-programmar
+please update the config_supervisor.yaml file. It seems like it has old configuration. the current project workflow is that supervisor is main controller which will take high level prompt from the user the checkthe input validation after then supervisor will create better prompt for the task and pass to planner. Planner will make execuation plan in details then give it back to supervisors. Planner will have access of the tools and if realise new scripts then it can also ask programmer to create scripts to execute plan. Supervisor will assigned the execution plan to subspecific agent.
+
+
+Preprocessor:
+I want it simple to follow, please write its config file in its directory. I want preprocessor to clean pdb (remove water, heavy atoms or any unwanted atoms), add missing residue/atoms, protonation and other steps that make pdb file clean to setup simulation. This agent can use related tool like: "reduce" , pdbfixer, obabel etc  I dont want to create any topology or create parameter files like .mdp these tasks will go to setup agent.
+
 # AgenticAI Workflow - Complete Code Flow Documentation
 
 This document describes the complete execution flow of the AgenticAI system from user entry point to final output.

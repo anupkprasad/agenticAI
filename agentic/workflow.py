@@ -5,7 +5,7 @@ This module implements the complete MD workflow that uses LLM reasoning
 for dynamic routing and agent coordination.
 """
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable
 from langgraph.graph import StateGraph, END
 from .state import MDState
 from .supervisor import MDSupervisor
@@ -15,13 +15,19 @@ from .human_checkpoints import HumanCheckpoints
 from .llm import LLMClient
 from .hpc import MDHPCAgent
 from .analysis import MDAnalysisAgent
+from .planner import MDPlanner
 
 logger = logging.getLogger(__name__)
 
 class MDWorkflow:
     """
     Complete MD workflow with LLM-powered supervisor and agent coordination.
-    Maintains compatibility with existing workflow while adding intelligent features.
+    
+    HIERARCHY:
+    - Supervisor: Orchestrates workflow, routes to agents
+    - Planner: Creates detailed execution plans, coordinates programmer
+    - Programmer: Generates scripts for planner (internal to planner)
+    - Field Agents: Execute supervisor-assigned tasks (preprocess, setup, hpc, analysis)
     """
     
     def __init__(self, llm_client: Optional[LLMClient] = None):
@@ -32,20 +38,23 @@ class MDWorkflow:
         # Initialize supervisor with LLM capabilities
         self.supervisor = MDSupervisor(llm_client=self.llm)
         
-        # Initialize existing agents
+        # Initialize planner (planner will initialize programmer internally)
+        self.planner = MDPlanner(llm_client=self.llm)
+        
+        # Initialize field-specific agents
         self.preprocessor = PreprocessingAgent(self.llm)
         self.setup_agent = SimulationSetupAgent(self.llm)
-        self.checkpoints = HumanCheckpoints()
         self.hpc_agent = MDHPCAgent(self.llm)
         self.analysis_agent = MDAnalysisAgent(self.llm)
+        self.checkpoints = HumanCheckpoints()
         
         # Build the graph
         self.graph = self._build_graph()
         
-        logger.info("MD workflow initialized with LLM-powered supervisor")
-        
+        logger.info("MD workflow initialized with supervisor → planner → programmer hierarchy")
+    
     def _build_graph(self) -> StateGraph:
-        """Build the LangGraph workflow."""
+        """Build the LangGraph workflow with proper agent hierarchy."""
         
         # Create the graph with our state
         workflow = StateGraph(MDState)
@@ -53,6 +62,7 @@ class MDWorkflow:
         # Add all nodes
         workflow.add_node("supervisor", self.supervisor.supervisor_node)
         workflow.add_node("input_validation", self.supervisor.input_validation_node)
+        workflow.add_node("planner", self.planner.planner_node)
         workflow.add_node("preprocess", self.preprocessor.preprocess_node)
         workflow.add_node("setup", self.setup_agent.setup_node)
         workflow.add_node("hpc", self.hpc_agent.hpc_node)
@@ -65,16 +75,16 @@ class MDWorkflow:
         # Set entry point
         workflow.set_entry_point("supervisor")
         
-        # Add conditional routing
+        # ========== SUPERVISOR ROUTING ==========
+        # Supervisor can route to: input_validation, planner, or field agents
         workflow.add_conditional_edges(
             "supervisor",
             self._route_from_supervisor,
             {
                 "input_validation": "input_validation",
+                "planner": "planner",
                 "preprocess": "preprocess", 
                 "setup": "setup",
-                "planner": "supervisor",  # planner is a sub-agent invoked within supervisor
-                "programmer": "supervisor",  # programmer is a sub-agent invoked via planner
                 "hpc": "hpc",
                 "analysis": "analysis",
                 "final_report": "final_report",
@@ -82,162 +92,183 @@ class MDWorkflow:
             }
         )
         
-        # Simple routing for other nodes
+        # ========== INPUT VALIDATION ==========
+        # Always routes back to supervisor
         workflow.add_conditional_edges(
             "input_validation",
-            lambda state: state["next_node"],
+            lambda state: state.get("next_node", "supervisor"),
             {"supervisor": "supervisor"}
         )
         
+        # ========== PLANNER (handles programmer internally) ==========
+        # Planner only routes back to supervisor
+        # Programmer is called internally by planner, never appears in graph
+        workflow.add_conditional_edges(
+            "planner",
+            lambda state: state.get("next_node", "supervisor"),
+            {
+                "supervisor": "supervisor"
+            }
+        )
+        
+        # ========== FIELD AGENTS - PREPROCESSING ==========
         workflow.add_conditional_edges(
             "preprocess",
-            lambda state: state["next_node"],
+            lambda state: state.get("next_node", "supervisor"),
             {
                 "supervisor": "supervisor",
                 "human_preprocess_check": "human_preprocess_check"
             }
         )
         
-        workflow.add_conditional_edges(
-            "setup", 
-            lambda state: state["next_node"],
-            {
-                "supervisor": "supervisor",
-                "human_setup_check": "human_setup_check"
-            }
-        )
-        
+        # Human preprocessing checkpoint
         workflow.add_conditional_edges(
             "human_preprocess_check",
-            lambda state: state["next_node"],
+            lambda state: state.get("next_node", "supervisor"),
             {
                 "supervisor": "supervisor",
-                "preprocess": "preprocess",
-                "human_preprocess_check": "human_preprocess_check"
+                "preprocess": "preprocess"
             }
         )
         
+        # ========== FIELD AGENTS - SETUP ==========
         workflow.add_conditional_edges(
-            "human_setup_check",
-            lambda state: state["next_node"], 
+            "setup", 
+            lambda state: state.get("next_node", "supervisor"),
             {
                 "supervisor": "supervisor",
-                "setup": "setup",
                 "human_setup_check": "human_setup_check"
             }
         )
         
+        # Human setup checkpoint
+        workflow.add_conditional_edges(
+            "human_setup_check",
+            lambda state: state.get("next_node", "supervisor"),
+            {
+                "supervisor": "supervisor",
+                "setup": "setup"
+            }
+        )
+        
+        # ========== FIELD AGENTS - HPC ==========
+        workflow.add_conditional_edges(
+            "hpc",
+            lambda state: state.get("next_node", "supervisor"),
+            {
+                "supervisor": "supervisor",
+                "human_hpc_check": "human_hpc_check"
+            }
+        )
+        
+        # Human HPC checkpoint
+        workflow.add_conditional_edges(
+            "human_hpc_check",
+            lambda state: state.get("next_node", "supervisor"),
+            {
+                "supervisor": "supervisor",
+                "hpc": "hpc"
+            }
+        )
+        
+        # ========== FIELD AGENTS - ANALYSIS ==========
+        workflow.add_conditional_edges(
+            "analysis",
+            lambda state: state.get("next_node", "supervisor"),
+            {
+                "supervisor": "supervisor"
+            }
+        )
+        
+        # ========== FINAL REPORT ==========
         workflow.add_edge("final_report", END)
         
         return workflow.compile()
     
     def _route_from_supervisor(self, state: MDState) -> str:
-        """Route from supervisor based on next_node."""
+        """
+        Route from supervisor based on next_node field.
+        
+        Supervisor decides which field agent to invoke or whether to create plan.
+        """
         next_node = state.get("next_node")
         
-        # Handle special cases
-        if next_node is None:
-            return END
-        else:
+        valid_nodes = [
+            "input_validation", "planner", "preprocess", "setup", 
+            "hpc", "analysis", "final_report"
+        ]
+        
+        if next_node in valid_nodes:
+            logger.info(f"Supervisor routing to: {next_node}")
             return next_node
+        
+        logger.warning(f"Invalid next_node: {next_node}, defaulting to final_report")
+        return "final_report"
     
     def _final_report_node(self, state: MDState) -> MDState:
         """Generate enhanced final workflow report using LLM when available."""
         
-        # Try LLM-powered report generation first
-        if self.llm.available:
-            try:
-                report = self._generate_llm_report(state)
-                state["final_report"] = report
-            except Exception as e:
-                logger.warning(f"LLM report generation failed: {e}, using fallback")
-                report = self._generate_fallback_report(state)
-                state["final_report"] = report
+        if self.llm:
+            report = self._generate_llm_report(state)
         else:
-            # Use fallback report
             report = self._generate_fallback_report(state)
-            state["final_report"] = report
-            
-        state["next_node"] = None  # End workflow
-        state["workflow_complete"] = True
         
-        logger.info("MD Workflow completed")
-        logger.info(report)
+        state["final_report"] = report
+        state["workflow_status"] = "completed"
         
         return state
     
     def _generate_llm_report(self, state: MDState) -> str:
         """Generate comprehensive report using LLM analysis."""
         
-        # Collect workflow summary
         summary = self._generate_workflow_summary(state)
         
         prompt = f"""
-Generate a comprehensive MD simulation workflow report based on the execution summary.
+Generate a comprehensive MD workflow completion report.
 
-WORKFLOW EXECUTION SUMMARY:
+WORKFLOW SUMMARY:
 {summary}
 
-USER ORIGINAL GOAL:
-{summary.get('user_goal', 'Not specified')}
+ERRORS: {len(state.get('errors', []))} total
+{chr(10).join(state.get('errors', [])[:5])}
 
-AGENTS UTILIZED:
-{', '.join(summary.get('agents_used', []))}
+WARNINGS: {len(state.get('warnings', []))} total
 
-ERRORS/WARNINGS:
-- Errors: {summary.get('total_errors', 0)}
-- Warnings: {summary.get('total_warnings', 0)}
-
-FINAL OUTPUTS:
-{summary.get('final_outputs', {})}
-
-Create a professional report that includes:
-1. Executive Summary
-2. Workflow Path Taken
-3. Key Results and Outputs
-4. Issues Encountered and Resolutions
-5. Recommendations for Next Steps
-6. File Locations and Usage Instructions
-
-Make it clear and actionable for the user.
+Create a professional summary including:
+1. Workflow status (success/partial/failed)
+2. Agents executed and results
+3. Files generated
+4. Any issues encountered
+5. Next steps recommendations
 """
         
-        report = self.llm.prompt(prompt, system="You are an expert MD simulation workflow reporter. Create clear, professional reports.")
-        
-        return report
+        try:
+            report = self.llm.prompt(prompt)
+            return report
+        except Exception as e:
+            logger.error(f"Error generating LLM report: {e}")
+            return self._generate_fallback_report(state)
     
     def _generate_fallback_report(self, state: MDState) -> str:
         """Generate standard report when LLM is not available."""
         
-        report = f"""
-        MD Workflow Completion Report
-        ============================
-
-        User Goal: {state.get('user_goal')}
-        Status: {'Completed' if not state.get('errors') else 'Completed with errors'}
-
-        Input Files:
-        - Original PDB: {state.get('raw_pdb')}
-
-        Preprocessing:
-        - Cleaned structure: {state.get('cleaned_pdb')}
-        - Force field: {state.get('force_field')}
-        - Water model: {state.get('water_model')}
-
-        Setup:
-        - Final coordinates: {state.get('coordinates')}
-        - Topology: {state.get('topology')}
-        - MDP files generated: {len(state.get('mdp_files', {}))}
-
-        Errors: {len(state.get('errors', []))}
-        Warnings: {len(state.get('warnings', []))}
-
-        Next Steps:
-        - Review generated files in {state.get('working_directory')}
-        - Submit job to HPC system (not yet implemented)
-        - Run analysis pipeline (not yet implemented)
-        """
+        summary = self._generate_workflow_summary(state)
         
+        report = f"""
+=== MD WORKFLOW COMPLETION REPORT ===
+
+Status: {'✅ SUCCESS' if not state.get('errors') else '❌ FAILED'}
+
+WORKFLOW SUMMARY:
+{summary}
+
+Files Generated: {len(state.get('figures', []))} figures, {len(state.get('mdp_files', {}))} MDP files
+
+Total Errors: {len(state.get('errors', []))}
+Total Warnings: {len(state.get('warnings', []))}
+
+Execution Path: {' → '.join(state.get('execution_path', []))}
+"""
         return report
     
     def _generate_workflow_summary(self, state: MDState) -> Dict[str, Any]:
@@ -254,7 +285,7 @@ Make it clear and actionable for the user.
         }
         
         # Collect agent usage
-        for agent in ["preprocessing", "setup", "hpc", "analysis"]:
+        for agent in ["preprocessing", "setup", "hpc", "analysis", "planner"]:
             if state.get(f"{agent}_completed"):
                 summary["agents_used"].append(agent)
         
@@ -265,14 +296,177 @@ Make it clear and actionable for the user.
         # Collect final outputs
         output_keys = [
             "cleaned_pdb", "topology", "coordinates", 
-            "job_id", "analysis_results", "final_plots"
+            "mdp_files", "figures", "analysis_results"
         ]
-        
         for key in output_keys:
             if state.get(key):
-                summary["final_outputs"][key] = state[key]
+                summary["final_outputs"][key] = str(state[key])[:100]
         
         return summary
+    
+    def _initialize_state(self, user_goal: str, config: Optional[Dict[str, Any]]) -> MDState:
+        """Create initial workflow state with config overrides applied."""
+        state = MDState(
+            user_goal=user_goal,
+            md_engine="gromacs",
+            force_field="amber99sb-ildn",
+            water_model="tip3p",
+            human_in_loop=False,
+            preprocessing_issues=[],
+            setup_issues=[],
+            mdp_files={},
+            analysis_results={},
+            figures=[],
+            errors=[],
+            warnings=[],
+            next_node=None,
+            human_feedback=None,
+            working_directory=None,
+            execution_path=[]
+        )
+
+        if config:
+            state.update(config)
+
+        # Ensure execution_path is always a list we control
+        state["execution_path"] = list(state.get("execution_path", []))
+        return state
+
+    def run(self, user_goal: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Run the MD workflow without human checkpoints.
+        
+        Args:
+            user_goal: Natural language description of what user wants
+            config: Optional configuration overrides
+            
+        Returns:
+            Final state dictionary
+        """
+        initial_state = self._initialize_state(user_goal, config)
+        # Respect explicit config for human loop but default to automatic mode here
+        initial_state["human_in_loop"] = bool(initial_state.get("human_in_loop", False))
+        
+        try:
+            final_state = self.graph.invoke(initial_state)
+            return final_state
+            
+        except Exception as e:
+            logger.error(f"Workflow execution error: {e}")
+            initial_state["errors"].append(f"Workflow error: {str(e)}")
+            return initial_state
+
+    def run_with_human_feedback(
+        self,
+        user_goal: str,
+        feedback_handler: Callable[[Dict[str, Any]], str],
+        config: Optional[Dict[str, Any]] = None,
+        max_steps: int = 200
+    ) -> Dict[str, Any]:
+        """Run workflow with interactive human checkpoints."""
+        if feedback_handler is None:
+            raise ValueError("feedback_handler is required for human-in-the-loop execution")
+
+        state = self._initialize_state(user_goal, config)
+        state["human_in_loop"] = True
+        current_node = "supervisor"
+        steps = 0
+
+        while steps < max_steps:
+            steps += 1
+            state["execution_path"].append(current_node)
+
+            if current_node == "supervisor":
+                state = self.supervisor.supervisor_node(state)
+                current_node = self._route_from_supervisor(state)
+
+            elif current_node == "input_validation":
+                state = self.supervisor.input_validation_node(state)
+                current_node = state.get("next_node", "supervisor")
+
+            elif current_node == "planner":
+                state = self.planner.planner_node(state)
+                current_node = state.get("next_node", "supervisor")
+
+            elif current_node == "preprocess":
+                state = self.preprocessor.preprocess_node(state)
+                current_node = state.get("next_node", "supervisor")
+
+            elif current_node == "setup":
+                state = self.setup_agent.setup_node(state)
+                current_node = state.get("next_node", "supervisor")
+
+            elif current_node == "hpc":
+                state = self.hpc_agent.hpc_node(state)
+                current_node = state.get("next_node", "supervisor")
+
+            elif current_node == "analysis":
+                state = self.analysis_agent.analysis_node(state)
+                current_node = state.get("next_node", "supervisor")
+
+            elif current_node == "human_preprocess_check":
+                feedback = self._collect_human_feedback(state, "preprocess", feedback_handler)
+                if self._should_stop(feedback, state, "preprocessing"):
+                    current_node = "final_report"
+                    continue
+                state["human_feedback"] = feedback
+                state = self.checkpoints.human_preprocess_check(state)
+                current_node = state.get("next_node", "supervisor")
+
+            elif current_node == "human_setup_check":
+                feedback = self._collect_human_feedback(state, "setup", feedback_handler)
+                if self._should_stop(feedback, state, "setup"):
+                    current_node = "final_report"
+                    continue
+                state["human_feedback"] = feedback
+                state = self.checkpoints.human_setup_check(state)
+                current_node = state.get("next_node", "supervisor")
+
+            elif current_node == "human_hpc_check":
+                feedback = self._collect_human_feedback(state, "hpc", feedback_handler)
+                if self._should_stop(feedback, state, "hpc"):
+                    current_node = "final_report"
+                    continue
+                state["human_feedback"] = feedback
+                state = self.checkpoints.human_hpc_check(state)
+                current_node = state.get("next_node", "supervisor")
+
+            elif current_node == "final_report":
+                return self._final_report_node(state)
+
+            else:
+                logger.error(f"Unknown workflow node encountered: {current_node}")
+                state["errors"].append(f"Unknown workflow node: {current_node}")
+                return self._final_report_node(state)
+
+        state["errors"].append("Human-in-the-loop workflow exceeded maximum iterations")
+        return self._final_report_node(state)
+
+    def _collect_human_feedback(
+        self,
+        state: MDState,
+        checkpoint_type: str,
+        feedback_handler: Callable[[Dict[str, Any]], str]
+    ) -> str:
+        """Prompt human for feedback using provided handler."""
+        summary = self.checkpoints.get_checkpoint_summary(state, checkpoint_type)
+        try:
+            response = feedback_handler(summary)
+        except Exception as exc:
+            logger.error(f"Feedback handler failed: {exc}")
+            state["errors"].append(f"Feedback handler error at {checkpoint_type}: {exc}")
+            return "exit"
+        return (response or "").strip()
+
+    def _should_stop(self, feedback: str, state: MDState, checkpoint_label: str) -> bool:
+        """Detect stop keywords from human feedback."""
+        if feedback.lower() in {"exit", "quit", "stop"}:
+            state["errors"].append(
+                f"Workflow stopped by human during {checkpoint_label} checkpoint"
+            )
+            state["next_node"] = "final_report"
+            return True
+        return False
     
     def visualize_workflow(self, output_file: str = "current_workflow.png") -> bool:
         """
@@ -290,158 +484,4 @@ Make it clear and actionable for the user.
             return visualizer.visualize_workflow(output_file, use_actual_graph=True)
         except Exception as e:
             logger.error(f"Failed to visualize workflow: {e}")
-            return False
-    
-    def get_workflow_structure(self) -> Dict[str, Any]:
-        """
-        Get information about the current workflow structure.
-        
-        Returns:
-            Dict with nodes, edges, and other workflow metadata
-        """
-        try:
-            from .utils import WorkflowVisualizer
-            visualizer = WorkflowVisualizer()
-            G = visualizer.extract_actual_workflow_graph()
-            
-            if G:
-                return {
-                    "nodes": list(G.nodes()),
-                    "edges": [(u, v, d.get('label', '')) for u, v, d in G.edges(data=True)],
-                    "node_count": len(G.nodes()),
-                    "edge_count": len(G.edges())
-                }
-        except Exception as e:
-            logger.error(f"Failed to get workflow structure: {e}")
-            
-        return {"error": "Could not extract workflow structure"}
-
-    def run(self, user_goal: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Run the MD workflow.
-        
-        Args:
-            user_goal: Natural language description of what user wants
-            config: Optional configuration overrides
-            
-        Returns:
-            Final state dictionary
-        """
-        # Initialize state
-        initial_state = MDState(
-            user_goal=user_goal,
-            md_engine="gromacs",
-            force_field="amber99sb-ildn", 
-            water_model="tip3p",
-            human_in_loop=True,
-            preprocessing_issues=[],
-            setup_issues=[],
-            mdp_files={},
-            analysis_results={},
-            figures=[],
-            errors=[],
-            warnings=[],
-            next_node=None,
-            human_feedback=None,
-            working_directory=None
-        )
-        
-        # Apply config overrides
-        if config:
-            initial_state.update(config)
-        
-        try:
-            # Run the graph
-            final_state = self.graph.invoke(initial_state)
-            return final_state
-            
-        except Exception as e:
-            logger.error(f"Workflow execution failed: {e}")
-            initial_state["errors"].append(f"Workflow error: {str(e)}")
-            return initial_state
-    
-    def run_with_human_feedback(self, user_goal: str, feedback_handler=None) -> Dict[str, Any]:
-        """
-        Run workflow with interactive human feedback capability.
-        
-        Args:
-            user_goal: Natural language description
-            feedback_handler: Function to get human input when needed
-            
-        Returns:
-            Final state
-        """
-        state = MDState(
-            user_goal=user_goal,
-            md_engine="gromacs", 
-            force_field="amber99sb-ildn",
-            water_model="tip3p",
-            human_in_loop=True,
-            preprocessing_issues=[],
-            setup_issues=[],
-            mdp_files={},
-            analysis_results={},
-            figures=[],
-            errors=[],
-            warnings=[],
-            next_node=None,
-            human_feedback=None,
-            working_directory=None
-        )
-        
-        max_iterations = 50
-        iteration = 0
-        
-        while iteration < max_iterations:
-            try:
-                # Run one step
-                result = self.graph.invoke(state)
-                state.update(result)
-                
-                # Check if we need human input
-                if (state.get("next_node") in ["human_preprocess_check", "human_setup_check", "human_hpc_check"] 
-                    and not state.get("human_feedback")):
-                    
-                    if feedback_handler:
-                        checkpoint_type = state["next_node"].replace("human_", "").replace("_check", "")
-                        summary = self.checkpoints.get_checkpoint_summary(state, checkpoint_type)
-                        
-                        feedback = feedback_handler(summary)
-                        state["human_feedback"] = feedback
-                    else:
-                        # Auto-approve if no handler
-                        state["human_feedback"] = "approved"
-                
-                # Check for completion
-                if state.get("next_node") is None or state.get("final_report"):
-                    break
-                    
-                iteration += 1
-                
-            except Exception as e:
-                logger.error(f"Workflow iteration failed: {e}")
-                state["errors"].append(f"Iteration error: {str(e)}")
-                break
-        
-        return state
-
-    def create_visualization(self, output_file: str = "md_workflow_diagram.png") -> bool:
-        """
-        Create a visual diagram of the current workflow structure.
-        
-        Args:
-            output_file: Output PNG file path
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        try:
-            from .utils import WorkflowVisualizer
-            visualizer = WorkflowVisualizer()
-            return visualizer.visualize_workflow(self.graph, output_file)
-        except ImportError:
-            logger.warning("Visualization dependencies not available. Install with: pip install matplotlib networkx")
-            return False
-        except Exception as e:
-            logger.error(f"Failed to create workflow visualization: {e}")
             return False

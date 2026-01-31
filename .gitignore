@@ -6,3 +6,12 @@ __pycache__/
 *.cache
 results/
 jobs/
+
+# Log files
+*.log
+
+# Backup files
+*_old.py
+
+# Slurm scripts
+*.slurm

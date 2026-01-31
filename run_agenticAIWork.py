@@ -21,33 +21,35 @@ logging.basicConfig(
 
 def simple_feedback_handler(summary: Dict[str, Any]) -> str:
     """Simple command-line feedback handler for human-in-the-loop."""
-    print("\n" + "="*60)
-    print(f"HUMAN CHECKPOINT: {summary['checkpoint_type'].upper()}")
-    print("="*60)
+    print("\n" + "="*60, flush=True)
+    print(f"HUMAN CHECKPOINT: {summary['checkpoint_type'].upper()}", flush=True)
+    print("="*60, flush=True)
     
-    print("\nCurrent State:")
+    print("\nCurrent State:", flush=True)
     for key, value in summary['current_state'].items():
-        print(f"  {key}: {value}")
+        print(f"  {key}: {value}", flush=True)
     
     if summary['issues_found']:
-        print("\nIssues Found:")
+        print("\nIssues Found:", flush=True)
         for issue in summary['issues_found']:
-            print(f"  - {issue}")
+            print(f"  - {issue}", flush=True)
     
-    print("\nRecommendations:")
+    print("\nRecommendations:", flush=True)
     for rec in summary['recommendations']:
-        print(f"  - {rec}")
+        print(f"  - {rec}", flush=True)
     
-    print("\nOptions:")
-    print("  'approved' or 'continue' - proceed to next step")
-    print("  'retry' - redo this step")
-    print("  'modify: <instructions>' - modify approach")
+    print("\nOptions:", flush=True)
+    print("  'approved' or 'continue' - proceed to next step", flush=True)
+    print("  'retry' - redo this step", flush=True)
+    print("  'modify: <instructions>' - modify approach", flush=True)
+    print("  'exit' or 'quit' - stop workflow\n", flush=True)
     
     while True:
-        feedback = input("\nYour decision: ").strip()
+        sys.stdout.flush()  # Force flush before blocking on input
+        feedback = input("Your decision: ").strip()
         if feedback:
             return feedback
-        print("Please provide feedback.")
+        print("Please provide feedback.", flush=True)
 
 # Remove the old log_workflow_state function since we now use conversation_logger
 
@@ -74,13 +76,11 @@ def main(argv=None):
     
     args = parser.parse_args(argv)
     
-    # Set up LLM client
-    llm_client = None
-    if args.use_llm:
-        llm_client = LLMClient(
-            model=args.llm_model,
-            base_url=args.llm_base_url
-        )
+    # Set up LLM client (required, uses fallback/mock mode if no server)
+    llm_client = LLMClient(
+        model=args.llm_model,
+        base_url=args.llm_base_url if args.use_llm else None
+    )
     
     # Initialize workflow
     workflow = MDWorkflow(llm_client)
@@ -105,8 +105,12 @@ def main(argv=None):
     log_user_prompt(args.goal, config)
     
     # Run workflow
-    print(f"Starting MD workflow for: {args.goal}")
-    print(f"Configuration: {config}")
+    print(f"\nStarting MD workflow for: {args.goal}", flush=True)
+    print(f"Configuration: {config}", flush=True)
+    
+    if config["human_in_loop"]:
+        print("\n⚠️  HUMAN-IN-THE-LOOP MODE: You will be prompted at checkpoints", flush=True)
+        print("    Use --no-human-loop for automatic execution\n", flush=True)
     
     try:
         if config["human_in_loop"]:
