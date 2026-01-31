@@ -1,11 +1,11 @@
 """
-Refactored Preprocessing Agent with LLM Tool Calling
-Uses Pydantic schemas for structured tool definitions and execution
+Preprocessing Agent - Orchestrates PDB structure preparation for MD simulations
+Focuses on high-level workflow coordination, delegates tool execution to tools.py
 """
 import logging
-import os
 import json
-from typing import Dict, Any, Optional, List
+import yaml
+from typing import Dict, Any, Optional
 from pathlib import Path
 
 from ..state import MDState
@@ -15,477 +15,70 @@ from ..utils import (
     log_file_operation, log_agent_completion, log_error
 )
 from .schemas import (
-    PDBAnalysisResult, PreprocessingPlan, PreprocessingStep, 
+    PreprocessingPlan, PreprocessingStep, 
     PreprocessingResult, PreprocessingAgentInput, PreprocessingAgentOutput
 )
+from .tools import PreprocessingToolExecutor
 
 logger = logging.getLogger(__name__)
 
 
-class PreprocessingToolExecutor:
-    """
-    Executes preprocessing tools with modular functions from src/preprocess/
-    """
-    
-    def __init__(self, working_dir: str = "working_dir"):
-        self.working_dir = Path(working_dir)
-        self.working_dir.mkdir(parents=True, exist_ok=True)
-        self.logger = logging.getLogger(__name__)
-        
-    def execute_tool(self, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Execute a preprocessing tool.
-        Routes to appropriate tool implementation.
-        """
-        try:
-            if tool_name == "analyze_pdb":
-                return self._analyze_pdb(**params)
-            elif tool_name == "remove_waters":
-                return self._remove_waters(**params)
-            elif tool_name == "handle_alternate_locations":
-                return self._handle_alternate_locations(**params)
-            elif tool_name == "add_hydrogens":
-                return self._add_hydrogens(**params)
-            elif tool_name == "assign_protonation":
-                return self._assign_protonation(**params)
-            elif tool_name == "prepare_for_gromacs":
-                return self._prepare_for_gromacs(**params)
-            elif tool_name == "generate_topology":
-                return self._generate_topology(**params)
-            elif tool_name == "validate_structure":
-                return self._validate_structure(**params)
-            else:
-                return {
-                    "success": False,
-                    "error": f"Unknown tool: {tool_name}"
-                }
-                
-        except Exception as e:
-            self.logger.error(f"Tool execution failed: {tool_name}: {e}")
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def _analyze_pdb(self, pdb_file: str, **kwargs) -> Dict[str, Any]:
-        """Analyze PDB file structure"""
-        if not os.path.exists(pdb_file):
-            return {"success": False, "error": f"PDB file not found: {pdb_file}"}
-        
-        try:
-            analysis = {
-                "file_exists": True,
-                "atom_count": 0,
-                "residue_count": 0,
-                "chain_count": 0,
-                "has_waters": False,
-                "has_heteroatoms": False,
-                "heteroatoms": [],
-                "alternate_locations": False,
-                "missing_hydrogens": True,
-                "chain_ids": []
-            }
-            
-            chains_seen = set()
-            heteroatoms_seen = set()
-            
-            with open(pdb_file, 'r') as f:
-                for line in f:
-                    if line.startswith("ATOM"):
-                        analysis["atom_count"] += 1
-                        if len(line) > 21:
-                            chain = line[21]
-                            if chain != " ":
-                                chains_seen.add(chain)
-                        if len(line) > 16 and line[16] not in [' ', 'A']:
-                            analysis["alternate_locations"] = True
-                    elif line.startswith("HETATM"):
-                        analysis["has_heteroatoms"] = True
-                        if len(line) > 17:
-                            residue = line[17:20].strip()
-                            if residue in ["HOH", "WAT", "TIP3"]:
-                                analysis["has_waters"] = True
-                            else:
-                                heteroatoms_seen.add(residue)
-                    elif line.startswith("SEQRES"):
-                        # Count residues from SEQRES records
-                        if len(line) > 19:
-                            rescount = (len(line) - 19) // 4
-                            analysis["residue_count"] = max(analysis["residue_count"], rescount)
-            
-            analysis["chain_count"] = len(chains_seen)
-            analysis["chain_ids"] = sorted(list(chains_seen))
-            analysis["heteroatoms"] = sorted(list(heteroatoms_seen))
-            
-            return {
-                "success": True,
-                "analysis": analysis
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"PDB analysis failed: {e}"
-            }
-    
-    def _remove_waters(self, pdb_file: str, output_file: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-        """Remove water molecules from PDB file"""
-        if not output_file:
-            output_file = str(self.working_dir / "no_waters.pdb")
-        
-        try:
-            removed_count = 0
-            with open(pdb_file, 'r') as f_in:
-                with open(output_file, 'w') as f_out:
-                    for line in f_in:
-                        # Skip water records (HOH, WAT, TIP3, etc.)
-                        if line.startswith("HETATM"):
-                            if len(line) > 17:
-                                residue = line[17:20].strip()
-                                if residue not in ["HOH", "WAT", "TIP3", "SPC", "SPE"]:
-                                    f_out.write(line)
-                                else:
-                                    removed_count += 1
-                        else:
-                            f_out.write(line)
-            
-            return {
-                "success": True,
-                "output_file": output_file,
-                "removed_count": removed_count,
-                "message": f"Removed {removed_count} water molecules"
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Water removal failed: {e}"
-            }
-    
-    def _handle_alternate_locations(self, pdb_file: str, output_file: Optional[str] = None, 
-                                   keep_occupancy: str = "highest", **kwargs) -> Dict[str, Any]:
-        """
-        Handle alternate locations (conformations) in PDB file.
-        keep_occupancy: 'highest' or 'first'
-        """
-        if not output_file:
-            output_file = str(self.working_dir / "no_altloc.pdb")
-        
-        try:
-            atoms_with_altloc = {}
-            processed_count = 0
-            skipped_count = 0
-            
-            with open(pdb_file, 'r') as f_in:
-                lines = f_in.readlines()
-            
-            with open(output_file, 'w') as f_out:
-                for line in lines:
-                    if line.startswith(("ATOM", "HETATM")):
-                        if len(line) > 16:
-                            altloc = line[16]
-                            
-                            if altloc == " ":
-                                # No alternate location
-                                f_out.write(line)
-                                processed_count += 1
-                            else:
-                                # Has alternate location
-                                atom_key = (line[0:6].strip(), line[6:11].strip(), 
-                                           line[21:22].strip(), line[22:27].strip())
-                                
-                                if atom_key not in atoms_with_altloc:
-                                    atoms_with_altloc[atom_key] = []
-                                atoms_with_altloc[atom_key].append((altloc, float(line[54:60].strip() if len(line) > 60 else 0), line))
-                                skipped_count += 1
-                    else:
-                        f_out.write(line)
-            
-            # Add best alternate locations
-            for atom_key, conformations in atoms_with_altloc.items():
-                if keep_occupancy == "highest":
-                    best = max(conformations, key=lambda x: x[1])
-                else:
-                    best = conformations[0]
-                
-                # Clear altloc flag
-                line = best[2]
-                modified_line = line[:16] + " " + line[17:]
-                
-                with open(output_file, 'a') as f_out:
-                    f_out.write(modified_line)
-                processed_count += 1
-            
-            return {
-                "success": True,
-                "output_file": output_file,
-                "atoms_kept": processed_count,
-                "alternate_locations_resolved": skipped_count,
-                "message": f"Resolved {skipped_count} alternate locations, kept {processed_count} atoms"
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Alternate location handling failed: {e}"
-            }
-    
-    def _add_hydrogens(self, pdb_file: str, output_file: Optional[str] = None, 
-                       method: str = "reduce", **kwargs) -> Dict[str, Any]:
-        """
-        Add missing hydrogen atoms to PDB file.
-        method: 'reduce', 'obabel', or 'gmx'
-        """
-        if not output_file:
-            output_file = str(self.working_dir / "with_hydrogens.pdb")
-        
-        try:
-            import subprocess
-            
-            if method == "reduce":
-                # Use reduce tool if available
-                cmd = ["reduce", "-build", str(pdb_file)]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-                
-                if result.returncode == 0:
-                    with open(output_file, 'w') as f:
-                        f.write(result.stdout)
-                    return {
-                        "success": True,
-                        "output_file": output_file,
-                        "method": "reduce",
-                        "message": "Hydrogens added using reduce"
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error": f"Reduce failed: {result.stderr}"
-                    }
-            
-            elif method == "obabel":
-                # Use Open Babel if available
-                cmd = ["obabel", str(pdb_file), "-O", str(output_file), "-xh"]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-                
-                if result.returncode == 0:
-                    return {
-                        "success": True,
-                        "output_file": output_file,
-                        "method": "obabel",
-                        "message": "Hydrogens added using Open Babel"
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error": f"Open Babel failed: {result.stderr}"
-                    }
-            
-            else:
-                # Default: copy file with note about hydrogens
-                import shutil
-                shutil.copy(pdb_file, output_file)
-                return {
-                    "success": True,
-                    "output_file": output_file,
-                    "method": "none",
-                    "warning": "Hydrogens not added - specify method or install reduce/obabel",
-                    "message": "PDB file copied (hydrogens not added)"
-                }
-                
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Hydrogen addition failed: {e}"
-            }
-    
-    def _assign_protonation(self, pdb_file: str, output_file: Optional[str] = None, 
-                           ph: float = 7.0, **kwargs) -> Dict[str, Any]:
-        """Assign protonation states based on pH"""
-        if not output_file:
-            output_file = str(self.working_dir / "protonated.pdb")
-        
-        try:
-            # For now, copy file as-is
-            # In real implementation, use pdb2pqr or similar
-            import shutil
-            shutil.copy(pdb_file, output_file)
-            
-            return {
-                "success": True,
-                "output_file": output_file,
-                "ph": ph,
-                "message": f"Protonation states assigned for pH {ph}"
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Protonation assignment failed: {e}"
-            }
-    
-    def _prepare_for_gromacs(self, pdb_file: str, force_field: str = "amber99sb-ildn",
-                            output_file: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-        """Prepare PDB for GROMACS using pdb2gmx"""
-        if not output_file:
-            output_file = str(self.working_dir / "processed.gro")
-        
-        try:
-            import subprocess
-            
-            working_dir = self.working_dir
-            topology_file = str(working_dir / "topol.top")
-            
-            # Run gmx pdb2gmx
-            cmd = [
-                "gmx", "pdb2gmx",
-                "-f", str(pdb_file),
-                "-o", str(output_file),
-                "-p", str(topology_file),
-                "-ff", force_field,
-                "-water", "tip3p",
-                "-ignh"  # Ignore hydrogen in input
-            ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=str(working_dir))
-            
-            if result.returncode == 0:
-                return {
-                    "success": True,
-                    "output_file": output_file,
-                    "topology_file": topology_file,
-                    "force_field": force_field,
-                    "message": "PDB prepared for GROMACS using pdb2gmx"
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": f"GROMACS pdb2gmx failed: {result.stderr}",
-                    "stdout": result.stdout
-                }
-                
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"GROMACS preparation failed: {e}"
-            }
-    
-    def _generate_topology(self, pdb_file: str, force_field: str = "amber99sb-ildn",
-                          output_file: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-        """Generate GROMACS topology file"""
-        if not output_file:
-            output_file = str(self.working_dir / "topol.top")
-        
-        try:
-            # Create basic topology file
-            with open(output_file, 'w') as f:
-                f.write(f"; Topology generated for {pdb_file}\n")
-                f.write(f"; Force field: {force_field}\n")
-                f.write("; Generated by PreprocessingAgent\n\n")
-                f.write('#include "ffnonbonded.itp"\n')
-                f.write('#include "ffbonded.itp"\n\n')
-                f.write('[ moleculetype ]\n')
-                f.write('; Name      nrexcl\n')
-                f.write('System         3\n\n')
-                f.write('[ atoms ]\n')
-                f.write('; Basic atom section - would be populated by gmx pdb2gmx\n\n')
-                f.write('[ system ]\n')
-                f.write('System in water\n\n')
-                f.write('[ molecules ]\n')
-                f.write('; Compound      #mols\n')
-                f.write('System         1\n')
-            
-            return {
-                "success": True,
-                "output_file": output_file,
-                "force_field": force_field,
-                "message": "Topology file generated"
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Topology generation failed: {e}"
-            }
-    
-    def _validate_structure(self, pdb_file: str, **kwargs) -> Dict[str, Any]:
-        """Validate PDB file structure"""
-        try:
-            issues = []
-            warnings = []
-            
-            if not os.path.exists(pdb_file):
-                return {
-                    "success": False,
-                    "error": f"File not found: {pdb_file}"
-                }
-            
-            line_count = 0
-            atom_count = 0
-            hetatm_count = 0
-            
-            with open(pdb_file, 'r') as f:
-                for line in f:
-                    line_count += 1
-                    if line.startswith("ATOM"):
-                        atom_count += 1
-                    elif line.startswith("HETATM"):
-                        hetatm_count += 1
-            
-            if atom_count == 0:
-                issues.append("No ATOM records found in PDB file")
-            
-            if hetatm_count > 100:
-                warnings.append(f"Large number of heteroatoms ({hetatm_count}) detected")
-            
-            return {
-                "success": len(issues) == 0,
-                "total_lines": line_count,
-                "atoms": atom_count,
-                "heteroatoms": hetatm_count,
-                "issues": issues,
-                "warnings": warnings,
-                "message": f"Validation complete: {atom_count} atoms, {hetatm_count} heteroatoms"
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Validation failed: {e}"
-            }
-
-
 class PreprocessingAgent:
     """
-    LLM-powered preprocessing agent with tool calling.
-    Takes PDB file and generates preprocessing plan, then executes it.
+    LLM-powered preprocessing agent - orchestrates PDB preparation workflow
+    Delegates tool execution to PreprocessingToolExecutor from tools.py
     """
     
-    def __init__(self, llm_client: Optional[LLMClient] = None):
+    def __init__(self, llm_client: Optional[LLMClient] = None, config_path: Optional[str] = None):
+        """
+        Initialize preprocessing agent
+        
+        Args:
+            llm_client: LLM client for intelligent planning
+            config_path: Path to config.yaml (defaults to same directory)
+        """
         if llm_client is None:
-            self.llm = LLMClient("gpt-oss:20b")  # Default model
+            self.llm = LLMClient("gpt-oss:20b")
         else:
             self.llm = llm_client
+        
         self.tool_executor = None
+        self.config = self._load_config(config_path)
+        
+    def _load_config(self, config_path: Optional[str] = None) -> Dict[str, Any]:
+        """Load preprocessing configuration from YAML"""
+        if config_path is None:
+            config_path = Path(__file__).parent / "config.yaml"
+        
+        try:
+            with open(config_path, 'r') as f:
+                return yaml.safe_load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load config from {config_path}: {e}")
+            return {}
     
     def preprocess_node(self, state: MDState) -> MDState:
-        """Main preprocessing node - entry point from workflow"""
+        """
+        Main preprocessing node - entry point from workflow
+        Orchestrates the entire preprocessing pipeline
+        """
         log_agent_start("preprocessing", "PDB Preprocessing with LLM Tool Calling", state)
         
         try:
-            # Initialize tool executor
+            # Initialize tool executor with config
             working_dir = state.get("working_directory", "working_dir")
-            self.tool_executor = PreprocessingToolExecutor(working_dir)
+            self.tool_executor = PreprocessingToolExecutor(working_dir, self.config)
             
-            # Prepare agent input
+            # Prepare agent input from state
             agent_input = self._prepare_agent_input(state)
             
-            # Run LLM-guided preprocessing
-            agent_output = self._run_llm_preprocessing_agent(agent_input, state)
+            # Run LLM-guided preprocessing workflow
+            agent_output = self._run_preprocessing_workflow(agent_input, state)
             
             # Update state with results
             self._update_state(state, agent_output)
             
-            # Determine next node
+            # Determine next workflow node
             if agent_output.success:
                 if state.get("human_in_loop") and agent_output.result.issues:
                     state["next_node"] = "human_preprocess_check"
@@ -507,37 +100,41 @@ class PreprocessingAgent:
         return state
     
     def _prepare_agent_input(self, state: MDState) -> PreprocessingAgentInput:
-        """Prepare input for preprocessing agent"""
+        """Prepare structured input for preprocessing from workflow state"""
+        defaults = self.config.get("defaults", {})
+        
         return PreprocessingAgentInput(
             pdb_path=state.get("raw_pdb", ""),
             working_directory=state.get("working_directory", "working_dir"),
-            force_field=state.get("force_field", "amber99sb-ildn"),
-            water_model=state.get("water_model", "tip3p"),
-            remove_waters=state.get("remove_waters", True),
-            add_hydrogens=state.get("add_hydrogens", True),
+            force_field=state.get("force_field", defaults.get("force_field", "amber99sb-ildn")),
+            water_model=state.get("water_model", defaults.get("water_model", "tip3p")),
+            remove_waters=state.get("remove_waters", defaults.get("remove_waters", True)),
+            add_hydrogens=state.get("add_hydrogens", defaults.get("add_hydrogens", True)),
             user_goal=state.get("user_goal", ""),
             additional_instructions=state.get("preprocessing_instructions", None)
         )
     
-    def _run_llm_preprocessing_agent(self, agent_input: PreprocessingAgentInput, 
+    def _run_preprocessing_workflow(self, agent_input: PreprocessingAgentInput, 
                                     state: MDState) -> PreprocessingAgentOutput:
         """
-        Run LLM-guided preprocessing with tool calling.
-        LLM makes a plan, then we execute it step by step.
+        Run complete preprocessing workflow:
+        1. LLM creates intelligent plan based on PDB analysis
+        2. Execute plan step-by-step using tools
+        3. Return structured results
         """
         try:
-            # Step 1: LLM analyzes PDB and makes a plan
-            plan = self._llm_make_plan(agent_input)
+            # Step 1: LLM analyzes PDB and creates plan
+            plan = self._create_preprocessing_plan(agent_input)
             
             log_agent_action("preprocessing", "Generated preprocessing plan", {
                 "steps": len(plan.steps),
                 "reasoning": plan.reasoning[:200]
             })
             
-            # Step 2: Execute each step in the plan
+            # Step 2: Execute plan using tool executor
             result = self._execute_plan(agent_input, plan, state)
             
-            # Step 3: Create output
+            # Step 3: Prepare supervisor update
             supervisor_update = {
                 "cleaned_pdb": result.cleaned_pdb,
                 "topology": result.topology,
@@ -553,7 +150,7 @@ class PreprocessingAgent:
             )
             
         except Exception as e:
-            logger.error(f"LLM preprocessing agent failed: {e}")
+            logger.error(f"Preprocessing workflow failed: {e}")
             return PreprocessingAgentOutput(
                 success=False,
                 plan=PreprocessingPlan(
@@ -570,10 +167,12 @@ class PreprocessingAgent:
                 supervisor_update={}
             )
     
-    def _llm_make_plan(self, agent_input: PreprocessingAgentInput) -> PreprocessingPlan:
-        """Use LLM to analyze PDB and create preprocessing plan"""
-        
-        # First, analyze the PDB
+    def _create_preprocessing_plan(self, agent_input: PreprocessingAgentInput) -> PreprocessingPlan:
+        """
+        Use LLM to analyze PDB and create intelligent preprocessing plan
+        Falls back to template-based plan if LLM fails
+        """
+        # First, analyze the PDB structure
         analysis_result = self.tool_executor.execute_tool(
             "analyze_pdb",
             {"pdb_file": agent_input.pdb_path}
@@ -581,61 +180,8 @@ class PreprocessingAgent:
         
         analysis = analysis_result.get("analysis", {}) if analysis_result.get("success") else {}
         
-        prompt = f"""
-You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed, step-by-step preprocessing plan.
-
-**PDB Information:**
-- File: {agent_input.pdb_path}
-- User Goal: {agent_input.user_goal}
-- Force Field: {agent_input.force_field}
-- Water Model: {agent_input.water_model}
-
-**Structure Analysis:**
-- Atoms: {analysis.get('atom_count', 'unknown')}
-- Chains: {analysis.get('chain_ids', [])}
-- Has Waters: {analysis.get('has_waters', False)}
-- Has Heteroatoms: {analysis.get('has_heteroatoms', False)}
-- Heteroatoms: {analysis.get('heteroatoms', [])}
-- Alternate Locations: {analysis.get('alternate_locations', False)}
-
-**Available Tools:**
-- analyze_pdb: Analyze PDB structure
-- remove_waters: Remove water molecules
-- handle_alternate_locations: Resolve alternate conformations
-- add_hydrogens: Add missing hydrogens
-- assign_protonation: Set protonation states
-- prepare_for_gromacs: Run pdb2gmx
-- generate_topology: Create topology file
-- validate_structure: Check structure integrity
-
-**Your Task:**
-Create a detailed preprocessing plan with specific steps. For each step, provide:
-1. Tool name to call
-2. Parameters for the tool
-3. Reason why this step is needed
-
-Output as JSON with this structure:
-{{
-  "reasoning": "Detailed analysis and strategy",
-  "overview": "High-level summary",
-  "steps": [
-    {{
-      "name": "step name",
-      "description": "what it does",
-      "tool_name": "tool to call",
-      "tool_params": {{"param": "value"}},
-      "reason": "why it's needed"
-    }}
-  ],
-  "potential_issues": ["issue1", "issue2"],
-  "recommendations": ["rec1", "rec2"]
-}}
-
-Focus on:
-- Handling the current PDB structure
-- Preparing for GROMACS simulation
-- Managing any special features (waters, heteroatoms, etc.)
-"""
+        # Build LLM prompt from config template
+        prompt = self._build_planning_prompt(agent_input, analysis)
         
         try:
             response = self.llm.invoke([prompt])
@@ -644,7 +190,7 @@ Focus on:
             log_llm_interaction("preprocessing.planning", prompt, content,
                               is_mock=hasattr(self.llm, '_is_mock_mode') and self.llm._is_mock_mode)
             
-            # Try to parse JSON from response
+            # Parse LLM response into structured plan
             plan_dict = self._extract_plan_json(content)
             
             return PreprocessingPlan(
@@ -666,10 +212,55 @@ Focus on:
             
         except Exception as e:
             logger.warning(f"LLM planning failed, using fallback: {e}")
-            return self._fallback_preprocessing_plan(agent_input, analysis)
+            return self._create_fallback_plan(agent_input, analysis)
+    
+    def _build_planning_prompt(self, agent_input: PreprocessingAgentInput, 
+                               analysis: Dict[str, Any]) -> str:
+        """Build LLM planning prompt from config template"""
+        config_prompt = self.config.get("llm", {}).get("planning_prompt_template", "")
+        
+        # Get available tools list from config
+        tools_config = self.config.get("tools", {})
+        tools_list = "\n".join([
+            f"- {name}: {info.get('description', '')}"
+            for name, info in tools_config.items()
+        ])
+        
+        # Format analysis for prompt
+        analysis_str = "\n".join([
+            f"- Atoms: {analysis.get('atom_count', 'unknown')}",
+            f"- Chains: {analysis.get('chain_ids', [])}",
+            f"- Has Waters: {analysis.get('has_waters', False)}",
+            f"- Heteroatoms: {analysis.get('heteroatoms', [])}",
+            f"- Alternate Locations: {analysis.get('alternate_locations', False)}"
+        ])
+        
+        # Use template or build basic prompt
+        if config_prompt:
+            return config_prompt.format(
+                pdb_path=agent_input.pdb_path,
+                user_goal=agent_input.user_goal,
+                force_field=agent_input.force_field,
+                water_model=agent_input.water_model,
+                analysis=analysis_str,
+                tools_list=tools_list
+            )
+        else:
+            # Fallback prompt
+            return f"""
+You are a molecular dynamics preprocessing expert. Create a preprocessing plan for:
+
+PDB: {agent_input.pdb_path}
+Goal: {agent_input.user_goal}
+Analysis: {analysis_str}
+
+Available tools: {tools_list}
+
+Return JSON with: reasoning, overview, steps (name, description, tool_name, tool_params, reason)
+"""
     
     def _extract_plan_json(self, content: str) -> Dict[str, Any]:
-        """Extract JSON plan from LLM response"""
+        """Extract and parse JSON plan from LLM response"""
         import re
         
         # Try to find JSON block in response
@@ -680,81 +271,77 @@ Focus on:
             except json.JSONDecodeError:
                 pass
         
-        # Fallback: return basic structure
+        # Fallback: return minimal structure
         return {
             "reasoning": content,
             "overview": "Preprocessing plan",
             "steps": []
         }
     
-    def _fallback_preprocessing_plan(self, agent_input: PreprocessingAgentInput, 
-                                    analysis: Dict[str, Any]) -> PreprocessingPlan:
-        """Create a fallback plan if LLM fails"""
+    def _create_fallback_plan(self, agent_input: PreprocessingAgentInput, 
+                             analysis: Dict[str, Any]) -> PreprocessingPlan:
+        """
+        Create template-based fallback plan when LLM fails
+        Uses workflows from config.yaml
+        """
         steps = []
+        workflows = self.config.get("workflows", {})
         
-        # Step 1: Remove waters if requested
-        if agent_input.remove_waters and analysis.get("has_waters"):
-            steps.append(PreprocessingStep(
-                name="remove_waters",
-                description="Remove water molecules from PDB",
-                tool_name="remove_waters",
-                tool_params={"pdb_file": agent_input.pdb_path},
-                reason="Water molecules should be removed for GROMACS topology generation"
-            ))
+        # Use "full" workflow as default
+        default_workflow = workflows.get("full", {}).get("steps", [
+            "analyze_pdb", "remove_waters", "handle_alternate_locations", 
+            "add_hydrogens", "prepare_for_gromacs", "validate_structure"
+        ])
         
-        # Step 2: Handle alternate locations
-        if analysis.get("alternate_locations"):
-            steps.append(PreprocessingStep(
-                name="handle_alternates",
-                description="Resolve alternate conformations",
-                tool_name="handle_alternate_locations",
-                tool_params={"pdb_file": agent_input.pdb_path},
-                reason="Alternate locations must be resolved for clean structure"
-            ))
-        
-        # Step 3: Add hydrogens if needed
-        if agent_input.add_hydrogens:
-            steps.append(PreprocessingStep(
-                name="add_hydrogens",
-                description="Add missing hydrogen atoms",
-                tool_name="add_hydrogens",
-                tool_params={"pdb_file": agent_input.pdb_path, "method": "reduce"},
-                reason="MD simulations require all hydrogen atoms"
-            ))
-        
-        # Step 4: Prepare for GROMACS
-        steps.append(PreprocessingStep(
-            name="prepare_gromacs",
-            description="Prepare structure for GROMACS using pdb2gmx",
-            tool_name="prepare_for_gromacs",
-            tool_params={
-                "pdb_file": agent_input.pdb_path,
-                "force_field": agent_input.force_field
-            },
-            reason="pdb2gmx generates correct topology and parameters"
-        ))
-        
-        # Step 5: Validate
-        steps.append(PreprocessingStep(
-            name="validate",
-            description="Validate final structure",
-            tool_name="validate_structure",
-            tool_params={"pdb_file": agent_input.pdb_path},
-            reason="Ensure structure is ready for simulation"
-        ))
+        # Build steps based on workflow and analysis
+        for tool_name in default_workflow:
+            step = self._create_step_from_tool(tool_name, agent_input, analysis)
+            if step:
+                steps.append(step)
         
         return PreprocessingPlan(
-            reasoning="Using default preprocessing workflow",
-            overview="Standard PDB preprocessing for GROMACS",
+            reasoning="Using standard preprocessing workflow (LLM fallback)",
+            overview="Standard PDB preprocessing for GROMACS MD simulation",
             steps=steps,
             potential_issues=[],
-            recommendations=[]
+            recommendations=["Review generated topology file before simulation"]
+        )
+    
+    def _create_step_from_tool(self, tool_name: str, agent_input: PreprocessingAgentInput,
+                               analysis: Dict[str, Any]) -> Optional[PreprocessingStep]:
+        """Create preprocessing step from tool name and analysis"""
+        tools_config = self.config.get("tools", {})
+        tool_info = tools_config.get(tool_name, {})
+        
+        # Skip if conditions not met
+        if tool_name == "remove_waters" and not analysis.get("has_waters"):
+            return None
+        if tool_name == "handle_alternate_locations" and not analysis.get("alternate_locations"):
+            return None
+        
+        # Build tool params
+        tool_params = {"pdb_file": agent_input.pdb_path}
+        
+        if tool_name == "add_hydrogens":
+            defaults = self.config.get("defaults", {})
+            tool_params["method"] = defaults.get("hydrogen_method", "reduce")
+        elif tool_name == "prepare_for_gromacs":
+            tool_params["force_field"] = agent_input.force_field
+        
+        return PreprocessingStep(
+            name=tool_name.replace("_", " ").title(),
+            description=tool_info.get("description", f"Execute {tool_name}"),
+            tool_name=tool_name,
+            tool_params=tool_params,
+            reason=f"Required for {tool_info.get('description', 'preprocessing')}"
         )
     
     def _execute_plan(self, agent_input: PreprocessingAgentInput, plan: PreprocessingPlan,
                      state: MDState) -> PreprocessingResult:
-        """Execute the preprocessing plan step by step"""
-        
+        """
+        Execute preprocessing plan step-by-step using tool executor
+        Tracks file outputs and chains them between steps
+        """
         execution_log = []
         issues = []
         warnings = []
@@ -776,17 +363,28 @@ Focus on:
                 execution_log.append(f"Tool: {step.tool_name}")
                 execution_log.append(f"Reason: {step.reason}")
                 
-                # Update input file for chained steps
-                if step.tool_params.get("pdb_file") == agent_input.pdb_path and current_pdb != agent_input.pdb_path:
-                    step.tool_params["pdb_file"] = current_pdb
+                # Prepare tool parameters
+                tool_params = dict(step.tool_params) if step.tool_params else {}
                 
-                # Execute tool
-                result = self.tool_executor.execute_tool(step.tool_name, step.tool_params)
+                # Auto-inject pdb_file for tools that need it
+                if "pdb_file" not in tool_params and step.tool_name in [
+                    "remove_waters", "handle_alternate_locations", "add_hydrogens",
+                    "assign_protonation", "prepare_for_gromacs", "validate_structure"
+                ]:
+                    tool_params["pdb_file"] = current_pdb
                 
+                # Update chained input file
+                if tool_params.get("pdb_file") == agent_input.pdb_path and current_pdb != agent_input.pdb_path:
+                    tool_params["pdb_file"] = current_pdb
+                
+                # Execute tool via tool executor
+                result = self.tool_executor.execute_tool(step.tool_name, tool_params)
+                
+                # Process results
                 if result.get("success"):
                     execution_log.append(f"✓ Success: {result.get('message', 'Step completed')}")
                     
-                    # Track output files
+                    # Track output files for chaining
                     if "output_file" in result:
                         current_pdb = result["output_file"]
                         generated_files[result["output_file"]] = step.description
@@ -797,12 +395,11 @@ Focus on:
                     
                     if result.get("warning"):
                         warnings.append(f"{step.name}: {result['warning']}")
-                    
                 else:
                     execution_log.append(f"✗ Failed: {result.get('error', 'Unknown error')}")
                     issues.append(f"{step.name}: {result.get('error', 'Failed to execute')}")
             
-            # Check if we have required output files
+            # Verify required outputs
             if not topology_file:
                 issues.append("No topology file generated - GROMACS preparation may have failed")
             

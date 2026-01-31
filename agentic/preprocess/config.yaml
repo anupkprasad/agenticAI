@@ -1,0 +1,228 @@
+# Preprocessing Agent Configuration
+
+# Default preprocessing settings
+defaults:
+  force_field: "amber99sb-ildn"
+  water_model: "tip3p"
+  remove_waters: true
+  add_hydrogens: true
+  ph: 7.0
+  keep_occupancy: "highest"  # For alternate locations
+  hydrogen_method: "reduce"  # Options: reduce, obabel, gmx
+
+# Tool definitions and descriptions
+tools:
+  analyze_pdb:
+    description: "Analyze PDB file structure and detect issues"
+    input_params:
+      - pdb_file
+    output:
+      - analysis
+    capabilities:
+      - "Count atoms, residues, chains"
+      - "Detect water molecules"
+      - "Identify heteroatoms"
+      - "Check for alternate locations"
+      - "Detect missing hydrogens"
+
+  remove_waters:
+    description: "Remove water molecules from PDB file"
+    input_params:
+      - pdb_file
+      - output_file (optional)
+    output:
+      - output_file
+      - removed_count
+    water_residues:
+      - HOH
+      - WAT
+      - TIP3
+      - SPC
+      - SPE
+
+  handle_alternate_locations:
+    description: "Resolve alternate conformations in PDB"
+    input_params:
+      - pdb_file
+      - output_file (optional)
+      - keep_occupancy (optional)
+    output:
+      - output_file
+      - atoms_kept
+      - alternate_locations_resolved
+    strategies:
+      - highest: "Keep conformation with highest occupancy"
+      - first: "Keep first conformation encountered"
+
+  add_hydrogens:
+    description: "Add missing hydrogen atoms to structure"
+    input_params:
+      - pdb_file
+      - output_file (optional)
+      - method (optional)
+    output:
+      - output_file
+      - method
+    methods:
+      reduce:
+        command: ["reduce", "-build"]
+        description: "Industry standard hydrogen addition"
+      obabel:
+        command: ["obabel", "-xh"]
+        description: "Open Babel hydrogen addition"
+      gmx:
+        command: ["gmx", "pdb2gmx", "-ignh"]
+        description: "GROMACS hydrogen addition"
+
+  assign_protonation:
+    description: "Assign protonation states based on pH"
+    input_params:
+      - pdb_file
+      - output_file (optional)
+      - ph (optional)
+    output:
+      - output_file
+      - ph
+    default_ph: 7.0
+    tools:
+      - pdb2pqr
+      - propka
+
+  prepare_for_gromacs:
+    description: "Prepare PDB for GROMACS using pdb2gmx"
+    input_params:
+      - pdb_file
+      - force_field (optional)
+      - output_file (optional)
+    output:
+      - output_file
+      - topology_file
+      - force_field
+    gromacs_command:
+      - gmx
+      - pdb2gmx
+    default_flags:
+      - "-ignh"  # Ignore hydrogens in input
+
+  generate_topology:
+    description: "Generate GROMACS topology file"
+    input_params:
+      - pdb_file
+      - force_field (optional)
+      - output_file (optional)
+    output:
+      - output_file
+      - force_field
+
+  validate_structure:
+    description: "Validate PDB file structure and report issues"
+    input_params:
+      - pdb_file
+    output:
+      - total_lines
+      - atoms
+      - heteroatoms
+      - issues
+      - warnings
+    checks:
+      - "File exists"
+      - "ATOM records present"
+      - "Heteroatom count reasonable"
+      - "Structure integrity"
+
+# Standard preprocessing workflows
+workflows:
+  basic:
+    description: "Basic PDB cleaning"
+    steps:
+      - remove_waters
+      - add_hydrogens
+      - validate_structure
+
+  full:
+    description: "Complete preprocessing for MD"
+    steps:
+      - analyze_pdb
+      - remove_waters
+      - handle_alternate_locations
+      - add_hydrogens
+      - prepare_for_gromacs
+      - validate_structure
+
+  minimal:
+    description: "Minimal processing for clean PDB"
+    steps:
+      - analyze_pdb
+      - validate_structure
+
+# Force fields supported
+force_fields:
+  - name: "amber99sb-ildn"
+    description: "AMBER99SB with improved side-chain torsions"
+    recommended: true
+  - name: "charmm27"
+    description: "CHARMM27 all-atom force field"
+  - name: "gromos96"
+    description: "GROMOS96 united-atom force field"
+  - name: "oplsaa"
+    description: "OPLS all-atom force field"
+
+# Water models
+water_models:
+  - name: "tip3p"
+    description: "TIP3P 3-site water model"
+    recommended: true
+  - name: "tip4p"
+    description: "TIP4P 4-site water model"
+  - name: "spc"
+    description: "SPC 3-site water model"
+  - name: "spce"
+    description: "SPC/E 3-site water model"
+
+# Output file naming conventions
+output_files:
+  cleaned_pdb: "{basename}_cleaned.pdb"
+  no_waters: "{basename}_nowat.pdb"
+  no_altloc: "{basename}_noalt.pdb"
+  with_hydrogens: "{basename}_h.pdb"
+  protonated: "{basename}_prot.pdb"
+  gro_coords: "processed.gro"
+  topology: "topol.top"
+
+# LLM prompting configuration
+llm:
+  planning_prompt_template: |
+    You are a molecular dynamics preprocessing expert. Analyze this PDB structure and create a detailed, step-by-step preprocessing plan.
+    
+    **PDB Information:**
+    - File: {pdb_path}
+    - User Goal: {user_goal}
+    - Force Field: {force_field}
+    - Water Model: {water_model}
+    
+    **Structure Analysis:**
+    {analysis}
+    
+    **Available Tools:**
+    {tools_list}
+    
+    Output as JSON with this structure:
+    {{
+      "reasoning": "Detailed analysis and strategy",
+      "overview": "High-level summary",
+      "steps": [
+        {{
+          "name": "step name",
+          "description": "what it does",
+          "tool_name": "tool to call",
+          "tool_params": {{"param": "value"}},
+          "reason": "why it's needed"
+        }}
+      ],
+      "potential_issues": ["issue1"],
+      "recommendations": ["rec1"]
+    }}
+
+  fallback_enabled: true
+  max_retries: 2
+  timeout_seconds: 60
