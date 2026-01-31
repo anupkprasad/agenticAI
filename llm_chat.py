@@ -1,31 +1,35 @@
 #!/usr/bin/env python3
 """
 Interactive Chat with Ollama LLM
-Make sure you are on the **same node** where Ollama server is running
-Usage: python ollama_llm_chat.py
+Supports both local and remote Ollama servers
+Usage: python llm_chat.py [--remote NODE_NAME]
 """
 
 import requests
 import json
 import sys
 from typing import Optional
+import llm_config  # Centralized LLM configuration
 
 class OllamaChat:
     def __init__(self, base_url: str = None, model: str = None):
-        self.base_url = base_url or "http://127.0.0.1:11434"
-        self.model = model or "gpt-oss:20b"
-        self.chat_url = f"{base_url}/api/chat"
-        self.generate_url = f"{base_url}/api/generate"
+        # Use centralized config as defaults
+        self.base_url = base_url or llm_config.LLM_BASE_URL
+        self.model = model or llm_config.DEFAULT_MODEL
+        self.chat_url = f"{self.base_url}/api/chat"
+        self.generate_url = f"{self.base_url}/api/generate"
         self.conversation_history = []
         
     def check_server_status(self) -> bool:
-        """Check if Ollama server is running and accessible"""
+        """Check if Ollama server is running and accessible (local or remote)"""
         try:
-            response = requests.get(f"{self.base_url}/api/tags", timeout=5)
+            print(f"🔍 Checking Ollama server at: {self.base_url}")
+            response = requests.get(f"{self.base_url}/api/tags", timeout=10)
             if response.status_code == 200:
                 models = response.json().get('models', [])
                 available_models = [model['name'] for model in models]
                 print(f"✅ Ollama server is running!")
+                print(f"🌐 Connected to: {self.base_url}")
                 print(f"📋 Available models: {', '.join(available_models)}")
                 
                 # Check if our target model is available
@@ -44,8 +48,15 @@ class OllamaChat:
                 return False
         except requests.exceptions.ConnectionError:
             print("❌ Cannot connect to Ollama server at", self.base_url)
-            print("🔧 Make sure you're on the same node where Ollama is running")
-            print("💡 Try running: srun --jobid=42162557 --pty bash")
+            print("🔧 Troubleshooting tips:")
+            print("   1. Check if Ollama is running: ssh NODE 'curl -s http://localhost:11434/api/tags'")
+            print("   2. Verify firewall allows port 11434")
+            print("   3. Update llm_config.py with correct server address")
+            print(f"   4. Try: ssh -L 11434:localhost:11434 NODE  # Port forwarding")
+            return False
+        except requests.exceptions.Timeout:
+            print(f"⏰ Connection to {self.base_url} timed out")
+            print("💡 Server might be slow or network issue")
             return False
         except Exception as e:
             print(f"❌ Error checking server: {e}")
@@ -176,25 +187,52 @@ class OllamaChat:
                 break
 
 def main():
-    """Main function"""
+    """Main function with remote node support"""
     import os
     
-    # Get defaults from environment or use fallbacks
-    base_url = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434")
-    model = os.getenv("LLM_MODEL", "gpt-oss:20b")
+    # Start with centralized config
+    base_url = llm_config.LLM_BASE_URL
+    model = llm_config.DEFAULT_MODEL
     
     # Allow command line arguments to override
     if len(sys.argv) > 1:
         if sys.argv[1] in ['-h', '--help']:
-            print("Usage: python ollama_llm_chat.py [base_url] [model]")
-            print("Example: python ollama_llm_chat.py http://localhost:11434 llama2")
-            print(f"Default base_url: {os.getenv('LLM_BASE_URL', 'http://127.0.0.1:11434')}")
-            print(f"Default model: {os.getenv('LLM_MODEL', 'gpt-oss:20b')}")
+            print("=" * 60)
+            print("🤖 Ollama Chat - Local & Remote Support")
+            print("=" * 60)
+            print("Usage:")
+            print("  python llm_chat.py                    # Use config from llm_config.py")
+            print("  python llm_chat.py [base_url]         # Override base URL")
+            print("  python llm_chat.py [base_url] [model] # Override both")
+            print("  python llm_chat.py --remote NODE      # Quick remote connection")
+            print()
+            print("Examples:")
+            print("  python llm_chat.py --remote ra5-5")
+            print("  python llm_chat.py http://ra5-5:11434")
+            print("  python llm_chat.py http://localhost:11434 llama2")
+            print()
+            print("Current config (from llm_config.py):")
+            print(f"  Base URL: {llm_config.LLM_BASE_URL}")
+            print(f"  Model:    {llm_config.DEFAULT_MODEL}")
+            print()
+            print("To permanently change, edit llm_config.py")
+            print("=" * 60)
             return
-        if len(sys.argv) > 1:
+        
+        # Handle --remote flag for quick remote connections
+        if sys.argv[1] == '--remote' and len(sys.argv) > 2:
+            node = sys.argv[2]
+            base_url = f"http://{node}:11434"
+            print(f"🌐 Connecting to remote Ollama on {node}...")
+        elif len(sys.argv) > 1 and not sys.argv[1].startswith('-'):
             base_url = sys.argv[1]
-        if len(sys.argv) > 2:
+        if len(sys.argv) > 2 and sys.argv[1] != '--remote':
             model = sys.argv[2]
+    
+    # Show configuration
+    print(f"📍 Using base URL: {base_url}")
+    print(f"🤖 Using model: {model}")
+    print()
     
     # Create and start chat
     chat = OllamaChat(base_url=base_url, model=model)
@@ -202,3 +240,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

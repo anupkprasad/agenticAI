@@ -1,0 +1,142 @@
+# MD Planner Configuration
+# Simplified planning strategy and behavior
+
+planner:
+  name: "MD Workflow Planner"
+  version: "1.0"
+  
+  # Planning behavior
+  behavior:
+    max_iterations: 5
+    require_supervisor_approval: true
+    auto_create_fallback: true  # Use fallback if LLM parsing fails
+    
+  # Response format requirements
+  response_format:
+    strict_parsing: false  # Allow flexible LLM responses
+    require_structured_steps: true
+    min_steps: 1
+    max_steps: 10
+    
+  # When to use fallback plan (keyword-based)
+  fallback_triggers:
+    - llm_parsing_failed
+    - zero_steps_generated
+    - invalid_response_format
+    
+  # Planning templates for common workflows
+  templates:
+    preprocessing:
+      keywords: ["preprocess", "clean", "missing", "hydrogen", "protonate"]
+      default_steps:
+        - name: "PDB Preprocessing"
+          agent: "preprocess"
+          description: "Clean PDB: remove unwanted atoms, add missing atoms, add hydrogens"
+          tools: ["reduce", "pdbfixer", "obabel"]
+          
+    setup:
+      keywords: ["setup", "solvate", "mdp", "simulation"]
+      default_steps:
+        - name: "Topology Generation"
+          agent: "setup"
+          description: "Generate topology using force field"
+          tools: ["gmx pdb2gmx", "acpype"]
+        - name: "System Solvation"
+          agent: "setup"
+          description: "Add water box and ions"
+          tools: ["gmx solvate", "gmx genion"]
+        - name: "MDP File Generation"
+          agent: "setup"
+          description: "Create parameter files for simulation"
+          tools: ["mdp_generator"]
+          
+    hpc:
+      keywords: ["submit", "hpc", "slurm", "run simulation"]
+      default_steps:
+        - name: "Job Submission"
+          agent: "hpc"
+          description: "Submit simulation to HPC cluster"
+          tools: ["sbatch", "slurm"]
+          
+    analysis:
+      keywords: ["analysis", "rmsd", "rmsf", "trajectory"]
+      default_steps:
+        - name: "Trajectory Analysis"
+          agent: "analysis"
+          description: "Analyze simulation results"
+          tools: ["gmx rms", "gmx rmsf", "gmx gyrate"]
+
+# Knowledge resources for planning
+knowledge_resources:
+  force_fields:
+    amber99sb-ildn:
+      description: "AMBER force field for proteins"
+      suitable_for: ["proteins", "peptides"]
+      tools: ["gmx pdb2gmx", "tleap"]
+      
+    charmm36:
+      description: "CHARMM force field for proteins and lipids"
+      suitable_for: ["proteins", "lipids", "membranes"]
+      tools: ["gmx pdb2gmx", "charmm-gui"]
+      
+    gromos54a7:
+      description: "GROMOS force field"
+      suitable_for: ["proteins", "small molecules"]
+      tools: ["gmx pdb2gmx"]
+      
+  water_models:
+    tip3p:
+      description: "3-point water model"
+      compatible_with: ["amber99sb-ildn", "charmm36"]
+      
+    tip4p:
+      description: "4-point water model"
+      compatible_with: ["gromos54a7"]
+      
+    spc:
+      description: "Simple point charge water"
+      compatible_with: ["gromos54a7"]
+      
+  simulation_engines:
+    gromacs:
+      description: "GROMACS MD engine"
+      commands: ["gmx", "pdb2gmx", "editconf", "solvate", "grompp", "mdrun"]
+      file_formats: [".gro", ".top", ".mdp", ".trr", ".xtc"]
+      
+  preprocessing_tools:
+    reduce:
+      description: "Add hydrogens with correct protonation states"
+      command: "reduce"
+      input: [".pdb"]
+      output: [".pdb"]
+      
+    pdbfixer:
+      description: "Fix missing residues and atoms"
+      command: "pdbfixer"
+      input: [".pdb"]
+      output: [".pdb"]
+      
+    obabel:
+      description: "Convert and clean molecular structures"
+      command: "obabel"
+      input: [".pdb", ".mol2", ".sdf"]
+      output: [".pdb", ".mol2"]
+      
+  topology_tools:
+    gmx_pdb2gmx:
+      description: "Generate topology from PDB with force field"
+      agent: "setup"
+      command: "gmx pdb2gmx"
+      
+    acpype:
+      description: "Generate topology for small molecules"
+      agent: "setup"
+      command: "acpype"
+
+# Logging and transparency
+logging:
+  log_llm_prompts: true
+  log_llm_responses: true
+  log_parsing_details: true
+  save_plans_to_file: true
+  plan_output_dir: "working_dir/plans"

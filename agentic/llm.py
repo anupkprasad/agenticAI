@@ -6,7 +6,8 @@ dependency is not available, so the rest of the codebase can remain testable.
 
 Example usage:
     from agentic.llm import LLMClient
-    llm = LLMClient(model="gpt-oss:20b", base_url="http://localhost:11434")
+    import llm_config
+    llm = LLMClient(model=llm_config.DEFAULT_MODEL, base_url=llm_config.LLM_BASE_URL)
     resp = llm.prompt("Summarize the following PDB: ...")
     print(resp)
 """
@@ -20,6 +21,15 @@ import logging
 import json
 import urllib.parse
 from typing import Any
+import sys
+import os
+
+# Add parent directory to path to import llm_config
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    import llm_config
+except ImportError:
+    llm_config = None
 
 try:
     import requests
@@ -40,11 +50,19 @@ except Exception:
 
 
 class LLMClient:
-    def __init__(self, model: str, base_url: Optional[str] = None, **kwargs):
-        self.model = model
-        self.base_url = base_url
+    def __init__(self, model: str = None, base_url: Optional[str] = None, **kwargs):
+        # Use centralized config as defaults if available
+        if llm_config:
+            self.model = model or llm_config.DEFAULT_MODEL
+            self.base_url = base_url or llm_config.LLM_BASE_URL
+        else:
+            self.model = model or "gpt-oss:20b"
+            self.base_url = base_url or "http://127.0.0.1:11434"
+            
         self._client = None
         self._is_mock_mode = False  # Track if we're in mock mode
+        
+        logger.info(f"LLMClient initialized: {self.base_url} with model {self.model}")
         
         # load optional configuration (system prompt, tokens) from agentic/config.json
         self.config = {}
@@ -82,35 +100,6 @@ class LLMClient:
     def available(self) -> bool:
         """Check if LLM client is available and not in mock mode."""
         return not self._is_mock_mode and self._client is not None
-        try:
-            import os, json as _json
-            cfg_path = os.path.join(os.path.dirname(__file__), "config.json")
-            if os.path.exists(cfg_path):
-                with open(cfg_path, "r", encoding="utf-8") as fh:
-                    self.config = _json.load(fh)
-        except Exception:
-            self.config = {}
-        # allow passing a system_prompt directly via kwargs
-        self.system_prompt = kwargs.pop("system_prompt", self.config.get("system_prompt"))
-        # Optional tool list (for compatibility with tool-using frameworks)
-        self.tools: Optional[List[Any]] = kwargs.pop("tools", None)
-        if ollama_client is None:
-            logger.info("ollama client not available; LLMClient will run in mock mode or HTTP-fallback if base_url provided")
-            self._is_mock_mode = True
-        else:
-            # Use the ollama client with base_url if provided
-            try:
-                # Create a client instance if base_url is provided
-                if base_url:
-                    self._client = ollama.Client(host=base_url)
-                else:
-                    self._client = ollama_client  # Use the module directly
-                self._is_mock_mode = False
-                logger.info(f"ollama client initialized with model: {model}, base_url: {base_url}")
-            except Exception as e:
-                logger.warning(f"Failed to initialize ollama client: {e}")
-                self._client = None
-                self._is_mock_mode = True
 
     def prompt(self, prompt: str, system: Optional[str] = None, **kwargs) -> str:
         """Send a prompt to the LLM and return a text response.

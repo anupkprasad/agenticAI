@@ -1,16 +1,45 @@
 #!/bin/bash
-# GPU Terminal Setup Script - Simple Version
-# Usage: ./setup_terminal.sh
+# GPU Terminal Setup Script - Connect to Ollama Server Node
+# Usage: ./setup_terminal.sh [JOB_ID]
+# Example: ./setup_terminal.sh 42358496
 
-echo "🚀 Step 1: Connecting to GPU node..."
-echo "📍 Target: ra8-7 (job ID: 42162557), check with: sq --me if it is changed"
+# Auto-detect Ollama job if no argument provided
+if [ -z "$1" ]; then
+    JOB_ID=$(squeue --me --noheader --format="%i %j" | grep -i "ollama" | head -1 | awk '{print $1}')
+    if [ -z "$JOB_ID" ]; then
+        echo "❌ No Ollama job found. Please provide job ID:"
+        echo "Usage: ./setup_terminal.sh [JOB_ID]"
+        echo ""
+        echo "Your running jobs:"
+        squeue --me --format="%.18i %.30j %.8T %R"
+        exit 1
+    fi
+    echo "🔍 Auto-detected Ollama job: $JOB_ID"
+else
+    JOB_ID=$1
+fi
+
+echo "🚀 Connecting to GPU node with Ollama server..."
+echo "📍 Job ID: $JOB_ID"
 echo "⏳ Please wait for connection..."
 echo ""
 
-echo "💡 After connecting, run these commands:"
-echo "   1. conda activate ~/conda_envs/ollama_env/"
-echo "   2. python llm_chat.py"
+# Get the actual node from the running job
+NODE=$(squeue --noheader --format=%N --jobs=$JOB_ID 2>/dev/null | head -1)
+
+if [ -z "$NODE" ]; then
+    echo "❌ Error: Could not find node for job $JOB_ID"
+    echo "💡 Check your job ID with: sq --me"
+    exit 1
+fi
+
+echo "✅ Node found: $NODE"
+echo ""
+echo "💡 After connecting, run:"
+echo "   conda activate ~/conda_envs/ollama_env/"
+echo "   python llm_chat.py"
 echo ""
 
-# Just connect to GPU node - user will run conda commands manually
-srun --jobid=42162557 --pty bash
+# Use srun with --overlap to avoid resource conflicts
+# This is SLURM-native and more reliable than SSH
+srun --overlap --jobid=$JOB_ID --pty bash
