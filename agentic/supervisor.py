@@ -14,7 +14,7 @@ import os
 from typing import Any, Dict, Optional, Tuple
 
 from .state import MDState
-from .utils import log_supervisor_routing
+from .utils import log_supervisor_routing, log_llm_interaction
 from .llm import LLMClient
 from .planner import MDPlanner
 
@@ -81,6 +81,13 @@ class MDSupervisor:
         logger.info("SUPERVISOR: Analyzing workflow state and routing decision")
         logger.info("=" * 60)
 
+        # Debug: Check execution plan state
+        has_plan = bool(state.get("execution_plan"))
+        logger.info(f"SUPERVISOR: execution_plan exists: {has_plan}")
+        if has_plan:
+            plan = state.get("execution_plan", {})
+            logger.info(f"SUPERVISOR: Plan has {len(plan.get('steps', []))} steps")
+
         # Step 1: Input validation if needed
         if not state.get("raw_pdb") or not state.get("user_goal"):
             state["next_node"] = "input_validation"
@@ -89,7 +96,7 @@ class MDSupervisor:
 
         # Step 2: Create execution plan if not exists
         if not state.get("execution_plan"):
-            logger.info("SUPERVISOR: Creating execution plan with planner")
+            logger.info("SUPERVISOR: No execution plan found, creating with planner")
             state["next_node"] = "planner"
             return state
 
@@ -181,6 +188,15 @@ class MDSupervisor:
 
         try:
             response = self.llm.prompt(prompt)
+            
+            # Log the LLM interaction
+            log_llm_interaction(
+                agent_name="supervisor.input_validation",
+                prompt=prompt,
+                response=response,
+                is_mock=not self.llm.available
+            )
+            
             logger.info("INPUT_VALIDATION: Successfully rephrased user prompt")
             return response
         except Exception as e:

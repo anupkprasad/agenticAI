@@ -22,6 +22,9 @@ class ConversationLogger:
         self.log_file = log_file
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         
+        # Track last routing to avoid duplicates
+        self._last_routing = None
+        
         # Set up the conversation logger
         self.logger = logging.getLogger("md_conversation")
         self.logger.setLevel(logging.DEBUG)  # Capture all levels
@@ -75,6 +78,16 @@ class ConversationLogger:
     
     def log_supervisor_routing(self, current_state: Dict[str, Any], next_node: str, reasoning: str = ""):
         """Log supervisor routing decisions."""
+        # Create a signature for this routing to detect duplicates
+        current_node = current_state.get('current_node', 'start')
+        routing_signature = f"{current_node}->{next_node}:{reasoning}"
+        
+        # Skip if this is an exact duplicate of the last routing
+        if self._last_routing == routing_signature:
+            return
+        
+        self._last_routing = routing_signature
+        
         self.logger.info(f"🎛️  SUPERVISOR ROUTING [{self._timestamp()}]:")
         self.logger.info(f"   Current State Summary:")
         
@@ -85,7 +98,8 @@ class ConversationLogger:
             status = "✅" if value else "❌"
             self.logger.info(f"     {status} {field}: {value or 'Not set'}")
         
-        self.logger.info(f"   📍 Routing to: {next_node}")
+        # Show routing path: CurrentNode → NextNode
+        self.logger.info(f"   📍 Routing: {current_node} → {next_node}")
         if reasoning:
             self.logger.info(f"   💭 Reasoning: {reasoning}")
         
@@ -118,21 +132,23 @@ class ConversationLogger:
         llm_type = "🔀 MOCK LLM" if is_mock else "🧠 LLM"
         self.logger.info(f"{llm_type} INTERACTION ({agent_name}) [{self._timestamp()}]:")
         self.logger.info(f"   📝 Prompt:")
+        self.logger.info("   " + "="*70)
         
-        # Log prompt with indentation (first 3 lines only to save space)
+        # Log full prompt with indentation for easy reading
         prompt_lines = prompt.strip().split('\n')
-        for i, line in enumerate(prompt_lines[:3]):
-            self.logger.info(f"      {line}")
-        if len(prompt_lines) > 3:
-            self.logger.info(f"      ... [+{len(prompt_lines)-3} more lines]")
+        for line in prompt_lines:
+            self.logger.info(f"   {line}")
         
+        self.logger.info("   " + "="*70)
         self.logger.info(f"   💭 Response:")
-        # Log response with indentation (first 2 lines only)
+        self.logger.info("   " + "="*70)
+        
+        # Log full response with indentation
         response_lines = response.strip().split('\n')
-        for i, line in enumerate(response_lines[:2]):
-            self.logger.info(f"      {line}")
-        if len(response_lines) > 2:
-            self.logger.info(f"      ... [+{len(response_lines)-2} more lines]")
+        for line in response_lines:
+            self.logger.info(f"   {line}")
+        
+        self.logger.info("   " + "="*70)
         self.logger.info("")
         self._flush()
     

@@ -5,6 +5,7 @@ Focuses on high-level workflow coordination, delegates tool execution to tools.p
 import logging
 import json
 import yaml
+import os
 from typing import Dict, Any, Optional
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from .schemas import (
     PreprocessingPlan, PreprocessingStep, 
     PreprocessingResult, PreprocessingAgentInput, PreprocessingAgentOutput
 )
-from .tools import PreprocessingToolExecutor
+from .tools import PreprocessingToolExecutor, get_tool_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +66,15 @@ class PreprocessingAgent:
         log_agent_start("preprocessing", "PDB Preprocessing with LLM Tool Calling", state)
         
         try:
-            # Initialize tool executor with config
-            working_dir = state.get("working_directory", "working_dir")
-            self.tool_executor = PreprocessingToolExecutor(working_dir, self.config)
+            # Initialize tool executor with agent-specific subdirectory
+            base_working_dir = state.get("working_directory", "working_dir")
+            preprocess_dir = str(Path(base_working_dir) / "preprocess")
+            Path(preprocess_dir).mkdir(parents=True, exist_ok=True)
+            
+            self.tool_executor = PreprocessingToolExecutor(preprocess_dir, self.config)
+            
+            # Store preprocess directory in state for other agents
+            state["preprocess_directory"] = preprocess_dir
             
             # Prepare agent input from state
             agent_input = self._prepare_agent_input(state)
@@ -216,15 +223,28 @@ class PreprocessingAgent:
     
     def _build_planning_prompt(self, agent_input: PreprocessingAgentInput, 
                                analysis: Dict[str, Any]) -> str:
-        """Build LLM planning prompt from config template"""
+        """Build LLM planning prompt from config template using dynamic tool metadata"""
         config_prompt = self.config.get("llm", {}).get("planning_prompt_template", "")
         
-        # Get available tools list from config
-        tools_config = self.config.get("tools", {})
-        tools_list = "\n".join([
-            f"- {name}: {info.get('description', '')}"
-            for name, info in tools_config.items()
-        ])
+        # Get available tools list dynamically from tool metadata - properly formatted
+        tool_metadata = get_tool_metadata()
+        tools_list = []
+        
+        for tool_info in tool_metadata.values():
+            tool_entry = f"• {tool_info['name']}\n"
+            tool_entry += f"  Description: {tool_info['description']}\n"
+            
+            # Format arguments nicely
+            if tool_info['args']:
+                tool_entry += "  Arguments:\n"
+                for arg_name, arg_details in tool_info['args'].items():
+                    required = "required" if arg_details['required'] else "optional"
+                    arg_type = arg_details['type']
+                    tool_entry += f"    - {arg_name} ({arg_type}, {required})\n"
+            
+            tools_list.append(tool_entry)
+        
+        tools_list_str = "\n".join(tools_list)
         
         # Format analysis for prompt
         analysis_str = "\n".join([
@@ -243,7 +263,7 @@ class PreprocessingAgent:
                 force_field=agent_input.force_field,
                 water_model=agent_input.water_model,
                 analysis=analysis_str,
-                tools_list=tools_list
+                tools_list=tools_list_str
             )
         else:
             # Fallback prompt
@@ -254,7 +274,8 @@ PDB: {agent_input.pdb_path}
 Goal: {agent_input.user_goal}
 Analysis: {analysis_str}
 
-Available tools: {tools_list}
+Available tools:
+{tools_list_str}
 
 Return JSON with: reasoning, overview, steps (name, description, tool_name, tool_params, reason)
 """
@@ -289,8 +310,8 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         
         # Use "full" workflow as default
         default_workflow = workflows.get("full", {}).get("steps", [
-            "analyze_pdb", "remove_waters", "handle_alternate_locations", 
-            "add_hydrogens", "prepare_for_gromacs", "validate_structure"
+            "analyze_pdb", "separate_protein_ligand", 
+            "add_hydrogens", "validate_structure"
         ])
         
         # Build steps based on workflow and analysis
@@ -314,19 +335,15 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         tool_info = tools_config.get(tool_name, {})
         
         # Skip if conditions not met
-        if tool_name == "remove_waters" and not analysis.get("has_waters"):
-            return None
-        if tool_name == "handle_alternate_locations" and not analysis.get("alternate_locations"):
-            return None
+        # Most tools are applied universally now
         
         # Build tool params
         tool_params = {"pdb_file": agent_input.pdb_path}
         
         if tool_name == "add_hydrogens":
             defaults = self.config.get("defaults", {})
-            tool_params["method"] = defaults.get("hydrogen_method", "reduce")
-        elif tool_name == "prepare_for_gromacs":
-            tool_params["force_field"] = agent_input.force_field
+            tool_params["method"] = defaults.get("hydrogen_method", "auto")
+            tool_params["ph"] = defaults.get("ph", 7.4)
         
         return PreprocessingStep(
             name=tool_name.replace("_", " ").title(),
@@ -341,6 +358,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         """
         Execute preprocessing plan step-by-step using tool executor
         Tracks file outputs and chains them between steps
+        Includes retry limits to prevent infinite loops
         """
         execution_log = []
         issues = []
@@ -351,7 +369,21 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         topology_file = None
         processed_coords = None
         
+        # Get execution limits from config
+        agent_config = self.config.get("agent", {})
+        max_retries = agent_config.get("max_tool_retries", 2)
+        max_steps = agent_config.get("max_total_steps", 20)
+        fail_fast = agent_config.get("fail_fast", False)
+        
+        # Track retry counts per tool
+        tool_retry_counts = {}
+        
         try:
+            # Enforce max steps limit
+            if len(plan.steps) > max_steps:
+                warnings.append(f"Plan has {len(plan.steps)} steps, limiting to {max_steps}")
+                plan.steps = plan.steps[:max_steps]
+            
             for i, step in enumerate(plan.steps):
                 log_agent_action("preprocessing", f"Executing step {i+1}/{len(plan.steps)}", {
                     "step": step.name,
@@ -368,20 +400,58 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 
                 # Auto-inject pdb_file for tools that need it
                 if "pdb_file" not in tool_params and step.tool_name in [
-                    "remove_waters", "handle_alternate_locations", "add_hydrogens",
-                    "assign_protonation", "prepare_for_gromacs", "validate_structure"
+                    "add_hydrogens", "validate_structure", "separate_protein_ligand"
                 ]:
                     tool_params["pdb_file"] = current_pdb
                 
-                # Update chained input file
-                if tool_params.get("pdb_file") == agent_input.pdb_path and current_pdb != agent_input.pdb_path:
-                    tool_params["pdb_file"] = current_pdb
+                # Update chained input file - handle both explicit and implicit chaining
+                if "pdb_file" in tool_params:
+                    specified_pdb = tool_params["pdb_file"]
+                    # If the specified file doesn't exist, use current_pdb (the actual last output)
+                    if not os.path.exists(specified_pdb) and current_pdb != agent_input.pdb_path:
+                        tool_params["pdb_file"] = current_pdb
+                    # Or if it explicitly matches the original input but we've processed files
+                    elif specified_pdb == agent_input.pdb_path and current_pdb != agent_input.pdb_path:
+                        tool_params["pdb_file"] = current_pdb
                 
-                # Execute tool via tool executor
-                result = self.tool_executor.execute_tool(step.tool_name, tool_params)
+                # Override output_file to ensure files are written to preprocess directory
+                # This fixes LLM-generated plans that specify working_dir paths
+                if step.tool_name in ["add_hydrogens", "separate_protein_ligand"]:
+                    input_file = tool_params.get("pdb_file", current_pdb)
+                    base_name = Path(input_file).stem
+                    # Generate output filename based on tool
+                    if step.tool_name == "separate_protein_ligand":
+                        # Special handling for separation tool
+                        if "protein_output" not in tool_params:
+                            tool_params["protein_output"] = str(Path(self.tool_executor.working_dir) / f"{base_name}_protein.pdb")
+                        if "ligand_output" not in tool_params:
+                            tool_params["ligand_output"] = str(Path(self.tool_executor.working_dir) / f"{base_name}_ligand.pdb")
+                    else:
+                        # Regular tools with single output
+                        suffix = "_h"  # add_hydrogens
+                        output_file = str(Path(self.tool_executor.working_dir) / f"{base_name}{suffix}.pdb")
+                        tool_params["output_file"] = output_file
+                
+                # Execute tool with retry logic
+                retry_count = 0
+                result = None
+                tool_key = f"{step.tool_name}_{i}"
+                
+                while retry_count <= max_retries:
+                    result = self.tool_executor.execute_tool(step.tool_name, tool_params)
+                    
+                    if result.get("success"):
+                        break  # Success, exit retry loop
+                    
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        execution_log.append(f"⚠ Retry {retry_count}/{max_retries}: {result.get('error')}")
+                        tool_retry_counts[tool_key] = retry_count
+                    else:
+                        execution_log.append(f"✗ Max retries ({max_retries}) exceeded")
                 
                 # Process results
-                if result.get("success"):
+                if result and result.get("success"):
                     execution_log.append(f"✓ Success: {result.get('message', 'Step completed')}")
                     
                     # Track output files for chaining
@@ -396,8 +466,14 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     if result.get("warning"):
                         warnings.append(f"{step.name}: {result['warning']}")
                 else:
-                    execution_log.append(f"✗ Failed: {result.get('error', 'Unknown error')}")
-                    issues.append(f"{step.name}: {result.get('error', 'Failed to execute')}")
+                    error_msg = result.get('error', 'Failed to execute') if result else 'Tool execution failed'
+                    execution_log.append(f"✗ Failed after {retry_count} attempts: {error_msg}")
+                    issues.append(f"{step.name}: {error_msg}")
+                    
+                    # Fail fast option
+                    if fail_fast:
+                        execution_log.append("⚠ Stopping execution (fail_fast enabled)")
+                        break
             
             # Verify required outputs
             if not topology_file:

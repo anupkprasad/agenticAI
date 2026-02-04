@@ -42,9 +42,15 @@ class MDState(TypedDict):
     conclusions: Optional[str]
     
     # Control flow
+    current_node: Optional[str]        # Track which node we're currently in
     next_node: Optional[str]
     human_feedback: Optional[str]
     working_directory: Optional[str]
+    
+    # Planning
+    execution_plan: Optional[Dict[str, Any]]  # Planner-generated execution plan
+    plan_executed: Optional[bool]             # Track if plan has been executed
+    rephrased_goal: Optional[str]             # LLM-rephrased user goal
     
     # Error handling
     errors: List[str]

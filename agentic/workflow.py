@@ -53,24 +53,31 @@ class MDWorkflow:
         
         logger.info("MD workflow initialized with supervisor → planner → programmer hierarchy")
     
+    def _wrap_node(self, node_name: str, node_func: Callable) -> Callable:
+        """Wrap a node function to automatically set current_node in state."""
+        def wrapped_node(state: MDState) -> MDState:
+            state["current_node"] = node_name
+            return node_func(state)
+        return wrapped_node
+    
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph workflow with proper agent hierarchy."""
         
         # Create the graph with our state
         workflow = StateGraph(MDState)
         
-        # Add all nodes
-        workflow.add_node("supervisor", self.supervisor.supervisor_node)
-        workflow.add_node("input_validation", self.supervisor.input_validation_node)
-        workflow.add_node("planner", self.planner.planner_node)
-        workflow.add_node("preprocess", self.preprocessor.preprocess_node)
-        workflow.add_node("setup", self.setup_agent.setup_node)
-        workflow.add_node("hpc", self.hpc_agent.hpc_node)
-        workflow.add_node("analysis", self.analysis_agent.analysis_node)
-        workflow.add_node("human_preprocess_check", self.checkpoints.human_preprocess_check)
-        workflow.add_node("human_setup_check", self.checkpoints.human_setup_check)
-        workflow.add_node("human_hpc_check", self.checkpoints.human_hpc_check)
-        workflow.add_node("final_report", self._final_report_node)
+        # Add all nodes with wrapper to track current_node
+        workflow.add_node("supervisor", self._wrap_node("supervisor", self.supervisor.supervisor_node))
+        workflow.add_node("input_validation", self._wrap_node("input_validation", self.supervisor.input_validation_node))
+        workflow.add_node("planner", self._wrap_node("planner", self.planner.planner_node))
+        workflow.add_node("preprocess", self._wrap_node("preprocess", self.preprocessor.preprocess_node))
+        workflow.add_node("setup", self._wrap_node("setup", self.setup_agent.setup_node))
+        workflow.add_node("hpc", self._wrap_node("hpc", self.hpc_agent.hpc_node))
+        workflow.add_node("analysis", self._wrap_node("analysis", self.analysis_agent.analysis_node))
+        workflow.add_node("human_preprocess_check", self._wrap_node("human_preprocess_check", self.checkpoints.human_preprocess_check))
+        workflow.add_node("human_setup_check", self._wrap_node("human_setup_check", self.checkpoints.human_setup_check))
+        workflow.add_node("human_hpc_check", self._wrap_node("human_hpc_check", self.checkpoints.human_hpc_check))
+        workflow.add_node("final_report", self._wrap_node("final_report", self._final_report_node))
         
         # Set entry point
         workflow.set_entry_point("supervisor")
@@ -322,7 +329,11 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             next_node=None,
             human_feedback=None,
             working_directory=None,
-            execution_path=[]
+            execution_path=[],
+            execution_plan=None,
+            plan_executed=False,
+            rephrased_goal=None,
+            current_node=None
         )
 
         if config:

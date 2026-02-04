@@ -9,6 +9,7 @@ import os
 from typing import Dict, Any, List, Optional
 from ..state import MDState
 from ..llm import LLMClient
+from ..utils import log_llm_interaction
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,14 @@ Include all necessary parameters and comments explaining choices.
         try:
             response = self.llm.prompt(prompt)
             
+            # Log LLM interaction
+            log_llm_interaction(
+                agent_name=f"programmer.mdp_{mdp_type}",
+                prompt=prompt,
+                response=response,
+                is_mock=not self.llm.available
+            )
+            
             # Save to file
             working_dir = state.get("working_directory", "./working_dir")
             os.makedirs(working_dir, exist_ok=True)
@@ -152,6 +161,14 @@ Include proper error handling and output generation.
         
         try:
             response = self.llm.prompt(prompt)
+            
+            # Log LLM interaction
+            log_llm_interaction(
+                agent_name=f"programmer.analysis_{script_type}",
+                prompt=prompt,
+                response=response,
+                is_mock=not self.llm.available
+            )
             
             working_dir = state.get("working_directory", "./working_dir")
             os.makedirs(working_dir, exist_ok=True)
@@ -199,6 +216,14 @@ Create a production-ready SLURM script with:
         try:
             response = self.llm.prompt(prompt)
             
+            # Log LLM interaction
+            log_llm_interaction(
+                agent_name=f"programmer.slurm_{script_type}",
+                prompt=prompt,
+                response=response,
+                is_mock=not self.llm.available
+            )
+            
             working_dir = state.get("working_directory", "./working_dir")
             os.makedirs(working_dir, exist_ok=True)
             
@@ -242,6 +267,14 @@ Create a Python script using BioPython/MDAnalysis that:
         try:
             response = self.llm.prompt(prompt)
             
+            # Log LLM interaction
+            log_llm_interaction(
+                agent_name=f"programmer.preprocess_{script_type}",
+                prompt=prompt,
+                response=response,
+                is_mock=not self.llm.available
+            )
+            
             working_dir = state.get("working_directory", "./working_dir")
             os.makedirs(working_dir, exist_ok=True)
             
@@ -279,6 +312,14 @@ Create a useful, well-documented script for this purpose.
         
         try:
             response = self.llm.prompt(prompt)
+            
+            # Log LLM interaction
+            log_llm_interaction(
+                agent_name=f"programmer.generic_{script_type}",
+                prompt=prompt,
+                response=response,
+                is_mock=not self.llm.available
+            )
             
             working_dir = state.get("working_directory", "./working_dir")
             os.makedirs(working_dir, exist_ok=True)

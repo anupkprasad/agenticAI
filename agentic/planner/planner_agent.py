@@ -10,7 +10,7 @@ import os
 from typing import Dict, Any, Optional, List
 from ..state import MDState
 from ..llm import LLMClient
-from ..utils import log_supervisor_routing
+from ..utils import log_supervisor_routing, log_llm_interaction
 from ..programmer import MDProgrammer
 
 logger = logging.getLogger(__name__)
@@ -69,6 +69,29 @@ class MDPlanner:
         
         num_steps = len(plan.get("steps", []))
         logger.info(f"PLANNER: Created plan with {num_steps} steps")
+        
+        # Log detailed plan to conversation log
+        from ..utils import log_agent_action
+        plan_details = {
+            "title": plan.get("title", "N/A"),
+            "summary": plan.get("summary", "N/A"),
+            "total_steps": num_steps,
+            "steps": []
+        }
+        
+        for step in plan.get("steps", []):
+            plan_details["steps"].append({
+                "number": step.get("number", "?"),
+                "name": step.get("name", "Unnamed"),
+                "agent": step.get("agent", "unknown"),
+                "description": step.get("description", "")[:100]
+            })
+        
+        log_agent_action(
+            agent_name="planner",
+            action="Generated Execution Plan",
+            details=plan_details
+        )
         
         # Log routing
         log_supervisor_routing(

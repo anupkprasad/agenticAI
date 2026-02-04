@@ -1,5 +1,27 @@
 # Preprocessing Agent Configuration
+# 
+# NOTE: Tool definitions are auto-discovered from tools.py using get_tool_metadata()
+# This file focuses on agent identity, behavior, and workflow orchestration
 
+# Agent Identity
+agent:
+  name: "Preprocessing Agent"
+  role: "PDB Structure Preparation Specialist"
+  description: |
+    Orchestrates PDB preprocessing workflows for molecular dynamics simulations.
+    Uses LLM-guided planning to intelligently select and sequence preprocessing tools.
+  capabilities:
+    - "Analyze PDB structure and detect issues"
+    - "Clean structures (remove waters, resolve alternate locations)"
+    - "Add missing hydrogens"
+    - "Assign pH-dependent protonation states"
+    - "Validate structure integrity"
+  
+  # Execution limits to prevent infinite loops
+  max_tool_retries: 2  # Max retries per tool on failure
+  max_total_steps: 20  # Max total steps in a plan
+  fail_fast: false     # Stop on first failure or continue
+  
 # Default preprocessing settings
 defaults:
   force_field: "amber99sb-ildn"
@@ -8,127 +30,8 @@ defaults:
   add_hydrogens: true
   ph: 7.0
   keep_occupancy: "highest"  # For alternate locations
-  hydrogen_method: "reduce"  # Options: reduce, obabel, gmx
-
-# Tool definitions and descriptions
-tools:
-  analyze_pdb:
-    description: "Analyze PDB file structure and detect issues"
-    input_params:
-      - pdb_file
-    output:
-      - analysis
-    capabilities:
-      - "Count atoms, residues, chains"
-      - "Detect water molecules"
-      - "Identify heteroatoms"
-      - "Check for alternate locations"
-      - "Detect missing hydrogens"
-
-  remove_waters:
-    description: "Remove water molecules from PDB file"
-    input_params:
-      - pdb_file
-      - output_file (optional)
-    output:
-      - output_file
-      - removed_count
-    water_residues:
-      - HOH
-      - WAT
-      - TIP3
-      - SPC
-      - SPE
-
-  handle_alternate_locations:
-    description: "Resolve alternate conformations in PDB"
-    input_params:
-      - pdb_file
-      - output_file (optional)
-      - keep_occupancy (optional)
-    output:
-      - output_file
-      - atoms_kept
-      - alternate_locations_resolved
-    strategies:
-      - highest: "Keep conformation with highest occupancy"
-      - first: "Keep first conformation encountered"
-
-  add_hydrogens:
-    description: "Add missing hydrogen atoms to structure"
-    input_params:
-      - pdb_file
-      - output_file (optional)
-      - method (optional)
-    output:
-      - output_file
-      - method
-    methods:
-      reduce:
-        command: ["reduce", "-build"]
-        description: "Industry standard hydrogen addition"
-      obabel:
-        command: ["obabel", "-xh"]
-        description: "Open Babel hydrogen addition"
-      gmx:
-        command: ["gmx", "pdb2gmx", "-ignh"]
-        description: "GROMACS hydrogen addition"
-
-  assign_protonation:
-    description: "Assign protonation states based on pH"
-    input_params:
-      - pdb_file
-      - output_file (optional)
-      - ph (optional)
-    output:
-      - output_file
-      - ph
-    default_ph: 7.0
-    tools:
-      - pdb2pqr
-      - propka
-
-  prepare_for_gromacs:
-    description: "Prepare PDB for GROMACS using pdb2gmx"
-    input_params:
-      - pdb_file
-      - force_field (optional)
-      - output_file (optional)
-    output:
-      - output_file
-      - topology_file
-      - force_field
-    gromacs_command:
-      - gmx
-      - pdb2gmx
-    default_flags:
-      - "-ignh"  # Ignore hydrogens in input
-
-  generate_topology:
-    description: "Generate GROMACS topology file"
-    input_params:
-      - pdb_file
-      - force_field (optional)
-      - output_file (optional)
-    output:
-      - output_file
-      - force_field
-
-  validate_structure:
-    description: "Validate PDB file structure and report issues"
-    input_params:
-      - pdb_file
-    output:
-      - total_lines
-      - atoms
-      - heteroatoms
-      - issues
-      - warnings
-    checks:
-      - "File exists"
-      - "ATOM records present"
-      - "Heteroatom count reasonable"
-      - "Structure integrity"
+  hydrogen_method: "reduce"  # Options: reduce, obabel, none
+  protonation_method: "pdb2pqr"  # Options: pdb2pqr, propka, copy
 
 # Standard preprocessing workflows
 workflows:
@@ -146,7 +49,7 @@ workflows:
       - remove_waters
       - handle_alternate_locations
       - add_hydrogens
-      - prepare_for_gromacs
+      - assign_protonation
       - validate_structure
 
   minimal:
@@ -186,8 +89,6 @@ output_files:
   no_altloc: "{basename}_noalt.pdb"
   with_hydrogens: "{basename}_h.pdb"
   protonated: "{basename}_prot.pdb"
-  gro_coords: "processed.gro"
-  topology: "topol.top"
 
 # LLM prompting configuration
 llm:
