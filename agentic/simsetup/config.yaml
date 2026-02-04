@@ -1,0 +1,117 @@
+# Simulation Setup Agent Configuration
+#
+# NOTE: Tool definitions (names, descriptions, args) are auto-discovered from tools.py
+# This file focuses on agent identity, default parameters, and MDP templates
+
+agent:
+  name: "SimulationSetupAgent"
+  description: "Handles GROMACS topology generation, system setup, and parameter files"
+  capabilities:
+    - "Generate GROMACS topology from cleaned PDB"
+    - "Generate ligand topologies using ACPYPE/Antechamber/RDKit"
+    - "Convert AMBER files to GROMACS format"
+    - "Create simulation boxes with various geometries"
+    - "Solvate systems with water models"
+    - "Add ions for neutralization and salt concentration"
+    - "Generate MDP parameter files for different simulation stages"
+  
+  # Execution limits to prevent infinite loops
+  max_tool_retries: 2  # Max retries per tool on failure
+  max_total_steps: 20  # Max total steps in a plan
+  fail_fast: false     # Stop on first failure or continue
+
+# Tool-specific default settings (not tool definitions)
+tools:
+  build_topology:
+    description: "Generate topology using gmx pdb2gmx"
+    force_fields:
+      - "amber99sb-ildn"  # Default
+      - "charmm27"
+      - "gromos54a7"
+      - "oplsaa"
+    water_models:
+      - "tip3p"  # Default
+      - "spce"
+      - "tip4p"
+      - "tip5p"
+    options:
+      ignore_hydrogens: true  # -ignh flag
+      
+  convert_amber_to_gromacs:
+    description: "Convert AMBER topology/coordinates to GROMACS"
+    methods:
+      - "acpype"  # Preferred
+      - "parmed"  # Fallback
+    
+  build_simulation_box:
+    description: "Define simulation box with gmx editconf"
+    box_types:
+      - "cubic"
+      - "dodecahedron"
+      - "octahedron"
+    default_distance: 1.0  # nm from solute to box edge
+    
+  solvate_system:
+    description: "Add water molecules with gmx solvate"
+    water_configurations:
+      - "spc216"  # Default 3-point water box
+      - "tip3p"
+      - "tip4p"
+      - "tip5p"
+      
+  add_ions:
+    description: "Add ions with gmx genion"
+    default_concentration: 0.15  # Molar (physiological)
+    positive_ion: "NA"  # Sodium
+    negative_ion: "CL"  # Chloride
+    neutralize: true
+    
+  generate_mdp_file:
+    description: "Create MDP parameter files"
+    templates:
+      minim:
+        description: "Energy minimization"
+        integrator: "steep"
+        nsteps: 50000
+        emtol: 1000.0  # kJ/mol/nm
+        emstep: 0.01  # nm
+      
+      nvt:
+        description: "NVT equilibration (constant volume)"
+        integrator: "md"
+        nsteps: 50000  # 100 ps with dt=0.002
+        dt: 0.002  # ps
+        temperature: 300.0  # K
+        tcoupl: "V-rescale"
+        
+      npt:
+        description: "NPT equilibration (constant pressure)"
+        integrator: "md"
+        nsteps: 50000  # 100 ps
+        dt: 0.002  # ps
+        temperature: 300.0  # K
+        pressure: 1.0  # bar
+        pcoupl: "Parrinello-Rahman"
+        
+      md:
+        description: "Production MD"
+        integrator: "md"
+        nsteps: 5000000  # 10 ns with dt=0.002
+        dt: 0.002  # ps
+        temperature: 300.0  # K
+        pressure: 1.0  # bar
+        
+      ions:
+        description: "Ion replacement preparation"
+        integrator: "steep"
+        nsteps: 50000
+
+working_directory: "working_dir"
+
+# Error handling
+max_retries: 2
+timeout: 300  # seconds for each tool execution
+
+# Logging
+log_level: "INFO"
+log_gmx_output: true

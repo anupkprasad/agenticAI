@@ -1,0 +1,142 @@
+# Workflow Orchestration Configuration
+# Controls iterative planning, error escalation, and feedback loops
+
+orchestration:
+  mode: "iterative"  # or "batch"
+  max_plan_revisions: 3
+  enable_feedback_loops: true
+  
+supervisor:
+  # Validation settings
+  validation:
+    check_pdb_exists: true
+    validate_parameters: true
+    check_resource_availability: true
+    feasibility_timeout_seconds: 30
+  
+  # Routing behavior
+  routing:
+    use_llm: true
+    fallback_to_sequential: true
+    retry_failed_agents: true
+    max_retries_per_agent: 2
+  
+  # Error handling
+  error_handling:
+    escalate_to_planner_threshold: "critical"  # minor, moderate, critical
+    auto_retry_on_minor_errors: true
+    collect_error_context: true
+
+planner:
+  # Planning strategy
+  planning:
+    mode: "iterative"  # Plan one step at a time
+    lookahead_steps: 1  # How many steps to plan ahead
+    replan_on_error: true
+    include_rollback_steps: true
+  
+  # Feedback integration
+  feedback:
+    accept_from_supervisor: true
+    accept_from_field_agents: false  # Only through supervisor
+    update_plan_on_feedback: true
+    track_plan_versions: true
+  
+  # Programmer integration
+  programmer:
+    auto_invoke_on_custom_tasks: true
+    cache_generated_scripts: true
+    validate_scripts_before_execution: true
+
+field_agents:
+  # Agent-specific planning
+  preprocessing:
+    create_detailed_plan: true
+    plan_granularity: "tool_level"
+    report_issues_to_supervisor: true
+    max_auto_retry: 2
+  
+  setup:
+    create_detailed_plan: true
+    plan_granularity: "tool_level"
+    report_issues_to_supervisor: true
+    max_auto_retry: 2
+  
+  hpc:
+    create_detailed_plan: true
+    plan_granularity: "job_level"
+    report_issues_to_supervisor: true
+    max_auto_retry: 1  # Expensive operations
+  
+  analysis:
+    create_detailed_plan: true
+    plan_granularity: "analysis_level"
+    report_issues_to_supervisor: true
+    max_auto_retry: 2
+
+# Error escalation rules
+error_escalation:
+  levels:
+    - name: "minor"
+      handling: "field_agent_retry"
+      max_retries: 2
+      
+    - name: "moderate"
+      handling: "supervisor_intervention"
+      supervisor_actions: ["suggest_alternative", "modify_parameters"]
+      
+    - name: "critical"
+      handling: "planner_escalation"
+      planner_actions: ["revise_plan", "invoke_programmer", "abort_workflow"]
+  
+  # What constitutes each level
+  classification:
+    minor:
+      - "file_not_found_with_alternative"
+      - "parameter_out_of_range_with_default"
+      - "tool_execution_warning"
+    
+    moderate:
+      - "tool_execution_failure"
+      - "missing_required_input"
+      - "unexpected_output_format"
+    
+    critical:
+      - "agent_crash"
+      - "unrecoverable_state"
+      - "security_violation"
+      - "resource_unavailable"
+
+# Logging and memory
+logging:
+  execution_trace:
+    enabled: true
+    file: "logs/execution_trace.jsonl"
+    include_timestamps: true
+    include_state_snapshots: true
+  
+  decision_log:
+    enabled: true
+    file: "logs/decision_log.jsonl"
+    track_routing_decisions: true
+    track_error_handling: true
+  
+  planner_memory:
+    enabled: true
+    file: "logs/planner_context.json"
+    persist_between_steps: true
+    include_reasoning: true
+  
+  agent_reports:
+    enabled: true
+    directory: "logs/agent_reports"
+    format: "json"
+    create_per_agent: true
+
+# Performance monitoring
+monitoring:
+  track_execution_time: true
+  track_token_usage: true
+  track_plan_revisions: true
+  alert_on_excessive_retries: true
+  alert_threshold_retries: 5
