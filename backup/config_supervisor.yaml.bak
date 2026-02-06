@@ -70,18 +70,32 @@ supervisor:
       - '(\.\./[^\s]*\.pdb)'         # Relative paths starting with ../
       - '([~/][^\s]*\.pdb)'          # Home directory paths
       - '(\S+\.pdb)'                 # Simple PDB filename
-    prompt_rephrase: |
-      Analyze and rephrase the following user request for an MD simulation workflow.
-      Make it clear, structured, and unambiguous.
+    
+    # LLM-based goal rephrasing with PDB context
+    goal_rephrase_prompt: |
+      You are an expert in molecular dynamics simulations. Rephrase the user's goal into a clear, 
+      unambiguous statement that captures their intent without adding assumptions.
       
-      ORIGINAL REQUEST:
+      USER'S ORIGINAL GOAL:
       {user_goal}
       
-      Provide:
-      1. Rephrased request with clear objectives
-      2. Identified data stage (raw_pdb, preprocessed, setup_complete, etc.)
-      3. Any assumptions being made
-      4. Questions for clarification if needed
+      PDB FILE STRUCTURE:
+      {pdb_summary}
+      
+      INSTRUCTIONS:
+      1. Identify what workflow stages the user wants: preprocessing, setup, simulation, or analysis
+      2. Identify which molecular components they want to work with (protein, ligand, water, ions, specific chains)
+      3. Rephrase their goal clearly and concisely
+      4. Do NOT add recommendations or suggestions
+      5. Do NOT assume they want all stages unless explicitly stated
+      6. If they say "only preprocessing" or "just preprocess", make that clear in the rephrased goal
+      
+      OUTPUT FORMAT:
+      Provide only the rephrased goal as a single clear statement. No additional commentary.
+      
+      EXAMPLE:
+      Original: "I want to just preprocess the protein from the pdb file working_dir/3.pdb"
+      Rephrased: "Preprocess the PDB file to extract and clean only the protein component, without proceeding to simulation setup or execution."
 
   # Planner collaboration configuration
   planner:

@@ -1,0 +1,322 @@
+# Supervisor Configuration for AgenticAI MD Workflow
+# Updated: 2026-01-30
+# Architecture: Supervisor → Planner → Programmer → Field Agents
+
+# ========================================
+# WORKFLOW HIERARCHY
+# ========================================
+# 1. SUPERVISOR - Main controller and orchestrator
+#    - Takes high-level prompts from user
+#    - Validates input and rephrases prompts
+#    - Collaborates with planner for execution strategy
+#    - Assigns tasks to field agents
+#    - Monitors overall workflow progress
+#
+# 2. PLANNER - Strategic planning and coordination
+#    - Receives refined prompts from supervisor
+#    - Creates detailed execution plans
+#    - Has access to tools and resources
+#    - Can request programmer to create custom scripts
+#    - Returns execution plan to supervisor
+#
+# 3. PROGRAMMER - Script generation (internal to planner)
+#    - Called by planner when custom scripts needed
+#    - Generates Python/TCL/Bash scripts
+#    - Never directly accessed by supervisor
+#
+# 4. FIELD AGENTS - Task execution specialists
+#    - Preprocess, Setup, HPC, Analysis agents
+#    - Execute specific tasks assigned by supervisor
+#    - Report results back to supervisor
+# ========================================
+
+supervisor:
+  # LLM Configuration for supervisor decision-making
+  llm_config:
+    temperature: 0.1  # Low temperature for consistent routing decisions
+    max_tokens: 500
+    system_prompt: |
+      You are the main controller of an MD simulation workflow system. Your responsibilities:
+      
+      PRIMARY ROLE:
+      1. Accept high-level prompts from users
+      2. Validate and extract input files (PDB, etc.)
+      3. Rephrase user goals into clear, structured prompts
+      4. Pass refined prompts to the planner for execution strategy
+      5. Receive execution plans from planner
+      6. Assign tasks to appropriate field agents (preprocess, setup, hpc, analysis)
+      7. Monitor workflow progress and handle errors
+      
+      DECISION MAKING:
+      - You control workflow routing and agent selection
+      - You decide when to consult the planner
+      - You coordinate between planner and field agents
+      - You do NOT execute tasks directly
+      - You do NOT call programmer (planner handles that internally)
+
+  # Conversation configuration
+  conversation:
+    max_turns: 5  # Maximum supervisor-agent conversations per decision
+    log_all_interactions: true
+
+  # Input validation configuration
+  input_validation:
+    required_fields:
+      - raw_pdb
+      - user_goal
+    pdb_search_patterns:
+      - '([^\s]+/[^\s]*\.pdb)'      # Paths with directories
+      - '(\./[^\s]*\.pdb)'           # Relative paths starting with ./
+      - '(\.\./[^\s]*\.pdb)'         # Relative paths starting with ../
+      - '([~/][^\s]*\.pdb)'          # Home directory paths
+      - '(\S+\.pdb)'                 # Simple PDB filename
+    
+    # LLM-based goal rephrasing with PDB context
+    goal_rephrase_prompt: |
+      You are an expert in molecular dynamics simulations. Rephrase the user's goal into a clear, 
+      unambiguous statement that captures their intent without adding assumptions.
+      
+      USER'S ORIGINAL GOAL:
+      {user_goal}
+      
+      PDB FILE STRUCTURE:
+      {pdb_summary}
+      
+      INSTRUCTIONS:
+      1. Identify what workflow stages the user wants: preprocessing, setup, simulation, or analysis
+      2. Identify which molecular components they want to work with (protein, ligand, water, ions, specific chains)
+      3. Rephrase their goal clearly and concisely
+      4. Do NOT add recommendations or suggestions
+      5. Do NOT assume they want all stages unless explicitly stated
+      6. If they say "only preprocessing" or "just preprocess", make that clear in the rephrased goal
+      
+      OUTPUT FORMAT:
+      Provide only the rephrased goal as a single clear statement. No additional commentary.
+      
+      EXAMPLE:
+      Original: "I want to just preprocess the protein from the pdb file working_dir/3.pdb"
+      Rephrased: "Preprocess the PDB file to extract and clean only the protein component, without proceeding to simulation setup or execution."
+
+  # Planner collaboration configuration
+  planner:
+    role: "Strategic planning and script generation coordination"
+    responsibilities:
+      - "Receive refined prompts from supervisor"
+      - "Create detailed execution plans"
+      - "Access tools and resources for planning"
+      - "Request programmer to generate custom scripts when needed"
+      - "Return execution plans to supervisor"
+      - "Provide risk assessment and fallback strategies"
+    
+    create_plan_prompt: |
+      You are the planner in the MD workflow system. The supervisor has analyzed the user's
+      request and needs you to create a detailed execution plan.
+      
+      SUPERVISOR ANALYSIS:
+      {supervisor_analysis}
+      
+      REFINED USER GOAL:
+      {user_goal}
+      
+      CURRENT WORKFLOW STATE:
+      {workflow_state}
+      
+      Create a comprehensive execution plan with:
+      1. Step-by-step execution sequence
+      2. Agent assignment for each step (preprocessing, setup, hpc, analysis)
+      3. Input/output requirements for each step
+      4. Tool requirements (GROMACS, VMD, Python scripts, etc.)
+      5. Custom scripts needed (if any, request programmer to generate)
+      6. Resource requirements (CPU, GPU, memory, time estimates)
+      7. Risk assessment and fallback options
+      8. Success criteria and validation checks
+      9. Dependencies between steps
+      10. Estimated completion timeline
+      
+      If custom scripts are needed, you can ask the programmer to generate them.
+      Return the complete plan to the supervisor for execution.
+
+# ========================================
+# PLANNER AND PROGRAMMER CONFIGURATION
+# ========================================
+planner:
+  name: "MD Workflow Planner"
+  description: "Creates detailed execution plans and coordinates with programmer for custom scripts"
+  capabilities:
+    - "Strategic workflow planning"
+    - "Task sequencing and dependency management"
+    - "Tool and resource requirement analysis"
+    - "Risk assessment and fallback planning"
+    - "Programmer coordination for custom scripts"
+    - "Plan validation and feasibility checks"
+  access_to:
+    - "Tool inventory (GROMACS, VMD, Python libraries)"
+    - "Resource specifications (HPC, local compute)"
+    - "Programmer agent (for script generation)"
+    - "Previous workflow logs and patterns"
+  outputs:
+    - "Detailed execution plan"
+    - "Agent task assignments"
+    - "Custom scripts (via programmer)"
+    - "Resource allocation recommendations"
+
+programmer:
+  name: "Script Programmer"
+  description: "Internal agent called by planner to generate custom scripts"
+  note: "Never directly accessed by supervisor - planner handles all interactions"
+  capabilities:
+    - "Python script generation"
+    - "TCL script generation (VMD)"
+    - "Bash script generation"
+    - "GROMACS workflow scripts"
+    - "Analysis pipeline scripts"
+  programming_languages:
+    - "Python 3.11+"
+    - "TCL (VMD)"
+    - "Bash"
+    - "GROMACS mdp files"
+
+# ========================================
+# FIELD AGENT REGISTRY
+# ========================================
+# These are task execution specialists assigned by supervisor
+agents:
+  preprocessing:
+    name: "PDB Preprocessing Agent"
+    description: "Cleans and prepares PDB files for simulation setup. ONLY handles structure cleaning - does NOT create topology or parameter files."
+    scope: "Structure preparation only"
+    capabilities:
+      - "Remove unwanted atoms (water, ligands, heteroatoms)"
+      - "Add missing residues and atoms"
+      - "Add hydrogens with correct protonation"
+      - "Fix alternate conformations"
+      - "Structural validation and quality checks"
+    tools:
+      - "reduce: Add hydrogens"
+      - "pdbfixer: Fix missing atoms/residues"
+      - "obabel: Structure conversion and cleaning"
+      - "Bio.PDB: Python structure manipulation"
+    input_requirements:
+      - "raw_pdb: Path to input PDB file"
+    output_provides:
+      - "cleaned_pdb: Cleaned structure file (PDB format)"
+    does_not_do:
+      - "Topology generation (belongs to setup agent)"
+      - "Force field assignment (belongs to setup agent)"
+      - "MDP file creation (belongs to setup agent)"
+    skip_conditions:
+      - "User mentions PDB is already cleaned"
+      - "User explicitly requests to skip preprocessing"
+
+  setup:
+    name: "Simulation Setup Agent"
+    description: "Generates topology and prepares complete simulation system. Handles force field assignment, solvation, ionization, and parameter file creation."
+    scope: "Topology and system setup"
+    capabilities:
+      - "Topology generation with force fields"
+      - "System solvation with water models"
+      - "Ion addition for physiological conditions"
+      - "Simulation box definition"
+      - "MDP parameter file generation"
+      - "Energy minimization setup"
+      - "Equilibration procedures"
+    tools:
+      - "gmx pdb2gmx: Generate topology"
+      - "gmx solvate: Add water"
+      - "gmx genion: Add ions"
+      - "gmx editconf: Define simulation box"
+      - "acpype: Small molecule topology"
+    input_requirements:
+      - "cleaned_pdb: Processed structure from preprocessing"
+    output_provides:
+      - "topology: System topology (.top)"
+      - "coordinates: Simulation-ready structure (.gro)"
+      - "mdp_files: Simulation parameters (.mdp)"
+    skip_conditions:
+      - "User mentions simulation is already set up"
+      - "User provides ready-to-run simulation files"
+
+  hpc:
+    name: "HPC Job Submission Agent"
+    description: "Handles high-performance computing job submission and monitoring. Manages queue systems and resource allocation."
+    capabilities:
+      - "SLURM/PBS job script generation"
+      - "Resource requirement estimation"
+      - "Job submission and monitoring"
+      - "Queue management"
+    input_requirements:
+      - "coordinates: Simulation system"
+      - "mdp_files: Simulation parameters"
+    output_provides:
+      - "job_id: HPC job identifier"
+      - "job_status: Submission status"
+    skip_conditions:
+      - "User wants local simulation"
+      - "User has already submitted jobs"
+
+  analysis:
+    name: "Trajectory Analysis Agent"
+    description: "Performs post-simulation analysis of MD trajectories. Calculates structural and dynamic properties."
+    capabilities:
+      - "RMSD/RMSF calculations"
+      - "Secondary structure analysis"
+      - "Energy analysis"
+      - "Custom property calculations"
+    input_requirements:
+      - "trajectory: MD trajectory files"
+      - "coordinates: Reference structure"
+    output_provides:
+      - "analysis_results: Analysis data and plots"
+    skip_conditions:
+      - "User only wants simulation setup"
+      - "Simulation is still running"
+
+# ========================================
+# WORKFLOW PIPELINE CONFIGURATION
+# ========================================
+workflow:
+  # Execution flow
+  execution_flow: |
+    1. User provides high-level prompt
+    2. Supervisor validates input and rephrases prompt
+    3. Supervisor passes refined prompt to planner
+    4. Planner creates execution plan (may request programmer for scripts)
+    5. Planner returns plan to supervisor
+    6. Supervisor assigns tasks to field agents based on plan
+    7. Field agents execute and report back to supervisor
+    8. Supervisor monitors progress and handles coordination
+  
+  # Default execution order for field agents
+  default_pipeline:
+    - "preprocessing"  # PDB cleaning and topology generation
+    - "setup"          # Solvation, ionization, minimization
+    - "hpc"            # Job submission and monitoring
+    - "analysis"       # Post-simulation analysis
+
+  # Entry points (where users can start based on their data stage)
+  entry_points:
+    - "preprocessing"  # Standard: start with raw PDB
+    - "setup"          # Skip preprocessing if PDB already cleaned
+    - "hpc"            # Skip to simulation if ready
+    - "analysis"       # Post-simulation analysis only
+
+  # Workflow hierarchy nodes
+  hierarchy:
+    controller: "supervisor"
+    strategic: "planner"
+    internal: "programmer"  # Called by planner only
+    field_agents:
+      - "preprocess"
+      - "setup"
+      - "hpc"
+      - "analysis"
+  
+  # Communication paths
+  communication:
+    user_to_supervisor: true
+    supervisor_to_planner: true
+    planner_to_programmer: true  # Internal to planner
+    programmer_to_supervisor: false  # Never direct
+    supervisor_to_field_agents: true
+    field_agents_to_supervisor: true  # Report back
+    planner_to_supervisor: true  # Return plans

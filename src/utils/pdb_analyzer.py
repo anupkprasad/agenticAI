@@ -49,6 +49,9 @@ def analyze_pdb(pdb_file: str) -> Dict[str, Any]:
             "total_residues": len(u.residues),
         }
         
+        # Log for debugging
+        print(f"DEBUG: Loaded {pdb_file} with {len(u.atoms)} atoms, {len(u.residues)} residues")
+        
         # Analyze protein components
         protein = u.select_atoms("protein")
         if len(protein) > 0:
@@ -75,7 +78,8 @@ def analyze_pdb(pdb_file: str) -> Dict[str, Any]:
             analysis["protein"] = {"present": False}
         
         # Analyze ligands (non-protein, non-water, non-ion heteroatoms)
-        ligand = u.select_atoms("not protein and not resname HOH WAT TIP3 SOL and not ion")
+        # Avoid 'ion' keyword - list common ion residue names instead
+        ligand = u.select_atoms("not protein and not resname HOH WAT TIP3 SOL NA CL K CA MG ZN FE CU ZN2 CA2 MG2 SOD CLA")
         if len(ligand) > 0:
             ligand_residues = {}
             for resname in set(ligand.residues.resnames):
@@ -111,8 +115,14 @@ def analyze_pdb(pdb_file: str) -> Dict[str, Any]:
         }
         analysis["has_waters"] = len(water) > 0
         
-        # Analyze ions
-        ions = u.select_atoms("ion or resname NA CL K CA MG ZN")
+        # Analyze ions (avoid 'ion' keyword which may not work in all MDAnalysis versions)
+        try:
+            # Try with 'ion' keyword first
+            ions = u.select_atoms("ion or resname NA CL K CA MG ZN")
+        except Exception:
+            # Fallback: use only residue names
+            ions = u.select_atoms("resname NA CL K CA MG ZN FE CU ZN2 CA2 MG2 SOD CLA")
+        
         if len(ions) > 0:
             ion_types = {}
             for resname in set(ions.residues.resnames):
@@ -142,44 +152,91 @@ def analyze_pdb(pdb_file: str) -> Dict[str, Any]:
         }
         analysis["missing_hydrogens"] = analysis["hydrogens"]["missing_hydrogens"]
         
-        # Check for alternate locations (only works with PDB files)
-        analysis["alternate_locations"] = False
-        if pdb_file.endswith('.pdb'):
-            try:
-                with open(pdb_file, 'r') as f:
-                    for line in f:
-                        if line.startswith(("ATOM", "HETATM")):
-                            if len(line) > 16 and line[16] not in [' ', 'A']:
-                                analysis["alternate_locations"] = True
-                                break
-            except:
-                pass
-        
+
         # Chain information (summary)
         all_chains = list(set(u.atoms.chainIDs))
         analysis["chain_ids"] = sorted([c for c in all_chains if c.strip()])
         analysis["chain_count"] = len(analysis["chain_ids"])
         
-        # Add summary section
-        analysis["summary"] = {
-            "has_protein": analysis["protein"]["present"],
-            "has_ligand": analysis["ligands"]["present"],
-            "has_water": analysis["water"]["present"],
-            "has_ions": analysis["ions"]["present"],
-            "needs_hydrogen_addition": analysis["missing_hydrogens"],
-            "needs_alternate_location_fix": analysis["alternate_locations"]
+        # Add components available summary (simplified)
+        analysis["components_available"] = {
+            "protein": analysis["protein"]["present"],
+            "ligand": analysis["ligands"]["present"],
+            "water": analysis["water"]["present"],
+            "ions": analysis["ions"]["present"],
+            "hydrogens": not analysis["missing_hydrogens"]
         }
+        
+        # Generate detailed human-readable summary for planner context
+        summary_parts = []
+        
+        # Protein details
+        if analysis["protein"]["present"]:
+            protein_info = analysis["protein"]
+            chains_info = protein_info.get("chains", {})
+            if chains_info:
+                chain_details = []
+                for chain_id, chain_data in sorted(chains_info.items()):
+                    chain_details.append(
+                        f"Chain {chain_id} ({chain_data['residue_count']} residues)"
+                    )
+                summary_parts.append(f"Protein: {', '.join(chain_details)}")
+            else:
+                summary_parts.append(f"Protein: {protein_info['total_residues']} residues")
+        
+        # Ligand details
+        if analysis["ligands"]["present"]:
+            ligand_info = analysis["ligands"]
+            ligand_details = ligand_info.get("residue_details", {})
+            if ligand_details:
+                ligand_summary = []
+                for lig_name, lig_data in sorted(ligand_details.items()):
+                    count = lig_data.get("residue_count", 1)
+                    ligand_summary.append(f"{lig_name} (×{count})" if count > 1 else lig_name)
+                summary_parts.append(f"Ligands: {', '.join(ligand_summary)}")
+            else:
+                ligand_names = ligand_info.get("residue_names", [])
+                summary_parts.append(f"Ligands: {', '.join(ligand_names)}")
+        
+        # Water details
+        if analysis["water"]["present"]:
+            water_count = analysis["water"]["molecule_count"]
+            summary_parts.append(f"Water: {water_count} molecules")
+        
+        # Ion details
+        if analysis["ions"]["present"]:
+            ion_types = analysis["ions"].get("types", {})
+            if ion_types:
+                ion_summary = [f"{name} (×{count})" if count > 1 else name 
+                              for name, count in sorted(ion_types.items())]
+                summary_parts.append(f"Ions: {', '.join(ion_summary)}")
+        
+        # Preprocessing needs
+        preprocessing_notes = []
+        if analysis["missing_hydrogens"]:
+            preprocessing_notes.append("missing hydrogens")
+        if preprocessing_notes:
+            summary_parts.append(f"Needs: {', '.join(preprocessing_notes)}")
+        
+        human_readable_summary = " | ".join(summary_parts)
+        analysis["human_readable_summary"] = human_readable_summary
         
         return {
             "success": True,
             "analysis": analysis,
-            "message": f"Analyzed {pdb_file}: {analysis['total_atoms']} atoms, {analysis['total_residues']} residues"
+            "message": f"Analyzed {pdb_file}: {analysis['total_atoms']} atoms, {analysis['total_residues']} residues",
+            "summary": human_readable_summary
         }
         
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"ERROR in PDB analysis: {str(e)}")
+        print(f"Traceback:\n{error_details}")
         return {
             "success": False,
-            "error": f"Structure analysis failed: {str(e)}"
+            "error": f"Structure analysis failed: {str(e)}",
+            "details": error_details
         }
 
 

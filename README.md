@@ -175,7 +175,7 @@ export PYTHONDONTWRITEBYTECODE=1
 
 # 5. Run AgenticAI workflow with LLM
 python run_agenticAIWork.py \
-  --goal "I want to just preprocess the pdb file working_dir/ATP.pdb" \
+  --goal "I want to just preprocess the protein from the pdb file working_dir/3.pdb" \
   --use-llm \
   --llm-base-url http://127.0.0.1:11434 \
   --llm-model gpt-oss:20b \

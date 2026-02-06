@@ -1,0 +1,750 @@
+"""
+Clean and simple LLM-Powered MD Workflow Supervisor
+
+Responsibilities:
+1. Analyze PDB structure and validate components
+2. Preprocess and rephrase user prompts into structured form
+3. Validate input feasibility (PDB files, parameters, user intent)
+4. Collaborate with planner to create execution plans
+5. Route tasks to field agents based on approved plans
+"""
+
+import logging
+import yaml
+import os
+from typing import Any, Dict, Optional, Tuple
+
+from .state import MDState
+from .utils import log_supervisor_routing, log_llm_interaction, log_agent_action
+from .llm import LLMClient
+from .planner import MDPlanner
+
+# Import PDB analyzer
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from src.utils.pdb_analyzer import analyze_pdb
+
+logger = logging.getLogger(__name__)
+
+
+class MDSupervisor:
+    """
+    Simple and clean LLM-powered supervisor that:
+    - Takes user prompts and rephrases them
+    - Validates inputs
+    - Collaborates with planner for execution planning
+    - Routes to field agents
+    """
+
+    def __init__(self, llm_client: Optional[LLMClient] = None, config_path: Optional[str] = None):
+        """
+        Initialize supervisor with LLM and configuration.
+
+        Args:
+            llm_client: LLMClient instance for LLM operations
+            config_path: Path to config_supervisor.yaml (auto-detected if None)
+        """
+        if llm_client is None:
+            raise ValueError("llm_client is required for supervisor operation")
+
+        self.llm = llm_client
+        self.planner = None  # Lazy-load planner on first use
+
+        # Load configuration
+        if config_path is None:
+            config_path = os.path.join(os.path.dirname(__file__), "config_supervisor.yaml")
+
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+
+        with open(config_path, "r") as f:
+            self.config = yaml.safe_load(f)
+
+        self.supervisor_config = self.config.get("supervisor", {})
+        self.agents_registry = self.config.get("agents", {})
+        self.workflow_config = self.config.get("workflow", {})
+
+        logger.info(
+            f"MDSupervisor initialized with {len(self.agents_registry)} agents "
+            f"from {config_path}"
+        )
+
+    def supervisor_node(self, state: MDState) -> MDState:
+        """
+        Main supervisor routing logic.
+
+        Pipeline:
+        1. Input Validation → PDB analysis and feasibility check
+        2. Create Execution Plan → Collaborate with planner
+        3. Execute Steps One-by-One → Route to field agents iteratively
+        4. Generate Final Report → Summarize results
+        """
+        # Lazy-load planner on first use
+        if self.planner is None:
+            self.planner = MDPlanner(llm_client=self.llm)
+        
+        logger.info("=" * 60)
+        logger.info("SUPERVISOR: Analyzing workflow state and routing decision")
+        logger.info("=" * 60)
+
+        # Check if we're returning from a field agent - increment step counter
+        current_node = state.get("current_node", "")
+        if current_node in ["preprocess", "setup", "hpc", "analysis"]:
+            current_step = state.get("current_step", 0)
+            logger.info(f"SUPERVISOR: Returned from {current_node}, advancing from step {current_step} to {current_step + 1}")
+            state["current_step"] = current_step + 1
+
+        # Debug: Check execution plan state
+        has_plan = bool(state.get("execution_plan"))
+        logger.info(f"SUPERVISOR: execution_plan exists: {has_plan}")
+        if has_plan:
+            plan = state.get("execution_plan", {})
+            current_step_num = state.get("current_step", 0)
+            total_steps = len(plan.get('steps', []))
+            logger.info(f"SUPERVISOR: Plan progress: Step {current_step_num}/{total_steps}")
+
+        # Step 1: Input validation if needed
+        # Always run input validation if PDB analysis hasn't been done yet
+        if not state.get("pdb_analysis") and state.get("user_goal"):
+            state["next_node"] = "input_validation"
+            logger.info("SUPERVISOR: Routing to input validation for PDB analysis and feasibility check")
+            return state
+        
+        # Check for missing required inputs
+        if not state.get("raw_pdb") or not state.get("user_goal"):
+            state["next_node"] = "input_validation"
+            logger.info("SUPERVISOR: Routing to input validation - missing raw_pdb or user_goal")
+            return state
+
+        # Step 2: Create execution plan if not exists (only after validation is complete)
+        if not state.get("execution_plan") and state.get("pdb_analysis"):
+            logger.info("SUPERVISOR: Validation complete, creating execution plan with planner")
+            state["next_node"] = "planner"
+            return state
+
+        # Step 3: Assign field agent tasks based on plan
+        # Check if plan has steps to execute
+        plan = state.get("execution_plan", {})
+        if plan.get("steps") and not state.get("plan_executed"):
+            logger.info("SUPERVISOR: Execution plan ready, assigning field agent tasks")
+            return self._assign_field_agent_tasks(state)
+
+        # Step 4: Handle errors and complete
+        if state.get("errors"):
+            logger.error(
+                f"SUPERVISOR: Workflow has {len(state['errors'])} errors. "
+                f"Routing to final report."
+            )
+            state["next_node"] = "final_report"
+            return state
+
+        # Step 5: All tasks complete
+        logger.info("SUPERVISOR: All workflow tasks completed")
+        state["next_node"] = "final_report"
+        return state
+
+    def input_validation_node(self, state: MDState) -> MDState:
+        """
+        Validate and preprocess user input with PDB analysis.
+
+        Steps:
+        1. Extract PDB file path
+        2. Analyze PDB structure (components, composition)
+        3. Parse user intent and component selection
+        4. Validate feasibility of parameters
+        5. Create structured prompt for planner
+        """
+        logger.info("=" * 60)
+        logger.info("INPUT_VALIDATION: Starting comprehensive input validation with PDB analysis")
+        logger.info("=" * 60)
+        
+        # Log to conversation logger as well
+        log_agent_action(
+            agent_name="supervisor.input_validation",
+            action="Starting Input Validation & PDB Analysis",
+            details={
+                "user_goal": state.get("user_goal", "")[:200]
+            }
+        )
+
+        user_goal = state.get("user_goal", "")
+
+        # Step 1: Extract and validate PDB path
+        pdb_path = self._extract_pdb_path(user_goal)
+        if pdb_path:
+            state["raw_pdb"] = pdb_path
+            logger.info(f"INPUT_VALIDATION: Extracted PDB path: {pdb_path}")
+
+            # Validate file exists
+            if not os.path.exists(pdb_path):
+                state["errors"].append(f"PDB file not found: {pdb_path}")
+                logger.error(f"INPUT_VALIDATION: PDB file not found: {pdb_path}")
+                state["next_node"] = "supervisor"
+                return state
+        else:
+            error_msg = "Could not extract PDB file path from user goal"
+            state["errors"].append(error_msg)
+            logger.error(f"INPUT_VALIDATION: {error_msg}")
+            state["next_node"] = "supervisor"
+            return state
+
+        # Step 2: Analyze PDB structure
+        logger.info(f"INPUT_VALIDATION: Analyzing PDB structure: {pdb_path}")
+        
+        pdb_analysis_result = analyze_pdb.invoke({"pdb_file": pdb_path})
+        
+        if not pdb_analysis_result.get("success"):
+            error_msg = f"PDB analysis failed: {pdb_analysis_result.get('error', 'Unknown error')}"
+            state["warnings"].append(error_msg)  # Changed from errors to warnings
+            logger.warning(f"INPUT_VALIDATION: {error_msg}")
+            logger.warning("INPUT_VALIDATION: Continuing with limited analysis, will use defaults")
+            
+            # Create minimal analysis for fallback
+            state["pdb_analysis"] = {
+                "total_atoms": 0,
+                "total_residues": 0,
+                "protein": {"present": True},  # Assume protein by default
+                "ligands": {"present": False},
+                "water": {"present": False},
+                "summary": {},
+                "chain_ids": []
+            }
+        else:
+            # Store analysis in state
+            state["pdb_analysis"] = pdb_analysis_result.get("analysis", {})
+            logger.info(f"INPUT_VALIDATION: PDB analysis complete - {pdb_analysis_result.get('message', '')}")
+            
+            # Log detailed analysis
+            analysis = state["pdb_analysis"]
+            
+            # Extract protein sequences if available
+            protein_sequences = {}
+            if analysis.get("protein", {}).get("present"):
+                chains_info = analysis.get("protein", {}).get("chains", {})
+                for chain_id, chain_data in chains_info.items():
+                    sequence = chain_data.get("sequence", "")
+                    if sequence:
+                        protein_sequences[chain_id] = sequence
+            
+            # Build details dict
+            details = {
+                "file": pdb_path,
+                "total_atoms": analysis.get("total_atoms", 0),
+                "total_residues": analysis.get("total_residues", 0),
+                "components_available": analysis.get("components_available", {})
+            }
+            
+            # Add protein sequences if present
+            if protein_sequences:
+                details["protein_sequences"] = protein_sequences
+            
+            log_agent_action(
+                agent_name="supervisor.input_validation",
+                action="PDB Structure Analysis",
+                details=details
+            )
+        
+        # Get analysis for subsequent steps
+        analysis = state["pdb_analysis"]
+
+        # Step 3: Parse user intent and determine component selection
+        component_selection = self._parse_component_selection(user_goal, analysis)
+        state["component_selection"] = component_selection
+        logger.info(f"INPUT_VALIDATION: Component selection: {component_selection}")
+
+        # Step 4: Validate feasibility
+        validation_result = self._validate_feasibility(user_goal, analysis, component_selection)
+        
+        if not validation_result["is_feasible"]:
+            for error in validation_result["errors"]:
+                state["errors"].append(error)
+                logger.error(f"INPUT_VALIDATION: Feasibility error - {error}")
+            state["next_node"] = "supervisor"
+            return state
+        
+        for warning in validation_result["warnings"]:
+            state["warnings"].append(warning)
+            logger.warning(f"INPUT_VALIDATION: {warning}")
+
+        # Step 5: Enrich user prompt with validated information for planner
+        enriched_prompt = self._enrich_user_prompt(
+            user_goal, analysis, component_selection, validation_result
+        )
+        state["structured_prompt"] = enriched_prompt
+        state["rephrased_goal"] = enriched_prompt  # Also store as rephrased_goal for backward compat
+        
+        logger.info(f"INPUT_VALIDATION: Enriched prompt created: {enriched_prompt[:150]}...")
+        
+        log_agent_action(
+            agent_name="supervisor.input_validation",
+            action="Input Validation Complete",
+            details={
+                "original_goal": user_goal[:100],
+                "enriched_prompt": enriched_prompt[:300],
+                "pdb_file": pdb_path
+            }
+        )
+
+        # Step 6: Set working directory
+        if pdb_path:
+            pdb_dir = os.path.dirname(pdb_path)
+            state["working_directory"] = pdb_dir if pdb_dir else "."
+            logger.info(f"INPUT_VALIDATION: Working directory set to: {state['working_directory']}")
+
+        # Log final validation summary
+        logger.info("=" * 60)
+        logger.info("INPUT_VALIDATION: Validation complete - ready for planning")
+        logger.info(f"  - PDB Analysis: {'✓ Success' if not state.get('warnings') else '⚠ With warnings'}")
+        logger.info(f"  - Component Selection: {component_selection}")
+        logger.info(f"  - Enriched Prompt: {enriched_prompt[:80]}...")
+        logger.info("=" * 60)
+
+        # Next step: supervisor routing
+        state["next_node"] = "supervisor"
+        log_supervisor_routing(
+            state, "supervisor", "Input validation complete with PDB analysis, returning to supervisor for planning"
+        )
+
+        return state
+
+    def _rephrase_user_prompt(self, user_goal: str) -> str:
+        """
+        Use LLM to rephrase and clarify user prompt.
+
+        Returns:
+            Rephrased goal string
+        """
+        prompt_template = self.supervisor_config.get("input_validation", {}).get(
+            "prompt_rephrase", ""
+        )
+
+        prompt = prompt_template.format(user_goal=user_goal)
+
+        try:
+            response = self.llm.prompt(prompt)
+            
+            # Log the LLM interaction
+            log_llm_interaction(
+                agent_name="supervisor.input_validation",
+                prompt=prompt,
+                response=response,
+                is_mock=not self.llm.available
+            )
+            
+            logger.info("INPUT_VALIDATION: Successfully rephrased user prompt")
+            return response
+        except Exception as e:
+            logger.error(f"INPUT_VALIDATION: Error rephrasing prompt: {e}")
+            return user_goal
+
+    def _extract_pdb_path(self, user_goal: str) -> Optional[str]:
+        """
+        Extract PDB file path from user goal.
+
+        Uses regex patterns defined in config to find PDB file paths.
+        """
+        import re
+
+        patterns = self.supervisor_config.get("input_validation", {}).get(
+            "pdb_search_patterns", []
+        )
+
+        for pattern in patterns:
+            match = re.search(pattern, user_goal)
+            if match:
+                pdb_path = match.group(1)
+                logger.info(f"INPUT_VALIDATION: Matched PDB path with pattern '{pattern}': {pdb_path}")
+                return pdb_path
+
+        logger.warning("INPUT_VALIDATION: No PDB file path found in user goal")
+        return None
+
+    def _assign_field_agent_tasks(self, state: MDState) -> MDState:
+        """
+        Route to appropriate field agents based on approved plan.
+        
+        Executes plan steps one-by-one in order, respecting dependencies.
+        Determines which agent to run next based on:
+        1. Current step number in execution plan
+        2. Step dependencies
+        3. Available inputs/outputs from previous steps
+        """
+        logger.info("FIELD_AGENT_ASSIGNMENT: Assigning tasks from approved plan")
+
+        plan = state.get("execution_plan", {})
+        steps = plan.get("steps", [])
+        current_step_idx = state.get("current_step", 0)
+        
+        if current_step_idx >= len(steps):
+            # All steps complete
+            logger.info("FIELD_AGENT_ASSIGNMENT: All plan steps completed")
+            state["plan_executed"] = True
+            state["next_node"] = "final_report"
+            log_supervisor_routing(state, "final_report", "All workflow tasks complete")
+            return state
+        
+        # Get current step to execute
+        current_step = steps[current_step_idx]
+        step_name = current_step.get("name", "Unnamed")
+        step_number = current_step.get("step_number", current_step_idx + 1)
+        agent_name = current_step.get("agent", "").lower()
+        
+        logger.info(f"FIELD_AGENT_ASSIGNMENT: Executing Step {step_number}: {step_name} (agent: {agent_name})")
+        
+        # Check dependencies
+        dependencies = current_step.get("dependencies", [])
+        for dep_step_num in dependencies:
+            dep_step_idx = dep_step_num - 1  # Convert to 0-indexed
+            if dep_step_idx >= current_step_idx:
+                error_msg = f"Step {step_number} dependency error: Step {dep_step_num} not yet executed"
+                logger.error(f"FIELD_AGENT_ASSIGNMENT: {error_msg}")
+                state["errors"].append(error_msg)
+                state["next_node"] = "final_report"
+                return state
+        
+        # Route to appropriate agent based on agent name
+        if "preprocessing" in agent_name or "preprocess" in agent_name:
+            if not state.get("cleaned_pdb"):
+                state["next_node"] = "preprocess"
+                state["preprocessing_plan"] = current_step
+                logger.info(f"FIELD_AGENT_ASSIGNMENT: Routing to preprocessing for step {step_number}")
+                log_supervisor_routing(state, "preprocess", f"Executing Step {step_number}: {step_name}")
+                return state
+            else:
+                logger.info(f"FIELD_AGENT_ASSIGNMENT: Preprocessing already complete, advancing to next step")
+                state["current_step"] = current_step_idx + 1
+                return self._assign_field_agent_tasks(state)  # Recursive call for next step
+
+        elif "setup" in agent_name or "simsetup" in agent_name:
+            if not state.get("coordinates"):
+                state["next_node"] = "setup"
+                state["setup_plan"] = current_step
+                logger.info(f"FIELD_AGENT_ASSIGNMENT: Routing to setup for step {step_number}")
+                log_supervisor_routing(state, "setup", f"Executing Step {step_number}: {step_name}")
+                return state
+            else:
+                logger.info(f"FIELD_AGENT_ASSIGNMENT: Setup already complete, advancing to next step")
+                state["current_step"] = current_step_idx + 1
+                return self._assign_field_agent_tasks(state)
+
+        elif "hpc" in agent_name or "simulation" in agent_name:
+            if not state.get("job_id"):
+                state["next_node"] = "hpc"
+                state["hpc_plan"] = current_step
+                logger.info(f"FIELD_AGENT_ASSIGNMENT: Routing to HPC for step {step_number}")
+                log_supervisor_routing(state, "hpc", f"Executing Step {step_number}: {step_name}")
+                return state
+            else:
+                logger.info(f"FIELD_AGENT_ASSIGNMENT: HPC already complete, advancing to next step")
+                state["current_step"] = current_step_idx + 1
+                return self._assign_field_agent_tasks(state)
+
+        elif "analysis" in agent_name:
+            if not state.get("analysis_results"):
+                state["next_node"] = "analysis"
+                state["analysis_plan"] = current_step
+                logger.info(f"FIELD_AGENT_ASSIGNMENT: Routing to analysis for step {step_number}")
+                log_supervisor_routing(state, "analysis", f"Executing Step {step_number}: {step_name}")
+                return state
+            else:
+                logger.info(f"FIELD_AGENT_ASSIGNMENT: Analysis already complete, advancing to next step")
+                state["current_step"] = current_step_idx + 1
+                return self._assign_field_agent_tasks(state)
+        
+        else:
+            # Unknown agent
+            error_msg = f"Unknown agent '{agent_name}' for step {step_number}"
+            logger.error(f"FIELD_AGENT_ASSIGNMENT: {error_msg}")
+            state["errors"].append(error_msg)
+            state["next_node"] = "final_report"
+            return state
+
+    # ===== HELPER METHODS =====
+
+    def _parse_component_selection(self, user_goal: str, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Parse user intent to determine which components to include in simulation.
+        
+        Key principle: Respect user's EXPLICIT requests first, then fall back to PDB contents.
+        
+        Args:
+            user_goal: User's natural language goal
+            analysis: PDB analysis results
+            
+        Returns:
+            Dict with component selection (protein, ligand, water, ions, etc.)
+        """
+        goal_lower = user_goal.lower()
+        
+        # Initialize with explicit user requests (defaults to None = not specified)
+        explicit_requests = {
+            "protein": None,
+            "ligand": None,
+            "water": None,
+            "ions": None,
+            "specific_chains": None
+        }
+        
+        # Parse EXPLICIT user intent for specific component requests
+        # Look for "only" keywords which are strongest indicators
+        if any(phrase in goal_lower for phrase in ["only protein", "just protein", "protein only", "extract protein"]):
+            explicit_requests["protein"] = True
+            explicit_requests["ligand"] = False
+            explicit_requests["ions"] = False
+            explicit_requests["water"] = False
+            logger.info("VALIDATION: User explicitly requested ONLY protein")
+            
+        elif any(phrase in goal_lower for phrase in ["only ligand", "just ligand", "ligand only", "extract ligand"]):
+            explicit_requests["protein"] = False
+            explicit_requests["ligand"] = True
+            explicit_requests["ions"] = False
+            explicit_requests["water"] = False
+            logger.info("VALIDATION: User explicitly requested ONLY ligand")
+            
+        elif any(phrase in goal_lower for phrase in ["protein-ligand", "complex", "protein and ligand"]):
+            explicit_requests["protein"] = True
+            explicit_requests["ligand"] = True
+            logger.info("VALIDATION: User explicitly requested protein-ligand complex")
+        
+        # Check for explicit component inclusions
+        if "with ligand" in goal_lower or "include ligand" in goal_lower:
+            explicit_requests["ligand"] = True
+            logger.info("VALIDATION: User explicitly wants to include ligand")
+        
+        if "with water" in goal_lower or "include water" in goal_lower or "keep water" in goal_lower:
+            explicit_requests["water"] = True
+            logger.info("VALIDATION: User explicitly wants to include water")
+        
+        if "with ions" in goal_lower or "include ions" in goal_lower:
+            explicit_requests["ions"] = True
+            logger.info("VALIDATION: User explicitly wants to include ions")
+        
+        # Check for explicit exclusions
+        if "without ligand" in goal_lower or "remove ligand" in goal_lower or "no ligand" in goal_lower:
+            explicit_requests["ligand"] = False
+            logger.info("VALIDATION: User explicitly wants to exclude ligand")
+        
+        if "without water" in goal_lower or "remove water" in goal_lower or "no water" in goal_lower:
+            explicit_requests["water"] = False
+            logger.info("VALIDATION: User explicitly wants to exclude water")
+        
+        if "without ions" in goal_lower or "remove ions" in goal_lower or "no ions" in goal_lower:
+            explicit_requests["ions"] = False
+            logger.info("VALIDATION: User explicitly wants to exclude ions")
+        
+        # Check for specific chain selection (e.g., "chain A", "chain B and C")
+        import re
+        chain_match = re.search(r"chain\s+([A-Z](?:\s+and\s+[A-Z]|,\s*[A-Z])*)", user_goal, re.IGNORECASE)
+        if chain_match:
+            chain_str = chain_match.group(1)
+            chains = re.findall(r"[A-Z]", chain_str.upper())
+            explicit_requests["specific_chains"] = chains
+            logger.info(f"VALIDATION: Specific chain selection detected: {chains}")
+        
+        # Build final selection: use explicit requests if specified, otherwise fall back to PDB contents
+        selection = {
+            "protein": explicit_requests["protein"] if explicit_requests["protein"] is not None 
+                      else analysis.get("protein", {}).get("present", False),
+            "ligand": explicit_requests["ligand"] if explicit_requests["ligand"] is not None
+                     else analysis.get("ligands", {}).get("present", False),
+            "water": explicit_requests["water"] if explicit_requests["water"] is not None
+                    else False,  # Default to False - usually removed during preprocessing
+            "ions": explicit_requests["ions"] if explicit_requests["ions"] is not None
+                   else analysis.get("ions", {}).get("present", False),
+            "specific_chains": explicit_requests["specific_chains"]
+        }
+        
+        logger.info(f"VALIDATION: Final component selection: {selection}")
+        return selection
+    
+    def _validate_feasibility(
+        self, 
+        user_goal: str, 
+        analysis: Dict[str, Any], 
+        component_selection: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Validate if user's request is feasible given PDB contents.
+        
+        Returns:
+            Dict with is_feasible, errors, warnings
+        """
+        errors = []
+        warnings = []
+        
+        # Check if requested components exist
+        if component_selection.get("protein") and not analysis.get("protein", {}).get("present"):
+            errors.append("User requested protein simulation but PDB contains no protein")
+        
+        if component_selection.get("ligand") and not analysis.get("ligands", {}).get("present"):
+            errors.append("User requested ligand simulation but PDB contains no ligand")
+        
+        # Check for specific chains
+        if component_selection.get("specific_chains"):
+            requested_chains = set(component_selection["specific_chains"])
+            available_chains = set(analysis.get("chain_ids", []))
+            missing_chains = requested_chains - available_chains
+            
+            if missing_chains:
+                errors.append(
+                    f"Requested chains {missing_chains} not found in PDB. "
+                    f"Available chains: {available_chains}"
+                )
+        
+        # Warnings for preprocessing needs
+        summary = analysis.get("summary", {})
+        if summary.get("needs_hydrogen_addition"):
+            warnings.append("PDB is missing hydrogens - will be added during preprocessing")
+        
+        if summary.get("needs_alternate_location_fix"):
+            warnings.append("PDB has alternate locations - will be resolved during preprocessing")
+        
+        if analysis.get("water", {}).get("present"):
+            warnings.append("PDB contains water molecules - will be removed during preprocessing")
+        
+        return {
+            "is_feasible": len(errors) == 0,
+            "errors": errors,
+            "warnings": warnings
+        }
+    
+    def _enrich_user_prompt(
+        self,
+        user_goal: str,
+        analysis: Dict[str, Any],
+        component_selection: Dict[str, Any],
+        validation_result: Dict[str, Any]
+    ) -> str:
+        """
+        Enrich user's natural language prompt with validated PDB information.
+        
+        Uses LLM to rephrase the user's goal clearly, then adds PDB structure details.
+        The LLM determines user intent without hardcoded heuristics.
+        """
+        # Get human-readable summary from PDB analyzer
+        human_summary = analysis.get("human_readable_summary", "")
+        
+        # If no human summary available, build a basic one
+        if not human_summary:
+            summary_parts = []
+            if analysis.get("protein", {}).get("present"):
+                residue_count = analysis.get("protein", {}).get("total_residues", 0)
+                summary_parts.append(f"Protein ({residue_count} residues)")
+            if analysis.get("ligands", {}).get("present"):
+                ligand_names = analysis.get("ligands", {}).get("residue_names", [])
+                summary_parts.append(f"Ligands: {', '.join(ligand_names)}")
+            if analysis.get("water", {}).get("present"):
+                water_count = analysis.get("water", {}).get("molecule_count", 0)
+                summary_parts.append(f"Water ({water_count} molecules)")
+            if analysis.get("ions", {}).get("present"):
+                ion_types = analysis.get("ions", {}).get("types", {})
+                if ion_types:
+                    summary_parts.append(f"Ions: {', '.join(ion_types.keys())}")
+            human_summary = " | ".join(summary_parts) if summary_parts else "Unknown structure"
+        
+        # Use LLM to rephrase the user's goal with PDB context
+        rephrased_goal = self._rephrase_user_goal_with_llm(user_goal, human_summary)
+        
+        # Create enhanced prompt: rephrased goal + PDB structure
+        enhanced_prompt = f"{rephrased_goal}\n\n**PDB Structure:** {human_summary}"
+        
+        return enhanced_prompt.strip()
+    
+    def _rephrase_user_goal_with_llm(self, user_goal: str, pdb_summary: str) -> str:
+        """
+        Use LLM to rephrase user's goal into a clear, unambiguous statement.
+        
+        Args:
+            user_goal: Original user goal
+            pdb_summary: Human-readable PDB structure summary
+            
+        Returns:
+            Rephrased goal as a clear statement
+        """
+        logger.info("ENRICH_PROMPT: Attempting to rephrase user goal with LLM")
+        
+        # Get prompt template from config
+        prompt_template = self.supervisor_config.get("input_validation", {}).get("goal_rephrase_prompt", "")
+        
+        if not prompt_template:
+            # Fallback if config not found
+            logger.warning("ENRICH_PROMPT: No goal_rephrase_prompt in config, using original goal")
+            return user_goal
+        
+        # Check if LLM client is available
+        if not self.llm:
+            logger.warning("ENRICH_PROMPT: No LLM client available, using original goal")
+            return user_goal
+        
+        # Format the prompt
+        prompt = prompt_template.format(
+            user_goal=user_goal,
+            pdb_summary=pdb_summary
+        )
+        
+        # Call LLM
+        try:
+            from .utils import log_llm_interaction
+            
+            logger.info("ENRICH_PROMPT: Calling LLM for goal rephrasing")
+            response = self.llm.prompt(
+                prompt=prompt,
+                temperature=0.3,
+                max_tokens=300
+            )
+            
+            log_llm_interaction(
+                agent_name="supervisor.goal_rephrasing",
+                prompt=prompt,
+                response=response
+            )
+            
+            rephrased = response.strip()
+            
+            # Basic validation - if LLM returns empty or very short, use original
+            if not rephrased or len(rephrased) < 10:
+                logger.warning("ENRICH_PROMPT: LLM returned empty/short response, using original goal")
+                return user_goal
+            
+            logger.info(f"ENRICH_PROMPT: Successfully rephrased goal: {rephrased[:150]}...")
+            return rephrased
+            
+        except Exception as e:
+            logger.error(f"ENRICH_PROMPT: LLM rephrasing failed: {e}", exc_info=True)
+            logger.warning("ENRICH_PROMPT: Falling back to original goal")
+            return user_goal
+
+    def get_agents_summary(self) -> str:
+        """Build summary of available agents for LLM context."""
+        summary = []
+        for agent_id, config in self.agents_registry.items():
+            summary.append(
+                f"\n{agent_id.upper()}:\n"
+                f"  - Name: {config.get('name', 'N/A')}\n"
+                f"  - Purpose: {config.get('description', 'N/A')}\n"
+                f"  - Capabilities: {', '.join(config.get('capabilities', []))}\n"
+                f"  - Requires: {', '.join(config.get('input_requirements', []))}\n"
+                f"  - Produces: {', '.join(config.get('output_provides', []))}"
+            )
+        return "".join(summary)
+
+    def get_workflow_progress(self, state: MDState) -> str:
+        """Get human-readable workflow progress summary."""
+        completed = []
+
+        if state.get("raw_pdb"):
+            completed.append("input_validation")
+        if state.get("execution_plan"):
+            completed.append("planning")
+        if state.get("cleaned_pdb"):
+            completed.append("preprocessing")
+        if state.get("coordinates"):
+            completed.append("setup")
+        if state.get("job_id"):
+            completed.append("hpc")
+        if state.get("analysis_results"):
+            completed.append("analysis")
+
+        total = len(self.workflow_config.get("default_pipeline", []))
+        progress = (len(completed) / (total + 2)) * 100  # +2 for validation and planning
+        return f"Progress: {completed} ({progress:.0f}%)"

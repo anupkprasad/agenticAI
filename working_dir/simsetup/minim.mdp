@@ -1,0 +1,28 @@
+; Energy Minimization MDP
+integrator  = steep
+nsteps      = 50000
+emtol       = 1000.0
+emstep      = 0.01
+
+; Output control
+nstlog      = 100
+nstenergy   = 100
+
+; Neighbor searching
+cutoff-scheme = Verlet
+ns_type     = grid
+nstlist     = 10
+rcoulomb    = 1.0
+rvdw        = 1.0
+
+; Electrostatics
+coulombtype = PME
+pme_order   = 4
+fourierspacing = 0.16
+
+; Temperature and pressure
+tcoupl      = no
+pcoupl      = no
+
+; PBC
+pbc         = xyz

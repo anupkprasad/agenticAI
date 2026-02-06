@@ -13,6 +13,11 @@ class MDState(TypedDict):
     water_model: str               # "tip3p"
     human_in_loop: bool
     
+    # PDB Analysis (from supervisor validation)
+    pdb_analysis: Optional[Dict[str, Any]]  # Output from PDB analyzer
+    component_selection: Optional[Dict[str, Any]]  # User-specified component selection
+    structured_prompt: Optional[str]  # High-level structured prompt for planner
+    
     # Preprocessing stage
     raw_pdb: Optional[str]
     cleaned_pdb: Optional[str]
@@ -49,6 +54,7 @@ class MDState(TypedDict):
     
     # Planning
     execution_plan: Optional[Dict[str, Any]]  # Planner-generated execution plan
+    current_step: Optional[int]               # Current step being executed (0-indexed)
     plan_executed: Optional[bool]             # Track if plan has been executed
     rephrased_goal: Optional[str]             # LLM-rephrased user goal
     

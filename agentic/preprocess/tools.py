@@ -1,13 +1,13 @@
 """
 Preprocessing Tools for PDB Structure Preparation
-Thin wrapper that exposes modular @tool functions from src/preprocess/
+Thin wrapper that exposes modular @tool functions from src/preprocess/ and src/utils/
 """
 import logging
 from typing import Dict, Any, Optional
 from pathlib import Path
 
-# Import modular @tool functions from src/preprocess/
-from src.preprocess.pdb_analyzer import analyze_pdb
+# Import modular @tool functions from src/utils/ and src/preprocess/
+from src.utils.pdb_analyzer import analyze_pdb
 from src.preprocess.hydrogen_adder import add_hydrogens
 from src.preprocess.structure_validator import validate_structure
 from src.preprocess.complex_separator import separate_protein_ligand
