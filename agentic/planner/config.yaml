@@ -1,22 +1,50 @@
 # MD Planner Configuration
-# Simplified planning strategy and behavior
+# Natural language detailed execution planning with dynamic tools and knowledge
 
 planner:
   name: "MD Workflow Planner"
-  version: "1.0"
+  version: "2.0"
+  description: "LLM-powered planner with dynamic tools discovery and knowledge base access"
   
   # Planning behavior
   behavior:
+    planning_mode: "detailed_natural_language"  # Create detailed NL plans, not structured JSON
     max_iterations: 5
     require_supervisor_approval: true
-    auto_create_fallback: true  # Use fallback if LLM parsing fails
+    auto_create_fallback: true  # Use fallback if LLM unavailable
+    use_dynamic_tools: true  # Discover tools from code, not config
+    use_knowledge_base: true  # Load domain knowledge from /knowledge
     
-  # Response format requirements
-  response_format:
-    strict_parsing: false  # Allow flexible LLM responses
-    require_structured_steps: true
-    min_steps: 1
-    max_steps: 10
+  # Output format for plans
+  output_format:
+    style: "natural_language_detailed"  # Detailed prose, not just bullet points
+    include_rationale: true  # Explain why each step is needed
+    include_tool_suggestions: true  # Suggest which tools agents might use
+    include_best_practices: true  # Reference knowledge base protocols
+    strict_json_parsing: false  # Allow flexible LLM responses
+    
+  # Natural language plan requirements
+  natural_language_plan:
+    min_detail_level: "comprehensive"  # high-level, moderate, comprehensive, very-detailed
+    include_sections:
+      - "goal_interpretation"  # What the user wants
+      - "pdb_analysis_summary"  # What we have
+      - "agent_assignments"  # Which agents do what (detailed)
+      - "execution_sequence"  # Step-by-step in prose
+      - "expected_outcomes"  # What each agent should produce
+      - "potential_issues"  # Known challenges
+      - "recommendations"  # Best practices
+    
+  # Context building
+  context:
+    tools_discovery: "dynamic"  # auto-discover from tools.py files
+    knowledge_sources:
+      - "protocols"  # MD protocols and workflows
+      - "force_fields"  # Force field documentation
+      - "tools_manuals"  # Software command references
+      - "md_fundamentals"  # MD theory and best practices
+    max_tools_chars: 8000  # Max characters for tools context
+    max_knowledge_chars: 8000  # Max characters for knowledge context
     
   # When to use fallback plan (keyword-based)
   fallback_triggers:

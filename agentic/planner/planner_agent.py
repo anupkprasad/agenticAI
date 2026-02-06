@@ -1,8 +1,10 @@
 """
-MD Workflow Planner Agent - Simplified Template-Based
+MD Workflow Planner Agent - LLM-Powered with Dynamic Tools & Knowledge
 
-Creates execution plans using templates from config.yaml.
-No complex LLM parsing - simple keyword matching and template expansion.
+Creates execution plans with access to:
+- Dynamic tool discovery from all agents
+- Knowledge base (research papers, protocols, manuals)
+- Field-specific expertise for detailed planning
 """
 import logging
 import yaml
@@ -12,14 +14,21 @@ from ..state import MDState
 from ..llm import LLMClient
 from ..utils import log_supervisor_routing, log_llm_interaction
 from ..programmer import MDProgrammer
+from .tools_registry import get_tools_registry
+from .knowledge_loader import get_knowledge_loader
 
 logger = logging.getLogger(__name__)
 
 
 class MDPlanner:
     """
-    Simplified template-based planner.
-    Uses keyword matching against config templates to create execution plans.
+    LLM-powered planner with dynamic tools and knowledge access.
+    
+    Creates detailed execution plans by:
+    1. Discovering available tools from all agents dynamically
+    2. Loading relevant knowledge from knowledge base
+    3. Using LLM to create context-aware execution plans
+    4. Providing high-level plans for field agents to structure
     """
     
     def __init__(self, llm_client: LLMClient, config_path: Optional[str] = None):
@@ -37,7 +46,47 @@ class MDPlanner:
         # Initialize programmer as internal component
         self.programmer = MDProgrammer(llm_client=self.llm)
         
-        logger.info("MD Planner initialized (template-based)")
+        # Initialize tools registry (dynamic tool discovery)
+        logger.info("Initializing tools registry...")
+        self.tools_registry = get_tools_registry()
+        
+        # Initialize knowledge loader
+        logger.info("Loading knowledge base...")
+        self.knowledge_loader = get_knowledge_loader()
+        
+        logger.info(f"MD Planner initialized with {len(self.tools_registry.tools)} tools and "
+                   f"{len(self.knowledge_loader.knowledge_docs)} knowledge documents")
+    
+    def _get_tools_context(self, agent_name: Optional[str] = None) -> str:
+        """
+        Get formatted tools context for LLM.
+        
+        Args:
+            agent_name: If specified, only get tools for this agent
+            
+        Returns:
+            Formatted tools description string
+        """
+        return self.tools_registry.get_tools_for_planner(agent_name)
+    
+    def _get_knowledge_context(self, 
+                               category: Optional[str] = None,
+                               max_chars: int = 8000) -> str:
+        """
+        Get formatted knowledge context for LLM.
+        
+        Args:
+            category: If specified, only get knowledge from this category
+            max_chars: Maximum characters to include in context
+            
+        Returns:
+            Formatted knowledge string
+        """
+        return self.knowledge_loader.get_knowledge_for_planner(category, max_chars)
+    
+    def _get_knowledge_summary(self) -> str:
+        """Get knowledge files summary (for logging only, not full content)."""
+        return self.knowledge_loader.get_knowledge_files_summary()
     
     def _load_config(self) -> Dict[str, Any]:
         """Load planner configuration from YAML."""
@@ -127,9 +176,234 @@ class MDPlanner:
         """
         Create detailed execution plan based on PDB analysis and component selection.
         
+        Uses dynamic tools knowledge and domain knowledge to create comprehensive plans.
+        """
+        logger.info("PLANNER: Creating plan with dynamic tools and knowledge")
+        
+        # Get available tools context
+        tools_context = self._get_tools_context()
+        
+        # Get relevant knowledge (protocols and force fields)
+        knowledge_context = self._get_knowledge_context(max_chars=6000)
+        
+        # Build LLM prompt with all context
+        planning_prompt = self._build_planning_prompt(
+            structured_prompt,
+            pdb_path,
+            pdb_analysis,
+            component_selection,
+            state,
+            tools_context,
+            knowledge_context
+        )
+        
+        # Call LLM to create plan
+        try:
+            logger.info("PLANNER: Calling LLM to create execution plan...")
+            response = self.llm.prompt(
+                prompt=planning_prompt,
+                temperature=0.2,
+                max_tokens=2000
+            )
+            
+            log_llm_interaction(
+                agent_name="planner.execution_planning",
+                prompt=planning_prompt,
+                response=response
+            )
+            
+            # Parse LLM response into structured plan
+            plan = self._parse_llm_plan_response(response, state)
+            
+        except Exception as e:
+            logger.error(f"PLANNER: LLM planning failed: {e}", exc_info=True)
+            logger.warning("PLANNER: Falling back to template-based planning")
+            plan = self._create_fallback_plan(
+                structured_prompt, pdb_path, pdb_analysis, component_selection, state
+            )
+        
+        return plan
+    
+    def _build_planning_prompt(
+        self,
+        structured_prompt: str,
+        pdb_path: str,
+        pdb_analysis: Dict[str, Any],
+        component_selection: Dict[str, Any],
+        state: MDState,
+        tools_context: str,
+        knowledge_context: str
+    ) -> str:
+        """Build comprehensive planning prompt for detailed natural language plans."""
+        
+        # Extract key information
+        force_field = state.get("force_field", "amber99sb-ildn")
+        water_model = state.get("water_model", "tip3p")
+        components = pdb_analysis.get("components_available", {})
+        
+        prompt = f"""You are an expert MD simulation workflow planner with deep knowledge of molecular dynamics protocols, force fields, and computational tools.
+
+**USER GOAL:**
+{structured_prompt}
+
+**PDB STRUCTURE ANALYSIS:**
+- File: {pdb_path}
+- Total atoms: {pdb_analysis.get('total_atoms', 'unknown')}
+- Total residues: {pdb_analysis.get('total_residues', 'unknown')}
+- Components present:
+  - Protein: {'Yes' if components.get('protein', False) else 'No'}
+  - Ligand: {'Yes' if components.get('ligand', False) else 'No'}
+  - Water: {'Yes' if components.get('water', False) else 'No'}
+  - Ions: {'Yes' if components.get('ions', False) else 'No'}
+  - Hydrogens: {'Yes' if components.get('hydrogens', False) else 'No'}
+
+**USER'S COMPONENT SELECTION:**
+- Protein: {'Include' if component_selection.get('protein', False) else 'Exclude'}
+- Ligand: {'Include' if component_selection.get('ligand', False) else 'Exclude'}
+- Water: {'Include' if component_selection.get('water', False) else 'Exclude'}
+- Ions: {'Include' if component_selection.get('ions', False) else 'Exclude'}
+- Specific chains: {component_selection.get('specific_chains', 'All chains')}
+
+**SIMULATION PARAMETERS:**
+- Force field: {force_field}
+- Water model: {water_model}
+
+**AVAILABLE TOOLS BY AGENT:**
+{tools_context}
+
+**DOMAIN KNOWLEDGE & BEST PRACTICES:**
+[Full knowledge content provided to LLM - {len(knowledge_context)} chars]
+
+Knowledge Files Available:
+{self._get_knowledge_summary()}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**YOUR TASK:**
+Create a DETAILED, COMPREHENSIVE execution plan in natural language. This plan will be given to specialized field agents (preprocessing, setup, HPC, analysis) who will create their own structured tool execution plans.
+
+Your plan should be:
+1. **High-level** - Describe WHAT needs to be done, not exact tool commands
+2. **Detailed** - Provide enough context for agents to understand requirements
+3. **Sequential** - Clearly indicate execution order and dependencies
+4. **Rationale-driven** - Explain WHY each step is important
+5. **Best-practice aware** - Reference protocols and domain knowledge
+6. **Practical** - Consider the available tools and common pitfalls
+
+**PLAN STRUCTURE (Natural Language, Detailed):**
+
+## 1. Goal Interpretation
+[Clearly state what the user wants to accomplish and any constraints]
+
+## 2. PDB Analysis Summary
+[Summarize the structure's composition and what needs to be prepared]
+
+## 3. Agent Assignments & Detailed Instructions
+
+### Preprocessing Agent (if needed)
+**Objective:** [What preprocessing must achieve]
+**Detailed Instructions:**
+- [Specific tasks in detail, e.g., "Remove all water molecules and heteroatoms except the ATP ligand in chain I"]
+- [Reference why, e.g., "to isolate the protein-ligand complex for force field topology generation"]
+**Available Tools:** [List relevant tools they can use]
+**Critical Considerations:** [Things they must watch for]
+**Expected Output:** [What files/data this produces]
+
+### Setup Agent (if needed)
+**Objective:** [What setup must achieve]
+**Detailed Instructions:**
+- [E.g., "Generate topology using AMBER99SB-ILDN for the protein and GAFF parameters for the ATP ligand"]
+- [E.g., "Create a cubic water box with 1.0 nm minimum distance, solvate with TIP3P water"]
+**Available Tools:** [List relevant tools]
+**Critical Considerations:** [E.g., "Ensure ligand parameters are compatible with protein force field"]
+**Expected Output:** [topology files, coordinate files, mdp files]
+
+### HPC Agent (if running simulation)
+[Similar detailed structure...]
+
+### Analysis Agent (if analyzing)
+[Similar detailed structure...]
+
+## 4. Execution Sequence
+[Describe step-by-step flow in prose, with dependencies clearly stated]
+
+## 5. Expected Outcomes
+[What files and data should exist after each agent completes]
+
+## 6. Potential Issues & Solutions
+[Known challenges and how agents should handle them]
+
+## 7. Recommendations
+[Best practices and optional optimizations]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Write the detailed execution plan now:"""
+        
+        return prompt
+    
+    def _parse_llm_plan_response(self, response: str, state: MDState) -> Dict[str, Any]:
+        """Parse LLM natural language response into plan structure.
+        
+        Extracts key information from prose plans:
+        - Which agents are assigned tasks
+        - Execution sequence/dependencies
+        - Key objectives and considerations
+        
+        Field agents will receive the full natural language plan and create
+        their own detailed tool execution plans.
+        """
+        import re
+        
+        logger.info("PLANNER: Parsing natural language execution plan")
+        
+        # Extract which agents are mentioned
+        agent_mentions = {
+            "preprocessing_agent": bool(re.search(r'(?i)preprocessing\s+agent', response)),
+            "setup_agent": bool(re.search(r'(?i)setup\s+agent', response)),
+            "hpc_agent": bool(re.search(r'(?i)hpc\s+agent', response)),
+            "analysis_agent": bool(re.search(r'(?i)analysis\s+agent', response))
+        }
+        
+        # Build lightweight plan structure for routing
+        steps = []
+        step_num = 1
+        
+        for agent_name, is_mentioned in agent_mentions.items():
+            if is_mentioned:
+                steps.append({
+                    "step_number": step_num,
+                    "agent": agent_name,
+                    "type": "natural_language",  # Signal to field agents
+                    "dependencies": [step_num - 1] if step_num > 1 else []
+                })
+                step_num += 1
+        
+        plan = {
+            "title": "Detailed Natural Language Execution Plan",
+            "format": "natural_language",
+            "full_plan": response,  # Full prose plan for field agents
+            "agent_sequence": [s["agent"] for s in steps],
+            "steps": steps
+        }
+        
+        logger.info(f"PLANNER: Detected {len(steps)} agents in execution sequence: {plan['agent_sequence']}")
+        return plan
+    
+    def _create_fallback_plan(
+        self,
+        structured_prompt: str,
+        pdb_path: str,
+        pdb_analysis: Dict[str, Any],
+        component_selection: Dict[str, Any],
+        state: MDState
+    ) -> Dict[str, Any]:
+        """
+        Fallback template-based planning when LLM is unavailable.
+        
         This creates dependency-aware plans with clear inputs/outputs for each step.
         """
-        logger.info("PLANNER: Creating plan from PDB analysis")
+        logger.info("PLANNER: Creating fallback plan from PDB analysis")
         
         plan_steps = []
         step_number = 1
