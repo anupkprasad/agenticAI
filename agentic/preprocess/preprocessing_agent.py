@@ -63,7 +63,29 @@ class PreprocessingAgent:
         Main preprocessing node - entry point from workflow
         Orchestrates the entire preprocessing pipeline
         """
-        log_agent_start("preprocessing", "PDB Preprocessing with LLM Tool Calling", state)
+        # Check if we have planner instructions
+        execution_plan = state.get("execution_plan", {})
+        has_planner_instructions = execution_plan.get("format") == "natural_language"
+        
+        input_summary = {
+            "raw_pdb": state.get("raw_pdb"),
+            "force_field": state.get("force_field"),
+            "water_model": state.get("water_model")
+        }
+        
+        if has_planner_instructions:
+            # Extract just the preprocessing agent section from the full plan
+            full_plan = execution_plan.get("full_plan", "")
+            preprocessing_section = self._extract_agent_instructions(full_plan, "Preprocessing Agent")
+            if preprocessing_section:
+                input_summary["planner_instructions"] = preprocessing_section
+            else:
+                input_summary["planner_instructions"] = "[Natural language plan from planner - see above]"
+        else:
+            # Fallback to user goal if no planner instructions
+            input_summary["user_goal"] = state.get("user_goal")
+        
+        log_agent_start("preprocessing", "PDB Preprocessing with LLM Tool Calling", input_summary)
         
         try:
             # Initialize tool executor with agent-specific subdirectory
@@ -71,10 +93,11 @@ class PreprocessingAgent:
             preprocess_dir = str(Path(base_working_dir) / "preprocess")
             Path(preprocess_dir).mkdir(parents=True, exist_ok=True)
             
-            self.tool_executor = PreprocessingToolExecutor(preprocess_dir, self.config)
-            
-            # Store preprocess directory in state for other agents
+            # CRITICAL: Set preprocess_directory in state BEFORE creating tool executor
+            # This allows tools to access the directory during execution
             state["preprocess_directory"] = preprocess_dir
+            
+            self.tool_executor = PreprocessingToolExecutor(preprocess_dir, self.config)
             
             # Prepare agent input from state
             agent_input = self._prepare_agent_input(state)
@@ -106,10 +129,49 @@ class PreprocessingAgent:
         
         return state
     
+    def _extract_agent_instructions(self, full_plan: str, agent_name: str) -> Optional[str]:
+        """
+        Extract agent-specific detailed instructions from planner's natural language plan.
+        
+        Args:
+            full_plan: Complete natural language plan from planner
+            agent_name: Name of the agent section to extract (e.g., "Preprocessing Agent")
+            
+        Returns:
+            Extracted instructions for this specific agent, or None if not found
+        """
+        import re
+        
+        # Try to find the agent section (supports various heading formats)
+        patterns = [
+            rf'###\s*{agent_name}.*?\n(.*?)(?=###|\Z)',  # Markdown ### heading
+            rf'##\s*{agent_name}.*?\n(.*?)(?=##|\Z)',    # Markdown ## heading  
+            rf'\*\*{agent_name}\*\*.*?\n(.*?)(?=\*\*[A-Z]|\Z)',  # Bold heading
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, full_plan, re.DOTALL | re.IGNORECASE)
+            if match:
+                instructions = match.group(1).strip()
+                logger.info(f"Extracted {len(instructions)} chars of detailed instructions for {agent_name}")
+                return instructions
+        
+        logger.warning(f"Could not find specific instructions for {agent_name} in natural language plan")
+        return None
+    
     def _prepare_agent_input(self, state: MDState) -> PreprocessingAgentInput:
         """Prepare structured input for preprocessing from workflow state"""
         defaults = self.config.get("defaults", {})
         
+        # Check if planner provided detailed instructions for this agent
+        execution_plan = state.get("execution_plan", {})
+        planner_instructions = None
+        
+        if execution_plan.get("format") == "natural_language":
+            # Extract preprocessing-specific instructions from natural language plan
+            full_plan = execution_plan.get("full_plan", "")
+            planner_instructions = self._extract_agent_instructions(full_plan, "Preprocessing Agent")
+            
         return PreprocessingAgentInput(
             pdb_path=state.get("raw_pdb", ""),
             working_directory=state.get("working_directory", "working_dir"),
@@ -118,7 +180,7 @@ class PreprocessingAgent:
             remove_waters=state.get("remove_waters", defaults.get("remove_waters", True)),
             add_hydrogens=state.get("add_hydrogens", defaults.get("add_hydrogens", True)),
             user_goal=state.get("user_goal", ""),
-            additional_instructions=state.get("preprocessing_instructions", None)
+            additional_instructions=planner_instructions or state.get("preprocessing_instructions", None)
         )
     
     def _run_preprocessing_workflow(self, agent_input: PreprocessingAgentInput, 
@@ -223,6 +285,92 @@ class PreprocessingAgent:
     
     def _build_planning_prompt(self, agent_input: PreprocessingAgentInput, 
                                analysis: Dict[str, Any]) -> str:
+        """Build LLM planning prompt - use planner's detailed instructions if available"""
+        
+        # Check if we have detailed instructions from planner
+        if agent_input.additional_instructions:
+            logger.info("Using planner's detailed instructions for preprocessing")
+            return self._build_prompt_from_planner_instructions(
+                agent_input, analysis, agent_input.additional_instructions
+            )
+        
+        # Otherwise use standard config-based prompt
+        return self._build_standard_planning_prompt(agent_input, analysis)
+    
+    def _build_prompt_from_planner_instructions(self, agent_input: PreprocessingAgentInput,
+                                                analysis: Dict[str, Any],
+                                                planner_instructions: str) -> str:
+        """Build prompt using planner's detailed natural language instructions"""
+        
+        # Get available tools for reference
+        tool_metadata = get_tool_metadata()
+        tools_list = []
+        
+        for tool_info in tool_metadata.values():
+            tool_entry = f"• {tool_info['name']}\n"
+            tool_entry += f"  Description: {tool_info['description']}\n"
+            
+            if tool_info['args']:
+                tool_entry += "  Arguments:\n"
+                for arg_name, arg_details in tool_info['args'].items():
+                    required = "required" if arg_details['required'] else "optional"
+                    arg_type = arg_details['type']
+                    tool_entry += f"    - {arg_name} ({arg_type}, {required})\n"
+            
+            tools_list.append(tool_entry)
+        
+        tools_list_str = "\n".join(tools_list)
+        
+        # Format analysis
+        analysis_str = "\n".join([
+            f"- Atoms: {analysis.get('atom_count', 'unknown')}",
+            f"- Chains: {analysis.get('chain_ids', [])}",
+            f"- Has Waters: {analysis.get('has_waters', False)}",
+            f"- Heteroatoms: {analysis.get('heteroatoms', [])}",
+            f"- Alternate Locations: {analysis.get('alternate_locations', False)}"
+        ])
+        
+        return f"""You are a molecular dynamics preprocessing expert executing a detailed plan from the workflow planner.
+
+**PDB Information:**
+- File: {agent_input.pdb_path}
+- Force Field: {agent_input.force_field}
+- Water Model: {agent_input.water_model}
+
+**Structure Analysis:**
+{analysis_str}
+
+**DETAILED INSTRUCTIONS FROM PLANNER:**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{planner_instructions}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**Available Tools:**
+{tools_list_str}
+
+Your task: Create a detailed, step-by-step execution plan that follows the planner's instructions above.
+The plan should specify which tools to call and in what order to achieve the planner's objectives.
+
+Output as JSON with this structure:
+{{
+  "reasoning": "How you'll implement the planner's instructions",
+  "overview": "High-level summary",
+  "steps": [
+    {{
+      "name": "step name",
+      "description": "what it does",
+      "tool_name": "tool to call",
+      "tool_params": {{"param": "value"}},
+      "reason": "why it's needed per planner's instructions"
+    }}
+  ],
+  "potential_issues": ["issue1"],
+  "recommendations": ["rec1"]
+}}
+"""
+    
+    def _build_standard_planning_prompt(self, agent_input: PreprocessingAgentInput,
+                                        analysis: Dict[str, Any]) -> str:
         """Build LLM planning prompt from config template using dynamic tool metadata"""
         config_prompt = self.config.get("llm", {}).get("planning_prompt_template", "")
         
@@ -385,6 +533,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 plan.steps = plan.steps[:max_steps]
             
             for i, step in enumerate(plan.steps):
+                # Log step start
                 log_agent_action("preprocessing", f"Executing step {i+1}/{len(plan.steps)}", {
                     "step": step.name,
                     "tool": step.tool_name
@@ -454,6 +603,13 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 if result and result.get("success"):
                     execution_log.append(f"✓ Success: {result.get('message', 'Step completed')}")
                     
+                    # Log step completion status
+                    log_agent_action("preprocessing", f"Step {i+1}/{len(plan.steps)} completed", {
+                        "step": step.name,
+                        "tool": step.tool_name,
+                        "status": "✅ SUCCESS"
+                    })
+                    
                     # Track output files for chaining
                     if "output_file" in result:
                         current_pdb = result["output_file"]
@@ -469,6 +625,14 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     error_msg = result.get('error', 'Failed to execute') if result else 'Tool execution failed'
                     execution_log.append(f"✗ Failed after {retry_count} attempts: {error_msg}")
                     issues.append(f"{step.name}: {error_msg}")
+                    
+                    # Log step failure status
+                    log_agent_action("preprocessing", f"Step {i+1}/{len(plan.steps)} failed", {
+                        "step": step.name,
+                        "tool": step.tool_name,
+                        "status": "❌ FAILED",
+                        "error": error_msg
+                    })
                     
                     # Fail fast option
                     if fail_fast:

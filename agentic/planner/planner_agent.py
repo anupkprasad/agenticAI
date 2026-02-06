@@ -133,22 +133,37 @@ class MDPlanner:
         
         # Log detailed plan to conversation log
         from ..utils import log_agent_action
-        plan_details = {
-            "title": plan.get("title", "N/A"),
-            "summary": plan.get("summary", "N/A"),
-            "total_steps": num_steps,
-            "steps": []
-        }
         
-        for step in plan.get("steps", []):
-            plan_details["steps"].append({
-                "number": step.get("step_number", "?"),
-                "name": step.get("name", "Unnamed"),
-                "agent": step.get("agent", "unknown"),
-                "description": step.get("description", "")[:100],
-                "inputs": step.get("inputs", {}),
-                "expected_outputs": step.get("expected_outputs", [])
-            })
+        # Check if this is a natural language plan
+        if plan.get("format") == "natural_language":
+            # For NL plans, log the agent sequence and a preview of the plan
+            plan_preview = plan.get("full_plan", "")[:500]  # First 500 chars
+            plan_details = {
+                "format": "natural_language",
+                "title": plan.get("title", "N/A"),
+                "agent_sequence": plan.get("agent_sequence", []),
+                "total_agents": len(plan.get("agent_sequence", [])),
+                "plan_preview": plan_preview + ("..." if len(plan.get("full_plan", "")) > 500 else "")
+            }
+        else:
+            # Legacy structured format
+            plan_details = {
+                "format": "structured",
+                "title": plan.get("title", "N/A"),
+                "summary": plan.get("summary", "N/A"),
+                "total_steps": num_steps,
+                "steps": []
+            }
+            
+            for step in plan.get("steps", []):
+                plan_details["steps"].append({
+                    "number": step.get("step_number", "?"),
+                    "name": step.get("name", "Unnamed"),
+                    "agent": step.get("agent", "unknown"),
+                    "description": step.get("description", "")[:100],
+                    "inputs": step.get("inputs", {}),
+                    "expected_outputs": step.get("expected_outputs", [])
+                })
         
         log_agent_action(
             agent_name="planner",

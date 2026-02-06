@@ -119,11 +119,21 @@ class ConversationLogger:
         self.logger.info(f"   Input Data Summary:")
         
         # Log relevant input fields
-        relevant_fields = ['raw_pdb', 'cleaned_pdb', 'user_goal', 'force_field', 'water_model']
+        # If planner instructions available, show that instead of user_goal
+        if input_data.get('planner_instructions'):
+            relevant_fields = ['raw_pdb', 'cleaned_pdb', 'planner_instructions', 'force_field', 'water_model']
+        else:
+            relevant_fields = ['raw_pdb', 'cleaned_pdb', 'user_goal', 'force_field', 'water_model']
+        
         for field in relevant_fields:
             value = input_data.get(field)
             if value:
-                self.logger.info(f"     • {field}: {value}")
+                # Truncate long planner instructions for log readability
+                if field == 'planner_instructions' and isinstance(value, str) and len(value) > 200:
+                    display_value = value[:200] + "... [truncated, see full plan above]"
+                else:
+                    display_value = value
+                self.logger.info(f"     • {field}: {display_value}")
         self.logger.info("")
         self._flush()
     

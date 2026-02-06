@@ -36,26 +36,32 @@ defaults:
 # Standard preprocessing workflows
 workflows:
   basic:
-    description: "Basic PDB cleaning"
+    description: "Basic protein extraction and hydrogen addition"
     steps:
-      - remove_waters
+      - analyze_pdb
+      - separate_protein_ligand
       - add_hydrogens
       - validate_structure
 
   full:
-    description: "Complete preprocessing for MD"
+    description: "Complete preprocessing for MD (protein extraction + hydrogens)"
     steps:
       - analyze_pdb
-      - remove_waters
-      - handle_alternate_locations
+      - separate_protein_ligand
       - add_hydrogens
-      - assign_protonation
       - validate_structure
 
   minimal:
-    description: "Minimal processing for clean PDB"
+    description: "Minimal analysis and validation only"
     steps:
       - analyze_pdb
+      - validate_structure
+  
+  protein_only:
+    description: "Extract protein and add hydrogens"
+    steps:
+      - separate_protein_ligand
+      - add_hydrogens
       - validate_structure
 
 # Force fields supported
@@ -82,13 +88,13 @@ water_models:
   - name: "spce"
     description: "SPC/E 3-site water model"
 
-# Output file naming conventions
+# Output file naming conventions (based on actual tool outputs)
 output_files:
   cleaned_pdb: "{basename}_cleaned.pdb"
-  no_waters: "{basename}_nowat.pdb"
-  no_altloc: "{basename}_noalt.pdb"
+  protein_only: "{basename}_protein.pdb"
+  ligand_only: "{basename}_ligand.pdb"
   with_hydrogens: "{basename}_h.pdb"
-  protonated: "{basename}_prot.pdb"
+  validated: "{basename}_validated.pdb"
 
 # LLM prompting configuration
 llm:
