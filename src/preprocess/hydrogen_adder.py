@@ -131,23 +131,25 @@ def _add_hydrogens_reduce(pdb_file: str, output_file: str) -> Dict[str, Any]:
         }
     
     try:
-        cmd = ["reduce", "-build", str(pdb_file)]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        # Use shell redirection as reduce outputs PDB to stdout
+        # Command: reduce -BUILD input.pdb > output.pdb
+        cmd = f"reduce -BUILD {pdb_file} > {output_file}"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
         
-        if result.returncode == 0:
-            with open(output_file, 'w') as f:
-                f.write(result.stdout)
+        # Check if output file was created successfully
+        if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+            atom_count = _count_atoms_in_pdb(output_file)
             return {
                 "success": True,
                 "output_file": output_file,
                 "method": "reduce",
                 "molecule_type": "protein",
-                "message": "Hydrogens added using reduce (protein optimized)"
+                "message": f"Hydrogens added using reduce (protein optimized, {atom_count} atoms total)"
             }
         else:
             return {
                 "success": False,
-                "error": f"reduce failed: {result.stderr}",
+                "error": f"reduce failed to create output file. Exit code: {result.returncode}, stderr: {result.stderr[:500]}",
                 "warning": "Try obabel method instead"
             }
     except subprocess.TimeoutExpired:
@@ -291,3 +293,12 @@ def _parse_pdb2pqr_output(stdout: str) -> list:
         if 'protonation' in line.lower() or 'titration' in line.lower():
             changes.append(line.strip())
     return changes
+
+
+def _count_atoms_in_pdb(pdb_file: str) -> int:
+    """Count total atoms in PDB file."""
+    try:
+        with open(pdb_file, 'r') as f:
+            return sum(1 for line in f if line.startswith(('ATOM', 'HETATM')))
+    except:
+        return 0

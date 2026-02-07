@@ -49,7 +49,9 @@ def separate_protein_ligand(
         
         # Select protein and ligand components
         protein = u.select_atoms("protein")
-        ligand = u.select_atoms("not protein and not resname HOH and not ion")
+        # Select non-protein, non-water atoms (ligands, cofactors, ions)
+        # Use 'not resname' instead of 'not ion' which isn't valid MDAnalysis syntax
+        ligand = u.select_atoms("not protein and not resname HOH TIP3 WAT SOL")
         
         # Check if components were found
         if len(protein) == 0:

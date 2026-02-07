@@ -348,6 +348,12 @@ class PreprocessingAgent:
 **Available Tools:**
 {tools_list_str}
 
+**CRITICAL INSTRUCTIONS:**
+- You MUST ONLY use the tools listed above - do NOT invent or suggest non-existent tools
+- If a required capability is missing, use the available tools creatively or skip that step
+- Every "tool_name" in your plan must match exactly one of the tool names listed above
+- Do NOT create placeholder tools like "custom_file_filter" or similar
+
 Your task: Create a detailed, step-by-step execution plan that follows the planner's instructions above.
 The plan should specify which tools to call and in what order to achieve the planner's objectives.
 
@@ -424,6 +430,8 @@ Analysis: {analysis_str}
 
 Available tools:
 {tools_list_str}
+
+**CRITICAL: You MUST ONLY use the tools listed above. Do NOT invent or suggest non-existent tools.**
 
 Return JSON with: reasoning, overview, steps (name, description, tool_name, tool_params, reason)
 """
@@ -570,11 +578,9 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     base_name = Path(input_file).stem
                     # Generate output filename based on tool
                     if step.tool_name == "separate_protein_ligand":
-                        # Special handling for separation tool
-                        if "protein_output" not in tool_params:
-                            tool_params["protein_output"] = str(Path(self.tool_executor.working_dir) / f"{base_name}_protein.pdb")
-                        if "ligand_output" not in tool_params:
-                            tool_params["ligand_output"] = str(Path(self.tool_executor.working_dir) / f"{base_name}_ligand.pdb")
+                        # Special handling for separation tool - ALWAYS override to preprocess dir
+                        tool_params["protein_output"] = str(Path(self.tool_executor.working_dir) / f"{base_name}_protein.pdb")
+                        tool_params["ligand_output"] = str(Path(self.tool_executor.working_dir) / f"{base_name}_ligand.pdb")
                     else:
                         # Regular tools with single output
                         suffix = "_h"  # add_hydrogens
@@ -603,21 +609,32 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 if result and result.get("success"):
                     execution_log.append(f"✓ Success: {result.get('message', 'Step completed')}")
                     
-                    # Log step completion status
-                    log_agent_action("preprocessing", f"Step {i+1}/{len(plan.steps)} completed", {
-                        "step": step.name,
-                        "tool": step.tool_name,
-                        "status": "✅ SUCCESS"
-                    })
-                    
-                    # Track output files for chaining
+                    # Collect output files for logging
+                    output_files = []
                     if "output_file" in result:
+                        output_files.append(result["output_file"])
                         current_pdb = result["output_file"]
                         generated_files[result["output_file"]] = step.description
-                    
+                    if "protein_file" in result:
+                        output_files.append(result["protein_file"])
+                        current_pdb = result["protein_file"]  # Use protein for chaining
+                        generated_files[result["protein_file"]] = "Protein component"
+                    if "ligand_file" in result:
+                        output_files.append(result["ligand_file"])
+                        generated_files[result["ligand_file"]] = "Ligand component"
                     if "topology_file" in result:
                         topology_file = result["topology_file"]
                         generated_files[topology_file] = "GROMACS topology file"
+                    
+                    # Log step completion status with output files
+                    log_data = {
+                        "step": step.name,
+                        "tool": step.tool_name,
+                        "status": "✅ SUCCESS"
+                    }
+                    if output_files:
+                        log_data["output_files"] = output_files
+                    log_agent_action("preprocessing", f"Step {i+1}/{len(plan.steps)} completed", log_data)
                     
                     if result.get("warning"):
                         warnings.append(f"{step.name}: {result['warning']}")
