@@ -10,7 +10,7 @@ from pathlib import Path
 from src.utils.pdb_analyzer import analyze_pdb
 from src.preprocess.hydrogen_adder import add_hydrogens
 from src.preprocess.structure_validator import validate_structure
-from src.preprocess.complex_separator import separate_protein_ligand
+from src.preprocess.complex_separator import separate_protein_ligand, separate_complex_components
 
 # Export tool functions for direct access
 __all__ = [
@@ -19,6 +19,7 @@ __all__ = [
     "add_hydrogens",
     "validate_structure",
     "separate_protein_ligand",
+    "separate_complex_components",
     "get_preprocessing_tools",
     "get_tool_metadata",
 ]
@@ -36,6 +37,7 @@ def get_preprocessing_tools() -> list:
     """
     return [
         analyze_pdb,
+        separate_complex_components,
         separate_protein_ligand,
         add_hydrogens,
         validate_structure,
@@ -111,6 +113,7 @@ class PreprocessingToolExecutor:
         """
         tool_map = {
             "analyze_pdb": analyze_pdb,
+            "separate_complex_components": separate_complex_components,
             "separate_protein_ligand": separate_protein_ligand,
             "add_hydrogens": add_hydrogens,
             "validate_structure": validate_structure,
@@ -126,16 +129,28 @@ class PreprocessingToolExecutor:
         try:
             # StructuredTool objects need .func or .invoke() to execute
             if hasattr(tool_func, 'func'):
-                # @tool decorator wraps function in StructuredTool
-                return tool_func.func(**params)
+                # @tool decorator wraps function in StructuredTool - call .func directly
+                result = tool_func.func(**params)
             elif hasattr(tool_func, 'invoke'):
-                # Alternative: use LangChain's invoke method
-                return tool_func.invoke(params)
+                # Alternative: use LangChain's invoke method (passes dict)
+                result = tool_func.invoke(params)
             else:
                 # Direct function call (backward compatibility)
-                return tool_func(**params)
+                result = tool_func(**params)
+            
+            # Ensure result is a dict with at least 'success' key
+            if not isinstance(result, dict):
+                return {
+                    "success": False,
+                    "error": f"Tool {tool_name} returned non-dict result: {type(result)}"
+                }
+            
+            return result
+            
         except Exception as e:
             self.logger.error(f"Tool execution failed: {tool_name}: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 "success": False,
                 "error": str(e)
@@ -146,6 +161,16 @@ class PreprocessingToolExecutor:
     def analyze_pdb(self, pdb_file: str, **kwargs) -> Dict[str, Any]:
         """Analyze PDB file structure - delegates to @tool function"""
         return analyze_pdb.func(pdb_file=pdb_file, **kwargs)
+    
+    def separate_complex_components(self, pdb_file: str, output_dir: Optional[str] = None,
+                                   protein_output: Optional[str] = None,
+                                   ligand_output: Optional[str] = None,
+                                   ion_output: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+        """Separate protein, ligand, and ion components - delegates to @tool function"""
+        return separate_complex_components.func(pdb_file=pdb_file, output_dir=output_dir,
+                                               protein_output=protein_output,
+                                               ligand_output=ligand_output,
+                                               ion_output=ion_output, **kwargs)
     
     def separate_protein_ligand(self, pdb_file: str, protein_output: Optional[str] = None,
                                ligand_output: Optional[str] = None, **kwargs) -> Dict[str, Any]:
