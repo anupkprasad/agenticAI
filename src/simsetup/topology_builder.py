@@ -14,7 +14,8 @@ def build_topology(
     force_field: str = "amber99sb-ildn",
     water_model: str = "tip3p",
     output_file: Optional[str] = None,
-    topology_file: Optional[str] = None
+    topology_file: Optional[str] = None,
+    working_dir: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Generate GROMACS topology and coordinate files using pdb2gmx.
@@ -25,11 +26,15 @@ def build_topology(
         water_model: Water model to use (default: tip3p)
         output_file: Output coordinate file (.gro)
         topology_file: Output topology file (.top)
+        working_dir: Directory for output files and command execution
         
     Returns:
         Dict with success status, output files, and force field info
     """
-    working_dir = Path(pdb_file).parent
+    if working_dir:
+        working_dir = Path(working_dir)
+    else:
+        working_dir = Path(pdb_file).parent
     
     if not output_file:
         output_file = str(working_dir / "processed.gro")

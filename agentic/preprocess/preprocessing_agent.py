@@ -138,26 +138,37 @@ class PreprocessingAgent:
             agent_name: Name of the agent section to extract (e.g., "Preprocessing Agent")
             
         Returns:
-            Extracted instructions for this specific agent, or None if not found
+            Extracted instructions for this specific agent, or full plan as fallback
         """
         import re
         
-        # Try to find the agent section (supports various heading formats)
+        # Try multiple patterns to find the agent section
         patterns = [
+            # Exact match patterns
             rf'###\s*{agent_name}.*?\n(.*?)(?=###|\Z)',  # Markdown ### heading
             rf'##\s*{agent_name}.*?\n(.*?)(?=##|\Z)',    # Markdown ## heading  
             rf'\*\*{agent_name}\*\*.*?\n(.*?)(?=\*\*[A-Z]|\Z)',  # Bold heading
+            # Fuzzy match patterns (allow for variations)
+            rf'###\s*(?:PDB\s*)?Preprocess.*?Agent.*?\n(.*?)(?=###|\Z)',  # Flexible preprocessing heading
+            rf'##\s*(?:PDB\s*)?Preprocess.*?Agent.*?\n(.*?)(?=##|\Z)',
+            # Section number patterns
+            rf'\d+\..*?(?:PDB\s*)?Preprocess.*?Agent.*?\n(.*?)(?=\d+\.|\Z)',
         ]
         
         for pattern in patterns:
             match = re.search(pattern, full_plan, re.DOTALL | re.IGNORECASE)
             if match:
                 instructions = match.group(1).strip()
-                logger.info(f"Extracted {len(instructions)} chars of detailed instructions for {agent_name}")
-                return instructions
+                if len(instructions) > 50:  # Ensure we got substantial content
+                    logger.info(f"Extracted {len(instructions)} chars of detailed instructions for {agent_name}")
+                    return instructions
         
-        logger.warning(f"Could not find specific instructions for {agent_name} in natural language plan")
-        return None
+        # Fallback: Use full plan if no specific section found
+        logger.info(f"Could not find specific section for {agent_name}, using full plan as context")
+        logger.info(f"Full plan length: {len(full_plan)} chars")
+        
+        # Return full plan so agent still has context
+        return full_plan
     
     def _prepare_agent_input(self, state: MDState) -> PreprocessingAgentInput:
         """Prepare structured input for preprocessing from workflow state"""
@@ -203,12 +214,56 @@ class PreprocessingAgent:
             # Step 2: Execute plan using tool executor
             result = self._execute_plan(agent_input, plan, state)
             
-            # Step 3: Prepare supervisor update
+            # Step 3: Register all created files in file_registry
+            file_registry = state.get("file_registry", {})
+            
+            # Register protein file
+            if result.cleaned_pdb:
+                file_registry[result.cleaned_pdb] = {
+                    "type": "protein",
+                    "description": "Preprocessed protein structure with hydrogens",
+                    "stage": "preprocess",
+                    "component": "protein"
+                }
+            
+            # Register all generated files from preprocessing
+            for file_path, description in result.generated_files.items():
+                if file_path == result.cleaned_pdb:
+                    continue  # Already registered above
+                
+                filename = Path(file_path).name
+                # Determine component type from filename
+                if "ligand" in filename.lower():
+                    file_registry[file_path] = {
+                        "type": "ligand",
+                        "description": description or "Preprocessed ligand structure",
+                        "stage": "preprocess",
+                        "component": "ligand"
+                    }
+                elif "ion" in filename.lower():
+                    file_registry[file_path] = {
+                        "type": "ion",
+                        "description": description or "Preprocessed ion structure",
+                        "stage": "preprocess",
+                        "component": "ion"
+                    }
+                else:
+                    # Generic file registration
+                    file_registry[file_path] = {
+                        "type": "other",
+                        "description": description or "Preprocessed file",
+                        "stage": "preprocess",
+                        "component": "unknown"
+                    }
+            
+            # Write back modified file_registry to state
+            state["file_registry"] = file_registry
+            
+            # Step 4: Prepare supervisor update - preprocessing outputs cleaned PDB and file registry
             supervisor_update = {
                 "cleaned_pdb": result.cleaned_pdb,
-                "topology": result.topology,
-                "processed_coordinates": result.processed_coordinates,
-                "preprocessing_report": result.report
+                "preprocessing_report": result.report,
+                "file_registry": file_registry
             }
             
             return PreprocessingAgentOutput(
@@ -348,11 +403,20 @@ class PreprocessingAgent:
 **Available Tools:**
 {tools_list_str}
 
+**CRITICAL FILE PATH RULES:**
+- Use ONLY filenames (e.g., "3.pdb", "protein_h.pdb") - NO directory paths!
+- DO NOT include paths like "working_dir/separated/...", "working_dir/preprocess/...", etc.
+- The system automatically handles directories - you only specify filenames
+- Example CORRECT: "pdb_file": "protein.pdb"
+- Example WRONG: "pdb_file": "working_dir/separated/protein.pdb"
+- If planner mentions paths like "working_dir/separated/protein.pdb", extract ONLY "protein.pdb"
+
 **CRITICAL INSTRUCTIONS:**
 - You MUST ONLY use the tools listed above - do NOT invent or suggest non-existent tools
 - If a required capability is missing, use the available tools creatively or skip that step
 - Every "tool_name" in your plan must match exactly one of the tool names listed above
-- Do NOT create placeholder tools like "custom_file_filter" or similar
+- Do NOT create placeholder tools like "custom_file_filter", "none", or "manual"
+- Do NOT add file concatenation/merging steps - that's handled by the Setup Agent
 
 Your task: Create a detailed, step-by-step execution plan that follows the planner's instructions above.
 The plan should specify which tools to call and in what order to achieve the planner's objectives.
@@ -520,6 +584,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         issues = []
         warnings = []
         generated_files = {}
+        ion_files = []  # Track ion files to skip hydrogen addition
         
         current_pdb = agent_input.pdb_path
         topology_file = None
@@ -555,37 +620,88 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 # Prepare tool parameters
                 tool_params = dict(step.tool_params) if step.tool_params else {}
                 
-                # Auto-inject pdb_file for tools that need it
-                if "pdb_file" not in tool_params and step.tool_name in [
-                    "add_hydrogens", "validate_structure", "separate_protein_ligand"
-                ]:
-                    tool_params["pdb_file"] = current_pdb
+                # HARDCODE: Strip any LLM-generated output directory parameters
+                # All preprocessing outputs MUST go to working_dir/preprocess/
+                for unwanted_key in ["output_dir", "output_file", "protein_output", "ligand_output", "ion_output"]:
+                    if unwanted_key in tool_params:
+                        del tool_params[unwanted_key]
                 
-                # Update chained input file - handle both explicit and implicit chaining
+                # HARDCODE: Normalize input paths - convert LLM-generated paths to agent directory
+                # LLM may specify "working_dir/3.pdb" or just "3.pdb" - we need full path in preprocess dir
                 if "pdb_file" in tool_params:
-                    specified_pdb = tool_params["pdb_file"]
-                    # If the specified file doesn't exist, use current_pdb (the actual last output)
-                    if not os.path.exists(specified_pdb) and current_pdb != agent_input.pdb_path:
-                        tool_params["pdb_file"] = current_pdb
-                    # Or if it explicitly matches the original input but we've processed files
-                    elif specified_pdb == agent_input.pdb_path and current_pdb != agent_input.pdb_path:
-                        tool_params["pdb_file"] = current_pdb
+                    pdb_value = tool_params["pdb_file"]
+                    # Extract just the filename (strip any directory prefix LLM added)
+                    if isinstance(pdb_value, str):
+                        filename = Path(pdb_value).name  # Gets just "3.pdb" from "working_dir/3.pdb"
+                        # Check if file exists in preprocess directory
+                        preprocess_path = Path(self.tool_executor.working_dir) / filename
+                        if preprocess_path.exists():
+                            tool_params["pdb_file"] = str(preprocess_path)
+                        elif current_pdb and os.path.exists(current_pdb):
+                            # Fallback to chained current_pdb if specified file not found
+                            tool_params["pdb_file"] = current_pdb
+                        else:
+                            # Try original input path as last resort
+                            tool_params["pdb_file"] = str(preprocess_path)  # Use preprocess dir anyway
+                else:
+                    # Auto-inject pdb_file for tools that need it
+                    if step.tool_name in [
+                        "add_hydrogens", "validate_structure", "separate_protein_ligand", "separate_complex_components"
+                    ]:
+                        tool_params["pdb_file"] = current_pdb if current_pdb else agent_input.pdb_path
                 
-                # Override output_file to ensure files are written to preprocess directory
+                # Override output paths to ensure ALL files go to preprocess directory
                 # This fixes LLM-generated plans that specify working_dir paths
-                if step.tool_name in ["add_hydrogens", "separate_protein_ligand"]:
+                if step.tool_name in ["add_hydrogens", "separate_protein_ligand", "separate_complex_components"]:
                     input_file = tool_params.get("pdb_file", current_pdb)
                     base_name = Path(input_file).stem
+                    
+                    # Remove existing _h suffixes to prevent repeated _h_h_h patterns
+                    while base_name.endswith("_h"):
+                        base_name = base_name[:-2]  # Remove "_h"
+                    
                     # Generate output filename based on tool
-                    if step.tool_name == "separate_protein_ligand":
-                        # Special handling for separation tool - ALWAYS override to preprocess dir
+                    if step.tool_name in ["separate_protein_ligand", "separate_complex_components"]:
+                        # Separation tools - ALWAYS set output_dir to preprocess directory
+                        tool_params["output_dir"] = str(self.tool_executor.working_dir)
+                        # Also explicitly set output paths to prevent any other directory usage
                         tool_params["protein_output"] = str(Path(self.tool_executor.working_dir) / f"{base_name}_protein.pdb")
                         tool_params["ligand_output"] = str(Path(self.tool_executor.working_dir) / f"{base_name}_ligand.pdb")
+                        if step.tool_name == "separate_complex_components":
+                            tool_params["ion_output"] = str(Path(self.tool_executor.working_dir) / f"{base_name}_ions.pdb")
                     else:
-                        # Regular tools with single output
-                        suffix = "_h"  # add_hydrogens
+                        # add_hydrogens tool - only add _h suffix once
+                        suffix = "_h"
                         output_file = str(Path(self.tool_executor.working_dir) / f"{base_name}{suffix}.pdb")
                         tool_params["output_file"] = output_file
+                
+                # Log actual paths being used (after overrides)
+                execution_log.append(f"Parameters: {json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in tool_params.items()}, indent=2)}")
+                
+                # Skip hydrogen addition for ion files
+                if step.tool_name == "add_hydrogens":
+                    input_file = tool_params.get("pdb_file", current_pdb)
+                    input_stem = Path(input_file).stem
+                    
+                    # Check if this is an ion file (by name or if it's in our tracked ion files)
+                    if "_ion" in input_stem or input_file in ion_files:
+                        execution_log.append(f"⊘ Skipping hydrogen addition for ion file: {Path(input_file).name}")
+                        log_agent_action("preprocessing", f"Step {i+1}/{len(plan.steps)} skipped", {
+                            "step": step.name,
+                            "tool": step.tool_name,
+                            "reason": "Hydrogen addition not needed for ions"
+                        })
+                        continue  # Skip to next step
+                    
+                    # Check if hydrogens were already added (file ends with _h)
+                    if input_stem.endswith("_h"):
+                        execution_log.append(f"⊘ Skipping hydrogen addition - file already has hydrogens: {Path(input_file).name}")
+                        log_agent_action("preprocessing", f"Step {i+1}/{len(plan.steps)} skipped", {
+                            "step": step.name,
+                            "tool": step.tool_name,
+                            "reason": "Hydrogens already added to this file"
+                        })
+                        continue  # Skip to next step
                 
                 # Execute tool with retry logic
                 retry_count = 0
@@ -622,6 +738,10 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     if "ligand_file" in result:
                         output_files.append(result["ligand_file"])
                         generated_files[result["ligand_file"]] = "Ligand component"
+                    if "ion_file" in result:
+                        output_files.append(result["ion_file"])
+                        generated_files[result["ion_file"]] = "Ion component"
+                        ion_files.append(result["ion_file"])  # Track ion file to skip hydrogen addition
                     if "topology_file" in result:
                         topology_file = result["topology_file"]
                         generated_files[topology_file] = "GROMACS topology file"
@@ -656,17 +776,15 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         execution_log.append("⚠ Stopping execution (fail_fast enabled)")
                         break
             
-            # Verify required outputs
-            if not topology_file:
-                issues.append("No topology file generated - GROMACS preparation may have failed")
-            
+            # Preprocessing complete - no topology verification needed
+            # Topology generation is handled by simulation setup agent
             execution_log_str = "\n".join(execution_log)
             
             return PreprocessingResult(
                 success=len(issues) == 0,
                 cleaned_pdb=current_pdb,
-                topology=topology_file or str(Path(agent_input.working_directory) / "topol.top"),
-                processed_coordinates=processed_coords or str(Path(agent_input.working_directory) / "processed.gro"),
+                topology=None,  # Topology is NOT created during preprocessing
+                processed_coordinates=None,  # Coordinates are created by setup agent
                 report=f"Preprocessing completed: {len(plan.steps)} steps executed",
                 issues=issues,
                 warnings=warnings,
@@ -693,6 +811,27 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         state["preprocessing_issues"] = agent_output.result.issues
         state["preprocessing_warnings"] = agent_output.result.warnings
         state["preprocessing_execution_log"] = agent_output.result.execution_log
+        
+        # Initialize file registry if not present
+        if "file_registry" not in state or state["file_registry"] is None:
+            state["file_registry"] = {}
+        
+        # Register all generated files with metadata
+        for file_path, description in agent_output.result.generated_files.items():
+            # Determine file type from filename
+            file_type = "unknown"
+            if "protein" in file_path.lower():
+                file_type = "protein"
+            elif "ligand" in file_path.lower() or "atp" in file_path.lower() or "gtp" in file_path.lower():
+                file_type = "ligand"
+            elif "ion" in file_path.lower() or "mg" in file_path.lower() or "mn" in file_path.lower():
+                file_type = "ion"
+            
+            state["file_registry"][file_path] = {
+                "type": file_type,
+                "description": description,
+                "stage": "preprocessing"
+            }
         
         # Log file operations
         for file_path, description in agent_output.result.generated_files.items():

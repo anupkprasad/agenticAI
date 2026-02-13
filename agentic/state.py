@@ -24,6 +24,9 @@ class MDState(TypedDict):
     preprocessing_report: Optional[str]
     preprocessing_issues: List[str]
     
+    # File registry - tracks all files created during workflow
+    file_registry: Dict[str, Dict[str, str]]  # {file_path: {"type": "protein", "description": "...", "stage": "preprocess"}}
+    
     # Setup stage
     topology: Optional[str]
     coordinates: Optional[str]

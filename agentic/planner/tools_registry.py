@@ -128,17 +128,34 @@ class ToolsRegistry:
         Returns:
             True if this is a tool function
         """
-        # Skip private functions and non-callables
-        if name.startswith("_") or not callable(obj):
+        # Skip private functions
+        if name.startswith("_"):
             return False
         
-        # Skip imported modules and classes (but not StructuredTool instances)
-        if inspect.ismodule(obj):
+        # CRITICAL: Skip meta-functions that return tool lists/metadata
+        # These are internal utilities, not operational tools
+        meta_function_names = {
+            "get_preprocessing_tools",
+            "get_simulation_setup_tools",
+            "get_tool_metadata",
+            "get_analysis_tools",
+            "get_hpc_tools"
+        }
+        if name in meta_function_names:
             return False
         
-        # Check for LangChain StructuredTool (from @tool decorator)
+        # Skip imported modules and classes
+        if inspect.ismodule(obj) or inspect.isclass(obj):
+            return False
+        
+        # Check for LangChain StructuredTool (from @tool decorator) - PRIORITY CHECK
+        # Note: StructuredTool is NOT callable() but has these attributes
         if hasattr(obj, 'name') and hasattr(obj, 'description') and hasattr(obj, 'args_schema'):
             return True
+        
+        # Check if it's callable (regular functions)
+        if not callable(obj):
+            return False
         
         # Check if it's a decorated function with __wrapped__
         if hasattr(obj, "__wrapped__"):

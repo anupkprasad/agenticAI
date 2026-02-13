@@ -82,20 +82,50 @@ supervisor:
       PDB FILE STRUCTURE:
       {pdb_summary}
       
-      INSTRUCTIONS:
-      1. Identify what workflow stages the user wants: preprocessing, setup, simulation, or analysis
-      2. Identify which molecular components they want to work with (protein, ligand, water, ions, specific chains)
-      3. Rephrase their goal clearly and concisely
-      4. Do NOT add recommendations or suggestions
-      5. Do NOT assume they want all stages unless explicitly stated
-      6. If they say "only preprocessing" or "just preprocess", make that clear in the rephrased goal
+      CRITICAL INSTRUCTIONS:
+      1. **PRESERVE USER'S COMPONENT SELECTION EXACTLY** - If they mention specific components (protein, ligand, ions), keep exactly what they specified
+      2. **DEFAULT TO CONSERVATIVE INTERPRETATION** - If user says "protein" without mentioning ligands/ions, interpret as protein ONLY
+      3. Identify what workflow stages the user wants: preprocessing, setup, simulation, or analysis
+      4. Pay attention to keywords like "only", "just", "retaining", "keeping", "with", "without", "remove", "exclude"
+      5. Rephrase their goal clearly and concisely
+      6. Do NOT add components the user didn't mention
+      7. Do NOT remove components the user explicitly mentioned
+      8. Do NOT add recommendations or suggestions
+      9. Do NOT assume they want all stages unless explicitly stated
+      10. If they say "only preprocessing" or "just preprocess", make that clear in the rephrased goal
+      11. If they say "do not submit HPC" or "no analysis", explicitly state those exclusions
+      
+      COMPONENT INTERPRETATION RULES:
+      - "protein" (alone) → ONLY protein, exclude ligands/ions (conservative default)
+      - "protein only" / "just protein" → ONLY protein, exclude ligands/ions
+      - "protein with ligand" / "protein and ligand" → protein + ligand
+      - "retaining ligand" / "keep ligand" → INCLUDE ligand
+      - "retaining ions" / "keep ions" → INCLUDE ions
+      - "without ligand" / "no ligand" → EXCLUDE ligand
+      - "without ions" / "no ions" → EXCLUDE ions
+      - If they mention multiple components explicitly, include all mentioned components
       
       OUTPUT FORMAT:
-      Provide only the rephrased goal as a single clear statement. No additional commentary.
+      Provide a clear, structured rephrasing of the user's goal. Keep it brief (2-5 sentences maximum).
+      Break down complex requests into key points. Explicitly state which components to include/exclude.
+      No additional commentary or suggestions.
       
-      EXAMPLE:
+      EXAMPLE 1 (Protein only - conservative default):
+      Original: "I want to preprocess and simulation setup of protein. The protein is available in working_dir/3.pdb"
+      Rephrased: "Preprocess the PDB file to extract and clean the protein structure only. 
+      Set up the simulation system for the protein (exclude ligands and ions). 
+      Generate topology and coordinate files. Do not submit to HPC or run simulation."
+      
+      EXAMPLE 2 (Just preprocessing):
       Original: "I want to just preprocess the protein from the pdb file working_dir/3.pdb"
-      Rephrased: "Preprocess the PDB file to extract and clean only the protein component, without proceeding to simulation setup or execution."
+      Rephrased: "Preprocess the PDB file to extract and clean only the protein component. 
+      Exclude ligands, ions, and water. Do not proceed to simulation setup or execution."
+      
+      EXAMPLE 3 (Protein with ligand and ions - explicit inclusion):
+      Original: "Preprocess protein retaining ATP ligand and MG ions, then setup for simulation but don't run it"
+      Rephrased: "Preprocess the PDB file keeping protein chain A, ATP ligand, and MG ions. 
+      Set up the simulation system with topology and coordinates for all three components. 
+      Do not submit to HPC or run simulation."
 
   # Planner collaboration configuration
   planner:
@@ -135,46 +165,6 @@ supervisor:
       
       If custom scripts are needed, you can ask the programmer to generate them.
       Return the complete plan to the supervisor for execution.
-
-# ========================================
-# PLANNER AND PROGRAMMER CONFIGURATION
-# ========================================
-planner:
-  name: "MD Workflow Planner"
-  description: "Creates detailed execution plans and coordinates with programmer for custom scripts"
-  capabilities:
-    - "Strategic workflow planning"
-    - "Task sequencing and dependency management"
-    - "Tool and resource requirement analysis"
-    - "Risk assessment and fallback planning"
-    - "Programmer coordination for custom scripts"
-    - "Plan validation and feasibility checks"
-  access_to:
-    - "Tool inventory (GROMACS, VMD, Python libraries)"
-    - "Resource specifications (HPC, local compute)"
-    - "Programmer agent (for script generation)"
-    - "Previous workflow logs and patterns"
-  outputs:
-    - "Detailed execution plan"
-    - "Agent task assignments"
-    - "Custom scripts (via programmer)"
-    - "Resource allocation recommendations"
-
-programmer:
-  name: "Script Programmer"
-  description: "Internal agent called by planner to generate custom scripts"
-  note: "Never directly accessed by supervisor - planner handles all interactions"
-  capabilities:
-    - "Python script generation"
-    - "TCL script generation (VMD)"
-    - "Bash script generation"
-    - "GROMACS workflow scripts"
-    - "Analysis pipeline scripts"
-  programming_languages:
-    - "Python 3.11+"
-    - "TCL (VMD)"
-    - "Bash"
-    - "GROMACS mdp files"
 
 # ========================================
 # FIELD AGENT REGISTRY
@@ -275,48 +265,16 @@ agents:
 # WORKFLOW PIPELINE CONFIGURATION
 # ========================================
 workflow:
-  # Execution flow
-  execution_flow: |
-    1. User provides high-level prompt
-    2. Supervisor validates input and rephrases prompt
-    3. Supervisor passes refined prompt to planner
-    4. Planner creates execution plan (may request programmer for scripts)
-    5. Planner returns plan to supervisor
-    6. Supervisor assigns tasks to field agents based on plan
-    7. Field agents execute and report back to supervisor
-    8. Supervisor monitors progress and handles coordination
-  
   # Default execution order for field agents
   default_pipeline:
-    - "preprocessing"  # PDB cleaning and topology generation
-    - "setup"          # Solvation, ionization, minimization
-    - "hpc"            # Job submission and monitoring
-    - "analysis"       # Post-simulation analysis
+    - "preprocessing"
+    - "setup"
+    - "hpc"
+    - "analysis"
 
   # Entry points (where users can start based on their data stage)
   entry_points:
-    - "preprocessing"  # Standard: start with raw PDB
-    - "setup"          # Skip preprocessing if PDB already cleaned
-    - "hpc"            # Skip to simulation if ready
-    - "analysis"       # Post-simulation analysis only
-
-  # Workflow hierarchy nodes
-  hierarchy:
-    controller: "supervisor"
-    strategic: "planner"
-    internal: "programmer"  # Called by planner only
-    field_agents:
-      - "preprocess"
-      - "setup"
-      - "hpc"
-      - "analysis"
-  
-  # Communication paths
-  communication:
-    user_to_supervisor: true
-    supervisor_to_planner: true
-    planner_to_programmer: true  # Internal to planner
-    programmer_to_supervisor: false  # Never direct
-    supervisor_to_field_agents: true
-    field_agents_to_supervisor: true  # Report back
-    planner_to_supervisor: true  # Return plans
+    - "preprocessing"
+    - "setup"
+    - "hpc"
+    - "analysis"

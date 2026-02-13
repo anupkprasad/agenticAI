@@ -333,7 +333,8 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             execution_plan=None,
             plan_executed=False,
             rephrased_goal=None,
-            current_node=None
+            current_node=None,
+            file_registry={}
         )
 
         if config:

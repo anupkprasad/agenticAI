@@ -16,8 +16,9 @@ def add_ions(
     positive_ion: str = "NA",
     negative_ion: str = "CL",
     neutral: bool = True,
-    concentration: float = 0.0,
-    output_file: Optional[str] = None
+    concentration: float = 0.15,
+    output_file: Optional[str] = None,
+    working_dir: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Add ions to system using gmx genion for neutralization and ionic strength.
@@ -28,30 +29,37 @@ def add_ions(
         mdp_file: MDP file for grompp (ions.mdp)
         positive_ion: Positive ion type (NA, K, etc.)
         negative_ion: Negative ion type (CL, etc.)
-        neutral: Neutralize system charge
-        concentration: Target ion concentration (mol/L)
+        neutral: Neutralize system charge (default: True)
+        concentration: Ionic concentration in Molar (default: 0.15, physiological)
         output_file: Output coordinate file with ions
+        working_dir: Directory for output files and command execution
         
     Returns:
-        Dict with success status, output file, and ion counts
+        Dict with success, output_file, and ion counts
     """
-    working_dir = Path(coordinate_file).parent
+    if working_dir:
+        working_dir = Path(working_dir)
+    else:
+        working_dir = Path(coordinate_file).parent
     
     if not output_file:
         base = Path(coordinate_file).stem
-        output_file = str(working_dir / f"{base}_ions.gro")
+        output_file = f"{base}_ions.gro"  # Just filename - working_dir handles location
     
-    tpr_file = str(working_dir / "ions.tpr")
+    # Use relative path since we run with cwd=working_dir
+    tpr_file = "ions.tpr"
+    maxwarn = 3  # Allow up to 3 warnings (increased for robustness)
     
     try:
         # Step 1: Create TPR file with grompp
+        # All paths are relative filenames since cwd=working_dir
         grompp_cmd = [
             "gmx", "grompp",
             "-f", str(mdp_file),
             "-c", str(coordinate_file),
             "-p", str(topology_file),
             "-o", tpr_file,
-            "-maxwarn", "1"
+            "-maxwarn", str(maxwarn)
         ]
         
         grompp_result = subprocess.run(
@@ -65,7 +73,8 @@ def add_ions(
         if grompp_result.returncode != 0:
             return {
                 "success": False,
-                "error": f"grompp failed: {grompp_result.stderr}"
+                "error": f"grompp failed (maxwarn={maxwarn}): {grompp_result.stderr}",
+                "maxwarn_used": maxwarn
             }
         
         # Step 2: Add ions with genion
@@ -120,7 +129,8 @@ def add_ions(
                 "positive_ion_count": positive_count,
                 "negative_ion_count": negative_count,
                 "concentration": concentration,
-                "message": f"Ions added: {positive_count} {positive_ion}, {negative_count} {negative_ion}"
+                "maxwarn_used": maxwarn,
+                "message": f"Ions added: {positive_count} {positive_ion}, {negative_count} {negative_ion} (concentration: {concentration} M, maxwarn: {maxwarn})"
             }
         else:
             return {

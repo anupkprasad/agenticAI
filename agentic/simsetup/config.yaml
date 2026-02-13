@@ -8,12 +8,16 @@ agent:
   description: "Handles GROMACS topology generation, system setup, and parameter files"
   capabilities:
     - "Generate GROMACS topology from cleaned PDB"
-    - "Generate ligand topologies using ACPYPE/Antechamber/RDKit"
+    - "Generate ligand topologies using ACPYPE/Antechamber with GAFF/GAFF2"
     - "Convert AMBER files to GROMACS format"
     - "Create simulation boxes with various geometries"
     - "Solvate systems with water models"
     - "Add ions for neutralization and salt concentration"
-    - "Generate MDP parameter files for different simulation stages"
+    - "Generate adaptive MDP files for protein/protein+ligand/protein+ligand+ion systems"
+  
+  # Directory management
+  working_directory: "working_dir/simsetup"  # All outputs go here
+  input_from: "working_dir/preprocess"  # Copy inputs from preprocessing
   
   # Execution limits to prevent infinite loops
   max_tool_retries: 2  # Max retries per tool on failure
@@ -23,10 +27,10 @@ agent:
 # Tool-specific default settings (not tool definitions)
 tools:
   build_topology:
-    description: "Generate topology using gmx pdb2gmx"
+    description: "Generate topology using gmx pdb2gmx - creates topol.top"
     force_fields:
       - "amber99sb-ildn"  # Default
-      - "charmm27"
+      - "charmm36-jul2022"
       - "gromos54a7"
       - "oplsaa"
     water_models:
@@ -36,6 +40,21 @@ tools:
       - "tip5p"
     options:
       ignore_hydrogens: true  # -ignh flag
+    default_topology_name: "topol.top"  # CRITICAL: All subsequent GMX commands must use this name
+      
+  generate_ligand_parameters:
+    description: "Generate ligand topology with acpype/antechamber using GAFF"
+    preferred_tool: "acpype"  # acpype or antechamber
+    charge_methods:
+      - "bcc"  # AM1-BCC (recommended for small molecules)
+      - "gas"  # Gasteiger charges
+    atom_types:
+      - "gaff2"  # Recommended
+      - "gaff"
+    timeout: 600  # seconds
+    notes:
+      - "output_dir parameter is optional - if empty/None, uses ligand PDB's directory"
+      - "Automatically handles empty output_dir from LLM planner"
       
   convert_amber_to_gromacs:
     description: "Convert AMBER topology/coordinates to GROMACS"
@@ -52,28 +71,53 @@ tools:
     default_distance: 1.0  # nm from solute to box edge
     
   solvate_system:
-    description: "Add water molecules with gmx solvate"
+    description: "Add water molecules with gmx solvate - MODIFIES topology_file IN-PLACE"
     water_configurations:
       - "spc216"  # Default 3-point water box
       - "tip3p"
       - "tip4p"
       - "tip5p"
+    critical_notes:
+      - "ALWAYS use topology_file='topol.top' (same file from build_topology)"
+      - "GMX modifies the topology IN-PLACE via -p flag, does NOT create new file"
+      - "Do NOT use output_topology parameter or expect solvated.top"
       
   add_ions:
-    description: "Add ions with gmx genion"
+    description: "Add ions with gmx genion - MODIFIES topology_file IN-PLACE"
     default_concentration: 0.15  # Molar (physiological)
     positive_ion: "NA"  # Sodium
     negative_ion: "CL"  # Chloride
     neutralize: true
+    critical_notes:
+      - "ALWAYS use topology_file='topol.top' (same file used in all previous steps)"
+      - "GMX modifies the topology IN-PLACE, does NOT create new file"
+      - "Requires MDP file (ions.mdp) for grompp step"
+      
+  generate_tpr_file:
+    description: "Generate binary run input file (.tpr) using gmx grompp for HPC submission"
+    default_mdp: "minim.mdp"  # Start with minimization
+    maxwarn: 3
+    critical_notes:
+      - "Must be called AFTER add_ions to use final ionized system"
+      - "Creates production-ready .tpr file for HPC job submission"
+      - "Use minim.mdp for energy minimization (first step on HPC)"
+      - "Output: minim.tpr (ready for mdrun on HPC)"
     
-  generate_mdp_file:
-    description: "Create MDP parameter files"
+  generate_mdp_files:
+    description: "Generate adaptive MDP files for complete simulation workflow"
+    default_temperature: 310.0  # K (body temperature)
+    default_pressure: 1.0  # bar
+    default_production_ns: 200.0  # nanoseconds
+    supported_systems:
+      - "protein-only"
+      - "protein+ligand"
+      - "protein+ligand+ion"
     templates:
       minim:
         description: "Energy minimization"
         integrator: "steep"
-        nsteps: 50000
-        emtol: 1000.0  # kJ/mol/nm
+        nsteps: 600000
+        emtol: 100.0  # kJ/mol/nm
         emstep: 0.01  # nm
       
       nvt:
@@ -115,3 +159,111 @@ timeout: 300  # seconds for each tool execution
 # Logging
 log_level: "INFO"
 log_gmx_output: true
+
+# Defaults for simulation parameters
+defaults:
+  force_field: "amber99sb-ildn"
+  water_model: "tip3p"
+  temperature: 300.0  # K
+  pressure: 1.0  # bar
+  salt_concentration: 0.15  # M
+
+# LLM-powered planning configuration
+llm:
+  planning_prompt_template: |
+    You are a GROMACS molecular dynamics expert. Analyze this simulation system and create a detailed setup plan.
+
+    **System Information:**
+    - Cleaned PDB: {cleaned_pdb}
+    - User Goal: {user_goal}
+    - Force Field: {force_field}
+    - Water Model: {water_model}
+    - Temperature: {temperature} K
+    - Pressure: {pressure} bar
+
+    **System Analysis:**
+    {analysis}
+
+    **Available Tools:**
+    {tools_list}
+
+    **Your Task:**
+    Create a comprehensive, step-by-step setup plan to prepare this system for GROMACS simulation.
+    Consider:
+    1. **Topology Generation**: Use pdb2gmx for protein topology, handle ligands/ions if present
+    2. **System Setup**: Define simulation box appropriate for system size
+    3. **Solvation**: Add water molecules with proper buffer
+    4. **Parameter Files**: Generate MDP files for minimization, equilibration (NVT/NPT), and production
+    5. **Neutralization & Ions**: Add ions to neutralize and reach physiological salt concentration
+    6. **TPR File**: Generate final binary run input file (minim.tpr) for HPC submission
+
+    **CRITICAL INSTRUCTIONS:**
+    - You MUST ONLY use the tools listed above - do NOT invent non-existent tools
+    - Every "tool_name" must exactly match one of the available tool names
+    - FORBIDDEN tool names: "none", "manual", "skip", "custom", "placeholder", or any made-up tool
+    - If a step cannot be performed with available tools, OMIT it from your plan entirely
+    - Do NOT include steps with tool_name="none" or tool_name="manual"
+    - If the system has ligands, ensure topology includes ligand parameters
+    - Standard workflow: topology → box → solvate → MDP files → add ions → generate TPR
+    - ALWAYS include generate_tpr_file as the FINAL step to create minim.tpr for HPC
+
+    **CRITICAL FILE PATH RULES:**
+    - Use ONLY filenames (e.g., "protein.pdb", "complex.gro") - NO directory paths!
+    - DO NOT use paths like "working_dir/protein.pdb" or "simsetup/complex.gro"
+    - The system automatically prepends the correct directory (working_dir/simsetup/)
+    - DO NOT specify output_dir or output_file paths in tool_params
+    - Example: Use "pdb_file": "protein.pdb" NOT "pdb_file": "working_dir/simsetup/protein.pdb"
+
+    **CRITICAL TOPOLOGY FILE RULES (GROMACS BEHAVIOR):**
+    - GMX pdb2gmx creates "topol.top" by default
+    - GMX solvate, gmx genion, and other commands MODIFY topol.top IN-PLACE via -p flag
+    - They do NOT create new topology files like "solvated.top" or "ions.top"
+    - ALWAYS use "topology_file": "topol.top" in ALL steps after build_topology
+    - Example workflow:
+      * build_topology → creates topol.top
+      * solvate_system with "topology_file": "topol.top" → updates topol.top (adds water)
+      * add_ions with "topology_file": "topol.top" → updates topol.top (adds ions)
+    - DO NOT use different topology filenames in different steps
+    - DO NOT expect or specify output_topology parameter in solvate_system
+
+    **Output Format:**
+    Return a JSON object with this exact structure:
+    {{
+      "reasoning": "Your scientific reasoning for this approach (2-3 sentences)",
+      "overview": "High-level summary of the setup strategy",
+      "steps": [
+        {{
+          "name": "Human-readable step name",
+          "description": "What this step accomplishes",
+          "tool_name": "exact_tool_name_from_list",
+          "tool_params": {{
+            "param1": "value1",
+            "param2": "value2"
+          }},
+          "reason": "Why this step is necessary"
+        }}
+      ],
+      "potential_issues": ["Issue 1 to watch for", "Issue 2"],
+      "recommendations": ["Best practice 1", "Best practice 2"]
+    }}
+
+    **Example Steps for Protein+Ligand System:**
+    1. build_topology (protein only, skip ligand for pdb2gmx) → creates "topol.top" and "processed.gro"
+       - tool_params: {{"pdb_file": "protein.pdb", "topology_file": "topol.top"}}
+    2. generate_ligand_parameters (if ligand present, use acpype/GAFF)
+    3. build_simulation_box (cubic, 1.0 nm buffer)
+       - tool_params: {{"coordinate_file": "processed.gro", "output_file": "boxed.gro"}}
+    4. solvate_system (add water) → updates "topol.top" IN-PLACE
+       - tool_params: {{"coordinate_file": "boxed.gro", "topology_file": "topol.top", "output_file": "solvated.gro"}}
+       - Note: topology_file is "topol.to) → updates "topol.top" IN-PLACE
+       - tool_params: {{"coordinate_file": "solvated.gro", "topology_file": "topol.top", "mdp_file": "ions.mdp"}}
+       - Note: topology_file is STILL "topol.top" (same as all previous steps)
+    7. generate_tpr_file (create minim.tpr for HPC submission)
+       - tool_params: {{"mdp_file": "minim.mdp", "coordinate_file": "system_ions.gro", "topology_file": "topol.top"}}
+       - This is the FINAL step - creates production-ready .tpr file
+
+    Remember: generate_mdp_files before add_ions (ions need MDP file for grompp)!
+    Remember: generate_tpr_file MUST be the last step (after ions) to create HPC-ready file
+
+    Remember: generate_mdp_files before add_ions (ions need MDP file for grompp)!
+    Remember: ALWAYS use "topol.top" for topology_file in ALL steps after build_topology!

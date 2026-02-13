@@ -8,23 +8,39 @@ from pathlib import Path
 
 # Import modular @tool functions from src/simsetup/
 from src.simsetup.topology_builder import build_topology
-from src.simsetup.ligand_topology_generator import generate_ligand_topology
+from src.simsetup.ligand_topology import generate_ligand_parameters
 from src.simsetup.amber_to_gromacs_converter import convert_amber_to_gromacs
 from src.simsetup.box_builder import build_simulation_box
 from src.simsetup.solvator import solvate_system
 from src.simsetup.ion_adder import add_ions
-from src.simsetup.mdp_generator import generate_mdp_file
+from src.simsetup.mdp_generator import generate_mdp_files
+from src.simsetup.tpr_generator import generate_tpr_file
+
+# New modular tools for component-based workflow
+from src.simsetup.pdb_to_gro_converter import convert_pdb_to_gro, split_complex_pdb_to_gro
+from src.simsetup.gro_merger import merge_gro_files
+from src.simsetup.topology_editor import edit_topology_file
+from src.simsetup.atom_name_mapper import map_ligand_atom_names
+from src.simsetup.system_builder import build_simulation_system
 
 # Export tool functions for direct access
 __all__ = [
     "SimulationSetupToolExecutor",
     "build_topology",
-    "generate_ligand_topology",
+    "generate_ligand_parameters",
     "convert_amber_to_gromacs",
     "build_simulation_box",
     "solvate_system",
     "add_ions",
-    "generate_mdp_file",
+    "generate_mdp_files",
+    "generate_tpr_file",
+    # New component-based tools
+    "convert_pdb_to_gro",
+    "split_complex_pdb_to_gro",
+    "merge_gro_files",
+    "edit_topology_file",
+    "map_ligand_atom_names",
+    "build_simulation_system",
     "get_simulation_setup_tools",
     "get_tool_metadata",
 ]
@@ -41,13 +57,24 @@ def get_simulation_setup_tools() -> list:
         List of StructuredTool objects ready for LLM use
     """
     return [
+        # Core topology and parameter generation
         build_topology,
-        generate_ligand_topology,
+        generate_ligand_parameters,
         convert_amber_to_gromacs,
+        # System building and solvation
         build_simulation_box,
         solvate_system,
         add_ions,
-        generate_mdp_file,
+        generate_tpr_file,
+        generate_mdp_files,
+        # Component-based workflow tools
+        convert_pdb_to_gro,
+        split_complex_pdb_to_gro,
+        merge_gro_files,
+        edit_topology_file,
+        map_ligand_atom_names,
+        # High-level orchestrator
+        build_simulation_system,
     ]
 
 
@@ -119,13 +146,22 @@ class SimulationSetupToolExecutor:
             Dict with 'success', 'error', and tool-specific results
         """
         tool_map = {
+            # Core tools
             "build_topology": build_topology,
-            "generate_ligand_topology": generate_ligand_topology,
+            "generate_ligand_parameters": generate_ligand_parameters,
             "convert_amber_to_gromacs": convert_amber_to_gromacs,
             "build_simulation_box": build_simulation_box,
             "solvate_system": solvate_system,
             "add_ions": add_ions,
-            "generate_mdp_file": generate_mdp_file,
+            "generate_mdp_files": generate_mdp_files,
+            "generate_tpr_file": generate_tpr_file,
+            # Component-based workflow tools
+            "convert_pdb_to_gro": convert_pdb_to_gro,
+            "split_complex_pdb_to_gro": split_complex_pdb_to_gro,
+            "merge_gro_files": merge_gro_files,
+            "edit_topology_file": edit_topology_file,
+            "map_ligand_atom_names": map_ligand_atom_names,
+            "build_simulation_system": build_simulation_system,
         }
         
         tool_func = tool_map.get(tool_name)
@@ -162,13 +198,15 @@ class SimulationSetupToolExecutor:
         return build_topology.func(pdb_file=pdb_file, force_field=force_field, 
                             water_model=water_model, output_file=output_file, **kwargs)
     
-    def generate_ligand_topology(self, pdb_file: str, ligand_name: str, charge: int,
-                                output_dir: Optional[str] = None, force_field: str = "gaff2",
-                                preferred_method: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+    def generate_ligand_parameters(self, ligand_pdb: str, output_dir: str,
+                                   charge_method: str = "bcc", net_charge: Optional[int] = None,
+                                   atom_type: str = "gaff2", preferred_tool: str = "acpype",
+                                   **kwargs) -> Dict[str, Any]:
         """Generate ligand topology using ACPYPE/Antechamber - delegates to @tool function"""
-        return generate_ligand_topology.func(pdb_file=pdb_file, ligand_name=ligand_name, 
-                                       charge=charge, output_dir=output_dir,
-                                       force_field=force_field, preferred_method=preferred_method, **kwargs)
+        return generate_ligand_parameters.func(ligand_pdb=ligand_pdb, output_dir=output_dir,
+                                              charge_method=charge_method, net_charge=net_charge,
+                                              atom_type=atom_type, preferred_tool=preferred_tool, 
+                                              **kwargs)
     
     def convert_amber_to_gromacs(self, prmtop_file: str, inpcrd_file: str,
                                 output_prefix: Optional[str] = None, **kwargs) -> Dict[str, Any]:
@@ -198,9 +236,12 @@ class SimulationSetupToolExecutor:
                        mdp_file=mdp_file, neutral=neutral, concentration=concentration,
                        output_file=output_file, **kwargs)
     
-    def generate_mdp_file(self, mdp_type: str = "minim", temperature: float = 300.0,
-                         pressure: float = 1.0, nsteps: int = 50000,
-                         output_file: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-        """Generate MDP parameter file - delegates to @tool function"""
-        return generate_mdp_file.func(mdp_type=mdp_type, temperature=temperature,
-                                pressure=pressure, nsteps=nsteps, output_file=output_file, **kwargs)
+    def generate_mdp_files(self, output_dir: str, force_field: str = "amber99sb-ildn",
+                          temperature: float = 310.0, pressure: float = 1.0,
+                          has_ligand: bool = False, has_ions: bool = False,
+                          production_ns: float = 200.0, **kwargs) -> Dict[str, Any]:
+        """Generate all MDP parameter files for simulation workflow - delegates to @tool function"""
+        return generate_mdp_files.func(output_dir=output_dir, force_field=force_field,
+                                      temperature=temperature, pressure=pressure,
+                                      has_ligand=has_ligand, has_ions=has_ions,
+                                      production_ns=production_ns, **kwargs)

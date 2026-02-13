@@ -68,9 +68,14 @@ class MDHPCAgent:
     def hpc_node(self, state: MDState) -> MDState:
         """
         Entry point: interpret supervisor intent and execute HPC task.
-        Expects `state['hpc_action']` in {submit_job, monitor_job, download_results}.
-        Falls back to submit if job_script present and no job_id.
+        Follows same pattern as preprocessing/setup agents:
+        - Single attempt, no retries
+        - Clear error reporting
+        - Route back to supervisor
         """
+        from ..utils import log_agent_start, log_agent_completion, log_error
+        
+        # Determine action
         action = (state.get("hpc_action") or "").strip().lower()
         if not action:
             if state.get("job_script") and not state.get("job_id"):
@@ -80,36 +85,57 @@ class MDHPCAgent:
             else:
                 action = "download_results" if state.get("trajectory_path") else "submit_job"
 
+        log_agent_start("hpc", "HPC Job Submission", {"action": action})
         logger.info(f"HPC agent executing action: {action}")
 
+        success = False
         try:
             if action == "submit_job":
                 self._handle_submit(state)
+                success = state.get("job_id") is not None
             elif action == "monitor_job":
                 self._handle_monitor(state)
+                success = True
             elif action == "download_results":
                 self._handle_download(state)
+                success = True
             else:
                 state["warnings"].append(f"Unknown HPC action '{action}', no operation performed")
+                
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
             msg = f"HPC action '{action}' failed: {e}"
-            logger.exception(msg)
+            logger.error(msg)
+            logger.error(f"Traceback: {tb}")
             state["errors"].append(msg)
+            log_error("hpc_agent.hpc_node", e, {"action": action, "traceback": tb})
+            success = False
 
-        # Route back to supervisor with an update
+        # Log completion
+        log_agent_completion("hpc", "HPC Job Submission", state, success)
+        
+        # Route back to supervisor - NO RETRIES
         state["next_node"] = "supervisor"
-        log_supervisor_routing(state, "supervisor", f"HPC agent completed '{action}'")
+        log_supervisor_routing(state, "supervisor", f"HPC agent completed '{action}' - {'success' if success else 'failed'}")
         return state
 
     def _handle_submit(self, state: MDState) -> None:
+        """Handle job submission - gracefully handle missing job_script"""
         job_script = state.get("job_script")
         if not job_script:
             # try planner/programmer produced scripts
             gen = state.get("generated_scripts", {})
             job_info = gen.get("slurm_job_script") or {}
             job_script = job_info.get("file_path")
+        
         if not job_script:
-            raise RuntimeError("No job_script available for submission")
+            # Gracefully handle missing job_script instead of raising error
+            error_msg = "No job_script available for submission. Setup agent may not have created one."
+            logger.warning(error_msg)
+            state["warnings"].append(error_msg)
+            state["errors"].append("HPC submission skipped: no job script available")
+            return  # Exit gracefully without submission
 
         ssh = self.config.get("ssh", {})
         remote_dir = self.config.get("paths", {}).get("remote_work_dir", "~/md_jobs")

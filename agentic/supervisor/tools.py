@@ -66,6 +66,30 @@ def parse_component_selection(user_goal: str, analysis: Dict[str, Any]) -> Dict[
         explicit_requests["ions"] = False
         explicit_requests["water"] = False
         logger.info("User explicitly requested ONLY protein")
+    
+    # NEW: If user mentions "protein" or "the protein" without mentioning other components, 
+    # assume they want protein only (conservative default)
+    elif any(phrase in goal_lower for phrase in [
+        "of protein", "the protein", "protein structure", "protein system"
+    ]):
+        # Check if they also mention other components
+        mentions_ligand = any(word in goal_lower for word in ["ligand", "atp", "adp", "nad", "fad", "hem"])
+        mentions_ions = any(word in goal_lower for word in ["ion", "mg", "ca", "zn", "na", "cl", "mg2+", "ca2+"])
+        
+        if not mentions_ligand and not mentions_ions:
+            # They only mentioned protein, so default to protein only
+            explicit_requests["protein"] = True
+            explicit_requests["ligand"] = False
+            explicit_requests["ions"] = False
+            explicit_requests["water"] = False
+            logger.info("User mentioned 'protein' without mentioning ligands/ions - defaulting to protein only")
+        else:
+            # They mentioned protein AND other components, so include what they mentioned
+            explicit_requests["protein"] = True
+            if mentions_ligand:
+                logger.info("User mentioned protein and ligand")
+            if mentions_ions:
+                logger.info("User mentioned protein and ions")
         
     elif any(phrase in goal_lower for phrase in ["only ligand", "just ligand", "ligand only", "extract ligand"]):
         explicit_requests["protein"] = False
@@ -80,15 +104,25 @@ def parse_component_selection(user_goal: str, analysis: Dict[str, Any]) -> Dict[
         logger.info("User explicitly requested protein-ligand complex")
     
     # Check for explicit component inclusions
-    if "with ligand" in goal_lower or "include ligand" in goal_lower:
+    if any(phrase in goal_lower for phrase in [
+        "with ligand", "include ligand", "retaining ligand", "retain ligand", 
+        "keeping ligand", "keep ligand", "retaining the atp", "retain the atp",
+        "retaining atp", "retain atp"
+    ]):
         explicit_requests["ligand"] = True
         logger.info("User explicitly wants to include ligand")
     
-    if "with water" in goal_lower or "include water" in goal_lower or "keep water" in goal_lower:
+    if any(phrase in goal_lower for phrase in [
+        "with water", "include water", "keep water", "retaining water", "retain water"
+    ]):
         explicit_requests["water"] = True
         logger.info("User explicitly wants to include water")
     
-    if "with ions" in goal_lower or "include ions" in goal_lower:
+    if any(phrase in goal_lower for phrase in [
+        "with ions", "include ions", "with ion", "include ion",
+        "retaining ions", "retain ions", "retaining the ions", "retain the ions",
+        "keeping ions", "keep ions", "retaining mg", "retain mg"
+    ]):
         explicit_requests["ions"] = True
         logger.info("User explicitly wants to include ions")
     

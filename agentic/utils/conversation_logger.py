@@ -154,7 +154,40 @@ class ConversationLogger:
         self.logger.info("   " + "="*70)
         
         # Log full response with indentation
-        response_lines = response.strip().split('\n')
+        # Try to format JSON responses for better readability
+        response_str = response.strip()
+        try:
+            # Check if response is wrapped in markdown code blocks
+            if response_str.startswith('```'):
+                # Handle both multi-line and single-line markdown blocks
+                if '\n' in response_str:
+                    # Multi-line: Extract content between ``` markers
+                    lines = response_str.split('\n')
+                    # Remove first line (```json or ```) and last line (```)
+                    if len(lines) > 2 and lines[-1].strip() == '```':
+                        response_str = '\n'.join(lines[1:-1])
+                else:
+                    # Single-line: ```json { ... } ```
+                    # Remove ``` markers and optional language identifier
+                    response_str = response_str.strip('`')
+                    if response_str.startswith('json'):
+                        response_str = response_str[4:].strip()
+                    elif response_str.startswith('python'):
+                        response_str = response_str[6:].strip()
+            
+            # Check if response is JSON
+            if response_str.strip().startswith('{') or response_str.strip().startswith('['):
+                # Try to parse and pretty-print JSON
+                import json
+                parsed = json.loads(response_str)
+                formatted = json.dumps(parsed, indent=2)
+                response_lines = formatted.split('\n')
+            else:
+                response_lines = response_str.split('\n')
+        except (json.JSONDecodeError, ValueError) as e:
+            # Not JSON or malformed, just split by newlines
+            response_lines = response_str.split('\n')
+        
         for line in response_lines:
             self.logger.info(f"   {line}")
         
@@ -204,8 +237,17 @@ class ConversationLogger:
         status = "✅ COMPLETED" if success else "❌ FAILED"
         self.logger.info(f"🏁 {agent_type.upper()} AGENT ({agent_name}) {status} [{self._timestamp()}]:")
         
-        # Log key outputs
-        output_fields = ['cleaned_pdb', 'topology', 'coordinates', 'mdp_files', 'execution_log']
+        # Log key outputs - different agents produce different outputs
+        if agent_name == "preprocessing":
+            # Preprocessing only produces cleaned PDB files
+            output_fields = ['cleaned_pdb', 'preprocessing_report']
+        elif agent_name == "setup":
+            # Setup produces topology, coordinates, and mdp files
+            output_fields = ['topology', 'coordinates', 'mdp_files']
+        else:
+            # Generic fields for other agents
+            output_fields = ['cleaned_pdb', 'topology', 'coordinates', 'mdp_files', 'execution_log']
+        
         self.logger.info(f"   📤 Output Summary:")
         for field in output_fields:
             value = output_data.get(field)

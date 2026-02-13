@@ -353,7 +353,26 @@ class MDSupervisor:
         
         # Route to appropriate agent based on agent name
         if "preprocessing" in agent_name or "preprocess" in agent_name:
+            # Check for repeated failures to prevent infinite loops
+            preprocess_retry_count = state.get("preprocess_retry_count", 0)
+            max_retries = 3
+            
+            if preprocess_retry_count >= max_retries:
+                error_msg = f"Preprocessing agent failed {preprocess_retry_count} times, skipping to avoid infinite loop"
+                logger.error(f"FIELD_AGENT_ASSIGNMENT: {error_msg}")
+                state["errors"].append(error_msg)
+                state["current_step"] = current_step_idx + 1
+                return self._assign_field_agent_tasks(state)
+            
             if not state.get("cleaned_pdb"):
+                # Track retry attempts for this specific step
+                if state.get("last_preprocess_step") == step_number:
+                    state["preprocess_retry_count"] = preprocess_retry_count + 1
+                    logger.warning(f"FIELD_AGENT_ASSIGNMENT: Preprocessing retry #{state['preprocess_retry_count']} for step {step_number}")
+                else:
+                    state["preprocess_retry_count"] = 0
+                    state["last_preprocess_step"] = step_number
+                
                 state["next_node"] = "preprocess"
                 state["preprocessing_plan"] = current_step
                 logger.info(f"FIELD_AGENT_ASSIGNMENT: Routing to preprocessing for step {step_number}")
@@ -365,7 +384,26 @@ class MDSupervisor:
                 return self._assign_field_agent_tasks(state)
 
         elif "setup" in agent_name or "simsetup" in agent_name:
+            # Check for repeated failures to prevent infinite loops
+            setup_retry_count = state.get("setup_retry_count", 0)
+            max_retries = 3
+            
+            if setup_retry_count >= max_retries:
+                error_msg = f"Setup agent failed {setup_retry_count} times, skipping to avoid infinite loop"
+                logger.error(f"FIELD_AGENT_ASSIGNMENT: {error_msg}")
+                state["errors"].append(error_msg)
+                state["current_step"] = current_step_idx + 1
+                return self._assign_field_agent_tasks(state)
+            
             if not state.get("coordinates"):
+                # Track retry attempts for this specific step
+                if state.get("last_setup_step") == step_number:
+                    state["setup_retry_count"] = setup_retry_count + 1
+                    logger.warning(f"FIELD_AGENT_ASSIGNMENT: Setup retry #{state['setup_retry_count']} for step {step_number}")
+                else:
+                    state["setup_retry_count"] = 0
+                    state["last_setup_step"] = step_number
+                
                 state["next_node"] = "setup"
                 state["setup_plan"] = current_step
                 logger.info(f"FIELD_AGENT_ASSIGNMENT: Routing to setup for step {step_number}")
@@ -377,10 +415,52 @@ class MDSupervisor:
                 return self._assign_field_agent_tasks(state)
 
         elif "hpc" in agent_name or "simulation" in agent_name:
+            # Check if user explicitly excluded HPC
+            user_goal = state.get("user_goal", "").lower()
+            rephrased_goal = state.get("rephrased_goal", "").lower()
+            combined_goals = f"{user_goal} {rephrased_goal}"
+            
+            user_excluded_hpc = any(phrase in combined_goals for phrase in [
+                "no hpc", "skip hpc", "do not submit", "don't submit", "do not use hpc",
+                "no job submission", "no simulation", "setup only", "without hpc",
+                "do not do hpc", "don't do hpc", "not do hpc", "no hpc job",
+                "skip job submission", "skip simulation", "local only", "locally only"
+            ])
+            
+            if user_excluded_hpc:
+                logger.info(f"FIELD_AGENT_ASSIGNMENT: User explicitly excluded HPC - skipping step {step_number}")
+                logger.info(f"FIELD_AGENT_ASSIGNMENT: Detection in: '{combined_goals[:200]}'")
+                state["warnings"].append(f"Skipping HPC step as per user request: {step_name}")
+                state["current_step"] = current_step_idx + 1
+                return self._assign_field_agent_tasks(state)
+            
+            # Check for failures - NO RETRIES, fail once and move on
+            hpc_retry_count = state.get("hpc_retry_count", 0)
+            
+            if hpc_retry_count >= 1:
+                error_msg = f"HPC agent failed, stopping (no retries)"
+                logger.error(f"FIELD_AGENT_ASSIGNMENT: {error_msg}")
+                state["errors"].append(error_msg)
+                state["warnings"].append("HPC execution skipped due to failure - simulation not submitted")
+                # Mark step as attempted and move on
+                state["current_step"] = current_step_idx + 1
+                return self._assign_field_agent_tasks(state)
+            
             if not state.get("job_id"):
+                # Check if we've already tried this step (no retries allowed)
+                if state.get("last_hpc_step") == step_number:
+                    state["hpc_retry_count"] = hpc_retry_count + 1
+                    logger.error(f"FIELD_AGENT_ASSIGNMENT: HPC already attempted for step {step_number}, no retry allowed")
+                    state["errors"].append("HPC agent already attempted, stopping to avoid retries")
+                    state["current_step"] = current_step_idx + 1
+                    return self._assign_field_agent_tasks(state)
+                else:
+                    state["hpc_retry_count"] = 0
+                    state["last_hpc_step"] = step_number
+                
                 state["next_node"] = "hpc"
                 state["hpc_plan"] = current_step
-                logger.info(f"FIELD_AGENT_ASSIGNMENT: Routing to HPC for step {step_number}")
+                logger.info(f"FIELD_AGENT_ASSIGNMENT: Routing to HPC for step {step_number} (first attempt only)")
                 log_supervisor_routing(state, "hpc", f"Executing Step {step_number}: {step_name}")
                 return state
             else:
@@ -389,7 +469,26 @@ class MDSupervisor:
                 return self._assign_field_agent_tasks(state)
 
         elif "analysis" in agent_name:
+            # Check for repeated failures to prevent infinite loops
+            analysis_retry_count = state.get("analysis_retry_count", 0)
+            max_retries = 3
+            
+            if analysis_retry_count >= max_retries:
+                error_msg = f"Analysis agent failed {analysis_retry_count} times, skipping to avoid infinite loop"
+                logger.error(f"FIELD_AGENT_ASSIGNMENT: {error_msg}")
+                state["errors"].append(error_msg)
+                state["current_step"] = current_step_idx + 1
+                return self._assign_field_agent_tasks(state)
+            
             if not state.get("analysis_results"):
+                # Track retry attempts for this specific step
+                if state.get("last_analysis_step") == step_number:
+                    state["analysis_retry_count"] = analysis_retry_count + 1
+                    logger.warning(f"FIELD_AGENT_ASSIGNMENT: Analysis retry #{state['analysis_retry_count']} for step {step_number}")
+                else:
+                    state["analysis_retry_count"] = 0
+                    state["last_analysis_step"] = step_number
+                
                 state["next_node"] = "analysis"
                 state["analysis_plan"] = current_step
                 logger.info(f"FIELD_AGENT_ASSIGNMENT: Routing to analysis for step {step_number}")

@@ -6,6 +6,29 @@ planner:
   version: "2.0"
   description: "LLM-powered planner with dynamic tools discovery and knowledge base access"
   
+  # Available agents in the system (DO NOT invent new agents)
+  available_agents:
+    - name: "preprocess"
+      full_name: "Preprocessing Agent"
+      description: "Handles PDB cleaning, hydrogen addition, structure validation"
+      capabilities: ["analyze_pdb", "separate_complex", "add_hydrogens", "validate_structure"]
+      
+    - name: "setup"
+      full_name: "Setup Agent"
+      description: "Handles topology generation, system building, solvation, ligand parameterization"
+      capabilities: ["build_topology", "generate_ligand_parameters", "solvate", "add_ions", "generate_mdp", "merge_files"]
+      note: "Ligand parameterization is handled by THIS agent, not a separate agent"
+      
+    - name: "hpc"
+      full_name: "HPC Agent"
+      description: "Handles job submission and execution on compute clusters"
+      capabilities: ["submit_job", "monitor_job", "retrieve_results"]
+      
+    - name: "analysis"
+      full_name: "Analysis Agent"
+      description: "Handles trajectory analysis and visualization"
+      capabilities: ["rmsd", "rmsf", "gyrate", "dssp", "hbond", "visualization"]
+  
   # Planning behavior
   behavior:
     planning_mode: "detailed_natural_language"  # Create detailed NL plans, not structured JSON
@@ -14,6 +37,8 @@ planner:
     auto_create_fallback: true  # Use fallback if LLM unavailable
     use_dynamic_tools: true  # Discover tools from code, not config
     use_knowledge_base: true  # Load domain knowledge from /knowledge
+    respect_user_exclusions: true  # CRITICAL: Honor "protein only", "no HPC", "no analysis" instructions
+    match_component_selection: true  # Only plan for components user explicitly selected
     
   # Output format for plans
   output_format:
@@ -27,13 +52,18 @@ planner:
   natural_language_plan:
     min_detail_level: "comprehensive"  # high-level, moderate, comprehensive, very-detailed
     include_sections:
-      - "goal_interpretation"  # What the user wants
-      - "pdb_analysis_summary"  # What we have
-      - "agent_assignments"  # Which agents do what (detailed)
-      - "execution_sequence"  # Step-by-step in prose
+      - "goal_interpretation"  # What the user wants (with explicit inclusions/exclusions)
+      - "pdb_analysis_summary"  # What we have (and what we'll use vs ignore)
+      - "agent_assignments"  # Which agents do what (ONLY needed agents)
+      - "execution_sequence"  # Step-by-step in prose (ONLY for selected components)
       - "expected_outcomes"  # What each agent should produce
       - "potential_issues"  # Known challenges
       - "recommendations"  # Best practices
+    critical_rules:
+      - "Only include agents user needs (skip HPC if 'no HPC', skip Analysis if 'no analysis')"
+      - "Respect component selection (if 'protein only', exclude ligand parameterization)"
+      - "User's explicit instructions override PDB structure content"
+      - "Do not invent agents not in the available agents list"
     
   # Context building
   context:
@@ -56,6 +86,7 @@ planner:
   templates:
     preprocessing:
       keywords: ["preprocess", "clean", "missing", "hydrogen", "protonate"]
+      agent: "preprocess"  # Preprocessing Agent
       default_steps:
         - name: "PDB Preprocessing"
           agent: "preprocess"
@@ -63,12 +94,13 @@ planner:
           tools: ["reduce", "pdbfixer", "obabel"]
           
     setup:
-      keywords: ["setup", "solvate", "mdp", "simulation"]
+      keywords: ["setup", "solvate", "mdp", "simulation", "topology", "ligand", "parameters"]
+      agent: "setup"  # Setup Agent (includes ligand parameterization)
       default_steps:
         - name: "Topology Generation"
           agent: "setup"
-          description: "Generate topology using force field"
-          tools: ["gmx pdb2gmx", "acpype"]
+          description: "Generate topology using force field (includes ligand parameters if needed)"
+          tools: ["gmx pdb2gmx", "acpype", "generate_ligand_parameters"]
         - name: "System Solvation"
           agent: "setup"
           description: "Add water box and ions"
@@ -77,9 +109,11 @@ planner:
           agent: "setup"
           description: "Create parameter files for simulation"
           tools: ["mdp_generator"]
+      note: "Ligand parameterization is part of Setup Agent, not a separate agent"
           
     hpc:
       keywords: ["submit", "hpc", "slurm", "run simulation"]
+      agent: "hpc"  # HPC Agent
       default_steps:
         - name: "Job Submission"
           agent: "hpc"
@@ -88,6 +122,7 @@ planner:
           
     analysis:
       keywords: ["analysis", "rmsd", "rmsf", "trajectory"]
+      agent: "analysis"  # Analysis Agent
       default_steps:
         - name: "Trajectory Analysis"
           agent: "analysis"

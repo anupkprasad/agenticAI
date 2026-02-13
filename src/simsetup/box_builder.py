@@ -14,7 +14,8 @@ def build_simulation_box(
     box_type: str = "cubic",
     box_distance: float = 1.0,
     output_file: Optional[str] = None,
-    center_molecule: bool = True
+    center_molecule: bool = True,
+    working_dir: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Define simulation box around molecule using gmx editconf.
@@ -23,13 +24,18 @@ def build_simulation_box(
         coordinate_file: Input coordinate file (.gro or .pdb)
         box_type: Box type - 'cubic', 'dodecahedron', 'octahedron'
         box_distance: Distance from molecule to box edge (nm)
-        output_file: Output coordinate file with box
+        output_file: Output coordinate file path
         center_molecule: Center molecule in box
+        working_dir: Directory for output files and command execution
         
     Returns:
-        Dict with success status, output file, and box dimensions
+        Dict with success, output_file, box info
     """
-    working_dir = Path(coordinate_file).parent
+    if working_dir:
+        working_dir = Path(working_dir)
+    else:
+        working_dir = Path(coordinate_file).parent
+
     
     if not output_file:
         base = Path(coordinate_file).stem

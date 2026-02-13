@@ -113,6 +113,23 @@ llm:
     **Available Tools:**
     {tools_list}
     
+    **CRITICAL FILE PATH RULES:**
+    - Use ONLY filenames (e.g., "3.pdb", "protein_h.pdb") - NO directory paths!
+    - DO NOT use paths like "working_dir/3.pdb" or "preprocess/3.pdb" or "working_dir/separated/protein_h.pdb"
+    - The system automatically prepends the correct directory (working_dir/preprocess/)
+    - DO NOT specify output_dir, output_file, protein_output, ligand_output, or ion_output
+    - Example CORRECT: "pdb_file": "complex.pdb"
+    - Example WRONG: "pdb_file": "working_dir/preprocess/complex.pdb"
+    - Example WRONG: "pdb_file": "working_dir/separated/protein.pdb"
+    - IGNORE any directory paths mentioned in the planner instructions - extract only the filename!
+    
+    **CRITICAL: DO NOT CONCATENATE OR MERGE FILES**
+    - Your job is ONLY to clean and prepare individual components (protein, ligand, ions)
+    - DO NOT add steps to merge/concatenate/combine separated files back together
+    - File merging is handled by the downstream Setup Agent, NOT here
+    - Each component should remain as a separate output file
+    - DO NOT use placeholder tools like "none" or "manual" - only use the tools listed above
+    
     Output as JSON with this structure:
     {{
       "reasoning": "Detailed analysis and strategy",
@@ -122,7 +139,7 @@ llm:
           "name": "step name",
           "description": "what it does",
           "tool_name": "tool to call",
-          "tool_params": {{"param": "value"}},
+          "tool_params": {{"pdb_file": "input.pdb"}},
           "reason": "why it's needed"
         }}
       ],

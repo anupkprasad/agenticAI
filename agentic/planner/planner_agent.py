@@ -261,23 +261,51 @@ class MDPlanner:
 **USER GOAL:**
 {structured_prompt}
 
+**CRITICAL: RESPECT USER'S EXPLICIT INSTRUCTIONS**
+- If user says "protein only", DO NOT include ligand parameterization steps
+- If user says "no HPC" or "do not submit", DO NOT create HPC Agent section
+- If user says "no analysis", DO NOT create Analysis Agent section
+- Only plan for components the user explicitly wants to work with
+- User's instructions override PDB structure analysis
+
 **PDB STRUCTURE ANALYSIS:**
 - File: {pdb_path}
 - Total atoms: {pdb_analysis.get('total_atoms', 'unknown')}
 - Total residues: {pdb_analysis.get('total_residues', 'unknown')}
-- Components present:
+- Components present in file:
   - Protein: {'Yes' if components.get('protein', False) else 'No'}
   - Ligand: {'Yes' if components.get('ligand', False) else 'No'}
   - Water: {'Yes' if components.get('water', False) else 'No'}
   - Ions: {'Yes' if components.get('ions', False) else 'No'}
   - Hydrogens: {'Yes' if components.get('hydrogens', False) else 'No'}
 
-**USER'S COMPONENT SELECTION:**
+**USER'S COMPONENT SELECTION (ONLY PLAN FOR THESE):**
 - Protein: {'Include' if component_selection.get('protein', False) else 'Exclude'}
 - Ligand: {'Include' if component_selection.get('ligand', False) else 'Exclude'}
 - Water: {'Include' if component_selection.get('water', False) else 'Exclude'}
-- Ions: {'Include' if component_selection.get('ions', False) else 'Exclude'}
+- Structural Ions (from PDB): {'Include' if component_selection.get('ions', False) else 'Exclude'}
 - Specific chains: {component_selection.get('specific_chains', 'All chains')}
+
+**CRITICAL DISTINCTION - TWO TYPES OF IONS:**
+1. **Structural Ions** (Mg²⁺, Ca²⁺, Zn²⁺, Fe²⁺/³⁺ from PDB) - RESPECT USER'S SELECTION ABOVE
+   - If marked "Exclude", do NOT include these ions from the PDB in the system
+   - If user says "protein only", these are excluded
+   
+2. **Neutralizing/Salt Ions** (Na⁺, Cl⁻ added by gmx genion) - ALWAYS INCLUDE IN SETUP
+   - These are NOT from the PDB, they are added during system setup
+   - ALWAYS needed for electroneutrality and physiological conditions
+   - The Setup Agent should ALWAYS add these ions unless user explicitly says "no neutralization"
+   - Even for "protein only" systems, neutralizing ions must be added
+
+**IMPORTANT PLANNING RULES:**
+1. If Ligand is marked "Exclude", DO NOT create ligand parameterization steps
+2. If user says "protein only", ignore ligands and structural ions from PDB
+3. "Protein only" does NOT mean "skip neutralizing ions (Na/Cl)" - those are always added
+4. If Structural Ions marked "Exclude", DO NOT include Mg²⁺/Ca²⁺/Zn²⁺ from PDB
+5. Setup Agent should ALWAYS include neutralizing ion addition (Na⁺/Cl⁻) step
+6. If user says "no HPC", skip HPC Agent section entirely
+7. If user says "no analysis" or "setup only", skip Analysis Agent section
+8. Match your plan to what the user explicitly requested, not just what's in the PDB
 
 **SIMULATION PARAMETERS:**
 - Force field: {force_field}
@@ -305,39 +333,80 @@ Your plan should be:
 5. **Best-practice aware** - Reference protocols and domain knowledge
 6. **Practical** - Consider the available tools and common pitfalls
 
+**CRITICAL: DO NOT specify exact filenames, paths, or tool parameters**
+- Field agents will determine specific filenames based on their workflow
+- Focus on describing WHAT needs to be done (e.g., "add hydrogens"), not HOW or WHERE
+- Example: Say "Add missing hydrogens to the protein and ligand" NOT "Run add_hydrogens with input=3.pdb output=3_h.pdb"
+- Agents have their own directory structure and will handle file management
+
+**AVAILABLE AGENTS IN THE SYSTEM:**
+You can ONLY assign tasks to these four agents. Do NOT create sections for agents that don't exist.
+ONLY include agents that are needed for the user's explicit goal.
+
+1. **Preprocessing Agent** - Handles PDB cleaning, hydrogen addition, structure validation
+   - Tools: analyze_pdb, separate_complex_components, add_hydrogens, validate_structure
+   - Include ONLY if: User needs preprocessing or cleaning
+   
+2. **Setup Agent** (Simulation Setup) - Handles topology generation, system building, solvation, ligand parameterization
+   - Tools: build_topology, generate_ligand_parameters, solvate_system, add_ions, generate_mdp_files, merge_gro_files, etc.
+   - NOTE: Ligand parameterization is done by THIS agent, not a separate "Ligand Parameterization Agent"
+   - Include ONLY if: User needs simulation setup or topology generation
+   - Skip ligand steps if: User says "protein only" or ligand is marked "Exclude"
+   
+3. **HPC Agent** - Handles job submission and execution on compute clusters
+   - Include ONLY if: User explicitly wants to run simulation or submit HPC job
+   - Skip if: User says "no HPC", "do not submit", "setup only", or "no job submission"
+   
+4. **Analysis Agent** - Handles trajectory analysis and visualization
+   - Include ONLY if: User explicitly wants trajectory analysis
+   - Skip if: User says "no analysis", "setup only", or doesn't mention analysis
+
+**CRITICAL: Do NOT create sections for non-existent agents** like "Ligand Parameterization Agent", "Ligand Agent", "Topology Agent", etc. All system setup tasks (including ligand parameters) are handled by the Setup Agent.
+
 **PLAN STRUCTURE (Natural Language, Detailed):**
 
 ## 1. Goal Interpretation
 [Clearly state what the user wants to accomplish and any constraints]
+[Explicitly state which components to include/exclude based on user's instructions]
+[Explicitly state if HPC or Analysis should be skipped]
 
 ## 2. PDB Analysis Summary
-[Summarize the structure's composition and what needs to be prepared]
+[Summarize the structure's composition]
+[Note which components will be USED vs IGNORED based on user's selection]
 
 ## 3. Agent Assignments & Detailed Instructions
+[ONLY include agent sections that are needed for the user's goal]
+[Skip agents if user explicitly excluded them or they're not needed]
 
-### Preprocessing Agent (if needed)
+### Preprocessing Agent (if user needs preprocessing)
 **Objective:** [What preprocessing must achieve]
 **Detailed Instructions:**
-- [Specific tasks in detail, e.g., "Remove all water molecules and heteroatoms except the ATP ligand in chain I"]
-- [Reference why, e.g., "to isolate the protein-ligand complex for force field topology generation"]
+- [Specific tasks - ONLY for selected components]
+- [If "protein only", explicitly state ligands will be removed/ignored]
 **Available Tools:** [List relevant tools they can use]
 **Critical Considerations:** [Things they must watch for]
 **Expected Output:** [What files/data this produces]
 
-### Setup Agent (if needed)
+### Setup Agent (if user needs simulation setup)
 **Objective:** [What setup must achieve]
 **Detailed Instructions:**
-- [E.g., "Generate topology using AMBER99SB-ILDN for the protein and GAFF parameters for the ATP ligand"]
-- [E.g., "Create a cubic water box with 1.0 nm minimum distance, solvate with TIP3P water"]
+- [ONLY include steps for components user selected]
+- [If "protein only", DO NOT include generate_ligand_parameters step]
+- [If ligand excluded, generate topology for protein only]
+- [If structural ions (Mg²⁺, Ca²⁺, Zn²⁺) excluded, do NOT include them in system]
+- [ALWAYS include neutralizing ion addition step (Na⁺/Cl⁻) - this is MANDATORY for any MD system]
+- [Neutralizing ions are added via gmx genion after solvation, not from the PDB]
 **Available Tools:** [List relevant tools]
-**Critical Considerations:** [E.g., "Ensure ligand parameters are compatible with protein force field"]
-**Expected Output:** [topology files, coordinate files, mdp files]
+**Critical Considerations:** [Match to user's component selection]
+**Expected Output:** [topology files, coordinate files, mdp files, neutralized system with Na⁺/Cl⁻]
 
-### HPC Agent (if running simulation)
+### HPC Agent (ONLY if user wants to run simulation - SKIP if "no HPC" or "setup only")
 [Similar detailed structure...]
+[If user said "no HPC", DO NOT include this section]
 
-### Analysis Agent (if analyzing)
+### Analysis Agent (ONLY if user wants analysis - SKIP if "no analysis" or not mentioned)
 [Similar detailed structure...]
+[If user said "no analysis" or only mentioned setup, DO NOT include this section]
 
 ## 4. Execution Sequence
 [Describe step-by-step flow in prose, with dependencies clearly stated]
@@ -479,9 +548,21 @@ Write the detailed execution plan now:"""
             logger.info(f"  Step {step_number}: Simulation setup")
             step_number += 1
         
-        # Step 3: HPC Submission (if requested in goal)
+        # Step 3: HPC Submission (if requested in goal AND not explicitly excluded)
         goal_lower = structured_prompt.lower()
-        if "run" in goal_lower or "execute" in goal_lower or "simulate" in goal_lower:
+        user_goal_lower = state.get("user_goal", "").lower()
+        
+        # Check for HPC exclusion phrases
+        hpc_excluded = any(phrase in f"{goal_lower} {user_goal_lower}" for phrase in [
+            "no hpc", "skip hpc", "do not submit", "don't submit", "do not use hpc",
+            "no job submission", "no simulation", "setup only", "without hpc",
+            "do not do hpc", "don't do hpc", "not do hpc", "no hpc job",
+            "skip job submission", "skip simulation", "local only", "locally only",
+            "no job", "not submit", "setup alone"
+        ])
+        
+        # Only create HPC step if requested AND not excluded
+        if ("run" in goal_lower or "execute" in goal_lower or "simulate" in goal_lower) and not hpc_excluded:
             hpc_step = {
                 "step_number": step_number,
                 "name": "Submit MD Simulation to HPC",
@@ -501,6 +582,8 @@ Write the detailed execution plan now:"""
             plan_steps.append(hpc_step)
             logger.info(f"  Step {step_number}: HPC submission")
             step_number += 1
+        elif hpc_excluded:
+            logger.info(f"  Skipping HPC step: User explicitly excluded HPC submission")
         
         # Step 4: Analysis (if requested)
         if "analyz" in goal_lower or "rmsd" in goal_lower or "rmsf" in goal_lower:
