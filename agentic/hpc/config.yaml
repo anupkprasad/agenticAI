@@ -1,21 +1,66 @@
+# HPC Agent Configuration for SLURM Job Submission and Monitoring
+
+# SSH connection settings for remote HPC
 ssh:
-  host: null
-  user: null
+  host: null  # e.g., "sapelo2.gacrc.uga.edu"
+  user: null  # e.g., "akp66103"
   port: 22
-  key_path: null
+  key_path: null  # Path to SSH key file
 
+# Directory paths
 paths:
-  remote_work_dir: "~/md_jobs"
-  local_download_dir: "./working_dir"
+  remote_work_dir: "~/md_jobs"  # Remote HPC working directory
+  local_hpc_dir: "./working_dir/hpc"  # Local HPC agent directory
+  local_download_dir: "./working_dir/hpc/results"  # Downloaded results
 
+# SLURM commands
 commands:
   submit: "sbatch {job_script}"
-  status: "squeue -j {job_id}"
+  status: "squeue -j {job_id} -o '%.18i %.9P %.8T %.10M %.6D %R'"
+  status_history: "sacct -j {job_id} -o State -n"
   cancel: "scancel {job_id}"
 
+# SLURM job defaults
+slurm_defaults:
+  partition: "gpu_p"
+  nodes: 1
+  ntasks: 1
+  cpus_per_task: 64
+  memory: "40G"
+  gpu_count: 1
+  gromacs_module: "GROMACS/2024.4-foss-2023b-CUDA-12.4.0-PLUMED-2.9.2"
+
+# Job monitoring
+monitoring:
+  check_interval: 3600  # Check every hour (in seconds)
+  max_checks: 48  # Maximum 48 checks (2 days if hourly)
+  retry_on_failure: true
+  max_retries: 2  # Maximum 2 submission attempts
+
+# File operations
+file_copy:
+  patterns:
+    - "*.gro"
+    - "*.top"
+    - "*.mdp"
+    - "*.itp"
+  create_backup: true
+
+# Download settings
 download:
   patterns:
     - "*.xtc"
     - "*.gro"
+    - "*.edr"
     - "*.log"
+    - "*.cpt"
+    - "*.xvg"
     - "*.out"
+  include_subdirs: false
+  verify_size: true
+
+# Time estimation defaults
+time_estimation:
+  default_production_ns: 10.0
+  default_timestep_ps: 0.002
+  performance_ns_per_day: 1.0  # For 50k atoms on GPU

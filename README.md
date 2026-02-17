@@ -175,7 +175,7 @@ export PYTHONDONTWRITEBYTECODE=1
 
 # 5. Run AgenticAI workflow with LLM
 python run_agenticAIWork.py \
-  --goal "I want to just preprocess the protein from the pdb file working_dir/3.pdb" \
+  --goal "I want to preprocess and simulation setup of protein. The protein is availble in the pdb file of working_dir/3.pdb. Please setup simulation for 10 ns only. Once the simulation setup is done then please submit simulation job on HPC. Please do not do simulation analysis." \
   --use-llm \
   --llm-base-url http://127.0.0.1:11434 \
   --llm-model gpt-oss:20b \
@@ -186,6 +186,23 @@ python run_agenticAIWork.py \
 # bash quick_setup_local.sh
 # source /tmp/agenticai_local/bin/activate
 # python run_agenticAIWork.py --goal "..." --use-llm --llm-base-url http://127.0.0.1:11434 --no-human-loop
+
+
+
+# 5.2. Run AgenticAI workflow with LLM
+python run_agenticAIWork.py \
+  --goal "The simulation setup is already done. Once the simulation setup is done then please submit simulation job on HPC. Please do not do simulation analysis." \
+  --use-llm \
+  --llm-base-url http://127.0.0.1:11434 \
+  --llm-model gpt-oss:20b \
+  --working-dir working_dir \
+  --no-human-loop
+
+# Alternative: Use a local environment to avoid NFS issues
+# bash quick_setup_local.sh
+# source /tmp/agenticai_local/bin/activate
+# python run_agenticAIWork.py --goal "..." --use-llm --llm-base-url http://127.0.0.1:11434 --no-human-loop
+
 ```
 
 ## Integration with Your Custom Tools

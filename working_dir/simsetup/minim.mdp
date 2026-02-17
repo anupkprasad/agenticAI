@@ -1,28 +1,37 @@
-; Energy Minimization MDP
-integrator  = steep
-nsteps      = 50000
-emtol       = 1000.0
-emstep      = 0.01
+; Energy Minimization
+define          = -DPOSRES -DPOSRES_LIG
+integrator      = steep
+emtol           = 100.0
+emstep          = 0.01
+nsteps          = 600000
 
 ; Output control
-nstlog      = 100
-nstenergy   = 100
+nstxout                  = 0
+nstxout-compressed       = 0
+nstvout                  = 0
+nstfout                  = 0
+nstenergy                = 1000
+nstlog                   = 1000
 
 ; Neighbor searching
-cutoff-scheme = Verlet
-ns_type     = grid
-nstlist     = 10
-rcoulomb    = 1.0
-rvdw        = 1.0
+nstlist         = 1
+ns_type         = grid
+pbc             = xyz
+
+; Bond parameters
+constraints     = h-bonds
+
+; Neighbor searching
+cutoff-scheme   = Verlet
 
 ; Electrostatics
-coulombtype = PME
-pme_order   = 4
-fourierspacing = 0.16
+coulombtype     = PME
+rlist           = 1.2
+vdwtype         = cutoff
+vdw-modifier    = force-switch
+rvdw            = 1.2
+rcoulomb        = 1.2
+rvdw-switch     = 1.0
 
-; Temperature and pressure
-tcoupl      = no
-pcoupl      = no
-
-; PBC
-pbc         = xyz
+; Dispersion correction
+DispCorr        = EnerPres
