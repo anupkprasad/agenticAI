@@ -189,14 +189,31 @@ python run_agenticAIWork.py \
 
 
 
-# 5.2. Run AgenticAI workflow with LLM
+# 5.2. Run analysis-only workflow (trajectory in working_dir/hpc/)
 python run_agenticAIWork.py \
-  --goal "The simulation setup is already done. Once the simulation setup is done then please submit simulation job on HPC. Please do not do simulation analysis." \
+  --goal "The protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulation production is already done and data output is stored in working_dir/hpc. Please dont preprocess, do not setup simulation and do not job submit the simulation. Only use the analysis agent for simulation analysis for RMSF caculation of trajectory. The trajectory file is md.xtc and topology file is md.gro" \
+  --subtask analysis \
+  --working-dir working_dir \
   --use-llm \
   --llm-base-url http://127.0.0.1:11434 \
   --llm-model gpt-oss:20b \
-  --working-dir working_dir \
   --no-human-loop
+
+
+# 5.3
+python run_agenticAIWork.py \
+  --goal "The protein availble in the pdb file of working_dir/3.pdb. Please preprocess the pdb file. Please do not setup, submit and analyisis the simulation" \
+  --subtask preprocess \
+  --working-dir working_dir \
+  --use-llm \
+  --llm-base-url http://127.0.0.1:11434 \
+  --llm-model gpt-oss:20b \
+  --no-human-loop
+
+
+# Analysis agent will:
+# - Read trajectory/topology from: working_dir/hpc/
+# - Write analysis results to: working_dir/analysis/
 
 # Alternative: Use a local environment to avoid NFS issues
 # bash quick_setup_local.sh

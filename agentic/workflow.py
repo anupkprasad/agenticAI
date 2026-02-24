@@ -313,29 +313,55 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
     
     def _initialize_state(self, user_goal: str, config: Optional[Dict[str, Any]]) -> MDState:
         """Create initial workflow state with config overrides applied."""
-        state = MDState(
-            user_goal=user_goal,
-            md_engine="gromacs",
-            force_field="amber99sb-ildn",
-            water_model="tip3p",
-            human_in_loop=False,
-            preprocessing_issues=[],
-            setup_issues=[],
-            mdp_files={},
-            analysis_results={},
-            figures=[],
-            errors=[],
-            warnings=[],
-            next_node=None,
-            human_feedback=None,
-            working_directory=None,
-            execution_path=[],
-            execution_plan=None,
-            plan_executed=False,
-            rephrased_goal=None,
-            current_node=None,
-            file_registry={}
-        )
+        # Note: TypedDict is a type hint only, cannot be instantiated as a class.
+        # Use a plain dict instead and let Python's type system handle validation.
+        state: MDState = {
+            "user_goal": user_goal,
+            "md_engine": "gromacs",
+            "force_field": "amber99sb-ildn",
+            "water_model": "tip3p",
+            "human_in_loop": False,
+            "preprocessing_issues": [],
+            "setup_issues": [],
+            "mdp_files": {},
+            "analysis_results": {},
+            "figures": [],
+            "errors": [],
+            "warnings": [],
+            "next_node": None,
+            "human_feedback": None,
+            "working_directory": None,
+            "execution_path": [],
+            "execution_plan": None,
+            "plan_executed": False,
+            "rephrased_goal": None,
+            "current_node": None,
+            "file_registry": {},
+            "generated_files": {},  # Centralized tracking of important files by agent
+            "subtask_type": None,
+            "required_inputs": None,
+            "analysis_validated": None,
+            "trajectory_paths": None,
+            "pdb_analysis": None,
+            "component_selection": {},  # Initialize as empty dict, not None
+            "structured_prompt": None,
+            "raw_pdb": None,
+            "cleaned_pdb": None,
+            "preprocessing_report": None,
+            "preprocess_directory": None,
+            "topology": None,
+            "coordinates": None,
+            "setup_report": None,
+            "hpc_action": None,
+            "job_script": None,
+            "job_id": None,
+            "job_status": None,
+            "trajectory_path": None,
+            "hpc_report": None,
+            "analysis_action": "full_analysis",
+            "analysis_request": None,
+            "conclusions": None
+        }
 
         if config:
             state.update(config)
@@ -364,7 +390,17 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             return final_state
             
         except Exception as e:
-            logger.error(f"Workflow execution error: {e}")
+            import traceback
+            import sys
+            error_traceback = traceback.format_exc()
+            logger.error(f"Workflow execution error: {e}\n{error_traceback}")
+            # Also print to stdout for immediate visibility
+            print(f"\n{'='*60}")
+            print(f"WORKFLOW ERROR: {e}")
+            print(f"{'='*60}")
+            print("Full traceback:")
+            print(error_traceback)
+            print(f"{'='*60}\n")
             initial_state["errors"].append(f"Workflow error: {str(e)}")
             return initial_state
 

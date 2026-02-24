@@ -1,7 +1,302 @@
-metrics:
-  - rmsd
-  - rmsf
-  - energy
-plots: true
-output_dir: "./working_dir/analysis"
-use_mdanalysis: true
+# Analysis Agent Configuration
+#
+# NOTE: Tool definitions (names, descriptions, args) are auto-discovered from tools.py
+# This file focuses on agent identity, default parameters, and LLM planning templates
+
+agent:
+  name: "AnalysisAgent"
+  description: "Performs structural and dynamic analysis of MD simulation trajectories"
+  capabilities:
+    - "Calculate RMSD (Root Mean Square Deviation) for structural stability assessment"
+    - "Calculate RMSF (Root Mean Square Fluctuation) for residue flexibility analysis"
+    - "Compute radius of gyration for protein compactness"
+    - "Analyze energy terms (potential, kinetic, temperature, pressure)"
+    - "Extract trajectory metrics and statistics"
+    - "Generate analysis reports and visualizations"
+  
+  # Directory management
+  working_directory: "working_dir/analysis"  # All analysis outputs go here
+  input_from: "working_dir/hpc"  # Get trajectory/topology from HPC output
+  
+  # Execution settings
+  max_tool_retries: 2  # Max retries per tool on failure
+  max_total_steps: 15  # Max total analysis steps
+  fail_fast: false  # Continue on failures to complete other analyses
+
+# Analysis workflow defaults
+workflow:
+  # Default analyses to run
+  default_analyses:
+    - "rmsd"
+    - "rmsf"
+    - "gyration"
+    - "energy"
+  
+  # Output settings
+  generate_plots: true
+  save_intermediate_data: true
+  compress_outputs: false
+
+# Tool-specific settings
+tools:
+  calculate_rmsd:
+    description: "Calculate RMSD to assess structural stability over time"
+    defaults:
+      selection: "protein and name CA"  # C-alpha atoms
+      reference_frame: 0  # First frame as reference
+      output_format: "dat"  # dat, csv, or xvg
+    interpretations:
+      stable: "< 2.0 Å"
+      moderate_drift: "2.0-5.0 Å"
+      significant_drift: "> 5.0 Å"
+  
+  calculate_rmsf:
+    description: "Calculate per-residue fluctuations to identify flexible regions"
+    defaults:
+      selection: "protein and name CA"
+      output_format: "dat"
+    interpretations:
+      rigid: "< 1.0 Å"
+      moderate_flexibility: "1.0-3.0 Å"
+      high_flexibility: "> 3.0 Å"
+  
+  calculate_radius_of_gyration:
+    description: "Measure protein compactness over time"
+    defaults:
+      selection: "protein"
+      output_format: "dat"
+    interpretations:
+      compact: "Rg stable with low std"
+      expanding: "Rg increasing trend"
+      collapsing: "Rg decreasing trend"
+  
+  analyze_energy:
+    description: "Extract and analyze thermodynamic properties"
+    defaults:
+      terms:
+        - "Potential"
+        - "Kinetic-En."
+        - "Temperature"
+        - "Pressure"
+        - "Total-Energy"
+      output_format: "xvg"
+    interpretations:
+      equilibrated: "Energy stable with constant mean"
+      drifting: "Energy showing trend"
+      unstable: "Large energy fluctuations"
+  
+  extract_trajectory_metrics:
+    description: "Get basic trajectory information"
+    provides:
+      - "Number of frames"
+      - "Time range"
+      - "File size"
+      - "Sampling frequency"
+
+# LLM-powered analysis planning configuration
+llm:
+  planning_prompt_template: |
+    You are an MD trajectory analysis expert. Analyze the simulation results and create a comprehensive analysis plan.
+
+    **System Information:**
+    - Trajectory File: {trajectory_file}
+    - Topology File: {topology_file}
+    - Energy File: {energy_file}
+    - User Goal: {user_goal}
+    - HPC Output Directory: {hpc_output_dir}
+
+    **Analysis Context:**
+    {analysis_context}
+
+    **Available Tools:**
+    {tools_list}
+
+    **Your Task:**
+    Create a detailed, step-by-step analysis plan to extract meaningful insights from the MD trajectory.
+    Consider:
+    1. **Structural Stability**: RMSD analysis to assess overall structure stability
+    2. **Flexibility Analysis** RMSF to identify rigid and flexible regions
+    3. **Compactness**: Radius of gyration to monitor protein folding/unfolding
+    4. **Thermodynamics**: Energy analysis for equilibration assessment
+    5. **Statistics**: Extract trajectory metadata and sampling information
+
+    **CRITICAL INSTRUCTIONS:**
+    - You MUST ONLY use the tools listed above - do NOT invent non-existent tools
+    - Every "tool_name" must exactly match one of the available tool names
+    - FORBIDDEN tool names: "none", "manual", "skip", "custom", "placeholder", or any made-up tool
+    - If a step cannot be performed with available tools, OMIT it from your plan entirely
+    - Do NOT include steps with tool_name="none" or tool_name="manual"
+    - Standard workflow: RMSD → RMSF → Gyration → Energy → Statistics
+    - All analyses should use appropriate atom selections (e.g., "protein and name CA" for RMSD)
+
+    **CRITICAL FILE PATH RULES:**
+    - Use ONLY filenames (e.g., "md.xtc", "md.gro") - NO directory paths!
+    - DO NOT use paths like "working_dir/hpc/md.xtc" or "analysis/output.dat"
+    - The system automatically prepends the correct directory (working_dir/analysis/)
+    - DO NOT specify output_dir paths in tool_params
+    - Example: Use "trajectory_file": "md.xtc" NOT "trajectory_file": "working_dir/hpc/md.xtc"
+
+    **ATOM SELECTION GUIDELINES:**
+    - RMSD: Use "protein and name CA" (C-alpha atoms) for overall stability
+    - RMSF: Use "protein and name CA" for per-residue flexibility
+    - Gyration: Use "protein" for whole structure compactness
+    - For ligand systems: Consider "protein or resname LIG" selections
+    - Avoid hydrogen atoms: Use "not name H*" for heavy atom analyses
+
+    **Output Format:**
+    Return a JSON object with this exact structure:
+    {{
+      "reasoning": "Your scientific reasoning for this analysis approach (2-3 sentences)",
+      "overview": "High-level summary of the analysis strategy",
+      "steps": [
+        {{
+          "name": "Human-readable step name",
+          "description": "What this analysis step accomplishes",
+          "tool_name": "exact_tool_name_from_list",
+          "tool_params": {{
+            "param1": "value1",
+            "param2": "value2"
+          }},
+          "reason": "Why this analysis is important"
+        }}
+      ],
+      "potential_issues": ["Issue 1 to watch for", "Issue 2"],
+      "recommendations": ["Best practice 1", "Best practice 2"]
+    }}
+
+    **Example Steps for Standard Protein Analysis:**
+    1. calculate_rmsd (assess structural stability)
+       - tool_params: {{"topology_file": "md.gro", "trajectory_file": "md.xtc", "selection": "protein and name CA", "output_file": "rmsd.dat"}}
+    2. calculate_rmsf (identify flexible regions)
+       - tool_params: {{"topology_file": "md.gro", "trajectory_file": "md.xtc", "selection": "protein and name CA", "output_file": "rmsf.dat"}}
+    3. calculate_radius_of_gyration (monitor compactness)
+       - tool_params: {{"topology_file": "md.gro", "trajectory_file": "md.xtc", "selection": "protein", "output_file": "gyration.dat"}}
+    4. analyze_energy (check equilibration)
+       - tool_params: {{"energy_file": "md.edr", "terms": ["Potential", "Temperature", "Pressure"], "output_file": "energy.dat"}}
+    5. extract_trajectory_metrics (get trajectory info)
+       - tool_params: {{"trajectory_file": "md.xtc", "topology_file": "md.gro"}}
+
+    **Analysis Interpretation Guidelines:**
+    - RMSD < 2.0 Å: Stable structure
+    - RMSD 2.0-5.0 Å: Moderate drift
+    - RMSD > 5.0 Å: Significant structural changes
+    - RMSF < 1.0 Å: Rigid regions (core, secondary structure)
+    - RMSF > 3.0 Å: Flexible regions (loops, termini)
+
+    Remember: Focus on analyses that directly address the user's goals and provide actionable insights!
+    Remember: ALWAYS use exact tool names from the available tools list!
+
+
+selection_presets:
+  protein_backbone:
+    selection: "protein and (name CA or name C or name N or name O)"
+    description: "Protein backbone atoms"
+  
+  protein_ca:
+    selection: "protein and name CA"
+    description: "Protein C-alpha atoms (standard for RMSD/RMSF)"
+  
+  protein_heavy:
+    selection: "protein and not name H*"
+    description: "All protein heavy atoms"
+  
+  binding_site:
+    selection: "protein and (resid 50-100)"
+    description: "Binding site residues (customize resid range)"
+  
+  ligand:
+    selection: "resname LIG"
+    description: "Ligand molecule (customize resname)"
+  
+  protein_ligand:
+    selection: "(protein or resname LIG) and not name H*"
+    description: "Protein and ligand heavy atoms"
+
+# Analysis result interpretation guidelines
+interpretation:
+  rmsd:
+    excellent: "< 1.5 Å - Very stable structure"
+    good: "1.5-3.0 Å - Stable structure with minor fluctuations"
+    moderate: "3.0-5.0 Å - Moderate structural changes"
+    concerning: "> 5.0 Å - Significant structural drift, may need longer equilibration"
+  
+  rmsf:
+    low: "< 1.0 Å - Rigid region (core, secondary structure)"
+    medium: "1.0-3.0 Å - Moderate flexibility (typical for structured regions)"
+    high: "> 3.0 Å - High flexibility (loops, termini, unstructured regions)"
+  
+  gyration:
+    stable: "std/mean < 0.05 - Compact, stable structure"
+    moderate: "0.05-0.10 - Some conformational changes"
+    unstable: "> 0.10 - Significant compactness changes (folding/unfolding?)"
+  
+  temperature:
+    good: "Within 5K of target - Good temperature control"
+    acceptable: "5-10K from target - Acceptable fluctuations"
+    poor: "> 10K from target - Temperature control issues"
+
+# File format specifications
+file_formats:
+  input:
+    topology:
+      - ".gro"  # GROMACS coordinate file
+      - ".pdb"  # Protein Data Bank file
+      - ".tpr"  # GROMACS portable binary run file
+    trajectory:
+      - ".xtc"  # GROMACS compressed trajectory
+      - ".trr"  # GROMACS full-precision trajectory
+      - ".dcd"  # CHARMM/NAMD trajectory
+    energy:
+      - ".edr"  # GROMACS energy file
+  
+  output:
+    data:
+      - ".dat"  # Plain text data (default)
+      - ".csv"  # Comma-separated values
+      - ".xvg"  # GROMACS xvgr/grace format
+    plots:
+      - ".png"  # PNG image
+      - ".pdf"  # PDF document
+      - ".svg"  # Scalable vector graphics
+
+# Dependencies and fallback behavior
+dependencies:
+  preferred:
+    - "MDAnalysis"  # Python library for trajectory analysis
+    - "numpy"  # Numerical operations
+    - "matplotlib"  # Plotting (if generate_plots=true)
+  
+  fallback:
+    method: "gromacs_tools"  # Use gmx rms, gmx rmsf, gmx gyrate, gmx energy
+    available_tools:
+      - "gmx rms"
+      - "gmx rmsf"
+      - "gmx gyrate"
+      - "gmx energy"
+      - "gmx check"
+
+# Agent behavior settings
+behavior:
+  # What to do when trajectory/topology not found
+  missing_files: "report_error"  # report_error, skip, or prompt_user
+  
+  # How to handle analysis failures
+  on_tool_failure: "continue"  # continue, stop, or retry
+  
+  # Whether to validate inputs before analysis
+  validate_inputs: true
+  
+  # LLM planning settings
+  llm_planning:
+    enabled: true
+    plan_before_execution: true
+    adaptive_analysis: true  # Adjust analysis based on trajectory characteristics
+    
+# Report generation
+report:
+  format: "markdown"  # markdown, json, or html
+  include_plots: true
+  include_raw_data: false
+  summary_statistics: true
+  interpretation_guidance: true
+  output_filename: "analysis_report.md"

@@ -13,6 +13,12 @@ class MDState(TypedDict):
     water_model: str               # "tip3p"
     human_in_loop: bool
     
+    # Subtask-specific workflow
+    subtask_type: Optional[str]    # "analysis_only", "setup_only", "preprocess_only", None
+    required_inputs: Optional[Dict[str, bool]]  # What inputs this task requires
+    analysis_validated: Optional[bool]  # Whether analysis-only inputs have been validated
+    trajectory_paths: Optional[Dict[str, Optional[str]]]  # Trajectory, topology, energy paths for analysis-only
+    
     # PDB Analysis (from supervisor validation)
     pdb_analysis: Optional[Dict[str, Any]]  # Output from PDB analyzer
     component_selection: Optional[Dict[str, Any]]  # User-specified component selection
@@ -27,6 +33,9 @@ class MDState(TypedDict):
     # File registry - tracks all files created during workflow
     file_registry: Dict[str, Dict[str, str]]  # {file_path: {"type": "protein", "description": "...", "stage": "preprocess"}}
     
+    # Generated files tracking by agent - centralized tracking of important outputs
+    generated_files: Dict[str, Dict[str, Dict[str, str]]]  # {agent: {file_key: {"path": "...", "description": "..."}}}
+    
     # Setup stage
     topology: Optional[str]
     coordinates: Optional[str]
@@ -36,10 +45,12 @@ class MDState(TypedDict):
     
     # HPC stage
     hpc_action: Optional[str]
+    hpc_output_directory: Optional[str]  # Path to HPC output directory (e.g., working_dir/hpc)
     job_script: Optional[str]
     job_id: Optional[str]
     job_status: Optional[str]
     trajectory_path: Optional[str]
+    energy_file: Optional[str]  # Path to energy file (.edr)
     hpc_report: Optional[str]
     
     # Analysis stage
@@ -49,18 +60,17 @@ class MDState(TypedDict):
     figures: List[str]
     conclusions: Optional[str]
     
-    # Control flow
+    # Control flow & Execution tracking
     current_node: Optional[str]        # Track which node we're currently in
     next_node: Optional[str]
     human_feedback: Optional[str]
     working_directory: Optional[str]
+    preprocess_directory: Optional[str]  # Subdirectory for preprocessing outputs
+    execution_path: List[str]          # Track which nodes have been visited
+    execution_plan: Optional[Dict[str, Any]]  # Detailed execution plan from planner
+    plan_executed: bool                # Whether execution plan has been created
+    rephrased_goal: Optional[str]      # LLM-rephrased user goal
     
-    # Planning
-    execution_plan: Optional[Dict[str, Any]]  # Planner-generated execution plan
-    current_step: Optional[int]               # Current step being executed (0-indexed)
-    plan_executed: Optional[bool]             # Track if plan has been executed
-    rephrased_goal: Optional[str]             # LLM-rephrased user goal
-    
-    # Error handling
-    errors: List[str]
-    warnings: List[str]
+    # Error & Warning tracking
+    errors: List[str]                  # List of errors encountered during workflow
+    warnings: List[str]                # List of warnings generated during workflow

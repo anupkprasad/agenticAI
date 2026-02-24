@@ -13,7 +13,7 @@ class PDBtoGROConverter:
     """Convert PDB files to GRO format for GROMACS simulations."""
     
     def __init__(self, working_dir: str = "working_dir/simsetup"):
-        self.working_dir = Path(working_dir)
+        self.working_dir = Path(working_dir).resolve()  # Resolve to absolute path
         self.working_dir.mkdir(parents=True, exist_ok=True)
     
     def convert_pdb_to_gro(

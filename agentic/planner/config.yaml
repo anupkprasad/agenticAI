@@ -40,16 +40,23 @@ planner:
     respect_user_exclusions: true  # CRITICAL: Honor "protein only", "no HPC", "no analysis" instructions
     match_component_selection: true  # Only plan for components user explicitly selected
     
-  # Output format for plans
+  # Output format for plans - ALWAYS NATURAL LANGUAGE
   output_format:
-    style: "natural_language_detailed"  # Detailed prose, not just bullet points
+    # CRITICAL: ALL plans must be in natural language format, never JSON
+    # This applies to: full workflows, subtasks (analysis-only, setup-only, preprocess-only), and fallback plans
+    format: "natural_language_only"  # Enforced for all plan types
+    style: "detailed_prose"  # Detailed prose with clear sections, not bullet points or JSON
     include_rationale: true  # Explain why each step is needed
     include_tool_suggestions: true  # Suggest which tools agents might use
     include_best_practices: true  # Reference knowledge base protocols
-    strict_json_parsing: false  # Allow flexible LLM responses
+    allow_json_format: false  # NEVER allow JSON format plans
+    allow_structured_format: false  # NEVER allow structured/templated format
     
-  # Natural language plan requirements
+  # Natural language plan requirements - MANDATORY FOR ALL PLANS
   natural_language_plan:
+    # CRITICAL: This is the ONLY format for all execution plans
+    # Applies to: full workflows, analysis-only, setup-only, preprocess-only, AND fallback plans
+    mandatory: true  # No exceptions - all plans must be natural language
     min_detail_level: "comprehensive"  # high-level, moderate, comprehensive, very-detailed
     include_sections:
       - "goal_interpretation"  # What the user wants (with explicit inclusions/exclusions)

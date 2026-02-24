@@ -126,6 +126,61 @@ supervisor:
       Rephrased: "Preprocess the PDB file keeping protein chain A, ATP ligand, and MG ions. 
       Set up the simulation system with topology and coordinates for all three components. 
       Do not submit to HPC or run simulation."
+    
+    # Analysis-only task rephrasing prompt
+    analysis_rephrase_prompt: |
+      You are an expert in molecular dynamics trajectory analysis. Rephrase the user's analysis goal 
+      into a clear, unambiguous statement that captures their analytical intent.
+      
+      USER'S ORIGINAL GOAL:
+      {user_goal}
+      
+      AVAILABLE FILES:
+      {file_summary}
+      
+      CRITICAL INSTRUCTIONS:
+      1. Identify what analysis calculations the user wants (RMSD, RMSF, SASA, energy, etc.)
+      2. Clarify the analysis scope (whole system, specific residues, specific chains, etc.)
+      3. Determine output format preferences (plots, data files, summary reports, etc.)
+      4. Pay attention to keywords like "calculate", "analyze", "visualize", "compare"
+      5. Rephrase their goal clearly and concisely
+      6. Do NOT add analysis types the user didn't mention
+      7. Do NOT make assumptions about what they want analyzed
+      8. Do NOT add recommendations or suggestions
+      9. Keep focus on trajectory analysis only
+      
+      ANALYSIS TYPE EXAMPLES:
+      - "RMSD" / "structural deviation" → Root Mean Square Deviation
+      - "RMSF" / "flexibility" / "fluctuation" → Root Mean Square Fluctuation
+      - "SASA" / "surface area" → Solvent Accessible Surface Area
+      - "energy" / "potential energy" → Energy analysis
+      - "secondary structure" / "helix content" → DSSP analysis
+      - "PCA" / "principal components" → Principal Component Analysis
+      - "hydrogen bonds" → H-bond analysis
+      - "distance analysis" / "contact maps" → Distance measurements
+      
+      OUTPUT FORMAT:
+      Provide a clear, structured rephrasing of the analysis goal. Keep it brief (2-4 sentences maximum).
+      Explicitly state which analysis calculations to perform and on which components.
+      No additional commentary or suggestions.
+      
+      EXAMPLE 1 (Simple RMSF):
+      Original: "Calculate RMSF from working_dir/hpc trajectory"
+      Rephrased: "Perform Root Mean Square Fluctuation (RMSF) analysis on the trajectory data 
+      in working_dir/hpc/. Calculate per-residue flexibility for the protein structure. 
+      Generate RMSF plot and save data files."
+      
+      EXAMPLE 2 (Multiple analyses):
+      Original: "I want to analyze the trajectory for RMSD and energy"
+      Rephrased: "Perform two analyses on the simulation trajectory: (1) Calculate RMSD 
+      to measure structural deviation from initial conformation, (2) Extract and plot 
+      potential energy over simulation time. Save plots and data files for both analyses."
+      
+      EXAMPLE 3 (Specific scope):
+      Original: "Calculate SASA for protein binding site residues 45-67"
+      Rephrased: "Calculate Solvent Accessible Surface Area (SASA) specifically for 
+      residues 45-67 in the protein binding site. Generate time-series plot showing 
+      SASA changes during simulation."
 
   # Planner collaboration configuration
   planner:

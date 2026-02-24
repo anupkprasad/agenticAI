@@ -1,0 +1,213 @@
+"""
+RMSD Calculator - Root Mean Square Deviation analysis tool
+
+Calculates RMSD for trajectory analysis to assess structural stability
+"""
+import os
+import logging
+from typing import Dict, Any, Optional, List
+from pathlib import Path
+from langchain.tools import tool
+
+logger = logging.getLogger(__name__)
+
+# Optional dependencies
+try:
+    import MDAnalysis as mda
+    from MDAnalysis.analysis import rms
+    HAS_MDA = True
+except ImportError:
+    HAS_MDA = False
+    logger.warning("MDAnalysis not available - RMSD calculation will be limited")
+
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+
+
+@tool
+def calculate_rmsd(
+    topology_file: str,
+    trajectory_file: str,
+    selection: str = "protein and name CA",
+    reference_frame: int = 0,
+    output_file: Optional[str] = None,
+    working_dir: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Calculate RMSD (Root Mean Square Deviation) for a trajectory.
+    
+    RMSD measures structural deviation over time, indicating stability.
+    Lower RMSD values suggest stable structures.
+    
+    Args:
+        topology_file: Topology file (.gro, .pdb, .tpr)
+        trajectory_file: Trajectory file (.xtc, .trr, .dcd)
+        selection: Atom selection for RMSD calculation (default: "protein and name CA")
+        reference_frame: Reference frame number (default: 0 - first frame)
+        output_file: Output file path for RMSD data (.dat, .csv)
+        working_dir: Working directory for analysis
+        
+    Returns:
+        Dict with RMSD results and statistics
+    """
+    try:
+        # Setup working directory
+        if working_dir:
+            os.makedirs(working_dir, exist_ok=True)
+            original_dir = os.getcwd()
+            os.chdir(working_dir)
+        
+        # Validate input files
+        if not os.path.exists(topology_file):
+            return {
+                "success": False,
+                "error": f"Topology file not found: {topology_file}"
+            }
+        
+        if not os.path.exists(trajectory_file):
+            return {
+                "success": False,
+                "error": f"Trajectory file not found: {trajectory_file}"
+            }
+        
+        # Use MDAnalysis if available
+        if HAS_MDA and HAS_NUMPY:
+            logger.info(f"Calculating RMSD using MDAnalysis for {trajectory_file}")
+            
+            # Load universe
+            u = mda.Universe(topology_file, trajectory_file)
+            
+            # Create RMSD analysis object
+            R = rms.RMSD(
+                u,
+                select=selection,
+                ref_frame=reference_frame
+            )
+            
+            # Run analysis
+            R.run()
+            
+            # Extract results
+            rmsd_data = R.results.rmsd  # Shape: (n_frames, 3) - [frame, time, RMSD]
+            times = rmsd_data[:, 1]  # Time in ps
+            rmsd_values = rmsd_data[:, 2]  # RMSD in Angstroms
+            
+            # Calculate statistics
+            mean_rmsd = float(np.mean(rmsd_values))
+            std_rmsd = float(np.std(rmsd_values))
+            min_rmsd = float(np.min(rmsd_values))
+            max_rmsd = float(np.max(rmsd_values))
+            
+            # Save data if requested
+            if output_file:
+                output_path = Path(output_file)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                with open(output_file, 'w') as f:
+                    f.write("# Frame\tTime(ps)\tRMSD(Angstrom)\n")
+                    for i, (t, r) in enumerate(zip(times, rmsd_values)):
+                        f.write(f"{i}\t{t:.2f}\t{r:.4f}\n")
+                
+                logger.info(f"RMSD data saved to {output_file}")
+            
+            if working_dir:
+                os.chdir(original_dir)
+            
+            return {
+                "success": True,
+                "mean_rmsd": mean_rmsd,
+                "std_rmsd": std_rmsd,
+                "min_rmsd": min_rmsd,
+                "max_rmsd": max_rmsd,
+                "n_frames": len(rmsd_values),
+                "selection": selection,
+                "output_file": output_file,
+                "message": f"RMSD calculation complete: mean={mean_rmsd:.2f} Å, std={std_rmsd:.2f} Å"
+            }
+        
+        # Fallback: Use GROMACS gmx rms
+        else:
+            logger.info("Using GROMACS gmx rms for RMSD calculation")
+            
+            # Determine output file
+            if not output_file:
+                output_file = "rmsd.xvg"
+            
+            # Create index file for selection if needed
+            import subprocess
+            
+            # Simple approach: assume backbone selection (index 4 in most cases)
+            # More sophisticated: create custom index file
+            
+            cmd = [
+                "gmx", "rms",
+                "-s", topology_file,
+                "-f", trajectory_file,
+                "-o", output_file,
+                "-tu", "ps"
+            ]
+            
+            # Run with echo to select groups (backbone vs backbone)
+            result = subprocess.run(
+                cmd,
+                input="4\n4\n",  # Backbone selection
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode != 0:
+                if working_dir:
+                    os.chdir(original_dir)
+                return {
+                    "success": False,
+                    "error": f"gmx rms failed: {result.stderr}"
+                }
+            
+            # Parse XVG output file
+            rmsd_values = []
+            times = []
+            
+            if os.path.exists(output_file):
+                with open(output_file, 'r') as f:
+                    for line in f:
+                        if line.startswith('#') or line.startswith('@'):
+                            continue
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            times.append(float(parts[0]))
+                            rmsd_values.append(float(parts[1]) * 10)  # Convert nm to Angstrom
+            
+            if rmsd_values:
+                mean_rmsd = sum(rmsd_values) / len(rmsd_values)
+                std_rmsd = (sum((x - mean_rmsd)**2 for x in rmsd_values) / len(rmsd_values)) ** 0.5
+                min_rmsd = min(rmsd_values)
+                max_rmsd = max(rmsd_values)
+            else:
+                mean_rmsd = std_rmsd = min_rmsd = max_rmsd = 0.0
+            
+            if working_dir:
+                os.chdir(original_dir)
+            
+            return {
+                "success": True,
+                "mean_rmsd": mean_rmsd,
+                "std_rmsd": std_rmsd,
+                "min_rmsd": min_rmsd,
+                "max_rmsd": max_rmsd,
+                "n_frames": len(rmsd_values),
+                "selection": "backbone (GROMACS default)",
+                "output_file": output_file,
+                "message": f"RMSD calculation complete using GROMACS: mean={mean_rmsd:.2f} Å"
+            }
+        
+    except Exception as e:
+        logger.exception(f"RMSD calculation failed: {e}")
+        if working_dir and 'original_dir' in locals():
+            os.chdir(original_dir)
+        return {
+            "success": False,
+            "error": f"RMSD calculation failed: {str(e)}"
+        }

@@ -74,9 +74,14 @@ class PreprocessingAgent:
         }
         
         if has_planner_instructions:
-            # Extract just the preprocessing agent section from the full plan
-            full_plan = execution_plan.get("full_plan", "")
-            preprocessing_section = self._extract_agent_instructions(full_plan, "Preprocessing Agent")
+            # Prefer pre-extracted instructions from supervisor (avoids duplication)
+            preprocessing_section = state.get("preprocessing_instructions")
+            
+            if not preprocessing_section:
+                # Fallback: Extract from full plan if supervisor didn't provide it
+                full_plan = execution_plan.get("full_plan", "")
+                preprocessing_section = self._extract_agent_instructions(full_plan, "Preprocessing Agent")
+            
             if preprocessing_section:
                 input_summary["planner_instructions"] = preprocessing_section
             else:
@@ -175,13 +180,15 @@ class PreprocessingAgent:
         defaults = self.config.get("defaults", {})
         
         # Check if planner provided detailed instructions for this agent
-        execution_plan = state.get("execution_plan", {})
-        planner_instructions = None
+        # Prefer pre-extracted instructions from supervisor
+        planner_instructions = state.get("preprocessing_instructions")
         
-        if execution_plan.get("format") == "natural_language":
-            # Extract preprocessing-specific instructions from natural language plan
-            full_plan = execution_plan.get("full_plan", "")
-            planner_instructions = self._extract_agent_instructions(full_plan, "Preprocessing Agent")
+        if not planner_instructions:
+            # Fallback: Extract from execution_plan if supervisor didn't provide it
+            execution_plan = state.get("execution_plan", {})
+            if execution_plan.get("format") == "natural_language":
+                full_plan = execution_plan.get("full_plan", "")
+                planner_instructions = self._extract_agent_instructions(full_plan, "Preprocessing Agent")
             
         return PreprocessingAgentInput(
             pdb_path=state.get("raw_pdb", ""),
@@ -191,7 +198,7 @@ class PreprocessingAgent:
             remove_waters=state.get("remove_waters", defaults.get("remove_waters", True)),
             add_hydrogens=state.get("add_hydrogens", defaults.get("add_hydrogens", True)),
             user_goal=state.get("user_goal", ""),
-            additional_instructions=planner_instructions or state.get("preprocessing_instructions", None)
+            additional_instructions=planner_instructions
         )
     
     def _run_preprocessing_workflow(self, agent_input: PreprocessingAgentInput, 

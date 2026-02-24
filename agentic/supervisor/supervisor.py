@@ -12,6 +12,7 @@ Responsibilities:
 import logging
 import yaml
 import os
+import re
 from typing import Any, Dict, Optional
 
 from ..state import MDState
@@ -19,15 +20,14 @@ from ..utils import log_supervisor_routing, log_agent_action
 from ..llm import LLMClient
 from ..planner import MDPlanner
 from .tools import (
-    extract_pdb_path,
     parse_component_selection,
     validate_feasibility,
-    enrich_user_prompt
+    enrich_user_prompt,
+    enrich_analysis_prompt,
+    detect_task_required_inputs
 )
 
 # Import PDB analyzer
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 from src.utils.pdb_analyzer import analyze_pdb
 
 logger = logging.getLogger(__name__)
@@ -73,15 +73,31 @@ class MDSupervisor:
             f"from {config_path}"
         )
 
+    def _extract_pdb_filename(self, user_goal: str) -> Optional[str]:
+        """Extract PDB filename (.pdb) from user goal."""
+        goal_lower = user_goal.lower()
+        pdb_match = re.search(r'(\w+\.pdb)', goal_lower)
+        if pdb_match:
+            filename = pdb_match.group(1)
+            logger.info(f"Extracted PDB filename: {filename}")
+            return filename
+        
+        # Try explicit file pattern
+        file_match = re.search(r'file\s+(?:is|:)?\s*(\w+\.pdb)', goal_lower)
+        if file_match:
+            return file_match.group(1)
+        return None
+
     def supervisor_node(self, state: MDState) -> MDState:
         """
-        Main supervisor routing logic.
+        Main supervisor routing logic with support for subtask-specific workflows.
 
         Pipeline:
-        1. Input Validation → PDB analysis and feasibility check
-        2. Create Execution Plan → Collaborate with planner
-        3. Execute Steps One-by-One → Route to field agents iteratively
-        4. Generate Final Report → Summarize results
+        1. Detect Subtask Type → If analysis-only, setup-only, etc., route accordingly
+        2. Input Validation → PDB analysis and feasibility check (skipped for analysis-only)
+        3. Create Execution Plan → Collaborate with planner
+        4. Execute Steps One-by-One → Route to field agents iteratively
+        5. Generate Final Report → Summarize results
         """
         # Lazy-load planner on first use
         if self.planner is None:
@@ -90,6 +106,17 @@ class MDSupervisor:
         logger.info("=" * 60)
         logger.info("SUPERVISOR: Analyzing workflow state and routing decision")
         logger.info("=" * 60)
+
+        # Get subtask type from state (passed from config via command-line args)
+        if not state.get("subtask_type_initialized"):
+            subtask_type = state.get("subtask_type")
+            if subtask_type:
+                logger.info(f"SUPERVISOR: Subtask type: {subtask_type}")
+            
+            # Store required inputs for this subtask
+            required_inputs = detect_task_required_inputs(subtask_type)
+            state["required_inputs"] = required_inputs
+            state["subtask_type_initialized"] = True
 
         # Check if we're returning from a field agent - increment step counter
         current_node = state.get("current_node", "")
@@ -107,23 +134,39 @@ class MDSupervisor:
             total_steps = len(plan.get('steps', []))
             logger.info(f"SUPERVISOR: Plan progress: Step {current_step_num}/{total_steps}")
 
-        # Step 1: Input validation if needed
-        if not state.get("pdb_analysis") and state.get("user_goal"):
+        # Step 1: Input validation if needed (unified for all task types)
+        required_inputs = state.get("required_inputs", {})
+        subtask_type = state.get("subtask_type", "full_task")
+        
+        # Check if we need to validate inputs (any task type)
+        needs_validation = False
+        if not state.get("pdb_analysis") and required_inputs.get("pdb_analysis_required", True):
+            needs_validation = True
+        elif subtask_type == "analysis_only" and not state.get("analysis_validated"):
+            needs_validation = True
+        
+        if needs_validation and state.get("user_goal"):
+            logger.info(f"SUPERVISOR: Routing to unified input validation for task type: {subtask_type}")
             state["next_node"] = "input_validation"
-            logger.info("SUPERVISOR: Routing to input validation for PDB analysis and feasibility check")
             return state
         
         # Check for missing required inputs
-        if not state.get("raw_pdb") or not state.get("user_goal"):
+        if not state.get("raw_pdb") and required_inputs.get("pdb_required", True):
             state["next_node"] = "input_validation"
-            logger.info("SUPERVISOR: Routing to input validation - missing raw_pdb or user_goal")
+            logger.info("SUPERVISOR: Routing to input validation - missing raw_pdb for this task")
             return state
 
         # Step 2: Create execution plan if not exists
-        if not state.get("execution_plan") and state.get("pdb_analysis"):
+        if not state.get("execution_plan") and (state.get("pdb_analysis") or state.get("analysis_validated")):
             logger.info("SUPERVISOR: Validation complete, creating execution plan with planner")
             state["next_node"] = "planner"
             return state
+        
+        # Step 2.5: Extract agent-specific plans after planner returns
+        # This ensures each agent receives only its relevant instructions
+        if state.get("execution_plan") and not state.get("preprocessing_instructions"):
+            logger.info("SUPERVISOR: Extracting agent-specific plans from full execution plan")
+            state = self._extract_agent_specific_plans(state)
 
         # Step 3: Assign field agent tasks based on plan
         plan = state.get("execution_plan", {})
@@ -147,170 +190,165 @@ class MDSupervisor:
 
     def input_validation_node(self, state: MDState) -> MDState:
         """
-        Validate and preprocess user input with PDB analysis.
-
-        Steps:
-        1. Extract PDB file path
-        2. Analyze PDB structure (components, composition)
-        3. Parse user intent and component selection
-        4. Validate feasibility of parameters
-        5. Create structured prompt for planner
+        Universal input validation node for all task types.
+        
+        Uses the unified validate_and_enrich_inputs() function from tools.py
+        to handle both PDB-based tasks and analysis-only tasks.
         """
+        from .tools import validate_and_enrich_inputs
+        
         logger.info("=" * 60)
-        logger.info("INPUT_VALIDATION: Starting comprehensive input validation with PDB analysis")
+        logger.info("INPUT_VALIDATION: Starting unified input validation")
         logger.info("=" * 60)
+        
+        subtask_type = state.get("subtask_type", "full_task")
         
         log_agent_action(
             agent_name="supervisor.input_validation",
-            action="Starting Input Validation & PDB Analysis",
+            action=f"Starting Unified Input Validation ({subtask_type})",
             details={
-                "user_goal": state.get("user_goal", "")[:200]
+                "user_goal": state.get("user_goal", "")[:200],
+                "task_type": subtask_type
             }
         )
-
-        user_goal = state.get("user_goal", "")
-
-        # Step 1: Extract and validate PDB path
-        search_patterns = self.supervisor_config.get("input_validation", {}).get(
-            "pdb_search_patterns", []
-        )
-        pdb_path = extract_pdb_path(user_goal, search_patterns)
         
-        if pdb_path:
-            state["raw_pdb"] = pdb_path
-            logger.info(f"INPUT_VALIDATION: Extracted PDB path: {pdb_path}")
-
-            # Validate file exists
-            if not os.path.exists(pdb_path):
-                state["errors"].append(f"PDB file not found: {pdb_path}")
-                logger.error(f"INPUT_VALIDATION: PDB file not found: {pdb_path}")
-                state["next_node"] = "supervisor"
-                return state
+        # Call unified validation function
+        state = validate_and_enrich_inputs(
+            state=state,
+            subtask_type=subtask_type,
+            llm_client=self.llm,
+            config=self.supervisor_config,
+            analyze_pdb_tool=analyze_pdb,
+            logger=logger
+        )
+        
+        # Set validation flags based on task type
+        if subtask_type == "analysis_only":
+            state["analysis_validated"] = True
         else:
-            error_msg = "Could not extract PDB file path from user goal"
-            state["errors"].append(error_msg)
-            logger.error(f"INPUT_VALIDATION: {error_msg}")
-            state["next_node"] = "supervisor"
-            return state
-
-        # Step 2: Analyze PDB structure
-        logger.info(f"INPUT_VALIDATION: Analyzing PDB structure: {pdb_path}")
+            # PDB-based tasks are validated
+            pass
         
-        pdb_analysis_result = analyze_pdb.invoke({"pdb_file": pdb_path})
-        
-        if not pdb_analysis_result.get("success"):
-            error_msg = f"PDB analysis failed: {pdb_analysis_result.get('error', 'Unknown error')}"
-            state["warnings"].append(error_msg)
-            logger.warning(f"INPUT_VALIDATION: {error_msg}")
-            logger.warning("INPUT_VALIDATION: Continuing with limited analysis, will use defaults")
-            
-            # Create minimal analysis for fallback
-            state["pdb_analysis"] = {
-                "total_atoms": 0,
-                "total_residues": 0,
-                "protein": {"present": True},
-                "ligands": {"present": False},
-                "water": {"present": False},
-                "components_available": {},
-                "chain_ids": []
-            }
-        else:
-            # Store analysis in state
-            state["pdb_analysis"] = pdb_analysis_result.get("analysis", {})
-            logger.info(f"INPUT_VALIDATION: PDB analysis complete - {pdb_analysis_result.get('message', '')}")
-            
-            # Log detailed analysis
-            analysis = state["pdb_analysis"]
-            
-            # Extract protein sequences if available
-            protein_sequences = {}
-            if analysis.get("protein", {}).get("present"):
-                chains_info = analysis.get("protein", {}).get("chains", {})
-                for chain_id, chain_data in chains_info.items():
-                    sequence = chain_data.get("sequence", "")
-                    if sequence:
-                        protein_sequences[chain_id] = sequence
-            
-            # Build details dict
-            details = {
-                "file": pdb_path,
-                "total_atoms": analysis.get("total_atoms", 0),
-                "total_residues": analysis.get("total_residues", 0),
-                "components_available": analysis.get("components_available", {})
-            }
-            
-            # Add protein sequences if present
-            if protein_sequences:
-                details["protein_sequences"] = protein_sequences
-            
-            log_agent_action(
-                agent_name="supervisor.input_validation",
-                action="PDB Structure Analysis",
-                details=details
-            )
-        
-        # Get analysis for subsequent steps
-        analysis = state["pdb_analysis"]
-
-        # Step 3: Parse user intent and determine component selection
-        component_selection = parse_component_selection(user_goal, analysis)
-        state["component_selection"] = component_selection
-        logger.info(f"INPUT_VALIDATION: Component selection: {component_selection}")
-
-        # Step 4: Validate feasibility
-        validation_result = validate_feasibility(user_goal, analysis, component_selection)
-        
-        if not validation_result["is_feasible"]:
-            for error in validation_result["errors"]:
-                state["errors"].append(error)
-                logger.error(f"INPUT_VALIDATION: Feasibility error - {error}")
-            state["next_node"] = "supervisor"
-            return state
-        
-        for warning in validation_result["warnings"]:
-            state["warnings"].append(warning)
-            logger.warning(f"INPUT_VALIDATION: {warning}")
-
-        # Step 5: Enrich user prompt with validated information for planner
-        enriched_prompt = enrich_user_prompt(
-            user_goal, analysis, self.llm, self.supervisor_config
-        )
-        state["structured_prompt"] = enriched_prompt
-        state["rephrased_goal"] = enriched_prompt
-        
-        logger.info(f"INPUT_VALIDATION: Enriched prompt created: {enriched_prompt[:150]}...")
-        
-        log_agent_action(
-            agent_name="supervisor.input_validation",
-            action="Input Validation Complete",
-            details={
-                "original_goal": user_goal[:100],
-                "enriched_prompt": enriched_prompt[:300],
-                "pdb_file": pdb_path
-            }
-        )
-
-        # Step 6: Set working directory
-        if pdb_path:
-            pdb_dir = os.path.dirname(pdb_path)
-            state["working_directory"] = pdb_dir if pdb_dir else "."
-            logger.info(f"INPUT_VALIDATION: Working directory set to: {state['working_directory']}")
-
-        # Log final validation summary
-        logger.info("=" * 60)
-        logger.info("INPUT_VALIDATION: Validation complete - ready for planning")
-        logger.info(f"  - PDB Analysis: {'✓ Success' if not state.get('warnings') else '⚠ With warnings'}")
-        logger.info(f"  - Component Selection: {component_selection}")
-        logger.info(f"  - Enriched Prompt: {enriched_prompt[:80]}...")
-        logger.info("=" * 60)
-
-        # Next step: supervisor routing
-        state["next_node"] = "supervisor"
         log_supervisor_routing(
-            state, "supervisor", "Input validation complete with PDB analysis, returning to supervisor for planning"
+            state, "supervisor",
+            f"Input validation complete for {subtask_type}, returning to supervisor for planning"
         )
-
+        
         return state
+
+    def _extract_agent_specific_plans(self, state: MDState) -> MDState:
+        """
+        Extract agent-specific instructions from the full execution plan.
+        
+        This centralizes the extraction logic that was duplicated across all agents.
+        After planner creates the full plan, this method parses it and stores
+        agent-specific sections in state for direct access by each agent.
+        
+        Args:
+            state: Current workflow state with execution_plan containing full_plan
+            
+        Returns:
+            Updated state with agent-specific instruction keys:
+            - preprocessing_instructions
+            - setup_instructions
+            - hpc_instructions
+            - analysis_instructions
+        """
+        import re
+        
+        execution_plan = state.get("execution_plan", {})
+        full_plan = execution_plan.get("full_plan", "")
+        
+        if not full_plan:
+            logger.warning("No full_plan found in execution_plan, skipping agent-specific extraction")
+            return state
+        
+        logger.info(f"Extracting agent-specific instructions from {len(full_plan)} char plan")
+        
+        # Define agent mappings: (state_key, agent_names_to_search)
+        agent_mappings = {
+            "preprocessing_instructions": [
+                "Preprocessing Agent",
+                "PDB Preprocessing Agent", 
+                "Preprocess Agent"
+            ],
+            "setup_instructions": [
+                "Simulation Setup Agent",
+                "SimSetup Agent",
+                "Setup Agent"
+            ],
+            "hpc_instructions": [
+                "HPC Agent",
+                "HPC Submission Agent",
+                "Job Submission Agent"
+            ],
+            "analysis_instructions": [
+                "Analysis Agent",
+                "MD Analysis Agent",
+                "Trajectory Analysis Agent"
+            ]
+        }
+        
+        # Extract instructions for each agent
+        for state_key, agent_names in agent_mappings.items():
+            extracted = None
+            
+            # Try each agent name variant
+            for agent_name in agent_names:
+                # Try multiple heading patterns
+                patterns = [
+                    # Markdown ### heading
+                    rf'###\s*{re.escape(agent_name)}.*?\n(.*?)(?=###|\Z)',
+                    # Markdown ## heading  
+                    rf'##\s*{re.escape(agent_name)}.*?\n(.*?)(?=##|\Z)',
+                    # Bold heading
+                    rf'\*\*{re.escape(agent_name)}\*\*.*?\n(.*?)(?=\*\*[A-Z]|\Z)',
+                    # Section number patterns
+                    rf'\d+\..*?{re.escape(agent_name)}.*?\n(.*?)(?=\d+\.|\Z)',
+                ]
+                
+                for pattern in patterns:
+                    match = re.search(pattern, full_plan, re.DOTALL | re.IGNORECASE)
+                    if match:
+                        instructions = match.group(1).strip()
+                        if len(instructions) > 50:  # Ensure substantial content
+                            extracted = instructions
+                            logger.info(
+                                f"Extracted {len(instructions)} chars for {state_key} "
+                                f"using agent name '{agent_name}'"
+                            )
+                            break
+                
+                if extracted:
+                    break
+            
+            # Store extracted instructions (or fallback to full plan)
+            if extracted:
+                state[state_key] = extracted
+            else:
+                # Fallback: provide full plan so agent has context
+                logger.warning(
+                    f"Could not extract specific section for {state_key}, "
+                    f"agent will receive full plan as fallback"
+                )
+                state[state_key] = full_plan
+        
+        logger.info(
+            f"Agent-specific extraction complete. Keys set: "
+            f"{[k for k in agent_mappings.keys() if state.get(k)]}"
+        )
+        
+        return state
+
+    def _validate_analysis_inputs(self, state: MDState) -> MDState:
+        """
+        DEPRECATED: Use input_validation_node() instead.
+        
+        This method is preserved for backward compatibility but now redirects
+        to the unified validate_and_enrich_inputs() function via input_validation_node().
+        """
+        logger.warning("_validate_analysis_inputs is deprecated. Use input_validation_node() instead.")
+        return self.input_validation_node(state)
 
     def _assign_field_agent_tasks(self, state: MDState) -> MDState:
         """

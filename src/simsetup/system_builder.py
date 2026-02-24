@@ -28,7 +28,7 @@ class ComplexSystemBuilder:
     }
     
     def __init__(self, working_dir: str = "working_dir/simsetup"):
-        self.working_dir = Path(working_dir)
+        self.working_dir = Path(working_dir).resolve()  # Resolve to absolute path
         self.working_dir.mkdir(parents=True, exist_ok=True)
         
     def run_gmx_command(self, cmd: List[str], stdin_input: Optional[str] = None) -> Dict[str, Any]:

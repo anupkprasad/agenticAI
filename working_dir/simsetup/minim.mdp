@@ -1,5 +1,5 @@
 ; Energy Minimization
-define          = -DPOSRES -DPOSRES_LIG
+define          = -DPOSRES
 integrator      = steep
 emtol           = 100.0
 emstep          = 0.01

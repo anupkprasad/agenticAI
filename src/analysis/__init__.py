@@ -1,9 +1,24 @@
 """
-Analysis module for AgenticAI
+Analysis tools for AgenticAI
 
-Contains tools for:
-- MD trajectory analysis
-- RMSD, RMSF calculations
-- Binding affinity analysis
-- Visualization and reporting
+Core implementations for MD trajectory analysis:
+- RMSD calculation (rmsd_calculator.py)
+- RMSF calculation (rmsf_calculator.py)
+- Radius of gyration (gyration_calculator.py)
+- Energy analysis (energy_analyzer.py)
+
+These tools are wrapped by agentic/analysis/tools.py for use in the agent workflow.
 """
+
+from .rmsd_calculator import calculate_rmsd
+from .rmsf_calculator import calculate_rmsf
+from .gyration_calculator import calculate_radius_of_gyration
+from .energy_analyzer import analyze_energy, extract_trajectory_metrics
+
+__all__ = [
+    "calculate_rmsd",
+    "calculate_rmsf",
+    "calculate_radius_of_gyration",
+    "analyze_energy",
+    "extract_trajectory_metrics",
+]

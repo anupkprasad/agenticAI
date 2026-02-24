@@ -128,46 +128,28 @@ class MDPlanner:
         state["current_step"] = 0  # Initialize step counter
         state["next_node"] = "supervisor"
         
-        num_steps = len(plan.get("steps", []))
-        logger.info(f"PLANNER: Created plan with {num_steps} steps")
+        # All plans are now natural language format
+        agent_sequence = plan.get("agent_sequence", [])
+        num_agents = len(agent_sequence)
+        logger.info(f"PLANNER: Created natural language plan with {num_agents} agents: {agent_sequence}")
         
         # Log detailed plan to conversation log
         from ..utils import log_agent_action
         
-        # Check if this is a natural language plan
-        if plan.get("format") == "natural_language":
-            # For NL plans, log the agent sequence and a preview of the plan
-            plan_preview = plan.get("full_plan", "")[:500]  # First 500 chars
-            plan_details = {
-                "format": "natural_language",
-                "title": plan.get("title", "N/A"),
-                "agent_sequence": plan.get("agent_sequence", []),
-                "total_agents": len(plan.get("agent_sequence", [])),
-                "plan_preview": plan_preview + ("..." if len(plan.get("full_plan", "")) > 500 else "")
-            }
-        else:
-            # Legacy structured format
-            plan_details = {
-                "format": "structured",
-                "title": plan.get("title", "N/A"),
-                "summary": plan.get("summary", "N/A"),
-                "total_steps": num_steps,
-                "steps": []
-            }
-            
-            for step in plan.get("steps", []):
-                plan_details["steps"].append({
-                    "number": step.get("step_number", "?"),
-                    "name": step.get("name", "Unnamed"),
-                    "agent": step.get("agent", "unknown"),
-                    "description": step.get("description", "")[:100],
-                    "inputs": step.get("inputs", {}),
-                    "expected_outputs": step.get("expected_outputs", [])
-                })
+        # Log natural language plan details
+        plan_preview = plan.get("full_plan", "")[:500]  # First 500 chars for preview
+        plan_details = {
+            "format": "natural_language",
+            "title": plan.get("title", "N/A"),
+            "agent_sequence": agent_sequence,
+            "total_agents": num_agents,
+            "plan_preview": plan_preview + ("..." if len(plan.get("full_plan", "")) > 500 else ""),
+            "method": plan.get("method", "llm_generated")
+        }
         
         log_agent_action(
             agent_name="planner",
-            action="Generated Execution Plan",
+            action="Generated Natural Language Execution Plan",
             details=plan_details
         )
         
@@ -175,7 +157,7 @@ class MDPlanner:
         log_supervisor_routing(
             state, 
             "supervisor",
-            f"Planner: Created plan with {num_steps} steps. Returning to supervisor."
+            f"Planner: Created natural language plan with {num_agents} agents. Returning to supervisor."
         )
         
         return state
@@ -191,17 +173,34 @@ class MDPlanner:
         """
         Create detailed execution plan based on PDB analysis and component selection.
         
+        CRITICAL: Respects subtask-specific workflows (analysis-only, setup-only, etc.)
         Uses dynamic tools knowledge and domain knowledge to create comprehensive plans.
         """
         logger.info("PLANNER: Creating plan with dynamic tools and knowledge")
         
-        # Get available tools context
-        tools_context = self._get_tools_context()
+        # NEW: Detect subtask type for smarter planning
+        subtask_type = state.get("subtask_type")
+        if subtask_type:
+            logger.info(f"PLANNER: Planning for subtask type: {subtask_type}")
+        
+        # Get available tools context - agent-specific for subtask workflows
+        if subtask_type == "analysis_only":
+            logger.info("PLANNER: Getting analysis agent tools for analysis-only workflow")
+            tools_context = self._get_tools_context(agent_name="analysis")
+        elif subtask_type == "setup_only":
+            logger.info("PLANNER: Getting setup agent tools for setup-only workflow")
+            tools_context = self._get_tools_context(agent_name="simsetup")
+        elif subtask_type == "preprocess_only":
+            logger.info("PLANNER: Getting preprocessing agent tools for preprocess-only workflow")
+            tools_context = self._get_tools_context(agent_name="preprocess")
+        else:
+            # Full workflow - get all tools
+            tools_context = self._get_tools_context()
         
         # Get relevant knowledge (protocols and force fields)
         knowledge_context = self._get_knowledge_context(max_chars=6000)
         
-        # Build LLM prompt with all context
+        # Build LLM prompt with all context - INCLUDE subtask type info
         planning_prompt = self._build_planning_prompt(
             structured_prompt,
             pdb_path,
@@ -209,7 +208,8 @@ class MDPlanner:
             component_selection,
             state,
             tools_context,
-            knowledge_context
+            knowledge_context,
+            subtask_type=subtask_type  # Pass subtask type to prompt
         )
         
         # Call LLM to create plan
@@ -230,6 +230,13 @@ class MDPlanner:
             # Parse LLM response into structured plan
             plan = self._parse_llm_plan_response(response, state)
             
+            # If LLM response was not a valid plan (e.g., asking questions), use fallback
+            if plan is None:
+                logger.warning("PLANNER: LLM response not suitable - using fallback plan")
+                plan = self._create_fallback_plan(
+                    structured_prompt, pdb_path, pdb_analysis, component_selection, state
+                )
+            
         except Exception as e:
             logger.error(f"PLANNER: LLM planning failed: {e}", exc_info=True)
             logger.warning("PLANNER: Falling back to template-based planning")
@@ -247,207 +254,241 @@ class MDPlanner:
         component_selection: Dict[str, Any],
         state: MDState,
         tools_context: str,
-        knowledge_context: str
+        knowledge_context: str,
+        subtask_type: Optional[str] = None
     ) -> str:
-        """Build comprehensive planning prompt for detailed natural language plans."""
+        """Build planning prompt for execution plan creation."""
         
-        # Extract key information
-        force_field = state.get("force_field", "amber99sb-ildn")
-        water_model = state.get("water_model", "tip3p")
-        components = pdb_analysis.get("components_available", {})
-        
-        prompt = f"""You are an expert MD simulation workflow planner with deep knowledge of molecular dynamics protocols, force fields, and computational tools.
+        # Common natural language format instructions for ALL plan types
+        nl_format_instructions = """**OUTPUT FORMAT - MANDATORY:**
 
-**USER GOAL:**
+You MUST provide your execution plan in NATURAL LANGUAGE format ONLY.
+
+✓ DO:
+- Write a detailed prose description of the execution plan
+- Organize into clear sections (Goal, Analysis, Execution Sequence, Expected Outcomes)
+- Explain which agents to use and why (use agent names explicitly!)
+- Describe what each agent should do in detail
+- Reference specific tools agents should consider using
+- Write in complete sentences and paragraphs
+- Be comprehensive and explanatory
+
+✗ DO NOT:
+- Use JSON format (CRITICAL: No curly braces {}, no key-value pairs)
+- Use YAML format
+- Use structured data formats
+- Create step-by-step numbered lists without context
+- Write bullet points without explanation
+- Use schemas or templates
+- Output command sequences or file contents directly
+
+Write your plan as if explaining the workflow to another expert in molecular dynamics.
+Be thorough, clear, and provide reasoning for your decisions.
+
+CRITICAL: If you output JSON, YAML, or any structured format, the plan will be rejected and the workflow will fail."""
+        
+        if subtask_type == "analysis_only":
+            working_dir = state.get("working_directory", ".")
+            return f"""Create a detailed natural language execution plan for trajectory analysis.
+
+USER GOAL:
 {structured_prompt}
 
-**CRITICAL: RESPECT USER'S EXPLICIT INSTRUCTIONS**
-- If user says "protein only", DO NOT include ligand parameterization steps
-- If user says "no HPC" or "do not submit", DO NOT create HPC Agent section
-- If user says "no analysis", DO NOT create Analysis Agent section
-- Only plan for components the user explicitly wants to work with
-- User's instructions override PDB structure analysis
+TASK: Analysis-only - perform trajectory analysis on existing simulation data.
+DO NOT include preprocessing, setup, or HPC agents.
+ONLY create execution plan for Analysis Agent.
 
-**PDB STRUCTURE ANALYSIS:**
-- File: {pdb_path}
-- Total atoms: {pdb_analysis.get('total_atoms', 'unknown')}
-- Total residues: {pdb_analysis.get('total_residues', 'unknown')}
-- Components present in file:
-  - Protein: {'Yes' if components.get('protein', False) else 'No'}
-  - Ligand: {'Yes' if components.get('ligand', False) else 'No'}
-  - Water: {'Yes' if components.get('water', False) else 'No'}
-  - Ions: {'Yes' if components.get('ions', False) else 'No'}
-  - Hydrogens: {'Yes' if components.get('hydrogens', False) else 'No'}
+File Structure:
+- Working Directory: {working_dir}
+- Trajectory/Topology Location: {working_dir}/hpc/ (auto-discovery)
+- Analysis Output Directory: {working_dir}/analysis/
 
-**USER'S COMPONENT SELECTION (ONLY PLAN FOR THESE):**
-- Protein: {'Include' if component_selection.get('protein', False) else 'Exclude'}
-- Ligand: {'Include' if component_selection.get('ligand', False) else 'Exclude'}
-- Water: {'Include' if component_selection.get('water', False) else 'Exclude'}
-- Structural Ions (from PDB): {'Include' if component_selection.get('ions', False) else 'Exclude'}
-- Specific chains: {component_selection.get('specific_chains', 'All chains')}
-
-**CRITICAL DISTINCTION - TWO TYPES OF IONS:**
-1. **Structural Ions** (Mg²⁺, Ca²⁺, Zn²⁺, Fe²⁺/³⁺ from PDB) - RESPECT USER'S SELECTION ABOVE
-   - If marked "Exclude", do NOT include these ions from the PDB in the system
-   - If user says "protein only", these are excluded
-   
-2. **Neutralizing/Salt Ions** (Na⁺, Cl⁻ added by gmx genion) - ALWAYS INCLUDE IN SETUP
-   - These are NOT from the PDB, they are added during system setup
-   - ALWAYS needed for electroneutrality and physiological conditions
-   - The Setup Agent should ALWAYS add these ions unless user explicitly says "no neutralization"
-   - Even for "protein only" systems, neutralizing ions must be added
-
-**IMPORTANT PLANNING RULES:**
-1. If Ligand is marked "Exclude", DO NOT create ligand parameterization steps
-2. If user says "protein only", ignore ligands and structural ions from PDB
-3. "Protein only" does NOT mean "skip neutralizing ions (Na/Cl)" - those are always added
-4. If Structural Ions marked "Exclude", DO NOT include Mg²⁺/Ca²⁺/Zn²⁺ from PDB
-5. Setup Agent should ALWAYS include neutralizing ion addition (Na⁺/Cl⁻) step
-6. If user says "no HPC", skip HPC Agent section entirely
-7. If user says "no analysis" or "setup only", skip Analysis Agent section
-8. Match your plan to what the user explicitly requested, not just what's in the PDB
-
-**SIMULATION PARAMETERS:**
-- Force field: {force_field}
-- Water model: {water_model}
-
-**AVAILABLE TOOLS BY AGENT:**
+**Available Analysis Agent Tools:**
 {tools_context}
 
-**DOMAIN KNOWLEDGE & BEST PRACTICES:**
-[Full knowledge content provided to LLM - {len(knowledge_context)} chars]
+**CRITICAL INSTRUCTIONS:**
+- Use the analysis agent's Python tools listed above (calculate_rmsd, calculate_rmsf, etc.)
+- Do NOT use bash/shell commands or GROMACS CLI tools (gmx rmsf, etc.)
+- The analysis agent will handle file discovery and tool execution
+- Specify WHICH tools to use and what analysis to perform
+- Let the analysis agent handle the implementation details
 
-Knowledge Files Available:
-{self._get_knowledge_summary()}
+{nl_format_instructions}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Provide a comprehensive natural language plan explaining how the Analysis Agent should conduct the trajectory analysis."""
 
-**YOUR TASK:**
-Create a DETAILED, COMPREHENSIVE execution plan in natural language. This plan will be given to specialized field agents (preprocessing, setup, HPC, analysis) who will create their own structured tool execution plans.
+        elif subtask_type == "setup_only":
+            return f"""Create a detailed natural language execution plan for MD simulation setup.
 
-Your plan should be:
-1. **High-level** - Describe WHAT needs to be done, not exact tool commands
-2. **Detailed** - Provide enough context for agents to understand requirements
-3. **Sequential** - Clearly indicate execution order and dependencies
-4. **Rationale-driven** - Explain WHY each step is important
-5. **Best-practice aware** - Reference protocols and domain knowledge
-6. **Practical** - Consider the available tools and common pitfalls
+USER GOAL:
+{structured_prompt}
 
-**CRITICAL: DO NOT specify exact filenames, paths, or tool parameters**
-- Field agents will determine specific filenames based on their workflow
-- Focus on describing WHAT needs to be done (e.g., "add hydrogens"), not HOW or WHERE
-- Example: Say "Add missing hydrogens to the protein and ligand" NOT "Run add_hydrogens with input=3.pdb output=3_h.pdb"
-- Agents have their own directory structure and will handle file management
+TASK: Setup-only - generate topology and coordinate files for simulation.
+Only include Setup Agent. Do NOT include preprocessing (unless explicitly requested), HPC, or analysis.
 
-**AVAILABLE AGENTS IN THE SYSTEM:**
-You can ONLY assign tasks to these four agents. Do NOT create sections for agents that don't exist.
-ONLY include agents that are needed for the user's explicit goal.
+PDB File: {pdb_path or 'Not specified'}
+Force Field: {state.get('force_field', 'amber99sb-ildn')}
+Water Model: {state.get('water_model', 'tip3p')}
 
-1. **Preprocessing Agent** - Handles PDB cleaning, hydrogen addition, structure validation
-   - Tools: analyze_pdb, separate_complex_components, add_hydrogens, validate_structure
-   - Include ONLY if: User needs preprocessing or cleaning
-   
-2. **Setup Agent** (Simulation Setup) - Handles topology generation, system building, solvation, ligand parameterization
-   - Tools: build_topology, generate_ligand_parameters, solvate_system, add_ions, generate_mdp_files, merge_gro_files, etc.
-   - NOTE: Ligand parameterization is done by THIS agent, not a separate "Ligand Parameterization Agent"
-   - Include ONLY if: User needs simulation setup or topology generation
-   - Skip ligand steps if: User says "protein only" or ligand is marked "Exclude"
-   
-3. **HPC Agent** - Handles job submission and execution on compute clusters
-   - Include ONLY if: User explicitly wants to run simulation or submit HPC job
-   - Skip if: User says "no HPC", "do not submit", "setup only", or "no job submission"
-   
-4. **Analysis Agent** - Handles trajectory analysis and visualization
-   - Include ONLY if: User explicitly wants trajectory analysis
-   - Skip if: User says "no analysis", "setup only", or doesn't mention analysis
+**Available Setup Agent Tools:**
+{tools_context}
 
-**CRITICAL: Do NOT create sections for non-existent agents** like "Ligand Parameterization Agent", "Ligand Agent", "Topology Agent", etc. All system setup tasks (including ligand parameters) are handled by the Setup Agent.
+**CRITICAL INSTRUCTIONS:**
+- Use the setup agent's tools listed above (generate_topology, create_solvation_box, etc.)
+- Specify which setup tools to use and their parameters
+- Focus on topology generation and system preparation
 
-**PLAN STRUCTURE (Natural Language, Detailed):**
+{nl_format_instructions}
 
-## 1. Goal Interpretation
-[Clearly state what the user wants to accomplish and any constraints]
-[Explicitly state which components to include/exclude based on user's instructions]
-[Explicitly state if HPC or Analysis should be skipped]
+Provide a comprehensive natural language plan explaining how the Setup Agent should prepare the simulation system."""
 
-## 2. PDB Analysis Summary
-[Summarize the structure's composition]
-[Note which components will be USED vs IGNORED based on user's selection]
+        elif subtask_type == "preprocess_only":
+            return f"""Create a detailed natural language execution plan for structure preprocessing.
 
-## 3. Agent Assignments & Detailed Instructions
-[ONLY include agent sections that are needed for the user's goal]
-[Skip agents if user explicitly excluded them or they're not needed]
+USER GOAL:
+{structured_prompt}
 
-### Preprocessing Agent (if user needs preprocessing)
-**Objective:** [What preprocessing must achieve]
-**Detailed Instructions:**
-- [Specific tasks - ONLY for selected components]
-- [If "protein only", explicitly state ligands will be removed/ignored]
-**Available Tools:** [List relevant tools they can use]
-**Critical Considerations:** [Things they must watch for]
-**Expected Output:** [What files/data this produces]
+TASK: Preprocessing-only - clean and validate protein structure.
+Only include Preprocessing Agent. Do NOT include setup, HPC, or analysis.
 
-### Setup Agent (if user needs simulation setup)
-**Objective:** [What setup must achieve]
-**Detailed Instructions:**
-- [ONLY include steps for components user selected]
-- [If "protein only", DO NOT include generate_ligand_parameters step]
-- [If ligand excluded, generate topology for protein only]
-- [If structural ions (Mg²⁺, Ca²⁺, Zn²⁺) excluded, do NOT include them in system]
-- [ALWAYS include neutralizing ion addition step (Na⁺/Cl⁻) - this is MANDATORY for any MD system]
-- [Neutralizing ions are added via gmx genion after solvation, not from the PDB]
-**Available Tools:** [List relevant tools]
-**Critical Considerations:** [Match to user's component selection]
-**Expected Output:** [topology files, coordinate files, mdp files, neutralized system with Na⁺/Cl⁻]
+PDB File: {pdb_path or 'Not specified'}
 
-### HPC Agent (ONLY if user wants to run simulation - SKIP if "no HPC" or "setup only")
-[Similar detailed structure...]
-[If user said "no HPC", DO NOT include this section]
+**Available Preprocessing Agent Tools:**
+{tools_context}
 
-### Analysis Agent (ONLY if user wants analysis - SKIP if "no analysis" or not mentioned)
-[Similar detailed structure...]
-[If user said "no analysis" or only mentioned setup, DO NOT include this section]
+**CRITICAL INSTRUCTIONS:**
+- Use the preprocessing agent's tools listed above (remove_waters, fix_residues, add_hydrogens, etc.)
+- Specify which preprocessing tools to use
+- Focus on structure cleanup and validation
 
-## 4. Execution Sequence
-[Describe step-by-step flow in prose, with dependencies clearly stated]
+{nl_format_instructions}
 
-## 5. Expected Outcomes
-[What files and data should exist after each agent completes]
+Provide a comprehensive natural language plan explaining how the Preprocessing Agent should clean and prepare the structure."""
 
-## 6. Potential Issues & Solutions
-[Known challenges and how agents should handle them]
+        else:
+            components = pdb_analysis.get("components_available", {})
+            return f"""Create a detailed natural language execution plan for the complete MD workflow.
 
-## 7. Recommendations
-[Best practices and optional optimizations]
+USER GOAL:
+{structured_prompt}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PDB File: {pdb_path}
+Atoms: {pdb_analysis.get('total_atoms', '?')} | Residues: {pdb_analysis.get('total_residues', '?')}
+Components: Protein={components.get('protein', False)} Ligand={components.get('ligand', False)} Water={components.get('water', False)}
 
-Write the detailed execution plan now:"""
-        
-        return prompt
+Force Field: {state.get('force_field', 'amber99sb-ildn')}
+Water Model: {state.get('water_model', 'tip3p')}
+
+**Available Agents and Their Tools:**
+{tools_context}
+
+**CRITICAL INSTRUCTIONS FOR AGENT NAMING:**
+You MUST explicitly name each agent involved in your plan using these EXACT phrases:
+- "Preprocessing Agent" or "preprocessing agent" - for structure cleaning
+- "Simulation Setup Agent" or "setup agent" - for topology and system building
+- "HPC Agent" or "hpc agent" - for job submission
+- "Analysis Agent" or "analysis agent" - for trajectory analysis
+
+Write complete sentences like:
+"The Preprocessing Agent will first clean the PDB structure by..."
+"Next, the Simulation Setup Agent generates topology files using..."
+"The HPC Agent then submits the simulation job with..."
+
+{nl_format_instructions}
+
+**EXAMPLE STRUCTURE:**
+
+Goal: [Summarize what needs to be accomplished]
+
+Workflow Execution:
+
+The Preprocessing Agent will handle structure preparation. It will use the separate_complex_components tool to extract the protein chain, removing the ATP ligand and MG ions as requested. The add_hydrogens tool will then ensure complete protonation using the reduce method at neutral pH.
+
+The Simulation Setup Agent will prepare the simulation system. Using build_topology, it generates AMBER99SB-ILDN topology files. The system will be placed in a cubic simulation box with adequate spacing, solvated with TIP3P water molecules, and neutralized with appropriate ions. The generate_mdp_files tool will create parameter files for a 10 ns production run.
+
+The HPC Agent will handle job submission to the compute cluster. It will use create_slurm_script to generate an appropriate job submission script, then submit_job to initiate the simulation on the HPC system.
+
+Expected Outcomes: [Describe final deliverables]
+
+Provide a comprehensive natural language plan following this structure. DO NOT output JSON, YAML, or any structured data format."""
     
-    def _parse_llm_plan_response(self, response: str, state: MDState) -> Dict[str, Any]:
-        """Parse LLM natural language response into plan structure.
-        
-        Extracts key information from prose plans:
-        - Which agents are assigned tasks
-        - Execution sequence/dependencies
-        - Key objectives and considerations
-        
-        Field agents will receive the full natural language plan and create
-        their own detailed tool execution plans.
-        """
+    def _parse_llm_plan_response(self, response: str, state: MDState) -> Optional[Dict[str, Any]]:
+        """Parse LLM response. Return None if response is just asking questions."""
         import re
         
-        logger.info("PLANNER: Parsing natural language execution plan")
+        logger.info("PLANNER: Processing LLM response")
         
-        # Extract which agents are mentioned
-        agent_mentions = {
-            "preprocessing_agent": bool(re.search(r'(?i)preprocessing\s+agent', response)),
-            "setup_agent": bool(re.search(r'(?i)setup\s+agent', response)),
-            "hpc_agent": bool(re.search(r'(?i)hpc\s+agent', response)),
-            "analysis_agent": bool(re.search(r'(?i)analysis\s+agent', response))
-        }
+        if not response:
+            logger.warning("PLANNER: Empty LLM response - triggering fallback")
+            return None
+        
+        # Detect if LLM is asking for clarification instead of providing a plan
+        question_indicators = [
+            r'what.*goal\s*\?',
+            r'i\s+(need|require)\s+.*information',
+            r'can\s+you\s+(clarify|specify)',
+            r'do\s+you\s+want',
+            r'are\s+there\s+any',
+        ]
+        
+        response_lower = response.lower()
+        question_count = sum(1 for pattern in question_indicators if re.search(pattern, response_lower))
+        question_mark_count = response.count('?')
+        
+        if question_count >= 2 or question_mark_count >= 3:
+            logger.warning("PLANNER: LLM response is asking questions instead of creating plan - triggering fallback")
+            return None  # Signal to use fallback
+        
+        # CRITICAL: For subtask-specific workflows, automatically infer agent from subtask type
+        # This ensures the correct agent is included even if not explicitly mentioned in prose
+        subtask_type = state.get("subtask_type")
+        
+        if subtask_type == "analysis_only":
+            # Analysis-only workflow - only analysis agent
+            agent_mentions = {"analysis_agent": True}
+        elif subtask_type == "setup_only":
+            # Setup-only workflow - only setup agent
+            agent_mentions = {"setup_agent": True}
+        elif subtask_type == "preprocess_only":
+            # Preprocess-only workflow - only preprocessing agent
+            agent_mentions = {"preprocessing_agent": True}
+        else:
+            # Full workflow - extract which agents are mentioned in the plan
+            agent_mentions = {
+                "preprocessing_agent": bool(re.search(r'(?i)preprocessing\s+agent', response)),
+                "setup_agent": bool(re.search(r'(?i)(setup|simsetup|simulation\s+setup)\s+agent', response)),
+                "hpc_agent": bool(re.search(r'(?i)hpc\s+agent', response)),
+                "analysis_agent": bool(re.search(r'(?i)analysis\s+agent', response))
+            }
+            
+            # FALLBACK: If LLM didn't mention agents (e.g., returned JSON), infer from user goal
+            num_agents_mentioned = sum(agent_mentions.values())
+            if num_agents_mentioned == 0:
+                logger.warning("PLANNER: LLM response doesn't mention any agents. Inferring from user goal.")
+                user_goal = state.get("user_goal", "").lower()
+                structured_prompt = state.get("structured_prompt", "").lower()
+                goal_text = user_goal + " " + structured_prompt
+                
+                # Infer which agents are needed based on keywords in goal
+                needs_preprocess = bool(re.search(r'(preprocess|clean|extract|protein)', goal_text))
+                needs_setup = bool(re.search(r'(setup|simulation|topology|system|solvate|box)', goal_text))
+                needs_hpc = bool(re.search(r'(hpc|submit|run|execute|cluster)', goal_text))
+                needs_analysis = bool(re.search(r'analysis|analyze|rmsd|rmsf', goal_text))
+                
+                # Default to full workflow if can't determine
+                if not any([needs_preprocess, needs_setup, needs_hpc, needs_analysis]):
+                    logger.info("PLANNER: Cannot determine workflow from goal, defaulting to full workflow")
+                    needs_preprocess = needs_setup = needs_hpc = True
+                    needs_analysis = False  # Only if explicitly requested
+                
+                agent_mentions = {
+                    "preprocessing_agent": needs_preprocess,
+                    "setup_agent": needs_setup,
+                    "hpc_agent": needs_hpc,
+                    "analysis_agent": needs_analysis
+                }
+                
+                logger.info(f"PLANNER: Inferred agents from goal: {[k for k, v in agent_mentions.items() if v]}")
         
         # Build lightweight plan structure for routing
         steps = []
@@ -458,7 +499,7 @@ Write the detailed execution plan now:"""
                 steps.append({
                     "step_number": step_num,
                     "agent": agent_name,
-                    "type": "natural_language",  # Signal to field agents
+                    "type": "natural_language",
                     "dependencies": [step_num - 1] if step_num > 1 else []
                 })
                 step_num += 1
@@ -466,7 +507,7 @@ Write the detailed execution plan now:"""
         plan = {
             "title": "Detailed Natural Language Execution Plan",
             "format": "natural_language",
-            "full_plan": response,  # Full prose plan for field agents
+            "full_plan": response,
             "agent_sequence": [s["agent"] for s in steps],
             "steps": steps
         }
@@ -485,142 +526,181 @@ Write the detailed execution plan now:"""
         """
         Fallback template-based planning when LLM is unavailable.
         
-        This creates dependency-aware plans with clear inputs/outputs for each step.
+        CRITICAL: Always generates NATURAL LANGUAGE plans, never structured JSON.
+        Respects subtask_type to focus only on requested workflow stages.
         """
-        logger.info("PLANNER: Creating fallback plan from PDB analysis")
+        logger.info("PLANNER: Creating fallback natural language plan from PDB analysis")
         
-        plan_steps = []
-        step_number = 1
-        
-        # Determine what preprocessing is needed
+        subtask_type = state.get("subtask_type")
         summary = pdb_analysis.get("summary", {})
+        working_dir = state.get("working_directory", ".")
         
-        # Step 1: Preprocessing (if needed)
-        preprocessing_tasks = []
-        if summary.get("needs_hydrogen_addition"):
-            preprocessing_tasks.append("add missing hydrogens")
-        if pdb_analysis.get("water", {}).get("present"):
-            preprocessing_tasks.append("remove water molecules")
-        if component_selection.get("ligand") is False and pdb_analysis.get("ligands", {}).get("present"):
-            preprocessing_tasks.append("remove ligand")
-        if component_selection.get("specific_chains"):
-            preprocessing_tasks.append(f"extract chains {component_selection['specific_chains']}")
+        # Build natural language plan prose
+        plan_sections = []
+        agents_involved = []
         
-        if preprocessing_tasks or not state.get("cleaned_pdb"):
-            preprocess_step = {
-                "step_number": step_number,
-                "name": "Preprocess PDB Structure",
-                "agent": "preprocessing_agent",
-                "description": f"Clean and prepare PDB file: {', '.join(preprocessing_tasks) if preprocessing_tasks else 'validate structure'}",
-                "inputs": {
-                    "raw_pdb": pdb_path,
-                    "component_selection": component_selection,
-                    "tasks": preprocessing_tasks
-                },
-                "expected_outputs": ["cleaned_pdb", "preprocessing_report"],
-                "dependencies": [],
-                "tools": ["pdb_fixer", "hydrogen_adder", "structure_validator"],
-                "type": "automated"
-            }
-            plan_steps.append(preprocess_step)
-            logger.info(f"  Step {step_number}: Preprocessing with tasks: {preprocessing_tasks}")
-            step_number += 1
+        # Section 1: Goal Understanding
+        plan_sections.append(f"**GOAL INTERPRETATION:**\n\n{structured_prompt}\n")
         
-        # Step 2: Simulation Setup (topology and coordinates)
-        if not state.get("coordinates"):
-            setup_step = {
-                "step_number": step_number,
-                "name": "Setup MD Simulation Files",
-                "agent": "setup_agent",
-                "description": "Generate topology, add solvent, ions, and create coordinate files",
-                "inputs": {
-                    "cleaned_pdb": "output from Step 1" if plan_steps else pdb_path,
-                    "force_field": state.get("force_field", "amber99sb-ildn"),
-                    "water_model": state.get("water_model", "tip3p"),
-                    "component_selection": component_selection
-                },
-                "expected_outputs": ["topology", "coordinates", "mdp_files", "setup_report"],
-                "dependencies": [1] if plan_steps else [],
-                "tools": ["topology_builder", "solvator", "ion_adder", "mdp_generator"],
-                "type": "automated"
-            }
-            plan_steps.append(setup_step)
-            logger.info(f"  Step {step_number}: Simulation setup")
-            step_number += 1
+        # Section 2: PDB Analysis Summary (if not analysis-only)
+        if subtask_type != "analysis_only":
+            pdb_info = []
+            pdb_info.append(f"PDB File: {pdb_path}")
+            pdb_info.append(f"Total Atoms: {pdb_analysis.get('total_atoms', 'Unknown')}")
+            if pdb_analysis.get('protein', {}).get('present'):
+                pdb_info.append(f"Protein: Present ({pdb_analysis.get('total_residues', '?')} residues)")
+            if pdb_analysis.get('ligands', {}).get('present'):
+                ligands = pdb_analysis.get('ligands', {}).get('residue_names', [])
+                pdb_info.append(f"Ligands: {', '.join(ligands)}")
+            if pdb_analysis.get('water', {}).get('present'):
+                pdb_info.append(f"Water: Present ({pdb_analysis.get('water', {}).get('molecule_count', '?')} molecules)")
+            
+            plan_sections.append(f"**PDB STRUCTURE ANALYSIS:**\n\n" + "\n".join(pdb_info) + "\n")
         
-        # Step 3: HPC Submission (if requested in goal AND not explicitly excluded)
-        goal_lower = structured_prompt.lower()
-        user_goal_lower = state.get("user_goal", "").lower()
+        # Section 3: Execution Sequence (detailed prose for each agent)
+        execution_prose = []
         
-        # Check for HPC exclusion phrases
-        hpc_excluded = any(phrase in f"{goal_lower} {user_goal_lower}" for phrase in [
-            "no hpc", "skip hpc", "do not submit", "don't submit", "do not use hpc",
-            "no job submission", "no simulation", "setup only", "without hpc",
-            "do not do hpc", "don't do hpc", "not do hpc", "no hpc job",
-            "skip job submission", "skip simulation", "local only", "locally only",
-            "no job", "not submit", "setup alone"
-        ])
+        # === ANALYSIS-ONLY WORKFLOW ===
+        if subtask_type == "analysis_only":
+            agents_involved.append("analysis_agent")
+            execution_prose.append(
+                f"**Analysis Agent Responsibilities:**\n\n"
+                f"The Analysis Agent will perform trajectory analysis on existing simulation data located "
+                f"in {working_dir}/hpc/. The agent will auto-discover topology and trajectory files "
+                f"(looking for .gro, .pdb, .tpr for topology and .xtc, .trr for trajectories).\n\n"
+                f"Analysis tasks to perform:\n"
+                f"- Calculate structural metrics (RMSD, RMSF) as requested\n"
+                f"- Generate energy profiles if energy files (.edr) are available\n"
+                f"- Create visualization plots for all analyses\n"
+                f"- Save all results to {working_dir}/analysis/\n\n"
+                f"The agent will use Python-based analysis tools (MDAnalysis, matplotlib) rather than "
+                f"command-line GROMACS tools for better integration and flexibility."
+            )
         
-        # Only create HPC step if requested AND not excluded
-        if ("run" in goal_lower or "execute" in goal_lower or "simulate" in goal_lower) and not hpc_excluded:
-            hpc_step = {
-                "step_number": step_number,
-                "name": "Submit MD Simulation to HPC",
-                "agent": "hpc_agent",
-                "description": "Submit GROMACS simulation job to HPC cluster",
-                "inputs": {
-                    "topology": "output from Step 2",
-                    "coordinates": "output from Step 2",
-                    "mdp_files": "output from Step 2",
-                    "engine": state.get("md_engine", "gromacs")
-                },
-                "expected_outputs": ["job_id", "job_status", "trajectory_path"],
-                "dependencies": [step_number - 1] if plan_steps else [],
-                "tools": ["job_script_generator", "slurm_submitter"],
-                "type": "automated"
-            }
-            plan_steps.append(hpc_step)
-            logger.info(f"  Step {step_number}: HPC submission")
-            step_number += 1
-        elif hpc_excluded:
-            logger.info(f"  Skipping HPC step: User explicitly excluded HPC submission")
+        # === FULL OR PARTIAL WORKFLOWS ===
+        else:
+            # Preprocessing
+            if subtask_type != "setup_only":
+                preprocessing_needed = []
+                if summary.get("needs_hydrogen_addition"):
+                    preprocessing_needed.append("adding missing hydrogens with correct protonation states")
+                if pdb_analysis.get("water", {}).get("present"):
+                    preprocessing_needed.append("removing water molecules")
+                if component_selection.get("ligand") is False and pdb_analysis.get("ligands", {}).get("present"):
+                    preprocessing_needed.append("removing ligand molecules")
+                
+                if preprocessing_needed or not state.get("cleaned_pdb"):
+                    agents_involved.append("preprocessing_agent")
+                    tasks_str = ", ".join(preprocessing_needed) if preprocessing_needed else "structure validation"
+                    execution_prose.append(
+                        f"**Preprocessing Agent Responsibilities:**\n\n"
+                        f"The Preprocessing Agent will clean and prepare the PDB structure by {tasks_str}. "
+                        f"This agent focuses solely on structure preparation and does NOT handle topology "
+                        f"generation or force field assignment (those are handled by the Setup Agent).\n\n"
+                        f"Tools to use: reduce (hydrogens), pdbfixer (missing atoms/residues), "
+                        f"Bio.PDB (structure manipulation)\n\n"
+                        f"Expected output: cleaned_pdb file ready for topology generation"
+                    )
+            
+            # Setup
+            if subtask_type not in ["analysis_only", "preprocess_only"]:
+                agents_involved.append("setup_agent")
+                ff = state.get('force_field', 'amber99sb-ildn')
+                wm = state.get('water_model', 'tip3p')
+                execution_prose.append(
+                    f"\n\n**Setup Agent Responsibilities:**\n\n"
+                    f"The Setup Agent will generate the complete simulation system using {ff} "
+                    f"force field and {wm} water model. This includes:\n\n"
+                    f"1. Topology generation (gmx pdb2gmx) for protein components\n"
+                    f"2. Ligand parameterization using acpype or CGenFF if ligands are present and requested\n"
+                    f"3. Defining the simulation box (gmx editconf)\n"
+                    f"4. System solvation (gmx solvate)\n"
+                    f"5. Adding neutralizing ions (gmx genion)\n"
+                    f"6. Generating MDP parameter files for energy minimization, equilibration, and production runs\n\n"
+                    f"Expected outputs: topology files (.top, .itp), coordinate files (.gro), "
+                    f"and parameter files (.mdp)"
+                )
+            
+            # HPC
+            if subtask_type not in ["analysis_only", "setup_only", "preprocess_only"]:
+                goal_lower = structured_prompt.lower() + state.get("user_goal", "").lower()
+                hpc_excluded = any(phrase in goal_lower for phrase in [
+                    "no hpc", "skip hpc", "do not submit", "don't submit", "setup only", "without hpc"
+                ])
+                
+                if ("run" in goal_lower or "execute" in goal_lower or "simulate" in goal_lower) and not hpc_excluded:
+                    agents_involved.append("hpc_agent")
+                    execution_prose.append(
+                        f"\n\n**HPC Agent Responsibilities:**\n\n"
+                        f"The HPC Agent will submit the simulation to a compute cluster using SLURM job scheduler. "
+                        f"The agent will:\n\n"
+                        f"1. Generate appropriate SLURM job scripts with resource requests\n"
+                        f"2. Submit energy minimization, NVT equilibration, NPT equilibration, and production MD jobs\n"
+                        f"3. Monitor job status and handle failures\n"
+                        f"4. Retrieve trajectory and output files upon completion\n\n"
+                        f"Expected outputs: job_id, trajectory files (.xtc), energy files (.edr), coordinate files (.gro)"
+                    )
+                elif hpc_excluded:
+                    execution_prose.append(
+                        f"\n\n**HPC Submission: SKIPPED**\n\n"
+                        f"User explicitly requested to skip HPC job submission. Simulation files will be "
+                        f"prepared but not executed."
+                    )
+            
+            # Analysis (for full workflows)
+            if subtask_type not in ["preprocess_only", "setup_only"]:
+                goal_lower = structured_prompt.lower()
+                if "analyz" in goal_lower or "rmsd" in goal_lower or "rmsf" in goal_lower:
+                    agents_involved.append("analysis_agent")
+                    execution_prose.append(
+                        f"\n\n**Analysis Agent Responsibilities:**\n\n"
+                        f"After simulation completion, the Analysis Agent will perform trajectory analysis "
+                        f"including RMSD (structural deviation), RMSF (per-residue flexibility), and other "
+                        f"requested analyses. Results will be saved to {working_dir}/analysis/ with both "
+                        f"data files and visualization plots."
+                    )
         
-        # Step 4: Analysis (if requested)
-        if "analyz" in goal_lower or "rmsd" in goal_lower or "rmsf" in goal_lower:
-            analysis_step = {
-                "step_number": step_number,
-                "name": "Analyze Simulation Results",
-                "agent": "analysis_agent",
-                "description": "Perform trajectory analysis (RMSD, RMSF, etc.)",
-                "inputs": {
-                    "trajectory": "output from Step 3",
-                    "topology": "output from Step 2"
-                },
-                "expected_outputs": ["analysis_results", "figures"],
-                "dependencies": [step_number - 1] if plan_steps else [],
-                "tools": ["mdanalysis", "plotting_tools"],
-                "type": "automated"
-            }
-            plan_steps.append(analysis_step)
-            logger.info(f"  Step {step_number}: Analysis")
-            step_number += 1
+        # Combine sections
+        plan_sections.append("**EXECUTION SEQUENCE:**\n\n" + "\n".join(execution_prose))
         
-        # Build complete plan
+        # Section 4: Expected Outcomes
+        outcomes = []
+        if "preprocessing_agent" in agents_involved:
+            outcomes.append("- Cleaned PDB structure ready for topology generation")
+        if "setup_agent" in agents_involved:
+            outcomes.append("- Complete simulation system (topology, coordinates, parameters)")
+        if "hpc_agent" in agents_involved:
+            outcomes.append("- Completed simulation trajectory and energy data")
+        if "analysis_agent" in agents_involved:
+            outcomes.append("- Analysis results with plots and data files")
+        
+        if outcomes:
+            plan_sections.append(f"\n\n**EXPECTED OUTCOMES:**\n\n" + "\n".join(outcomes))
+        
+        # Build complete natural language plan
+        full_plan_text = "\n".join(plan_sections)
+        
+        # Create minimal step structure for routing (supervisor needs to know agent sequence)
+        steps = []
+        for i, agent_name in enumerate(agents_involved, 1):
+            steps.append({
+                "step_number": i,
+                "agent": agent_name,
+                "type": "natural_language",
+                "dependencies": [i - 1] if i > 1 else []
+            })
+        
         plan = {
-            "title": f"MD Workflow: {component_selection}",
-            "summary": f"Structured plan with {len(plan_steps)} steps based on PDB analysis",
-            "method": "analysis_based",
-            "pdb_file": pdb_path,
-            "pdb_analysis": {
-                "total_atoms": pdb_analysis.get("total_atoms", 0),
-                "has_protein": pdb_analysis.get("protein", {}).get("present", False),
-                "has_ligand": pdb_analysis.get("ligands", {}).get("present", False),
-                "component_selection": component_selection
-            },
-            "steps": plan_steps
+            "title": f"Fallback Natural Language Execution Plan: {subtask_type or 'full_pipeline'}",
+            "format": "natural_language",
+            "full_plan": full_plan_text,
+            "agent_sequence": agents_involved,
+            "steps": steps,
+            "method": "fallback",
+            "subtask_type": subtask_type
         }
         
-        logger.info(f"PLANNER: Plan complete with {len(plan_steps)} dependency-aware steps")
+        logger.info(f"PLANNER: Fallback natural language plan complete with {len(agents_involved)} agents: {agents_involved}")
         return plan
     
     def _create_plan_from_templates(
@@ -629,42 +709,19 @@ Write the detailed execution plan now:"""
         validated_pdb: str,
         state: MDState
     ) -> Dict[str, Any]:
-        """Create plan using keyword-based templates."""
+        """
+        DEPRECATED: Create plan using keyword-based templates.
         
-        goal_lower = user_goal.lower()
-        templates = self.config.get("planner", {}).get("templates", {})
+        This method is no longer used as all plans are now generated in natural language format.
+        Kept for reference only. Use _create_fallback_plan() instead which generates NL plans.
+        """
+        logger.warning("PLANNER: _create_plan_from_templates is deprecated. Use _create_fallback_plan instead.")
         
-        # Collect matching steps
-        plan_steps = []
-        
-        for template_name, template in templates.items():
-            keywords = template.get("keywords", [])
-            
-            # Check if any keyword matches
-            if any(kw in goal_lower for kw in keywords):
-                logger.info(f"PLANNER: Matched template '{template_name}'")
-                
-                for step_template in template.get("default_steps", []):
-                    step = {
-                        "number": f"Step {len(plan_steps) + 1}",
-                        "name": step_template.get("name", "Unnamed Step"),
-                        "agent": step_template.get("agent", "unknown"),
-                        "description": step_template.get("description", ""),
-                        "tools": step_template.get("tools", []),
-                        "dependencies": [f"Step {len(plan_steps)}"] if plan_steps else [],
-                        "type": "automated"
-                    }
-                    plan_steps.append(step)
-                    logger.info(f"  - Added step: {step['name']} (agent: {step['agent']})")
-        
-        # Build plan
-        plan = {
-            "title": f"Execution Plan: {user_goal[:40]}",
-            "summary": f"Template-based plan with {len(plan_steps)} step(s)",
-            "steps": plan_steps,
-            "method": "template_based",
-            "pdb_file": validated_pdb
-        }
-        
-        logger.info(f"PLANNER: Plan complete with {len(plan_steps)} steps")
-        return plan
+        # Redirect to fallback plan which generates natural language
+        return self._create_fallback_plan(
+            structured_prompt=user_goal,
+            pdb_path=validated_pdb,
+            pdb_analysis=state.get("pdb_analysis", {}),
+            component_selection=state.get("component_selection", {}),
+            state=state
+        )

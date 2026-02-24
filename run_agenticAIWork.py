@@ -59,6 +59,9 @@ def main(argv=None):
     )
     parser.add_argument("--goal", required=True, 
                        help="Natural language description of simulation goal")
+    parser.add_argument("--subtask", default=None,
+                       choices=["preprocess", "simsetup", "hpcjob", "analysis"],
+                       help="Specific subtask to run. If omitted, runs all subtasks in series")
     parser.add_argument("--use-llm", action="store_true", 
                        help="Use LLM for intelligent planning (recommended)")
     parser.add_argument("--llm-model", default="gpt-oss:20b",
@@ -71,8 +74,8 @@ def main(argv=None):
                        help="Force field to use")
     parser.add_argument("--water-model", default="tip3p", 
                        help="Water model to use")
-    parser.add_argument("--working-dir", default=None,
-                       help="Working directory for files")
+    parser.add_argument("--working-dir", default=".",
+                       help="Base working directory (agents use subdirs: working_dir/preprocess/, working_dir/hpc/, etc.)")
     
     args = parser.parse_args(argv)
     
@@ -81,32 +84,43 @@ def main(argv=None):
         model=args.llm_model,
         base_url=args.llm_base_url if args.use_llm else None
     )
-    
-    # Initialize workflow
-    workflow = MDWorkflow(llm_client)
-    
     # Configuration
     config = {
         "force_field": args.force_field,
         "water_model": args.water_model,
-        "human_in_loop": not args.no_human_loop
+        "human_in_loop": not args.no_human_loop,
+        "working_directory": args.working_dir
     }
     
-    if args.working_dir:
-        config["working_directory"] = args.working_dir
-
+    # Pass subtask type directly in config
+    if args.subtask:
+        subtask_types = {
+            "preprocess": "preprocess_only",
+            "simsetup": "setup_only",
+            "hpcjob": "hpc_only",
+            "analysis": "analysis_only"
+        }
+        config["subtask_type"] = subtask_types[args.subtask]
+    
+    goal = args.goal
+    
     # Set up logging with the specified log file
     set_log_file("agent_conversation.log")
+    
+    # Initialize workflow
+    workflow = MDWorkflow(llm_client)
     
     # Initialize conversation logger
     conversation_logger = get_conversation_logger("agent_conversation.log")
     
     # Log user prompt
-    log_user_prompt(args.goal, config)
+    log_user_prompt(goal, config)
     
     # Run workflow
-    print(f"\nStarting MD workflow for: {args.goal}", flush=True)
+    print(f"\nStarting MD workflow for: {goal}", flush=True)
     print(f"Configuration: {config}", flush=True)
+    if args.subtask:
+        print(f"Subtask Mode: {args.subtask.upper()}", flush=True)
     
     if config["human_in_loop"]:
         print("\n⚠️  HUMAN-IN-THE-LOOP MODE: You will be prompted at checkpoints", flush=True)
@@ -116,12 +130,12 @@ def main(argv=None):
         if config["human_in_loop"]:
             # Run with human feedback
             final_state = workflow.run_with_human_feedback(
-                args.goal, 
+                goal, 
                 feedback_handler=simple_feedback_handler
             )
         else:
             # Run automatically
-            final_state = workflow.run(args.goal, config)
+            final_state = workflow.run(goal, config)
         
         # Log workflow completion is handled by conversation_logger
         # No need for separate log_workflow_state since conversation logger captures everything

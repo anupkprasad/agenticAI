@@ -113,8 +113,14 @@ class MDHPCAgent:
         }
         
         if has_planner_instructions:
-            full_plan = execution_plan.get("full_plan", "")
-            hpc_section = self._extract_agent_instructions(full_plan, "HPC Agent")
+            # Prefer pre-extracted instructions from supervisor (avoids duplication)
+            hpc_section = state.get("hpc_instructions")
+            
+            if not hpc_section:
+                # Fallback: Extract from full plan if supervisor didn't provide it
+                full_plan = execution_plan.get("full_plan", "")
+                hpc_section = self._extract_agent_instructions(full_plan, "HPC Agent")
+            
             if hpc_section:
                 input_summary["planner_instructions"] = hpc_section
             else:
@@ -200,14 +206,17 @@ class MDHPCAgent:
     
     def _create_execution_plan(self, state: MDState) -> Optional[Dict[str, Any]]:
         """Create HPC execution plan using LLM"""
-        execution_plan = state.get("execution_plan", {})
-        planner_instructions = ""
+        # Prefer pre-extracted instructions from supervisor
+        planner_instructions = state.get("hpc_instructions", "")
         
-        if execution_plan.get("format") == "natural_language":
-            full_plan = execution_plan.get("full_plan", "")
-            hpc_section = self._extract_agent_instructions(full_plan, "HPC Agent")
-            if hpc_section:
-                planner_instructions = hpc_section
+        if not planner_instructions:
+            # Fallback: Extract from execution_plan if supervisor didn't provide it
+            execution_plan = state.get("execution_plan", {})
+            if execution_plan.get("format") == "natural_language":
+                full_plan = execution_plan.get("full_plan", "")
+                hpc_section = self._extract_agent_instructions(full_plan, "HPC Agent")
+                if hpc_section:
+                    planner_instructions = hpc_section
         
         # Get system information
         mdp_files = state.get("mdp_files", {})

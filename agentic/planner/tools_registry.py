@@ -347,9 +347,21 @@ class ToolsRegistry:
         else:
             agents_to_format = self.tools_by_agent
         
+        # Use workflow order instead of alphabetical
+        workflow_order = ["preprocess", "simsetup", "hpc", "analysis", "supervisor"]
+        
         formatted = []
         
-        for agent, tools in sorted(agents_to_format.items()):
+        # Sort agents by workflow order
+        def agent_sort_key(agent_name):
+            for i, workflow_agent in enumerate(workflow_order):
+                if workflow_agent in agent_name.lower():
+                    return i
+            return 999  # Unknown agents go last
+        
+        sorted_agents = sorted(agents_to_format.items(), key=lambda x: agent_sort_key(x[0]))
+        
+        for agent, tools in sorted_agents:
             formatted.append(f"\n**{agent.upper()} Agent Tools:**")
             
             for tool in tools:

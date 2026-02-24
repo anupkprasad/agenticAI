@@ -75,9 +75,14 @@ class SimulationSetupAgent:
         }
         
         if has_planner_instructions:
-            # Extract just the setup agent section from the full plan
-            full_plan = execution_plan.get("full_plan", "")
-            setup_section = self._extract_agent_instructions(full_plan, "Simulation Setup Agent")
+            # Prefer pre-extracted instructions from supervisor (avoids duplication)
+            setup_section = state.get("setup_instructions")
+            
+            if not setup_section:
+                # Fallback: Extract from full plan if supervisor didn't provide it
+                full_plan = execution_plan.get("full_plan", "")
+                setup_section = self._extract_agent_instructions(full_plan, "Simulation Setup Agent")
+            
             if setup_section:
                 input_summary["planner_instructions"] = setup_section
             else:
@@ -91,6 +96,9 @@ class SimulationSetupAgent:
         try:
             # Initialize tool executor with agent-specific subdirectory
             base_working_dir = state.get("working_directory", "working_dir")
+            # Ensure absolute path to avoid path doubling in subprocess calls
+            if not Path(base_working_dir).is_absolute():
+                base_working_dir = str(Path.cwd() / base_working_dir)
             simsetup_dir = str(Path(base_working_dir) / "simsetup")
             Path(simsetup_dir).mkdir(parents=True, exist_ok=True)
             
@@ -243,13 +251,15 @@ class SimulationSetupAgent:
         defaults = self.config.get("defaults", {})
         
         # Check if planner provided detailed instructions for this agent
-        execution_plan = state.get("execution_plan", {})
-        planner_instructions = None
+        # Prefer pre-extracted instructions from supervisor
+        planner_instructions = state.get("setup_instructions")
         
-        if execution_plan.get("format") == "natural_language":
-            # Extract setup-specific instructions from natural language plan
-            full_plan = execution_plan.get("full_plan", "")
-            planner_instructions = self._extract_agent_instructions(full_plan, "Simulation Setup Agent")
+        if not planner_instructions:
+            # Fallback: Extract from execution_plan if supervisor didn't provide it
+            execution_plan = state.get("execution_plan", {})
+            if execution_plan.get("format") == "natural_language":
+                full_plan = execution_plan.get("full_plan", "")
+                planner_instructions = self._extract_agent_instructions(full_plan, "Simulation Setup Agent")
             
         return SimSetupAgentInput(
             cleaned_pdb=state.get("cleaned_pdb", ""),
@@ -259,7 +269,7 @@ class SimulationSetupAgent:
             temperature=state.get("temperature", defaults.get("temperature", 300.0)),
             pressure=state.get("pressure", defaults.get("pressure", 1.0)),
             user_goal=state.get("user_goal", ""),
-            additional_instructions=planner_instructions or state.get("setup_instructions", None)
+            additional_instructions=planner_instructions
         )
     
     def _run_setup_workflow(self, agent_input: SimSetupAgentInput, 
@@ -759,7 +769,13 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 # HARDCODE: Normalize input file paths
                 # Since we pass working_dir to GROMACS tools, they need RELATIVE paths (just filenames)
                 # not absolute paths. Extract filenames and let tools handle them with cwd=working_dir
-                for path_key in ["pdb_file", "coordinate_file", "topology_file", "mdp_file"]:
+                # Extended list to cover all tools including build_simulation_system
+                path_keys = [
+                    "pdb_file", "coordinate_file", "topology_file", "mdp_file",
+                    "protein_pdb", "ligand_pdb", "ion_pdb", "ligand_itp",  # For build_simulation_system
+                    "input_structure", "restraint_file"  # For other tools
+                ]
+                for path_key in path_keys:
                     if path_key in tool_params:
                         file_value = tool_params[path_key]
                         if isinstance(file_value, str):
@@ -770,19 +786,37 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                             simsetup_path = Path(simsetup_dir) / filename
                             if not simsetup_path.exists():
                                 # Check if original path exists (might be absolute or from different dir)
-                                if Path(file_value).is_absolute() and os.path.exists(file_value):
+                                original_path = Path(file_value)
+                                if original_path.is_absolute() and original_path.exists():
                                     # Copy file to simsetup directory
                                     shutil.copy2(file_value, str(simsetup_path))
                                     logger.info(f"Copied {file_value} to {simsetup_path}")
+                                else:
+                                    # Try relative to workspace root
+                                    workspace_path = Path(state.get("working_directory", "working_dir")).parent / file_value
+                                    if workspace_path.exists():
+                                        shutil.copy2(str(workspace_path), str(simsetup_path))
+                                        logger.info(f"Copied {workspace_path} to {simsetup_path}")
                             
                             # Always use just filename since working_dir is set
                             tool_params[path_key] = filename
+                
+                # Special handling for output_dir parameter (for build_simulation_system)
+                if "output_dir" in tool_params:
+                    # Ensure output_dir is set to simsetup_dir (absolute path for tool initialization)
+                    tool_params["output_dir"] = simsetup_dir
                 
                 # HARDCODE: Force all outputs to simsetup directory (use relative paths for working_dir)
                 # Chain inputs from previous steps
                 # CRITICAL: Always pass working_dir to ensure GROMACS creates files in correct location
                 # Since working_dir is set, use RELATIVE paths (just filenames) not absolute paths
-                if step.tool_name == "build_topology":
+                if step.tool_name == "build_simulation_system":
+                    # This tool handles everything internally, just ensure paths are set
+                    # Input file paths already normalized above to just filenames
+                    # Output dir already set to simsetup_dir
+                    pass  # Tool will create all files in output_dir
+                    
+                elif step.tool_name == "build_topology":
                     # Ensure PDB file path is set (already normalized to filename above)
                     if "pdb_file" not in tool_params:
                         tool_params["pdb_file"] = Path(agent_input.cleaned_pdb).name  # Just filename
