@@ -53,14 +53,14 @@ class MDPGenerator:
     def _determine_tc_groups(self, has_ligand: bool, has_ions: bool) -> tuple:
         """
         Determine temperature coupling groups based on system composition.
+        For solvated systems (water + ions), always use Protein Non-Protein.
         
         Returns:
             (tc-grps string, number of groups)
         """
-        if has_ligand or has_ions:
-            return "Protein Non-Protein", 2
-        else:
-            return "System", 1
+        # Solvated systems always have water/ions = Non-Protein
+        # Only use "System" for vacuum simulations (rare)
+        return "Protein Non-Protein", 2
     
     def _get_position_restraints(self, has_ligand: bool) -> str:
         """Get position restraint definitions."""
@@ -142,10 +142,10 @@ DispCorr        = {cutoffs['DispCorr']}
         
         mdp_content = f"""; NVT equilibration
 title           = NVT equilibration
-define          = {posres}
+define          = {posres}  ; position restrain the protein
 
 ; Run parameters
-integrator      = md
+integrator      = md        ; leap-frog integrator
 nsteps          = {nsteps}
 dt              = {dt}
 comm-mode       = Linear
@@ -159,21 +159,21 @@ nstlog          = 500
 nstxout-compressed = 500
 
 ; Bond parameters
-continuation         = no
-constraint_algorithm = lincs
-constraints          = h-bonds
-lincs_iter           = 1
-lincs_order          = 4
+continuation         = no        ; first dynamics run
+constraint_algorithm = lincs     ; holonomic constraints
+constraints          = h-bonds   ; bonds with H-atoms to constraints
+lincs_iter           = 1         ; accuracy of LINCS
+lincs_order          = 4         ; also related to accuracy
 
 ; Neighbor searching
 cutoff-scheme   = Verlet
-ns_type         = grid
-nstlist         = 20
+ns_type         = grid      ; search neighboring grid cells
+nstlist         = 20        ; 10 fs
 
 ; Electrostatics
-coulombtype     = PME
-pme_order       = 4
-fourierspacing  = 0.12
+coulombtype     = PME       ; for long range electrostatics
+pme_order       = 4         ; cubic interpolation
+fourierspacing  = 0.12      ; grid spacing for FFT
 ewald-rtol      = 1e-5
 optimize-fft    = yes
 rlist           = {cutoffs['rlist']}
@@ -191,6 +191,17 @@ ref_t           = {ref_t}
 
 ; Periodic boundary conditions
 pbc             = xyz
+
+; Dispersion correction
+DispCorr        = {cutoffs['DispCorr']}
+
+; Pressure coupling is off
+pcoupl          = no
+
+; Velocity generation
+gen_vel         = yes
+gen_temp        = {temperature}
+gen_seed        = -1
 """
         
         Path(output_file).write_text(mdp_content)
@@ -216,38 +227,38 @@ pbc             = xyz
         
         mdp_content = f"""; NPT equilibration
 title           = NPT equilibration
-define          = {posres}
+define          = {posres}  ; position restrain the protein
 
 ; Run parameters
-integrator      = md
-nsteps          = {nsteps}
-dt              = {dt}
+integrator      = md        ; leap-frog integrator
+nsteps          = {nsteps}  ; 2 * 50000 = 100 ps
+dt              = {dt}      ; 2 fs
 comm-mode       = Linear
 
 ; Output control
-nstxout         = 0
-nstvout         = 0
-nstfout         = 0
-nstenergy       = 500
+nstxout         = 0         ; do not write .trr positions
+nstvout         = 0         ; do not write velocities to .trr
+nstfout         = 0         ; do not write forces to .trr
+nstenergy       = 500       ; write energy to .edr every 500 steps
 nstlog          = 500
-nstxout-compressed = 500
+nstxout-compressed = 500    ; write .xtc every 500 steps
 
 ; Bond parameters
-continuation         = yes
-constraint_algorithm = lincs
-constraints          = h-bonds
-lincs_iter           = 1
-lincs_order          = 4
+continuation         = yes       ; continuation from NVT
+constraint_algorithm = lincs     ; holonomic constraints
+constraints          = h-bonds   ; bonds with H-atoms to constraints
+lincs_iter           = 1         ; accuracy of LINCS
+lincs_order          = 4         ; also related to accuracy
 
 ; Neighbor searching
 cutoff-scheme   = Verlet
-ns_type         = grid
-nstlist         = 20
+ns_type         = grid      ; search neighboring grid cells
+nstlist         = 20        ; 10 fs
 
 ; Electrostatics
-coulombtype     = PME
-pme_order       = 4
-fourierspacing  = 0.12
+coulombtype     = PME       ; for long range electrostatics
+pme_order       = 4         ; cubic interpolation
+fourierspacing  = 0.12      ; grid spacing for FFT
 ewald-rtol      = 1e-5
 optimize-fft    = yes
 rlist           = {cutoffs['rlist']}
@@ -257,27 +268,27 @@ rvdw            = {cutoffs['rvdw']}
 rcoulomb        = {cutoffs['rcoulomb']}
 rvdw-switch     = {cutoffs['rvdw_switch']}
 
-; Temperature coupling
-tcoupl          = V-rescale
-tc-grps         = {tc_grps}
-tau_t           = {tau_t}
-ref_t           = {ref_t}
+; Temperature coupling is on
+tcoupl          = V-rescale           ; modified Berendsen thermostat
+tc-grps         = {tc_grps}           ; two coupling groups - more accurate
+tau_t           = {tau_t}             ; time constant, in ps
+ref_t           = {ref_t}             ; reference temperature, one for each group, in K
 
 ; Periodic boundary conditions
-pbc             = xyz
+pbc             = xyz       ; 3-D PBC
 
 ; Dispersion correction
-DispCorr        = EnerPres
+DispCorr        = EnerPres  ; account for cut-off vdW scheme
 
-; Pressure coupling (NPT)
-pcoupl          = Berendsen
-pcoupltype      = isotropic
-tau_p           = 2.0
-ref_p           = {pressure}
-compressibility = 4.5e-5
+; Pressure coupling is on
+pcoupl          = Berendsen ; pressure coupling on in NPT
+pcoupltype      = isotropic ; uniform scaling of box vectors
+tau_p           = 2.0       ; time constant, in ps
+ref_p           = {pressure}; reference pressure, in bar
+compressibility = 4.5e-5    ; isothermal compressibility of water, bar^-1
 refcoord-scaling= all
 
-gen_vel         = no
+gen_vel         = no        ; velocities from NVT
 """
         
         Path(output_file).write_text(mdp_content)
@@ -305,66 +316,65 @@ gen_vel         = no
 title           = production run
 
 ; Run parameters
-integrator      = md
-nsteps          = {nsteps}
-dt              = {dt}
+integrator      = md        ; leap-frog integrator
+nsteps          = {nsteps}  ; 100000000 = 200 ns (at dt=0.002)
+dt              = {dt}      ; unit in gromacs is ps so it is 2 fs
 comm-mode       = Linear
 
 ; Output control
-nstxout         = 0
-nstvout         = 0
-nstfout         = 0
-nstenergy       = {output_freq}
+nstxout         = 0         ; do not write .trr positions
+nstvout         = 0         ; do not write velocities to .trr
+nstfout         = 0         ; do not write forces to .trr
+nstenergy       = {output_freq}     ; write energy to .edr every {output_freq} steps
 nstlog          = {output_freq}
-nstxout-compressed = {output_freq}
+nstxout-compressed = {output_freq}  ; write .xtc every {output_freq} steps
 
 ; Bond parameters
-constraint_algorithm = lincs
-constraints          = h-bonds
-lincs_iter           = 1
-lincs_order          = 6
+continuation         = yes       ; continuation from NPT
+constraint_algorithm = lincs     ; holonomic constraints
+constraints          = h-bonds   ; bonds with H-atoms to constraints
+lincs_iter           = 1         ; accuracy of LINCS
+lincs_order          = 6         ; 6 is needed for large time steps with virtual sites or BD
 
 ; Neighbor searching
 cutoff-scheme   = Verlet
-ns_type         = grid
-nstlist         = 20
+ns_type         = grid      ; search neighboring grid cells
+nstlist         = 20        ; 20*2fs = 40 fs
 
 ; Electrostatics
-coulombtype     = PME
+coulombtype     = PME       ; for long range electrostatics
 ewald-rtol      = 1e-5
-pme_order       = 4
-fourierspacing  = 0.12
+pme_order       = 4         ; cubic interpolation
+fourierspacing  = 0.12      ; grid spacing for FFT
 optimize-fft    = yes
-rlist           = {cutoffs['rlist']}
-rcoulomb        = {cutoffs['rcoulomb']}
-vdwtype         = {cutoffs['vdwtype']}
-vdw-modifier    = {cutoffs['vdw_modifier']}
-rvdw            = {cutoffs['rvdw']}
-rvdw-switch     = {cutoffs['rvdw_switch']}
+rlist           = {cutoffs['rlist']}            ; short-range neighbor list cutoff (in nm)
+rcoulomb        = {cutoffs['rcoulomb']}         ; short-range electrostatic cutoff (in nm)
+vdwtype         = {cutoffs['vdwtype']}          ; twin range cutoffs with neighbor list
+vdw-modifier    = {cutoffs['vdw_modifier']}     ; smoothly switches the forces to zero
+rvdw            = {cutoffs['rvdw']}             ; short-range van der Waals cutoff (in nm)
+rvdw-switch     = {cutoffs['rvdw_switch']}      ; where to start switching the LJ force
 
-; Temperature coupling
-tcoupl          = V-rescale
-tc-grps         = {tc_grps}
-tau_t           = {tau_t}
-ref_t           = {ref_t}
+; Temperature coupling is on
+tcoupl          = V-rescale           ; modified Berendsen thermostat
+tc-grps         = {tc_grps}           ; two coupling groups - more accurate
+tau_t           = {tau_t}             ; time constant, in ps
+ref_t           = {ref_t}             ; reference temperature, one for each group, in K
 
 ; Periodic boundary conditions
-pbc             = xyz
+pbc             = xyz       ; 3-D PBC
 
 ; Dispersion correction
-DispCorr        = {cutoffs['DispCorr']}
+DispCorr        = no        ; set to 'no' for production runs
 
-; Pressure coupling
-pcoupl          = Berendsen
-pcoupltype      = isotropic
-tau_p           = 2.0
-ref_p           = {pressure}
-compressibility = 4.5e-5
+; Pressure coupling is on
+pcoupl          = Berendsen ; pressure coupling on
+pcoupltype      = isotropic ; uniform scaling of box vectors
+tau_p           = 2.0       ; time constant, in ps
+ref_p           = {pressure}; reference pressure, in bar
+compressibility = 4.5e-5    ; isothermal compressibility of water, bar^-1
 refcoord-scaling= all
 
-gen_vel         = yes
-gen_temp        = {temperature}
-gen_seed        = 12345
+gen_vel         = no        ; velocities from NPT
 """
         
         Path(output_file).write_text(mdp_content)
