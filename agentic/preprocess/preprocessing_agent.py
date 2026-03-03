@@ -147,14 +147,18 @@ class PreprocessingAgent:
         """
         import re
         
-        # Try multiple patterns to find the agent section
+        # Try multiple patterns to find the agent section (in priority order)
         patterns = [
-            # Exact match patterns
-            rf'###\s*{agent_name}.*?\n(.*?)(?=###|\Z)',  # Markdown ### heading
-            rf'##\s*{agent_name}.*?\n(.*?)(?=##|\Z)',    # Markdown ## heading  
-            rf'\*\*{agent_name}\*\*.*?\n(.*?)(?=\*\*[A-Z]|\Z)',  # Bold heading
-            # Fuzzy match patterns (allow for variations)
-            rf'###\s*(?:PDB\s*)?Preprocess.*?Agent.*?\n(.*?)(?=###|\Z)',  # Flexible preprocessing heading
+            # New standardized format: **Agent Name:**
+            rf'\*\*{agent_name}:\*\*\s*\n(.*?)(?=\n\s*\*\*(?:Simulation Setup Agent|HPC Agent|Analysis Agent|Expected Outcomes):|$)',
+            # Alternative with optional colon
+            rf'\*\*{agent_name}\*\*:?\s*\n(.*?)(?=\n\s*\*\*[A-Z]|\Z)',
+            # Markdown headings
+            rf'###\s*{agent_name}.*?\n(.*?)(?=###|\Z)',
+            rf'##\s*{agent_name}.*?\n(.*?)(?=##|\Z)',
+            # Fuzzy match patterns (allow for variations like "PDB Preprocessing Agent")
+            rf'\*\*(?:PDB\s*)?Preprocess(?:ing)?\s*Agent\*\*:?\s*\n(.*?)(?=\n\s*\*\*[A-Z]|\Z)',
+            rf'###\s*(?:PDB\s*)?Preprocess.*?Agent.*?\n(.*?)(?=###|\Z)',
             rf'##\s*(?:PDB\s*)?Preprocess.*?Agent.*?\n(.*?)(?=##|\Z)',
             # Section number patterns
             rf'\d+\..*?(?:PDB\s*)?Preprocess.*?Agent.*?\n(.*?)(?=\d+\.|\Z)',
@@ -369,15 +373,15 @@ class PreprocessingAgent:
         tools_list = []
         
         for tool_info in tool_metadata.values():
-            tool_entry = f"• {tool_info['name']}\n"
-            tool_entry += f"  Description: {tool_info['description']}\n"
+            tool_entry = f"→ {tool_info['name']}\n"
+            tool_entry += f"  {tool_info['description']}\n"
             
             if tool_info['args']:
-                tool_entry += "  Arguments:\n"
+                tool_entry += "  Parameters:\n"
                 for arg_name, arg_details in tool_info['args'].items():
                     required = "required" if arg_details['required'] else "optional"
-                    arg_type = arg_details['type']
-                    tool_entry += f"    - {arg_name} ({arg_type}, {required})\n"
+                    desc = arg_details.get('description', 'No description')
+                    tool_entry += f"    • {arg_name} ({required}): {desc}\n"
             
             tools_list.append(tool_entry)
         
@@ -456,16 +460,16 @@ Output as JSON with this structure:
         tools_list = []
         
         for tool_info in tool_metadata.values():
-            tool_entry = f"• {tool_info['name']}\n"
-            tool_entry += f"  Description: {tool_info['description']}\n"
+            tool_entry = f"→ {tool_info['name']}\n"
+            tool_entry += f"  {tool_info['description']}\n"
             
-            # Format arguments nicely
+            # Format parameters nicely
             if tool_info['args']:
-                tool_entry += "  Arguments:\n"
+                tool_entry += "  Parameters:\n"
                 for arg_name, arg_details in tool_info['args'].items():
                     required = "required" if arg_details['required'] else "optional"
-                    arg_type = arg_details['type']
-                    tool_entry += f"    - {arg_name} ({arg_type}, {required})\n"
+                    desc = arg_details.get('description', 'No description')
+                    tool_entry += f"    • {arg_name} ({required}): {desc}\n"
             
             tools_list.append(tool_entry)
         
@@ -537,7 +541,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         
         # Use "full" workflow as default
         default_workflow = workflows.get("full", {}).get("steps", [
-            "analyze_pdb", "separate_protein_ligand", 
+            "analyze_pdb", "separate_complex_components", 
             "add_hydrogens", "validate_structure"
         ])
         
@@ -653,13 +657,13 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 else:
                     # Auto-inject pdb_file for tools that need it
                     if step.tool_name in [
-                        "add_hydrogens", "validate_structure", "separate_protein_ligand", "separate_complex_components"
+                        "add_hydrogens", "validate_structure", "separate_complex_components"
                     ]:
                         tool_params["pdb_file"] = current_pdb if current_pdb else agent_input.pdb_path
                 
                 # Override output paths to ensure ALL files go to preprocess directory
                 # This fixes LLM-generated plans that specify working_dir paths
-                if step.tool_name in ["add_hydrogens", "separate_protein_ligand", "separate_complex_components"]:
+                if step.tool_name in ["add_hydrogens", "separate_complex_components"]:
                     input_file = tool_params.get("pdb_file", current_pdb)
                     base_name = Path(input_file).stem
                     
@@ -668,7 +672,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         base_name = base_name[:-2]  # Remove "_h"
                     
                     # Generate output filename based on tool
-                    if step.tool_name in ["separate_protein_ligand", "separate_complex_components"]:
+                    if step.tool_name == "separate_complex_components":
                         # Separation tools - ALWAYS set output_dir to preprocess directory
                         tool_params["output_dir"] = str(self.tool_executor.working_dir)
                         # Also explicitly set output paths to prevent any other directory usage

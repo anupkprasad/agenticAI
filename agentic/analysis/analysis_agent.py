@@ -158,14 +158,20 @@ class MDAnalysisAgent:
         Returns:
             Extracted instructions for this specific agent, or full plan as fallback
         """
-        # Try multiple patterns to find the agent section
+        import re
+        
+        # Try multiple patterns to find the agent section (in priority order)
         patterns = [
-            # Exact match patterns
-            rf'###\s*{agent_name}.*?\n(.*?)(?=###|\Z)',  # Markdown ### heading
-            rf'##\s*{agent_name}.*?\n(.*?)(?=##|\Z)',    # Markdown ## heading  
-            rf'\*\*{agent_name}\*\*.*?\n(.*?)(?=\*\*[A-Z]|\Z)',  # Bold heading
-            # Fuzzy match patterns (allow for variations)
-            rf'###\s*(?:MD\s*)?Analysis.*?Agent.*?\n(.*?)(?=###|\Z)',  # Flexible analysis agent heading
+            # New standardized format: **Analysis Agent:**
+            rf'\*\*Analysis Agent:\*\*\s*\n(.*?)(?=\n\s*\*\*Expected Outcomes:|$)',
+            # With optional colon
+            rf'\*\*{agent_name}\*\*:?\s*\n(.*?)(?=\n\s*\*\*[A-Z]|\Z)',
+            # Markdown headings
+            rf'###\s*{agent_name}.*?\n(.*?)(?=###|\Z)',
+            rf'##\s*{agent_name}.*?\n(.*?)(?=##|\Z)',
+            # Fuzzy match patterns (allow for variations like "MD Analysis Agent")
+            rf'\*\*(?:MD\s*)?Analysis.*?Agent\*\*:?\s*\n(.*?)(?=\n\s*\*\*[A-Z]|\Z)',
+            rf'###\s*(?:MD\s*)?Analysis.*?Agent.*?\n(.*?)(?=###|\Z)',
             rf'##\s*(?:MD\s*)?Analysis.*?Agent.*?\n(.*?)(?=##|\Z)',
             # Section number patterns
             rf'\d+\..*?(?:MD\s*)?Analysis.*?Agent.*?\n(.*?)(?=\d+\.|\Z)',
@@ -361,10 +367,6 @@ class MDAnalysisAgent:
                 "description": description,
                 "stage": "analysis"
             }
-        
-        # Log file operations
-        for file_path, description in agent_output.result.generated_files.items():
-            log_file_operation("analysis", "create", file_path, True, description)
 
     def _create_analysis_plan_llm(self, agent_input: AnalysisAgentInput, state: MDState) -> AnalysisPlan:
         """
@@ -429,7 +431,7 @@ class MDAnalysisAgent:
         tools_list = []
         
         for tool_info in tool_metadata.values():
-            tool_entry = f"• {tool_info['name']}: {tool_info['description']}"
+            tool_entry = f"→ {tool_info['name']}: {tool_info['description']}"
             tools_list.append(tool_entry)
         
         tools_list_str = "\n".join(tools_list)
@@ -504,15 +506,15 @@ Output as JSON with this structure:
         tools_list = []
         
         for tool_info in tool_metadata.values():
-            tool_entry = f"• {tool_info['name']}\n"
-            tool_entry += f"  Description: {tool_info['description']}\n"
+            tool_entry = f"→ {tool_info['name']}\n"
+            tool_entry += f"  {tool_info['description']}\n"
             
             if tool_info['args']:
-                tool_entry += "  Arguments:\n"
+                tool_entry += "  Parameters:\n"
                 for arg_name, arg_details in tool_info['args'].items():
                     required = "required" if arg_details['required'] else "optional"
-                    arg_type = arg_details['type']
-                    tool_entry += f"    - {arg_name} ({arg_type}, {required})\n"
+                    desc = arg_details.get('description', 'No description')
+                    tool_entry += f"    • {arg_name} ({required}): {desc}\n"
             
             tools_list.append(tool_entry)
         

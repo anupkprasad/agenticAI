@@ -60,8 +60,8 @@ def add_hydrogens(
             else:  # complex
                 return {
                     "success": False,
-                    "error": "Complex structures should be separated first using separate_protein_ligand tool",
-                    "recommendation": "Use separate_protein_ligand, then add hydrogens to each component separately"
+                    "error": "Complex structures should be separated first using separate_complex_components tool",
+                    "recommendation": "Use separate_complex_components, then add hydrogens to each component separately"
                 }
         
         # Execute appropriate method

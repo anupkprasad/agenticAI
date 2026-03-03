@@ -9,6 +9,7 @@ jobs/
 working_dir/
 backup/
 tests/
+tmp/
 
 # Log files
 *.log

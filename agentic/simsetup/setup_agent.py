@@ -156,14 +156,20 @@ class SimulationSetupAgent:
         """
         import re
         
-        # Try multiple patterns to find the agent section
+        # Try multiple patterns to find the agent section (in priority order)
         patterns = [
-            # Exact match patterns
-            rf'###\s*{agent_name}.*?\n(.*?)(?=###|\Z)',  # Markdown ### heading
-            rf'##\s*{agent_name}.*?\n(.*?)(?=##|\Z)',    # Markdown ## heading  
-            rf'\*\*{agent_name}\*\*.*?\n(.*?)(?=\*\*[A-Z]|\Z)',  # Bold heading
+            # New standardized format: **Simulation Setup Agent:**
+            rf'\*\*Simulation Setup Agent:\*\*\s*\n(.*?)(?=\n\s*\*\*(?:HPC Agent|Analysis Agent|Expected Outcomes):|$)',
+            # Alternative: **Setup Agent:**
+            rf'\*\*Setup Agent:\*\*\s*\n(.*?)(?=\n\s*\*\*(?:HPC Agent|Analysis Agent|Expected Outcomes):|$)',
+            # With optional colon
+            rf'\*\*{agent_name}\*\*:?\s*\n(.*?)(?=\n\s*\*\*[A-Z]|\Z)',
+            # Markdown headings
+            rf'###\s*{agent_name}.*?\n(.*?)(?=###|\Z)',
+            rf'##\s*{agent_name}.*?\n(.*?)(?=##|\Z)',
             # Fuzzy match patterns (allow for variations)
-            rf'###\s*(?:Simulation\s*)?Setup.*?Agent.*?\n(.*?)(?=###|\Z)',  # Flexible setup agent heading
+            rf'\*\*(?:Simulation\s*)?Setup.*?Agent\*\*:?\s*\n(.*?)(?=\n\s*\*\*[A-Z]|\Z)',
+            rf'###\s*(?:Simulation\s*)?Setup.*?Agent.*?\n(.*?)(?=###|\Z)',
             rf'##\s*(?:Simulation\s*)?Setup.*?Agent.*?\n(.*?)(?=##|\Z)',
             # Section number patterns
             rf'\d+\..*?(?:Simulation\s*)?Setup.*?Agent.*?\n(.*?)(?=\d+\.|\Z)',
@@ -456,15 +462,15 @@ class SimulationSetupAgent:
         tools_list = []
         
         for tool_info in tool_metadata.values():
-            tool_entry = f"• {tool_info['name']}\n"
-            tool_entry += f"  Description: {tool_info['description']}\n"
+            tool_entry = f"→ {tool_info['name']}\n"
+            tool_entry += f"  {tool_info['description']}\n"
             
             if tool_info['args']:
-                tool_entry += "  Arguments:\n"
+                tool_entry += "  Parameters:\n"
                 for arg_name, arg_details in tool_info['args'].items():
                     required = "required" if arg_details['required'] else "optional"
-                    arg_type = arg_details['type']
-                    tool_entry += f"    - {arg_name} ({arg_type}, {required})\n"
+                    desc = arg_details.get('description', 'No description')
+                    tool_entry += f"    • {arg_name} ({required}): {desc}\n"
             
             tools_list.append(tool_entry)
         
@@ -557,15 +563,15 @@ Output as JSON with this structure:
         tools_list = []
         
         for tool_info in tool_metadata.values():
-            tool_entry = f"• {tool_info['name']}\n"
-            tool_entry += f"  Description: {tool_info['description']}\n"
+            tool_entry = f"→ {tool_info['name']}\n"
+            tool_entry += f"  {tool_info['description']}\n"
             
             if tool_info['args']:
-                tool_entry += "  Arguments:\n"
+                tool_entry += "  Parameters:\n"
                 for arg_name, arg_details in tool_info['args'].items():
                     required = "required" if arg_details['required'] else "optional"
-                    arg_type = arg_details['type']
-                    tool_entry += f"    - {arg_name} ({arg_type}, {required})\n"
+                    desc = arg_details.get('description', 'No description')
+                    tool_entry += f"    • {arg_name} ({required}): {desc}\n"
             
             tools_list.append(tool_entry)
         
@@ -1075,7 +1081,3 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 "description": description,
                 "stage": "simsetup"
             }
-        
-        # Log file operations
-        for file_path, description in agent_output.result.generated_files.items():
-            log_file_operation("setup", "create", file_path, True, description)

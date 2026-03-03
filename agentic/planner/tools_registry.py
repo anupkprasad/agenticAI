@@ -365,7 +365,7 @@ class ToolsRegistry:
             formatted.append(f"\n**{agent.upper()} Agent Tools:**")
             
             for tool in tools:
-                formatted.append(f"\n- **{tool['name']}**")
+                formatted.append(f"\n→ {tool['name']}")
                 formatted.append(f"  {tool['description']}")
                 
                 if tool['parameters']:

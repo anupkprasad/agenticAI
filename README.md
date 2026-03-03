@@ -175,7 +175,7 @@ export PYTHONDONTWRITEBYTECODE=1
 
 # 5. Run AgenticAI workflow with LLM
 python run_agenticAIWork.py \
-  --goal "I want to preprocess and simulation setup of protein. The protein is availble in the pdb file of working_dir/3.pdb. Please setup simulation for 10 ns only. Once the simulation setup is done then please submit simulation job on HPC. Please do not do simulation analysis." \
+  --goal "I want to preprocess and simulation setup of protein only. The protein is availble in the pdb file of working_dir/3.pdb. Please setup simulation for 15 ns only. Once the simulation setup is done then please submit simulation job on HPC. Please do not do simulation analysis." \
   --use-llm \
   --llm-base-url http://127.0.0.1:11434 \
   --llm-model gpt-oss:20b \

@@ -1,0 +1,375 @@
+"""
+Input Validator for Supervisor
+
+Universal input validation for all task types (PDB-based and analysis-only).
+"""
+import os
+import re
+import logging
+from typing import Dict, Any
+
+logger = logging.getLogger(__name__)
+
+
+def validate_and_enrich_inputs(
+    state: Dict[str, Any],
+    subtask_type: str,
+    llm_client,
+    config: Dict[str, Any],
+    analyze_pdb_tool,
+    logger
+) -> Dict[str, Any]:
+    """
+    Universal input validation and enrichment function for ALL task types.
+    
+    Args:
+        state: Current MDState dictionary
+        subtask_type: One of "analysis_only", "setup_only", "preprocess_only", "full_task"
+        llm_client: LLM client instance
+        config: Supervisor configuration
+        analyze_pdb_tool: PDB analysis tool (for PDB-based tasks)
+        logger: Logger instance
+        
+    Returns:
+        Updated state dictionary with validation results and enriched prompt
+    """
+    # Import here to avoid circular dependencies
+    from agentic.utils import log_agent_action
+    
+    logger.info("=" * 60)
+    logger.info(f"INPUT_VALIDATION: Starting validation for task type: {subtask_type}")
+    logger.info("=" * 60)
+    
+    user_goal = state.get("user_goal", "")
+    working_directory = state.get("working_directory", ".")
+    
+    # Route to appropriate validation based on task type
+    if subtask_type == "analysis_only":
+        # Analysis-only tasks: validate trajectory/topology files
+        state = _validate_analysis_files(state, user_goal, working_directory, llm_client, config, logger)
+    else:
+        # PDB-based tasks: validate and analyze PDB structure
+        state = _validate_pdb_structure(state, user_goal, working_directory, llm_client, config, analyze_pdb_tool, logger)
+    
+    # Set routing
+    state["next_node"] = "supervisor"
+    
+    logger.info("=" * 60)
+    logger.info(f"INPUT_VALIDATION: Validation complete for {subtask_type}")
+    logger.info("=" * 60)
+    
+    return state
+
+
+def _validate_pdb_structure(
+    state: Dict[str, Any],
+    user_goal: str,
+    working_directory: str,
+    llm_client,
+    config: Dict[str, Any],
+    analyze_pdb_tool,
+    logger
+) -> Dict[str, Any]:
+    """Validate PDB structure for setup/preprocess/full tasks."""
+    from agentic.utils import log_agent_action
+    from .component_parser import parse_component_selection, validate_feasibility, build_human_summary
+    from .prompt_enricher import enrich_prompt_with_context
+    
+    # Step 1: Extract PDB filename from user goal
+    pdb_pattern = r'([\w\-]+\.pdb)'
+    match = re.search(pdb_pattern, user_goal, re.IGNORECASE)
+    
+    if match:
+        pdb_filename = match.group(1)
+        pdb_path = os.path.join(working_directory, pdb_filename)
+        state["raw_pdb"] = pdb_path
+        logger.info(f"INPUT_VALIDATION: Extracted PDB filename: {pdb_filename}")
+        logger.info(f"INPUT_VALIDATION: Using working directory: {working_directory}")
+
+        # Validate file exists
+        if not os.path.exists(pdb_path):
+            state["errors"].append(f"PDB file not found: {pdb_path}")
+            logger.error(f"INPUT_VALIDATION: PDB file not found: {pdb_path}")
+            return state
+    else:
+        error_msg = "Could not extract PDB filename from user goal"
+        state["errors"].append(error_msg)
+        logger.error(f"INPUT_VALIDATION: {error_msg}")
+        return state
+
+    # Step 2: Analyze PDB structure
+    logger.info(f"INPUT_VALIDATION: Analyzing PDB structure: {pdb_path}")
+    
+    pdb_analysis_result = analyze_pdb_tool.invoke({"pdb_file": pdb_path})
+    
+    if not pdb_analysis_result.get("success"):
+        error_msg = f"PDB analysis failed: {pdb_analysis_result.get('error', 'Unknown error')}"
+        state["warnings"].append(error_msg)
+        logger.warning(f"INPUT_VALIDATION: {error_msg}")
+        logger.warning("INPUT_VALIDATION: Continuing with limited analysis, will use defaults")
+        
+        # Create minimal analysis for fallback
+        state["pdb_analysis"] = {
+            "total_atoms": 0,
+            "total_residues": 0,
+            "protein": {"present": True},
+            "ligands": {"present": False},
+            "water": {"present": False},
+            "components_available": {},
+            "chain_ids": []
+        }
+    else:
+        # Store analysis in state
+        state["pdb_analysis"] = pdb_analysis_result.get("analysis", {})
+        logger.info(f"INPUT_VALIDATION: PDB analysis complete - {pdb_analysis_result.get('message', '')}")
+        
+        # Log detailed analysis
+        analysis = state["pdb_analysis"]
+        
+        # Extract protein sequences if available
+        protein_sequences = {}
+        if analysis.get("protein", {}).get("present"):
+            chains_info = analysis.get("protein", {}).get("chains", {})
+            for chain_id, chain_data in chains_info.items():
+                sequence = chain_data.get("sequence", "")
+                if sequence:
+                    protein_sequences[chain_id] = sequence
+        
+        # Build details dict
+        details = {
+            "file": pdb_path,
+            "total_atoms": analysis.get("total_atoms", 0),
+            "total_residues": analysis.get("total_residues", 0),
+            "components_available": analysis.get("components_available", {})
+        }
+        
+        # Add protein sequences if present
+        if protein_sequences:
+            details["protein_sequences"] = protein_sequences
+        
+        log_agent_action(
+            agent_name="supervisor.input_validation",
+            action="PDB Structure Analysis",
+            details=details
+        )
+    
+    # Get analysis for subsequent steps
+    analysis = state["pdb_analysis"]
+
+    # Step 3: Parse user intent and determine component selection
+    component_selection = parse_component_selection(user_goal, analysis)
+    state["component_selection"] = component_selection
+    logger.info(f"INPUT_VALIDATION: Component selection: {component_selection}")
+
+    # Step 4: Validate feasibility
+    validation_result = validate_feasibility(user_goal, analysis, component_selection)
+    
+    if not validation_result["is_feasible"]:
+        for error in validation_result["errors"]:
+            state["errors"].append(error)
+            logger.error(f"INPUT_VALIDATION: Feasibility error - {error}")
+        return state
+    
+    for warning in validation_result["warnings"]:
+        state["warnings"].append(warning)
+        logger.warning(f"INPUT_VALIDATION: {warning}")
+
+    # Step 5: Enrich user prompt with validated information
+    pdb_summary = build_human_summary(analysis)
+    enriched_prompt = enrich_prompt_with_context(
+        user_goal=user_goal,
+        context_type="pdb",
+        context_data={
+            "pdb_analysis": analysis,
+            "pdb_summary": pdb_summary
+        },
+        llm_client=llm_client,
+        config=config
+    )
+    state["structured_prompt"] = enriched_prompt
+    state["rephrased_goal"] = enriched_prompt
+    
+    logger.info(f"INPUT_VALIDATION: Enriched prompt created: {enriched_prompt[:150]}...")
+    
+    log_agent_action(
+        agent_name="supervisor.input_validation",
+        action="Input Validation Complete",
+        details={
+            "original_goal": user_goal[:100],
+            "enriched_prompt": enriched_prompt[:300],
+            "pdb_file": pdb_path,
+            "working_directory": working_directory
+        }
+    )
+
+    # Log final validation summary
+    logger.info(f"  - PDB Analysis: {'✓ Success' if not state.get('warnings') else '⚠ With warnings'}")
+    logger.info(f"  - Component Selection: {component_selection}")
+    logger.info(f"  - Working Directory: {working_directory}")
+    logger.info(f"  - Enriched Prompt: {enriched_prompt[:80]}...")
+    
+    return state
+
+
+def _validate_analysis_files(
+    state: Dict[str, Any],
+    user_goal: str,
+    working_directory: str,
+    llm_client,
+    config: Dict[str, Any],
+    logger
+) -> Dict[str, Any]:
+    """Validate trajectory/topology files for analysis-only tasks."""
+    from agentic.utils import log_agent_action
+    from .file_extractor import extract_file_names_from_goal
+    from .prompt_enricher import enrich_prompt_with_context
+    
+    hpc_output_dir = os.path.join(working_directory, "hpc")
+    analysis_output_dir = os.path.join(working_directory, "analysis")
+    
+    # Step 1: Validate HPC output directory exists
+    if not os.path.exists(hpc_output_dir):
+        error = f"HPC output directory not found: {hpc_output_dir}"
+        state["errors"].append(error)
+        logger.error(f"INPUT_VALIDATION: {error}")
+        return state
+    
+    logger.info(f"INPUT_VALIDATION: ✓ HPC output directory found: {hpc_output_dir}")
+    
+    # Step 2: Discover/validate files
+    topology_file, trajectory_file, energy_file = extract_file_names_from_goal(
+        user_goal, hpc_output_dir
+    )
+    
+    logger.info("INPUT_VALIDATION: File discovery strategy:")
+    logger.info("  1. Use explicitly stated files in user goal")
+    logger.info("  2. Default to md.* pattern (md.gro, md.xtc, md.edr)")
+    logger.info("  3. Auto-discover first available file as fallback")
+    
+    # If explicit/default files not found, fall back to auto-discovery
+    if not topology_file or not trajectory_file:
+        logger.info("INPUT_VALIDATION: No explicit/default files found, attempting auto-discovery...")
+        
+        topology_extensions = [".gro", ".pdb", ".tpr"]
+        trajectory_extensions = [".xtc", ".trr"]
+        energy_extensions = [".edr"]
+        
+        try:
+            hpc_files = os.listdir(hpc_output_dir)
+            
+            # Find topology file if not already set
+            if not topology_file:
+                for ext in topology_extensions:
+                    matching = [f for f in hpc_files if f.endswith(ext)]
+                    if matching:
+                        topology_file = os.path.join(hpc_output_dir, matching[0])
+                        logger.info(f"INPUT_VALIDATION: ⚠ Auto-discovered topology: {matching[0]}")
+                        break
+            
+            # Find trajectory file if not already set
+            if not trajectory_file:
+                for ext in trajectory_extensions:
+                    matching = [f for f in hpc_files if f.endswith(ext)]
+                    if matching:
+                        trajectory_file = os.path.join(hpc_output_dir, matching[0])
+                        logger.info(f"INPUT_VALIDATION: ⚠ Auto-discovered trajectory: {matching[0]}")
+                        break
+            
+            # Find energy file if not already set (optional)
+            if not energy_file:
+                for ext in energy_extensions:
+                    matching = [f for f in hpc_files if f.endswith(ext)]
+                    if matching:
+                        energy_file = os.path.join(hpc_output_dir, matching[0])
+                        logger.info(f"INPUT_VALIDATION: ⚠ Auto-discovered energy: {matching[0]}")
+                        break
+                    
+        except Exception as e:
+            error = f"Failed to list files in {hpc_output_dir}: {e}"
+            state["errors"].append(error)
+            logger.error(f"INPUT_VALIDATION: {error}")
+            return state
+    else:
+        logger.info(f"INPUT_VALIDATION: ✓ Using explicit/default topology: {os.path.basename(topology_file)}")
+        logger.info(f"INPUT_VALIDATION: ✓ Using explicit/default trajectory: {os.path.basename(trajectory_file)}")
+        if energy_file:
+            logger.info(f"INPUT_VALIDATION: ✓ Using explicit/default energy: {os.path.basename(energy_file)}")
+    
+    # Store in file_info dict
+    file_info = {
+        "hpc_output_dir": hpc_output_dir,
+        "analysis_output_dir": analysis_output_dir,
+        "topology_file": topology_file,
+        "trajectory_file": trajectory_file,
+        "energy_file": energy_file
+    }
+    
+    # Step 3: Validate that required files were found
+    if not file_info["topology_file"]:
+        warning = f"No topology file (.gro, .pdb, .tpr) found in {hpc_output_dir}"
+        state["warnings"].append(warning)
+        logger.warning(f"INPUT_VALIDATION: {warning}")
+    
+    if not file_info["trajectory_file"]:
+        warning = f"No trajectory file (.xtc, .trr) found in {hpc_output_dir}"
+        state["warnings"].append(warning)
+        logger.warning(f"INPUT_VALIDATION: {warning}")
+    
+    # Step 4: Enrich user prompt with validated information
+    enriched_prompt = enrich_prompt_with_context(
+        user_goal=user_goal,
+        context_type="files",
+        context_data={"file_info": file_info},
+        llm_client=llm_client,
+        config=config
+    )
+    state["structured_prompt"] = enriched_prompt
+    state["rephrased_goal"] = enriched_prompt
+    
+    logger.info(f"INPUT_VALIDATION: Enriched analysis prompt created: {enriched_prompt[:150]}...")
+    
+    # Step 5: Store analysis context in state
+    state["pdb_analysis"] = {
+        "subtask_type": "analysis_only",
+        "requires_pdb_structure": False,
+        "working_directory": working_directory,
+        "hpc_output_dir": hpc_output_dir,
+        "analysis_output_dir": analysis_output_dir,
+        "topology_file": file_info["topology_file"],
+        "trajectory_file": file_info["trajectory_file"],
+        "energy_file": file_info["energy_file"]
+    }
+    
+    # CRITICAL: Set top-level state fields that analysis agent expects
+    state["topology"] = file_info["topology_file"]
+    state["trajectory_path"] = file_info["trajectory_file"]
+    state["energy_file"] = file_info["energy_file"]
+    state["hpc_output_directory"] = hpc_output_dir
+    
+    # Create analysis output directory if it doesn't exist
+    os.makedirs(analysis_output_dir, exist_ok=True)
+    logger.info(f"INPUT_VALIDATION: ✓ Analysis output directory ready: {analysis_output_dir}")
+    
+    log_agent_action(
+        agent_name="supervisor.input_validation-analysis",
+        action="Analysis-Only Input Validation Complete",
+        details={
+            "subtask_type": "analysis-only",
+            "original_goal": user_goal[:100],
+            "enriched_prompt": enriched_prompt[:300],
+            "topology_file": file_info["topology_file"],
+            "trajectory_file": file_info["trajectory_file"],
+            "energy_file": file_info["energy_file"],
+            "hpc_output_directory": hpc_output_dir,
+            "working_directory": working_directory
+        }
+    )
+    
+    # Log final validation summary
+    logger.info(f"  - File Validation: {'✓ Success' if not state.get('errors') else '✗ Failed'}")
+    logger.info(f"  - Topology: {file_info['topology_file'] or 'Not found'}")
+    logger.info(f"  - Trajectory: {file_info['trajectory_file'] or 'Not found'}")
+    logger.info(f"  - Working Directory: {working_directory}")
+    logger.info(f"  - Enriched Prompt: {enriched_prompt[:80]}...")
+    
+    return state

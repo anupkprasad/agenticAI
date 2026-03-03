@@ -398,17 +398,24 @@ Write complete sentences like:
 
 **EXAMPLE STRUCTURE:**
 
-Goal: [Summarize what needs to be accomplished]
+**Goal:**
+[Summarize what needs to be accomplished in 2-3 sentences]
 
-Workflow Execution:
+**Workflow Execution:**
 
+**Preprocessing Agent:**
 The Preprocessing Agent will handle structure preparation. It will use the separate_complex_components tool to extract the protein chain, removing the ATP ligand and MG ions as requested. The add_hydrogens tool will then ensure complete protonation using the reduce method at neutral pH.
 
+**Simulation Setup Agent:**
 The Simulation Setup Agent will prepare the simulation system. Using build_topology, it generates AMBER99SB-ILDN topology files. The system will be placed in a cubic simulation box with adequate spacing, solvated with TIP3P water molecules, and neutralized with appropriate ions. The generate_mdp_files tool will create parameter files for a 10 ns production run.
 
+**HPC Agent:**
 The HPC Agent will handle job submission to the compute cluster. It will use create_slurm_script to generate an appropriate job submission script, then submit_job to initiate the simulation on the HPC system.
 
-Expected Outcomes: [Describe final deliverables]
+**Expected Outcomes:**
+[Describe final deliverables and verification steps]
+
+CRITICAL: Use the section headers exactly as shown above with ** markers (e.g., **Preprocessing Agent:**, **Simulation Setup Agent:**, **HPC Agent:**, **Analysis Agent:**). This allows each agent to extract only its relevant instructions.
 
 Provide a comprehensive natural language plan following this structure. DO NOT output JSON, YAML, or any structured data format."""
     

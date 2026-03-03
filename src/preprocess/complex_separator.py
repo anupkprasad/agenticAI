@@ -163,35 +163,3 @@ def separate_complex_components(
             "success": False,
             "error": f"Failed to separate complex components: {str(e)}"
         }
-
-
-def separate_protein_ligand(
-    pdb_file: str,
-    output_dir: Optional[str] = None,
-    protein_output: Optional[str] = None,
-    ligand_output: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Legacy function: Automatically detect and separate protein and ligand from a complex PDB file.
-    This function now calls separate_complex_components for backward compatibility.
-    
-    NOTE: This function is NOT exposed as an LLM tool. Use separate_complex_components instead.
-    Kept for backward compatibility in non-LLM contexts.
-    
-    Args:
-        pdb_file: Input PDB file path containing protein-ligand complex
-        output_dir: Output directory for separated files (optional)
-        protein_output: Output PDB file path for protein (optional)
-        ligand_output: Output PDB file path for ligand (optional)
-        
-    Returns:
-        Dict with success status, protein_file, ligand_file paths, and component statistics
-    """
-    result = separate_complex_components(
-        pdb_file=pdb_file,
-        output_dir=output_dir,
-        protein_output=protein_output,
-        ligand_output=ligand_output
-    )
-    
-    return result

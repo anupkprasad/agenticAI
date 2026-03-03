@@ -39,7 +39,7 @@ workflows:
     description: "Basic protein extraction and hydrogen addition"
     steps:
       - analyze_pdb
-      - separate_protein_ligand
+      - separate_complex_components
       - add_hydrogens
       - validate_structure
 
@@ -47,7 +47,7 @@ workflows:
     description: "Complete preprocessing for MD (protein extraction + hydrogens)"
     steps:
       - analyze_pdb
-      - separate_protein_ligand
+      - separate_complex_components
       - add_hydrogens
       - validate_structure
 
@@ -60,7 +60,7 @@ workflows:
   protein_only:
     description: "Extract protein and add hydrogens"
     steps:
-      - separate_protein_ligand
+      - separate_complex_components
       - add_hydrogens
       - validate_structure
 

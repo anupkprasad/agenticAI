@@ -10,8 +10,7 @@ from pathlib import Path
 from src.utils.pdb_analyzer import analyze_pdb
 from src.preprocess.hydrogen_adder import add_hydrogens
 from src.preprocess.structure_validator import validate_structure
-# Note: separate_protein_ligand is imported but NOT exposed as @tool (use separate_complex_components instead)
-from src.preprocess.complex_separator import separate_protein_ligand, separate_complex_components
+from src.preprocess.complex_separator import separate_complex_components
 
 # Export tool functions for direct access
 __all__ = [
@@ -37,7 +36,7 @@ def get_preprocessing_tools() -> list:
     """
     return [
         analyze_pdb,
-        separate_complex_components,  # Use this instead of deprecated separate_protein_ligand
+        separate_complex_components,
         add_hydrogens,
         validate_structure,
     ]
@@ -113,7 +112,6 @@ class PreprocessingToolExecutor:
         tool_map = {
             "analyze_pdb": analyze_pdb,
             "separate_complex_components": separate_complex_components,
-            "separate_protein_ligand": separate_protein_ligand,
             "add_hydrogens": add_hydrogens,
             "validate_structure": validate_structure,
         }
@@ -170,14 +168,6 @@ class PreprocessingToolExecutor:
                                                protein_output=protein_output,
                                                ligand_output=ligand_output,
                                                ion_output=ion_output, **kwargs)
-    
-    def separate_protein_ligand(self, pdb_file: str, output_dir: Optional[str] = None,
-                               protein_output: Optional[str] = None,
-                               ligand_output: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-        """Separate protein and ligand components - delegates to internal function (now supports output_dir)"""
-        return separate_protein_ligand(pdb_file=pdb_file, output_dir=output_dir,
-                                      protein_output=protein_output,
-                                      ligand_output=ligand_output, **kwargs)
     
     def add_hydrogens(self, pdb_file: str, output_file: Optional[str] = None, 
                      method: str = "auto", ph: float = 7.4, molecule_type: str = "auto", **kwargs) -> Dict[str, Any]:

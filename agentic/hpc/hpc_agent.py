@@ -188,21 +188,42 @@ class MDHPCAgent:
         return state
     
     def _extract_agent_instructions(self, full_plan: str, agent_name: str) -> str:
-        """Extract specific agent section from full plan"""
-        lines = full_plan.split('\n')
-        in_section = False
-        section_lines = []
+        """
+        Extract agent-specific detailed instructions from planner's natural language plan.
         
-        for line in lines:
-            if f"### {agent_name}" in line or f"## {agent_name}" in line:
-                in_section = True
-                continue
-            elif in_section and (line.startswith("### ") or line.startswith("## ")):
-                break
-            elif in_section:
-                section_lines.append(line)
+        Args:
+            full_plan: Complete natural language plan from planner
+            agent_name: Name of the agent section to extract (e.g., "HPC Agent")
+            
+        Returns:
+            Extracted instructions for this specific agent, or full plan as fallback
+        """
+        import re
         
-        return '\n'.join(section_lines).strip()
+        # Try multiple patterns to find the agent section (in priority order)
+        patterns = [
+            # New standardized format: **HPC Agent:**
+            rf'\*\*HPC Agent:\*\*\s*\n(.*?)(?=\n\s*\*\*(?:Analysis Agent|Expected Outcomes):|$)',
+            # With optional colon
+            rf'\*\*{agent_name}\*\*:?\s*\n(.*?)(?=\n\s*\*\*[A-Z]|\Z)',
+            # Markdown headings
+            rf'###\s*{agent_name}.*?\n(.*?)(?=###|\Z)',
+            rf'##\s*{agent_name}.*?\n(.*?)(?=##|\Z)',
+            # Fuzzy match patterns
+            rf'\*\*HPC.*?Agent\*\*:?\s*\n(.*?)(?=\n\s*\*\*[A-Z]|\Z)',
+            rf'###\s*HPC.*?Agent.*?\n(.*?)(?=###|\Z)',
+            rf'##\s*HPC.*?Agent.*?\n(.*?)(?=##|\Z)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, full_plan, re.DOTALL | re.IGNORECASE)
+            if match:
+                instructions = match.group(1).strip()
+                if len(instructions) > 50:  # Ensure we got substantial content
+                    return instructions
+        
+        # Fallback: Use full plan if no specific section found
+        return full_plan
     
     def _create_execution_plan(self, state: MDState) -> Optional[Dict[str, Any]]:
         """Create HPC execution plan using LLM"""
@@ -352,32 +373,63 @@ Output as JSON with this structure:
     
     def _get_tools_description(self) -> str:
         """Generate description of available tools"""
-        return """• copy_simulation_files
-  Description: Copy simulation files from setup directory to HPC working directory.
-  Arguments: source_dir (required), dest_dir (required), file_patterns (optional), create_dest (optional)
+        return """→ copy_simulation_files
+  Copy simulation files from setup directory to HPC working directory.
+  Parameters:
+    • source_dir (required): No description
+    • dest_dir (required): No description
+    • file_patterns (optional): No description
+    • create_dest (optional): No description
 
-• estimate_simulation_time
-  Description: Estimate simulation walltime based on system size and simulation length.
-  Arguments: production_ns (optional), system_size (optional), timestep_ps (optional)
+→ estimate_simulation_time
+  Estimate simulation walltime based on system size and simulation length.
+  Parameters:
+    • production_ns (optional): No description
+    • system_size (optional): No description
+    • timestep_ps (optional): No description
 
-• create_slurm_script
-  Description: Create SLURM job submission script for GROMACS simulation.
-  Arguments: job_name (required), working_dir (required), topology_file (optional), input_structure (optional), 
-             simulation_phases (optional), partition (optional), cpus_per_task (optional), memory (optional),
-             time_limit (optional), gpu_count (optional), email (optional), gromacs_module (optional)
+→ create_slurm_script
+  Create SLURM job submission script for GROMACS simulation.
+  Parameters:
+    • job_name (required): No description
+    • working_dir (required): No description
+    • topology_file (optional): No description
+    • input_structure (optional): No description
+    • simulation_phases (optional): No description
+    • partition (optional): No description
+    • cpus_per_task (optional): No description
+    • memory (optional): No description
+    • time_limit (optional): No description
+    • gpu_count (optional): No description
+    • email (optional): No description
+    • gromacs_module (optional): No description
 
-• submit_job
-  Description: Submit SLURM job to HPC system.
-  Arguments: script_path (required), remote_host (optional), remote_user (optional), remote_dir (optional), ssh_key_path (optional)
+→ submit_job
+  Submit SLURM job to HPC system.
+  Parameters:
+    • script_path (required): No description
+    • remote_host (optional): No description
+    • remote_user (optional): No description
+    • remote_dir (optional): No description
+    • ssh_key_path (optional): No description
 
-• check_job_status
-  Description: Check status of submitted SLURM job.
-  Arguments: job_id (required), remote_host (optional), remote_user (optional), ssh_key_path (optional)
+→ check_job_status
+  Check status of submitted SLURM job.
+  Parameters:
+    • job_id (required): No description
+    • remote_host (optional): No description
+    • remote_user (optional): No description
+    • ssh_key_path (optional): No description
 
-• download_results
-  Description: Download simulation results from HPC system.
-  Arguments: remote_dir (required), local_dir (required), file_patterns (optional), remote_host (optional), 
-             remote_user (optional), ssh_key_path (optional)
+→ download_results
+  Download simulation results from HPC system.
+  Parameters:
+    • remote_dir (required): No description
+    • local_dir (required): No description
+    • file_patterns (optional): No description
+    • remote_host (optional): No description
+    • remote_user (optional): No description
+    • ssh_key_path (optional): No description
 """
     
     def _estimate_system_size(self, coordinates_file: Optional[str]) -> int:

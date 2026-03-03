@@ -12,7 +12,7 @@ This protocol outlines the standard steps for preparing a protein structure for 
 - Keep ligands/ions if studying protein-ligand interactions
 - Extract specific chains if needed
 
-**Tools**: `separate_protein_ligand`, MDAnalysis selection
+**Tools**: `separate_complex_components`, MDAnalysis selection
 
 ### 2. Hydrogen Addition
 **Goal**: Add missing hydrogen atoms
