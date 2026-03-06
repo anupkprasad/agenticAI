@@ -1,21 +1,22 @@
 ================================================================================
-NEW MD WORKFLOW SESSION STARTED - 2026-03-02 18:29:41
-Session ID: 20260302_182941
+NEW MD WORKFLOW SESSION STARTED - 2026-03-04 17:44:37
+Session ID: 20260304_174437
 ================================================================================
 
-🎯 USER PROMPT [2026-03-02 18:29:41]:
-   Goal: I want to preprocess and simulation setup of protein only. The protein is availble in the pdb file of working_dir/3.pdb. Please setup simulation for 15 ns only. Once the simulation setup is done then please submit simulation job on HPC. Please do not do simulation analysis.
+🎯 USER PROMPT [2026-03-04 17:44:37]:
+   Goal: The protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulation production is already done and data output is stored in working_dir/hpc. Please dont preprocess, do not setup simulation and do not job submit the simulation. Only use the analysis agent for simulation analysis for RMSF, RMSD and energy caculation of trajectory. Please plot in multipanal figure.please plot energy plot seperately. The trajectory file is md.xtc and topology file is md.gro
    Configuration: {
     "force_field": "amber99sb-ildn",
     "water_model": "tip3p",
     "human_in_loop": false,
-    "working_directory": "working_dir"
+    "working_directory": "working_dir",
+    "subtask_type": "analysis_only"
 }
 
 ⚡ AGENT ACTION (supervisor.input_validation):
-   🎬 Action: Starting Unified Input Validation (None)
-   📊 user_goal: I want to preprocess and simulation setup of protein only. The protein is availble in the pdb file of working_dir/3.pdb. Please setup simulation for 15 ns only. Once the simulation setup is done then 
-   📊 task_type: None
+   🎬 Action: Starting Unified Input Validation (analysis_only)
+   📊 user_goal: The protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulation production is already done and data output is stored in working_dir/hpc. Please dont preprocess, 
+   📊 task_type: analysis_only
 
 ⚡ AGENT ACTION (supervisor.input_validation):
    🎬 Action: PDB Structure Analysis
@@ -33,81 +34,82 @@ Session ID: 20260302_182941
       "A": "FERIKTLGTGSFGRVMLVKHKETGNHYAMKILDKQKVVKLKQIEHTLNEKRILQAVNFPFLVKLEFSFKDNSNLYMVMEYVPGGEMFSHLRRIGRFSEPHARFYAAQIVLTFEYLHSLDLIYRDLKPENLLIDQQGYIQVTDFGFAKRVKGRTWTLCGTPEYLAPEIILSKGYNKAVDWWALGVLIYEMAAGYPPFFADQPIQIYEKIVSGKVRFPSHFSSDLKDLLRNLLQVDLTKRFGNLKNGVNDIKNHKWF"
 }
 
-🧠 LLM INTERACTION (supervisor.goal_rephrasing) [2026-03-02 18:29:48]:
+🧠 LLM INTERACTION (supervisor.analysis_goal_rephrasing) [2026-03-04 17:44:44]:
    📝 Prompt:
    ======================================================================
-   You are an expert in molecular dynamics simulations. Rephrase the user's goal into a clear, 
-   unambiguous statement that captures their intent without adding assumptions.
+   You are an expert in molecular dynamics trajectory analysis. Rephrase the user's analysis goal 
+   into a clear, unambiguous statement that captures their analytical intent.
    
    USER'S ORIGINAL GOAL:
-   I want to preprocess and simulation setup of protein only. The protein is availble in the pdb file of working_dir/3.pdb. Please setup simulation for 15 ns only. Once the simulation setup is done then please submit simulation job on HPC. Please do not do simulation analysis.
+   The protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulation production is already done and data output is stored in working_dir/hpc. Please dont preprocess, do not setup simulation and do not job submit the simulation. Only use the analysis agent for simulation analysis for RMSF, RMSD and energy caculation of trajectory. Please plot in multipanal figure.please plot energy plot seperately. The trajectory file is md.xtc and topology file is md.gro
    
-   PDB FILE STRUCTURE:
-   Protein (1 chains) | Ligands: ATP | Ions: MG
+   AVAILABLE FILES:
+   Topology: working_dir/hpc/md.gro
+   Trajectory: working_dir/hpc/md.xtc
+   Energy: working_dir/hpc/md.edr
+   HPC Output Directory: working_dir/hpc
    
    CRITICAL INSTRUCTIONS:
-   1. **PRESERVE USER'S COMPONENT SELECTION EXACTLY** - If they mention specific components (protein, ligand, ions), keep exactly what they specified
-   2. **DEFAULT TO CONSERVATIVE INTERPRETATION** - If user says "protein" without mentioning ligands/ions, interpret as protein ONLY
-   3. Identify what workflow stages the user wants: preprocessing, setup, simulation, or analysis
-   4. Pay attention to keywords like "only", "just", "retaining", "keeping", "with", "without", "remove", "exclude"
+   1. Identify what analysis calculations the user wants (RMSD, RMSF, SASA, energy, etc.)
+   2. Clarify the analysis scope (whole system, specific residues, specific chains, etc.)
+   3. Determine output format preferences (plots, data files, summary reports, etc.)
+   4. Pay attention to keywords like "calculate", "analyze", "visualize", "compare"
    5. Rephrase their goal clearly and concisely
-   6. Do NOT add components the user didn't mention
-   7. Do NOT remove components the user explicitly mentioned
+   6. Do NOT add analysis types the user didn't mention
+   7. Do NOT make assumptions about what they want analyzed
    8. Do NOT add recommendations or suggestions
-   9. Do NOT assume they want all stages unless explicitly stated
-   10. If they say "only preprocessing" or "just preprocess", make that clear in the rephrased goal
-   11. If they say "do not submit HPC" or "no analysis", explicitly state those exclusions
+   9. Keep focus on trajectory analysis only
    
-   COMPONENT INTERPRETATION RULES:
-   - "protein" (alone) → ONLY protein, exclude ligands/ions (conservative default)
-   - "protein only" / "just protein" → ONLY protein, exclude ligands/ions
-   - "protein with ligand" / "protein and ligand" → protein + ligand
-   - "retaining ligand" / "keep ligand" → INCLUDE ligand
-   - "retaining ions" / "keep ions" → INCLUDE ions
-   - "without ligand" / "no ligand" → EXCLUDE ligand
-   - "without ions" / "no ions" → EXCLUDE ions
-   - If they mention multiple components explicitly, include all mentioned components
+   ANALYSIS TYPE EXAMPLES:
+   - "RMSD" / "structural deviation" → Root Mean Square Deviation
+   - "RMSF" / "flexibility" / "fluctuation" → Root Mean Square Fluctuation
+   - "SASA" / "surface area" → Solvent Accessible Surface Area
+   - "energy" / "potential energy" → Energy analysis
+   - "secondary structure" / "helix content" → DSSP analysis
+   - "PCA" / "principal components" → Principal Component Analysis
+   - "hydrogen bonds" → H-bond analysis
+   - "distance analysis" / "contact maps" → Distance measurements
    
    OUTPUT FORMAT:
-   Provide a clear, structured rephrasing of the user's goal. Keep it brief (2-5 sentences maximum).
-   Break down complex requests into key points. Explicitly state which components to include/exclude.
+   Provide a clear, structured rephrasing of the analysis goal. Keep it brief (2-4 sentences maximum).
+   Explicitly state which analysis calculations to perform and on which components.
    No additional commentary or suggestions.
    
-   EXAMPLE 1 (Protein only - conservative default):
-   Original: "I want to preprocess and simulation setup of protein. The protein is available in working_dir/3.pdb"
-   Rephrased: "Preprocess the PDB file to extract and clean the protein structure only. 
-   Set up the simulation system for the protein (exclude ligands and ions). 
-   Generate topology and coordinate files. Do not submit to HPC or run simulation."
+   EXAMPLE 1 (Simple RMSF):
+   Original: "Calculate RMSF from working_dir/hpc trajectory"
+   Rephrased: "Perform Root Mean Square Fluctuation (RMSF) analysis on the trajectory data 
+   in working_dir/hpc/. Calculate per-residue flexibility for the protein structure. 
+   Generate RMSF plot and save data files."
    
-   EXAMPLE 2 (Just preprocessing):
-   Original: "I want to just preprocess the protein from the pdb file working_dir/3.pdb"
-   Rephrased: "Preprocess the PDB file to extract and clean only the protein component. 
-   Exclude ligands, ions, and water. Do not proceed to simulation setup or execution."
+   EXAMPLE 2 (Multiple analyses):
+   Original: "I want to analyze the trajectory for RMSD and energy"
+   Rephrased: "Perform two analyses on the simulation trajectory: (1) Calculate RMSD 
+   to measure structural deviation from initial conformation, (2) Extract and plot 
+   potential energy over simulation time. Save plots and data files for both analyses."
    
-   EXAMPLE 3 (Protein with ligand and ions - explicit inclusion):
-   Original: "Preprocess protein retaining ATP ligand and MG ions, then setup for simulation but don't run it"
-   Rephrased: "Preprocess the PDB file keeping protein chain A, ATP ligand, and MG ions. 
-   Set up the simulation system with topology and coordinates for all three components. 
-   Do not submit to HPC or run simulation."
+   EXAMPLE 3 (Specific scope):
+   Original: "Calculate SASA for protein binding site residues 45-67"
+   Rephrased: "Calculate Solvent Accessible Surface Area (SASA) specifically for 
+   residues 45-67 in the protein binding site. Generate time-series plot showing 
+   SASA changes during simulation."
    ======================================================================
    💭 Response:
    ======================================================================
-   Preprocess the PDB file at working_dir/3.pdb to extract and clean the protein component only, excluding any ligands or ions.  
-   Set up the simulation system for a 15‑ns run, generate the necessary topology and coordinate files, and submit the job to the HPC.  
-   Do not perform any simulation analysis.
+   Perform Root Mean Square Deviation (RMSD) and Root Mean Square Fluctuation (RMSF) analyses on the protein in the trajectory file working_dir/hpc/md.xtc using the topology working_dir/hpc/md.gro. Generate a multi‑panel figure containing both the RMSD and RMSF plots. Extract the energy data from working_dir/hpc/md.edr and plot the energy (potential/total) as a separate figure. Save all plots and accompanying data files.
    ======================================================================
 
-⚡ AGENT ACTION (supervisor.input_validation):
-   🎬 Action: Input Validation Complete
-   📊 original_goal: I want to preprocess and simulation setup of protein only. The protein is availble in the pdb file o
-   📊 enriched_prompt: Preprocess the PDB file at working_dir/3.pdb to extract and clean the protein component only, excluding any ligands or ions.  
-Set up the simulation system for a 15‑ns run, generate the necessary topology and coordinate files, and submit the job to the HPC.  
-Do not perform any simulation analysis.
-
-   📊 pdb_file: working_dir/3.pdb
+⚡ AGENT ACTION (supervisor.input_validation-analysis):
+   🎬 Action: Analysis-Only Input Validation Complete
+   📊 subtask_type: analysis-only
+   📊 original_goal: The protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulati
+   📊 enriched_prompt: Perform Root Mean Square Deviation (RMSD) and Root Mean Square Fluctuation (RMSF) analyses on the protein in the trajectory file working_dir/hpc/md.xtc using the topology working_dir/hpc/md.gro. Generate a multi‑panel figure containing both the RMSD and RMSF plots. Extract the energy data from worki
+   📊 topology_file: working_dir/hpc/md.gro
+   📊 trajectory_file: working_dir/hpc/md.xtc
+   📊 energy_file: working_dir/hpc/md.edr
+   📊 hpc_output_directory: working_dir/hpc
    📊 working_directory: working_dir
 
-🎛️  SUPERVISOR ROUTING [2026-03-02 18:29:48]:
+🎛️  SUPERVISOR ROUTING [2026-03-04 17:44:44]:
    Current State Summary:
      ✅ raw_pdb: working_dir/3.pdb
      ❌ cleaned_pdb: Not set
@@ -115,641 +117,32 @@ Do not perform any simulation analysis.
      ❌ job_id: Not set
      ❌ analysis_results: Not set
    📍 Routing: input_validation → supervisor
-   💭 Reasoning: Input validation complete for None, returning to supervisor for planning
-   ⚠️  Warnings: ['PDB is missing hydrogens - preprocessing will add them']
+   💭 Reasoning: Input validation complete for analysis_only, returning to supervisor for planning
 
-🧠 LLM INTERACTION (planner.execution_planning) [2026-03-02 18:30:56]:
+🧠 LLM INTERACTION (planner.execution_planning) [2026-03-04 17:45:17]:
    📝 Prompt:
    ======================================================================
-   Create a detailed natural language execution plan for the complete MD workflow.
+   Create a detailed natural language execution plan for trajectory analysis.
    
    USER GOAL:
-   Preprocess the PDB file at working_dir/3.pdb to extract and clean the protein component only, excluding any ligands or ions.  
-   Set up the simulation system for a 15‑ns run, generate the necessary topology and coordinate files, and submit the job to the HPC.  
-   Do not perform any simulation analysis.
-   
-   **PDB Structure Overview:** Protein (1 chains) | Ligands: ATP | Ions: MG
-   **Available Protein Chains:** A
-   **Ligands Present:** ATP
-   
-   PDB File: working_dir/3.pdb
-   Atoms: 2137 | Residues: 258
-   Components: Protein=True Ligand=True Water=False
-   
-   Force Field: amber99sb-ildn
-   Water Model: tip3p
-   
-   **Available Agents and Their Tools:**
-   
-   **PREPROCESS Agent Tools:**
-   
-   → add_hydrogens
-     Add missing hydrogen atoms to PDB file with appropriate tool based on molecule type.
-   
-   Args:
-       pdb_file: Input PDB file path
-       output_file: Output PDB file path (optional)
-       method: Tool to use:
-           - 'auto': Auto-detect (reduce for protein, obabel for ligand)
-           - 'reduce': Reduce (protein, neutral pH)
-           - 'pdb2pqr': PDB2PQR (protein, pH-dependent with PropKa)
-           - 'obabel': Open Babel (ligand, pH-dependent)
-           - 'none': No hydrogen addition
-       ph: pH value for protonation (used with pdb2pqr and obabel)
-       molecule_type: 'auto' (detect), 'protein', 'ligand', or 'complex'
-   
-   Returns:
-       Dict with success status, output_file, method used, and molecule type
-     Parameters:
-       • pdb_file (required): No description
-       • output_file (optional): No description
-       • method (optional): No description
-       • ph (optional): No description
-       • molecule_type (optional): No description
-   
-   → analyze_pdb
-     Analyze PDB/GRO file structure and composition using MDAnalysis.
-   Provides comprehensive information about proteins, ligands, heteroatoms, and missing atoms.
-   
-   Args:
-       pdb_file: Path to PDB or GRO file to analyze
-   
-   Returns:
-       Dict with detailed analysis including:
-       - Protein info (chains, sequences, residue counts)
-       - Ligand info (residue names, atom counts)
-       - Heteroatom details
-       - Missing hydrogens and protonation state
-       - Water molecules
-       - Ions
-       - Alternate locations
-     Parameters:
-       • pdb_file (required): No description
-   
-   → separate_complex_components
-     Automatically detect and separate all components (protein, ligands, ions) from a complex PDB file.
-   Water molecules are automatically removed.
-   
-   Args:
-       pdb_file: Input PDB file path containing protein complex
-       output_dir: Output directory for separated files (optional)
-       protein_output: Specific output path for protein (optional)
-       ligand_output: Specific output path for ligand (optional)
-       ion_output: Specific output path for ions (optional)
-   
-   Returns:
-       Dict with success status, output file paths, and component statistics
-     Parameters:
-       • pdb_file (required): No description
-       • output_dir (optional): No description
-       • protein_output (optional): No description
-       • ligand_output (optional): No description
-       • ion_output (optional): No description
-   
-   → validate_structure
-     Validate PDB file structure and integrity.
-   
-   Args:
-       pdb_file: PDB file path to validate
-   
-   Returns:
-       Dict with validation results, issues, warnings, and statistics
-     Parameters:
-       • pdb_file (required): No description
-   
-   **SIMSETUP Agent Tools:**
-   
-   → add_ions
-     Add ions to system using gmx genion for neutralization and ionic strength.
-   
-   Args:
-       coordinate_file: Input solvated coordinate file (.gro)
-       topology_file: Input topology file (.top)
-       mdp_file: MDP file for grompp (ions.mdp)
-       positive_ion: Positive ion type (NA, K, etc.)
-       negative_ion: Negative ion type (CL, etc.)
-       neutral: Neutralize system charge (default: True)
-       concentration: Ionic concentration in Molar (default: 0.15, physiological)
-       output_file: Output coordinate file with ions
-       working_dir: Directory for output files and command execution
-   
-   Returns:
-       Dict with success, output_file, and ion counts
-     Parameters:
-       • coordinate_file (required): No description
-       • topology_file (required): No description
-       • mdp_file (required): No description
-       • positive_ion (optional): No description
-       • negative_ion (optional): No description
-       • neutral (optional): No description
-       • concentration (optional): No description
-       • output_file (optional): No description
-       • working_dir (optional): No description
-   
-   → build_simulation_box
-     Define simulation box around molecule using gmx editconf.
-   
-   Args:
-       coordinate_file: Input coordinate file (.gro or .pdb)
-       box_type: Box type - 'cubic', 'dodecahedron', 'octahedron'
-       box_distance: Distance from molecule to box edge (nm)
-       output_file: Output coordinate file path
-       center_molecule: Center molecule in box
-       working_dir: Directory for output files and command execution
-   
-   Returns:
-       Dict with success, output_file, box info
-     Parameters:
-       • coordinate_file (required): No description
-       • box_type (optional): No description
-       • box_distance (optional): No description
-       • output_file (optional): No description
-       • center_molecule (optional): No description
-       • working_dir (optional): No description
-   
-   → build_simulation_system
-     Build complete GROMACS simulation system from component PDB files.
-   Orchestrates entire workflow: topology generation → merging → solvation → ionization.
-   
-   Args:
-       protein_pdb: Path to protein PDB file (with hydrogens from preprocessor)
-       output_dir: Directory for all output files
-       ligand_pdb: Path to ligand PDB file (optional)
-       ion_pdb: Path to ion PDB file (optional, e.g., MG ions)
-       ligand_resname: Ligand residue name (e.g., "ATP", "GTP", "ADP")
-       ligand_itp: Ligand topology file path (e.g., "ATP.itp")
-                  If not provided, will need to be generated separately
-       ion_resname: Ion residue name (e.g., "MG", "CA", "ZN", "MN", "FE")
-       force_field: GROMACS force field (default: amber99sb-ildn)
-       water_model: Water model (default: tip3p)
-       box_distance: Distance from solute to box edge in nm (default: 1.2)
-       ion_concentration: Salt concentration in M (default: 0.15 = physiological)
-   
-   Returns:
-       Dict with all generated files and workflow status
-   
-   Example:
-       >>> build_simulation_system(
-       ...     protein_pdb="working_dir/preprocess/protein_h.pdb",
-       ...     output_dir="working_dir/simsetup",
-       ...     ligand_pdb="working_dir/preprocess/ATP_h.pdb",
-       ...     ion_pdb="working_dir/preprocess/MG.pdb",
-       ...     ligand_resname="ATP",
-       ...     ligand_itp="ATP.itp",
-       ...     ion_resname="MG"
-       ... )
-   
-   Generated files:
-       - protein_processed.gro: Protein with GROMACS atom types
-       - complex.gro: Merged protein + ligand + ions
-       - boxed.gro: Complex in simulation box
-       - solvated.gro: Solvated complex
-       - system.gro: Final system with neutralizing ions + salt
-       - topol.top: Complete topology file
-       - posre.itp: Position restraints for protein
-       - ions.tpr: TPR file for adding ions
-     Parameters:
-       • protein_pdb (required): No description
-       • output_dir (required): No description
-       • ligand_pdb (optional): No description
-       • ion_pdb (optional): No description
-       • ligand_resname (optional): No description
-       • ligand_itp (optional): No description
-       • ion_resname (optional): No description
-       • force_field (optional): No description
-       • water_model (optional): No description
-       • box_distance (optional): No description
-       • ion_concentration (optional): No description
-   
-   → build_topology
-     Generate GROMACS topology and coordinate files using pdb2gmx.
-   
-   Args:
-       pdb_file: Input PDB file path
-       force_field: Force field to use (default: amber99sb-ildn)
-       water_model: Water model to use (default: tip3p)
-       output_file: Output coordinate file (.gro)
-       topology_file: Output topology file (.top)
-       working_dir: Directory for output files and command execution
-   
-   Returns:
-       Dict with success status, output files, and force field info
-     Parameters:
-       • pdb_file (required): No description
-       • force_field (optional): No description
-       • water_model (optional): No description
-       • output_file (optional): No description
-       • topology_file (optional): No description
-       • working_dir (optional): No description
-   
-   → convert_amber_to_gromacs
-     Convert AMBER prmtop/inpcrd files to GROMACS top/gro format.
-   
-   Args:
-       prmtop_file: AMBER topology file (.prmtop)
-       inpcrd_file: AMBER coordinate file (.inpcrd)
-       output_top: Output GROMACS topology file (.top)
-       output_gro: Output GROMACS coordinate file (.gro)
-   
-   Returns:
-       Dict with success status and converted file paths
-     Parameters:
-       • prmtop_file (required): No description
-       • inpcrd_file (required): No description
-       • output_top (optional): No description
-       • output_gro (optional): No description
-   
-   → convert_pdb_to_gro
-     Convert PDB file to GROMACS GRO format using MDAnalysis.
-   
-   Args:
-       pdb_file: Input PDB file path (e.g., "protein_h.pdb")
-       output_gro: Output GRO file path (e.g., "protein.gro")
-       selection: MDAnalysis selection string (default: "all")
-                 Examples: "protein", "resname ATP", "resname MG"
-   
-   Returns:
-       Dict with success status, output file path, and atom count
-   
-   Example:
-       >>> convert_pdb_to_gro("protein_h.pdb", "protein.gro", "protein")
-       {"success": True, "output_file": "protein.gro", "n_atoms": 1234}
-     Parameters:
-       • pdb_file (required): No description
-       • output_gro (required): No description
-       • selection (optional): No description
-   
-   → edit_topology_file
-     Edit GROMACS topology file to include ligand and ion parameters.
-   Safely adds includes and molecule entries without creating duplicates.
-   
-   Args:
-       topology_file: Path to topol.top file (generated by gmx pdb2gmx)
-       ligand_itp: Ligand topology filename (e.g., "ATP.itp")
-       ligand_resname: Ligand residue name (e.g., "ATP", "GTP")
-       ligand_count: Number of ligand molecules in system (default: 1)
-       ion_resname: Ion residue name (e.g., "MG", "MN", "ZN")
-       ion_count: Number of ion molecules in system
-   
-   Returns:
-       Dict with success status and list of modifications made
-   
-   Example:
-       >>> edit_topology_file(
-       ...     "topol.top",
-       ...     ligand_itp="ATP.itp",
-       ...     ligand_resname="ATP",
-       ...     ion_resname="MG",
-       ...     ion_count=2
-       ... )
-       {"success": True, "modifications": ["Added ligand include: ATP.itp", ...]}
-   
-   Note:
-       - Detects and prevents duplicate entries
-       - Adds position restraint support (#ifdef POSRES_LIG)
-       - Adds entries to [ molecules ] section in correct order
-     Parameters:
-       • topology_file (required): No description
-       • ligand_itp (optional): No description
-       • ligand_resname (optional): No description
-       • ligand_count (optional): No description
-       • ion_resname (optional): No description
-       • ion_count (optional): No description
-   
-   → generate_ligand_parameters
-     Generate missing ligand topology parameters using acpype or antechamber.
-   Uses GAFF/GAFF2 force field for small molecules.
-   
-   Args:
-       ligand_pdb: Path to ligand PDB file (e.g., ATP_cleaned.pdb)
-       output_dir: Directory for output files (if None or empty, uses ligand PDB's directory)
-       charge_method: Charge calculation method (bcc=AM1-BCC, gas=Gasteiger)
-       net_charge: Net molecular charge (auto-detect if None)
-       atom_type: GAFF version (gaff or gaff2, recommended: gaff2)
-       preferred_tool: Preferred tool (acpype or antechamber)
-   
-   Returns:
-       Dict with paths to generated topology files and success status
-   
-   Example:
-       >>> result = generate_ligand_parameters(
-       ...     ligand_pdb="working_dir/preprocess/ATP.pdb",
-       ...     output_dir="working_dir/simsetup/ligand_params"
-       ... )
-       >>> print(result["topology"])  # ATP_GMX.itp
-     Parameters:
-       • ligand_pdb (required): No description
-       • output_dir (optional): No description
-       • charge_method (optional): No description
-       • net_charge (optional): No description
-       • atom_type (optional): No description
-       • preferred_tool (optional): No description
-   
-   → generate_mdp_files
-     Generate all GROMACS MDP files for a complete simulation workflow.
-   Adapts to system composition (protein-only, protein+ligand, protein+ligand+ion).
-   
-   Args:
-       output_dir: Directory to write MDP files
-       force_field: Force field name (amber99sb-ildn, charmm36-jul2022)
-       temperature: Simulation temperature in Kelvin (default: 310K)
-       pressure: Simulation pressure in bar (default: 1.0)
-       has_ligand: Whether system contains ligand molecules (ATP, GTP, etc.)
-       has_ions: Whether system contains ions (MG, MN, etc.)
-       production_ns: Production simulation length in nanoseconds
-   
-   Returns:
-       Dict with success status and paths to generated MDP files
-     Parameters:
-       • output_dir (required): No description
-       • force_field (optional): No description
-       • temperature (optional): No description
-       • pressure (optional): No description
-       • has_ligand (optional): No description
-       • has_ions (optional): No description
-       • production_ns (optional): No description
-       • kwargs (optional): No description
-   
-   → generate_tpr_file
-     Generate GROMACS TPR (binary run input) file using gmx grompp.
-   This file contains all simulation parameters and is ready for HPC submission.
-   
-   Args:
-       mdp_file: MDP parameter file (e.g., minim.mdp, nvt.mdp, npt.mdp, md.mdp)
-       coordinate_file: Input coordinate file (.gro)
-       topology_file: Input topology file (.top)
-       output_tpr: Output TPR file (default: derived from mdp_file name)
-       restraint_file: Reference coordinate file for position restraints (optional, typically same as coordinate_file)
-       working_dir: Directory for output files and command execution
-       maxwarn: Maximum number of warnings to accept (default: 3)
-   
-   Returns:
-       Dict with success status and output file path
-   
-   Example:
-       >>> generate_tpr_file(
-       ...     mdp_file="minim.mdp",
-       ...     coordinate_file="system_ions.gro",
-       ...     topology_file="topol.top",
-       ...     output_tpr="minim.tpr",
-       ...     restraint_file="system_ions.gro"
-       ... )
-     Parameters:
-       • mdp_file (required): No description
-       • coordinate_file (required): No description
-       • topology_file (required): No description
-       • output_tpr (optional): No description
-       • restraint_file (optional): No description
-       • working_dir (optional): No description
-       • maxwarn (optional): No description
-   
-   → map_ligand_atom_names
-     Map ligand atom names from AlphaFold3/PDB format to AMBER force field format.
-   Also reorders atoms to match topology file requirements.
-   
-   Args:
-       input_pdb: Input PDB file with original atom names
-       output_pdb: Output PDB file with mapped atom names
-       mapping_file: Atom name mapping file path
-                    Format: RESNAME OLD_NAME NEW_NAME (one per line)
-       ligand_resname: Ligand residue name (e.g., "ATP", "GTP", "ADP")
-   
-   Returns:
-       Dict with success status, number of atoms renamed/reordered
-   
-   Example:
-       >>> map_ligand_atom_names(
-       ...     "complex_h.pdb",
-       ...     "complex_mapped.pdb",
-       ...     "ATP_AF3_to_amber_mapping.txt",
-       ...     ligand_resname="ATP"
-       ... )
-       {"success": True, "atoms_renamed": 31, "atoms_reordered": 31}
-   
-   Note:
-       - Only ligand atoms are renamed/reordered
-       - Protein, ions, and water remain unchanged
-       - Mapping file should contain: RESNAME OLD_ATOM NEW_ATOM per line
-       - Lines starting with # are treated as comments
-     Parameters:
-       • input_pdb (required): No description
-       • output_pdb (required): No description
-       • mapping_file (required): No description
-       • ligand_resname (optional): No description
-   
-   → merge_gro_files
-     Merge multiple GROMACS GRO files into a single complex GRO file.
-   Maintains proper atom numbering and coordinates. Order of files matters!
-   
-   Args:
-       gro_files: List of GRO file paths in desired merge order
-                 Example: ["protein_processed.gro", "ATP.gro", "MG.gro"]
-       output_file: Output path for merged GRO file (e.g., "complex.gro")
-   
-   Returns:
-       Dict with success status, total atom count, and component details
-   
-   Example:
-       >>> merge_gro_files(
-       ...     ["protein_processed.gro", "ATP.gro", "MG.gro"],
-       ...     "complex.gro"
-       ... )
-       {"success": True, "total_atoms": 1500, "n_components": 3}
-   
-   Note:
-       - Files are merged in the order provided
-       - Atom IDs are automatically renumbered sequentially
-       - Box dimensions from first file are preserved
-     Parameters:
-       • gro_files (required): No description
-       • output_file (required): No description
-   
-   → solvate_system
-     Add water molecules to simulation system using gmx solvate.
-   
-   CRITICAL: GMX solvate modifies the topology file IN-PLACE via the -p flag.
-   Always pass the same topology file (typically topol.top) that was created by build_topology.
-   
-   Args:
-       coordinate_file: Input coordinate file with box (.gro)
-       topology_file: Topology file to update IN-PLACE (typically topol.top)
-       water_model: Water model - 'spc216' (default), 'spc', 'tip4p', 'tip5p'
-                    Note: tip3p not supported by gmx solvate, use default or spc216
-                    If default (spc216) or not in valid list, -cs flag is omitted
-       output_file: Output solvated coordinate file
-       working_dir: Directory for output files and command execution
-   
-   Returns:
-       Dict with success status, output files, and water count
-     Parameters:
-       • coordinate_file (required): No description
-       • topology_file (required): No description
-       • water_model (optional): No description
-       • output_file (optional): No description
-       • working_dir (optional): No description
-   
-   → split_complex_pdb_to_gro
-     Split a complex PDB file into separate GRO files for protein, ligand, and ions.
-   Useful when you have a single PDB with all components together.
-   
-   Args:
-       pdb_file: Input PDB file with all components (protein+ligand+ion)
-       output_dir: Directory for output GRO files
-       ligand_resname: Ligand residue name (e.g., "ATP", "GTP", "ADP")
-       ion_resname: Ion residue name (e.g., "MG", "MN", "ZN")
-   
-   Returns:
-       Dict with paths to generated protein.gro, ligand.gro, ion.gro files
-   
-   Example:
-       >>> split_complex_pdb_to_gro(
-       ...     "complex.pdb", 
-       ...     "output/", 
-       ...     ligand_resname="ATP", 
-       ...     ion_resname="MG"
-       ... )
-       {"success": True, "files": {"protein": "output/protein.gro", ...}}
-     Parameters:
-       • pdb_file (required): No description
-       • output_dir (required): No description
-       • ligand_resname (optional): No description
-       • ion_resname (optional): No description
-   
-   **HPC Agent Tools:**
-   
-   → check_job_status
-     Check status of submitted SLURM job.
-   
-   Args:
-       job_id: SLURM job ID
-       remote_host: Remote HPC hostname (optional)
-       remote_user: Remote username (optional)
-       ssh_key_path: SSH key path (optional)
-   
-   Returns:
-       Dict with job status information
-     Parameters:
-       • job_id (required): No description
-       • remote_host (optional): No description
-       • remote_user (optional): No description
-       • ssh_key_path (optional): No description
-   
-   → copy_simulation_files
-     Copy simulation files from setup directory to HPC working directory.
-   
-   Args:
-       source_dir: Source directory (e.g., working_dir/simsetup)
-       dest_dir: Destination directory (e.g., working_dir/hpc)
-       file_patterns: File patterns to copy (default: *.gro, *.top, *.mdp, *.itp)
-       create_dest: Create destination directory if it doesn't exist
-   
-   Returns:
-       Dict with success status and list of copied files
-     Parameters:
-       • source_dir (required): No description
-       • dest_dir (required): No description
-       • file_patterns (optional): No description
-       • create_dest (optional): No description
-   
-   → create_slurm_script
-     Create SLURM job submission script for GROMACS simulation.
-   
-   Args:
-       job_name: Job name for SLURM
-       working_dir: Directory containing simulation files
-       topology_file: Topology file name
-       input_structure: Input coordinate file name
-       simulation_phases: List of phases (default: ["minim", "nvt", "npt", "md"])
-       partition: SLURM partition
-       cpus_per_task: CPU cores per task
-       memory: Memory allocation (e.g., "40G")
-       time_limit: Time limit (days-hours:min:sec)
-       gpu_count: Number of GPUs
-       email: Email for notifications
-       gromacs_module: GROMACS module to load
-   
-   Returns:
-       Dict with script path and configuration
-     Parameters:
-       • job_name (required): No description
-       • working_dir (required): No description
-       • topology_file (optional): No description
-       • input_structure (optional): No description
-       • simulation_phases (optional): No description
-       • partition (optional): No description
-       • cpus_per_task (optional): No description
-       • memory (optional): No description
-       • time_limit (optional): No description
-       • gpu_count (optional): No description
-       • email (optional): No description
-       • gromacs_module (optional): No description
-   
-   → download_results
-     Download simulation results from HPC system.
-   
-   Args:
-       remote_dir: Remote directory path
-       local_dir: Local download directory
-       file_patterns: File patterns to download (default: *.xtc, *.gro, *.edr, *.log, *.cpt)
-       remote_host: Remote HPC hostname
-       remote_user: Remote username
-       ssh_key_path: SSH key path
-   
-   Returns:
-       Dict with downloaded file information
-     Parameters:
-       • remote_dir (required): No description
-       • local_dir (required): No description
-       • file_patterns (optional): No description
-       • remote_host (optional): No description
-       • remote_user (optional): No description
-       • ssh_key_path (optional): No description
-   
-   → estimate_simulation_time
-     Estimate simulation walltime based on system size and simulation length.
-   
-   Args:
-       production_ns: Production simulation length in nanoseconds
-       system_size: Number of atoms in the system
-       timestep_ps: Integration timestep in picoseconds
-   
-   Returns:
-       Dict with time estimates and SLURM time format
-   
-   Example:
-       >>> estimate_simulation_time(production_ns=50, system_size=80000)
-       {
-           "estimated_hours": 72.6,
-           "slurm_time": "3-00:36:00",
-           "total_steps": 25000000
-       }
-     Parameters:
-       • production_ns (optional): No description
-       • system_size (optional): No description
-       • timestep_ps (optional): No description
-   
-   → submit_job
-     Submit SLURM job to HPC system.
-   
-   Args:
-       script_path: Path to SLURM script
-       remote_host: Remote HPC hostname (optional, for SSH submission)
-       remote_user: Remote username (optional)
-       remote_dir: Remote working directory (optional)
-       ssh_key_path: SSH key path (optional)
-   
-   Returns:
-       Dict with job_id and submission status
-   
-   Note:
-       If remote_host is not provided, assumes local submission via sbatch.
-       For remote submission, uses SSH to transfer script and submit.
-     Parameters:
-       • script_path (required): No description
-       • remote_host (optional): No description
-       • remote_user (optional): No description
-       • remote_dir (optional): No description
-       • ssh_key_path (optional): No description
+   Perform Root Mean Square Deviation (RMSD) and Root Mean Square Fluctuation (RMSF) analyses on the protein in the trajectory file working_dir/hpc/md.xtc using the topology working_dir/hpc/md.gro. Generate a multi‑panel figure containing both the RMSD and RMSF plots. Extract the energy data from working_dir/hpc/md.edr and plot the energy (potential/total) as a separate figure. Save all plots and accompanying data files.
+   
+   **Available Files:**
+   Topology: working_dir/hpc/md.gro
+   Trajectory: working_dir/hpc/md.xtc
+   Energy: working_dir/hpc/md.edr
+   HPC Output Directory: working_dir/hpc
+   
+   TASK: Analysis-only - perform trajectory analysis on existing simulation data.
+   DO NOT include preprocessing, setup, or HPC agents.
+   ONLY create execution plan for Analysis Agent.
+   
+   File Structure:
+   - Working Directory: working_dir
+   - Trajectory/Topology Location: working_dir/hpc/ (auto-discovery)
+   - Analysis Output Directory: working_dir/analysis/
+   
+   **Available Analysis Agent Tools:**
    
    **ANALYSIS Agent Tools:**
    
@@ -801,6 +194,9 @@ Do not perform any simulation analysis.
    RMSD measures structural deviation over time, indicating stability.
    Lower RMSD values suggest stable structures.
    
+   NOTE: The RMSD calculation in MDAnalysis automatically performs alignment
+   before computing RMSD. Set align_before_rmsd=False to disable this.
+   
    Args:
        topology_file: Topology file (.gro, .pdb, .tpr)
        trajectory_file: Trajectory file (.xtc, .trr, .dcd)
@@ -808,6 +204,7 @@ Do not perform any simulation analysis.
        reference_frame: Reference frame number (default: 0 - first frame)
        output_file: Output file path for RMSD data (.dat, .csv)
        working_dir: Working directory for analysis
+       align_before_rmsd: Whether to align before RMSD calculation (default: True)
    
    Returns:
        Dict with RMSD results and statistics
@@ -818,6 +215,7 @@ Do not perform any simulation analysis.
        • reference_frame (optional): No description
        • output_file (optional): No description
        • working_dir (optional): No description
+       • align_before_rmsd (optional): No description
    
    → calculate_rmsf
      Calculate RMSF (Root Mean Square Fluctuation) for a trajectory.
@@ -825,12 +223,17 @@ Do not perform any simulation analysis.
    RMSF measures per-residue flexibility. Higher RMSF indicates more flexible regions.
    Useful for identifying flexible loops, rigid cores, and binding sites.
    
+   IMPORTANT: Structural alignment is performed by default to remove translational
+   and rotational motions, giving meaningful RMSF values.
+   
    Args:
        topology_file: Topology file (.gro, .pdb, .tpr)
        trajectory_file: Trajectory file (.xtc, .trr, .dcd)
        selection: Atom selection for RMSF calculation (default: "protein and name CA")
        output_file: Output file path for RMSF data (.dat, .csv)
        working_dir: Working directory for analysis
+       align_trajectory: Whether to align trajectory before RMSF calculation (default: True)
+       align_selection: Atom selection for alignment (default: same as selection)
    
    Returns:
        Dict with RMSF results and statistics
@@ -840,6 +243,8 @@ Do not perform any simulation analysis.
        • selection (optional): No description
        • output_file (optional): No description
        • working_dir (optional): No description
+       • align_trajectory (optional): No description
+       • align_selection (optional): No description
    
    → extract_trajectory_metrics
      Extract basic metrics from trajectory file.
@@ -860,6 +265,125 @@ Do not perform any simulation analysis.
        • output_dir (optional): No description
        • working_dir (optional): No description
    
+   → generate_summary_report
+     Generate a human-readable summary report from the summary file.
+   
+       Formatted summary report string
+     Parameters:
+       • working_dir (required): Working directory for analysis
+   
+   → initialize_summary_file
+     Initialize the analysis summary file.
+   Creates the file if it doesn't exist and writes header information.
+   
+       Path to the summary file
+     Parameters:
+       • working_dir (required): Working directory for analysis
+   
+   → plot_combined_data
+     Create combined plots from a single data file with multiple columns.
+   
+   Useful for plotting multiple energy terms, multiple properties, or
+   comparing different metrics from the same simulation.
+   
+   Args:
+       data_files: List containing one data file with multiple columns
+       output_file: Output image file path (.png, .pdf, .svg)
+       data_columns: List of column indices to plot (e.g., [1, 2, 3] for columns after x-axis)
+       subplot_arrangement: (rows, cols) for subplot grid (auto if None)
+       shared_xaxis: Whether to share x-axis across subplots - default: True
+       titles: List of subplot titles (optional)
+       xlabel: Common x-axis label (optional)
+       ylabels: List of y-axis labels for each subplot (optional)
+       colors: List of colors for each subplot (optional)
+       figsize: Figure size as (width, height) in inches - default: (12, 8)
+       dpi: Resolution in dots per inch - default: 300
+       working_dir: Working directory for analysis
+   
+   Returns:
+       Dict with plotting results
+     Parameters:
+       • data_files (required): No description
+       • output_file (required): No description
+       • data_columns (optional): No description
+       • subplot_arrangement (optional): No description
+       • shared_xaxis (optional): No description
+       • titles (optional): No description
+       • xlabel (optional): No description
+       • ylabels (optional): No description
+       • colors (optional): No description
+       • figsize (optional): No description
+       • dpi (optional): No description
+       • working_dir (optional): No description
+   
+   → plot_md_data
+     Plot MD analysis data from one or more data files (single panel).
+   
+   Creates a single-panel plot for visualizing RMSD, RMSF, Rg, or energy data.
+   Supports overlay of multiple datasets on the same axes.
+   
+   Args:
+       data_files: List of data file paths to plot (.xvg, .dat, .csv)
+       output_file: Output image file path (.png, .pdf, .svg)
+       plot_type: Type of plot ("line", "scatter", "bar") - default: "line"
+       titles: Plot title (optional)
+       xlabel: X-axis label (optional, auto-detected from file if available)
+       ylabel: Y-axis label (optional, auto-detected from file if available)
+       labels: Legend labels for each data file (optional)
+       colors: Line/marker colors for each dataset (optional)
+       figsize: Figure size as (width, height) in inches - default: (10, 6)
+       dpi: Resolution in dots per inch - default: 300
+       working_dir: Working directory for analysis
+   
+   Returns:
+       Dict with plotting results
+     Parameters:
+       • data_files (required): No description
+       • output_file (required): No description
+       • plot_type (optional): No description
+       • titles (optional): No description
+       • xlabel (optional): No description
+       • ylabel (optional): No description
+       • labels (optional): No description
+       • colors (optional): No description
+       • figsize (optional): No description
+       • dpi (optional): No description
+       • working_dir (optional): No description
+   
+   → plot_md_multipanel
+     Create multi-panel plots for comparing multiple MD analyses.
+   
+   Creates a figure with multiple subplots, one for each data file.
+   Useful for comparing RMSD, RMSF, Rg, and energy in a single figure.
+   
+   Args:
+       data_files: List of data file paths, one per panel (.xvg, .dat, .csv)
+       output_file: Output image file path (.png, .pdf, .svg)
+       layout: Subplot layout ("vertical", "horizontal", "grid") - default: "vertical"
+       titles: List of subplot titles (optional)
+       xlabels: List of x-axis labels for each subplot (optional)
+       ylabels: List of y-axis labels for each subplot (optional)
+       plot_types: List of plot types for each panel (optional, default: "line")
+       colors: List of colors for each panel (optional)
+       figsize: Figure size as (width, height) in inches (auto-sized if None)
+       dpi: Resolution in dots per inch - default: 300
+       working_dir: Working directory for analysis
+   
+   Returns:
+       Dict with plotting results
+     Parameters:
+       • data_files (required): No description
+       • output_file (required): No description
+       • layout (optional): No description
+       • titles (optional): No description
+       • xlabels (optional): No description
+       • ylabels (optional): No description
+       • plot_types (optional): No description
+       • colors (optional): No description
+       • figsize (optional): No description
+       • dpi (optional): No description
+       • working_dir (optional): No description
+   
    → run_complete_analysis
      Convenience function to run complete analysis workflow.
    
@@ -871,114 +395,12 @@ Do not perform any simulation analysis.
        • working_dir (optional): Working directory for outputs
        • analyses (optional): List of analyses to perform
    
-   **SUPERVISOR Agent Tools:**
-   
-   → build_human_summary
-     Build human-readable summary of PDB analysis for LLM context.
-   
-       Human-readable summary string
-     Parameters:
-       • analysis (required): PDB analysis dict
-   
-   → detect_task_required_inputs
-     Determine which inputs are required based on subtask type.
-   
-       Dict mapping input requirements to boolean flags
-     Parameters:
-       • subtask_type (required): Type of subtask (analysis_only, setup_only, preprocess_only, full_task)
-   
-   → enrich_analysis_prompt
-     Legacy wrapper - use enrich_prompt_with_context instead.
-     Parameters:
-       • user_goal (required): No description
-       • file_info (required): No description
-       • llm_client (required): No description
-       • config (required): No description
-   
-   → enrich_prompt_with_context
-     Universal prompt enrichment function that works with any context type.
-   
-       Enriched prompt string combining rephrased goal and context
-     Parameters:
-       • user_goal (required): User's natural language goal
-       • context_type (required): Type of context ("pdb" or "files")
-       • context_data (required): Context information dict
-       • llm_client (required): LLM client instance
-       • config (required): Supervisor configuration
-   
-   → enrich_user_prompt
-     Legacy wrapper - use enrich_prompt_with_context instead.
-     Parameters:
-       • user_goal (required): No description
-       • pdb_analysis (required): No description
-       • pdb_summary (required): No description
-       • llm_client (required): No description
-       • config (required): No description
-   
-   → extract_file_names_from_goal
-     Extract explicit file names from user goal for analysis tasks.
-   
-   Priority:
-   1. Use explicitly stated file names from user goal
-   2. Default to md.* pattern (md.gro, md.xtc, md.edr)
-   3. Return None to trigger auto-discovery
-   
-       Tuple of (topology_file, trajectory_file, energy_file) or None values
-     Parameters:
-       • user_goal (required): User's analysis goal
-       • hpc_dir (required): HPC output directory path
-   
-   → parse_component_selection
-     Parse user intent to determine components for simulation.
-   
-       Dict with protein, ligand, water, ions, specific_chains selections
-     Parameters:
-       • user_goal (required): User's natural language goal
-       • analysis (required): PDB analysis results
-   
-   → rephrase_with_context
-     Universal LLM rephrasing function that works with any context type.
-   
-       Rephrased goal string
-     Parameters:
-       • user_goal (required): User's natural language goal
-       • context_type (required): Type of context ("pdb" or "files")
-       • context_data (required): Context information dict
-       • llm_client (required): LLM client instance
-       • config (required): Supervisor configuration
-   
-   → validate_and_enrich_inputs
-     Universal input validation and enrichment function for ALL task types.
-   
-       Updated state dictionary with validation results and enriched prompt
-     Parameters:
-       • state (required): Current MDState dictionary
-       • subtask_type (required): One of "analysis_only", "setup_only", "preprocess_only", "full_task"
-       • llm_client (required): LLM client instance
-       • config (required): Supervisor configuration
-       • analyze_pdb_tool (required): PDB analysis tool (for PDB-based tasks)
-       • logger (required): Logger instance
-   
-   → validate_feasibility
-     Validate if user's request is feasible given PDB contents.
-   
-       Dict with is_feasible, errors, warnings
-     Parameters:
-       • user_goal (required): User's natural language goal
-       • analysis (required): PDB analysis results
-       • component_selection (required): Parsed component selection
-   
-   **CRITICAL INSTRUCTIONS FOR AGENT NAMING:**
-   You MUST explicitly name each agent involved in your plan using these EXACT phrases:
-   - "Preprocessing Agent" or "preprocessing agent" - for structure cleaning
-   - "Simulation Setup Agent" or "setup agent" - for topology and system building
-   - "HPC Agent" or "hpc agent" - for job submission
-   - "Analysis Agent" or "analysis agent" - for trajectory analysis
-   
-   Write complete sentences like:
-   "The Preprocessing Agent will first clean the PDB structure by..."
-   "Next, the Simulation Setup Agent generates topology files using..."
-   "The HPC Agent then submits the simulation job with..."
+   **CRITICAL INSTRUCTIONS:**
+   - Use the analysis agent's Python tools listed above (calculate_rmsd, calculate_rmsf, etc.)
+   - Do NOT use bash/shell commands or GROMACS CLI tools (gmx rmsf, etc.)
+   - The analysis agent will handle file discovery and tool execution
+   - Specify WHICH tools to use and what analysis to perform
+   - Let the analysis agent handle the implementation details
    
    **OUTPUT FORMAT - MANDATORY:**
    
@@ -1007,80 +429,68 @@ Do not perform any simulation analysis.
    
    CRITICAL: If you output JSON, YAML, or any structured format, the plan will be rejected and the workflow will fail.
    
-   **EXAMPLE STRUCTURE:**
-   
-   **Goal:**
-   [Summarize what needs to be accomplished in 2-3 sentences]
-   
-   **Workflow Execution:**
-   
-   **Preprocessing Agent:**
-   The Preprocessing Agent will handle structure preparation. It will use the separate_complex_components tool to extract the protein chain, removing the ATP ligand and MG ions as requested. The add_hydrogens tool will then ensure complete protonation using the reduce method at neutral pH.
-   
-   **Simulation Setup Agent:**
-   The Simulation Setup Agent will prepare the simulation system. Using build_topology, it generates AMBER99SB-ILDN topology files. The system will be placed in a cubic simulation box with adequate spacing, solvated with TIP3P water molecules, and neutralized with appropriate ions. The generate_mdp_files tool will create parameter files for a 10 ns production run.
-   
-   **HPC Agent:**
-   The HPC Agent will handle job submission to the compute cluster. It will use create_slurm_script to generate an appropriate job submission script, then submit_job to initiate the simulation on the HPC system.
-   
-   **Expected Outcomes:**
-   [Describe final deliverables and verification steps]
-   
-   CRITICAL: Use the section headers exactly as shown above with ** markers (e.g., **Preprocessing Agent:**, **Simulation Setup Agent:**, **HPC Agent:**, **Analysis Agent:**). This allows each agent to extract only its relevant instructions.
-   
-   Provide a comprehensive natural language plan following this structure. DO NOT output JSON, YAML, or any structured data format.
+   Provide a comprehensive natural language plan explaining how the Analysis Agent should conduct the trajectory analysis.
    ======================================================================
    💭 Response:
    ======================================================================
-   **Goal:**  
-   The user requires a fully prepared simulation system containing only the protein chain of the supplied PDB file, with all ligands and ions removed, and wishes to run a 15‑nanosecond GROMACS production run on the compute cluster. No trajectory analysis is requested; the focus is solely on preprocessing, system construction, and job submission.
+   **Goal**  
+   The purpose of this workflow is to extract meaningful dynamic information from a pre‑existing protein simulation. Specifically, we will quantify how the structure changes over time using RMSD and per‑residue flexibility via RMSF, and we will examine the energetic behaviour of the trajectory by reporting potential and total energy. All results will be saved to the dedicated analysis directory, plotted in clear, publication‑ready figures, and summarized in a concise report that can be appended to any subsequent documentation.
    
-   ---
+   **Analysis**  
+   The analysis will be carried out exclusively with the Python tools available in the Analysis Agent. No external GROMACS binaries or shell commands will be invoked. The chosen tools are:
    
-   **Workflow Execution:**
+   1. **initialize_summary_file** – sets up a structured, versioned summary file that the other tools will populate.  
+   2. **extract_trajectory_metrics** – provides quick checks on frame count, time span and file size, which is useful for validating the simulation output.  
+   3. **calculate_rmsd** – computes the RMSD of the protein backbone (default CA atoms) relative to the first frame, automatically aligning the trajectory to remove rigid body motion.  
+   4. **calculate_rmsf** – calculates per‑residue RMSF after the same alignment, giving a map of flexible regions.  
+   5. **plot_md_multipanel** – assembles the RMSD and RMSF data into a single multi‑panel figure, keeping the panels vertically stacked for easy comparison.  
+   6. **analyze_energy** – extracts the potential and total energy components from the GROMACS energy file, outputting an .xvg data file.  
+   7. **plot_md_data** – turns the energy data into a clean line plot, labeling each energy term.  
+   8. **generate_summary_report** – consumes the summary file and creates a human‑readable report that references the generated plots and key statistics.
    
-   **Preprocessing Agent:**  
-   The Preprocessing Agent will begin by isolating the desired protein chain from the input PDB file. It will invoke the *separate_complex_components* tool to split the structure into its constituent parts, selecting chain **A** (the chain that contains the target protein) and discarding the ATP ligand and the MG ion species. Once the protein alone is extracted, the Preprocessing Agent will use the *add_hydrogens* tool with the *reduce* method to guarantee that all backbone and side‑chain atoms are fully protonated at neutral pH, thereby producing a chemically complete structure. Finally, the agent will save the cleaned, protonated protein as a new PDB file in the preprocessing subdirectory, ready for downstream topology generation.
+   These tools collectively cover the entire analysis requirement: metric extraction, data processing, visualisation, and reporting.
    
-   **Simulation Setup Agent:**  
-   The Simulation Setup Agent will take the cleaned protein PDB and build a full GROMACS simulation system. First, it will call *build_topology* to generate an AMBER99SB‑ILDN force field topology for the protein and to create the initial *topol.top* file. Next, the agent will use *build_hollow* or *build_topology*? Wait we don't have build_hollow; we have *build_topology* and *solvate_system*. The agent will place the protein in a cubic simulation box with at least 10 Å of solvent on each side by calling *build_topology*? Actually *build_topology* only builds the topology, not the box. We should use *build_hollow*? That tool not listed. Instead we can use *build_hollow*? Not available. We can use *solvate_system* which expects a box; we need to create a box first. The *solvate_system* tool can accept a coordinate file with a box defined by *build_topology*? No. Actually *solvate_system* expects coordinate_file with box. We need to create a box using *build_hollow*? We don't have that. Perhaps we can use *solvate_system* with *-cs* default spc216. But we need to create a box using *build_topology*? Wait *build_topology* is in Simulation Setup Agent Tools; it creates topology and updates in place. But it doesn't define box. The *solvate_system* tool expects a coordinate file with a box. We can use *solvate_system* after creating a box via *solvate_system*? Wait, *solvate_system* also expects a box. We need to create a box first. There is *build_hollow*? Not listed. The *split_complex_pdb_to_gro*? Not needed. The *solvate_system* does not create the box; we need to use *build_hollow* or *solvate_system* with *-p*? Actually *solvate_system* modifies the topology in place and can add water to a system that already has a box. We need to create a box using *solvate_system*? But *solvate_system* cannot create the box. We can use *solvate_system* after we create a box with *solvate_system*? Wait, we can use *solvate_system* to add water; but we need a box first. We can create a box with *solvate_system* by providing a coordinate file that already has a box. The box can be created by *build_topology*? Not. The *solvate_system* tool can also create a box if the coordinate file has no box? Actually gmx solvate can accept a coordinate file without a box and it will create a box. But the tool description says it modifies topology IN-PLACE via the -p flag. So we can call *solvate_system* with the original protein coordinate file; it will create a box automatically with a default cubic box if needed? GROMACS solvate will generate a cubic box with a spacing of 1 nm? Actually solvate automatically creates a cubic box of size that contains the structure plus 1 nm margin? I'm not 100% sure. But we can rely on solvate to create a box. So we can directly call *solvate_system* on the protein coordinate file. That will create a solvated .gro file and update topol.top in place. That should be fine. Then we need to neutralize the system. We can use *add_counter_ions* tool to add the required counter ions to the protein PDB. However, since we have already solvated, we can use *add_counter_ions* on the solvated PDB file? The tool expects a PDB file. We can provide the solvated PDB and add a Na+ ion to neutralize. Alternatively, we can use *add_counter_ions* before solvation, but after adding water we can still add ions with *add_counter_ions*. Let's do after solvation. Next, we need to generate the MDP files for each simulation phase. The *generate_mdp_files* tool can create parameter files for the minimization, NVT, NPT, and a 15‑nanosecond production phase. For the production run we set the integrator to leapfrog with a 2 fs timestep, a pressure coupling to 1 atm, temperature coupling to 300 K, and a total of 15 ns. The other phases are standard: 100 ps energy minimization, 100 ps NVT, 100 ps NPT, and the 15 ns production. After all files are ready, the Simulation Setup Agent will copy the relevant *.gro, *.top, *.mdp, and *.itp files into a dedicated simulation directory named *simsetup* within the working directory.  
-   **HPC Agent:**  
-   The HPC Agent will manage the transfer of the simulation files to the compute cluster and generate a SLURM submission script. It will first use *copy_simulation_files* to copy all *.gro, *.top, *.mdp, and *.itp files from *working_dir/simsetup* to *working_dir/hpc*. It will then invoke *create_slurm_script*, supplying the job name (e.g., “md_sim_15ns”), the working directory, topology file, input structure, and partition details. The script will request a single CPU core with 16 GB of memory and a time limit of 0‑02:00:00 (two hours), which should be ample for a 15‑nanosecond run on a typical cluster node. The HPC Agent will submit the job via *submit_job*, passing the script path and the remote host and credentials for SSH submission.  
-   **Analysis Agent:**  
-   No trajectory analysis is required for this task. The Analysis Agent will be instructed to skip analysis and simply confirm that the simulation has been submitted.  
+   **Execution Sequence**  
+   1. **Prepare the output structure** – the agent will create a subdirectory named *analysis* under the working directory (`working_dir/analysis`). All data files and figures will be written here to keep the workspace organised.  
+   2. **Initialize the summary infrastructure** – the agent calls **initialize_summary_file** with the working directory as context, which creates an empty summary file ready to be populated by downstream tools.  
+   3. **Capture trajectory basic metrics** – **extract_trajectory_metrics** is invoked with the topology (`working_dir/hpc/md.gro`) and trajectory (`working_dir/hpc/md.xtc`). The resulting metrics (frame count, simulation time, file size) are written to the summary file.  
+   4. **Compute RMSD** – the agent runs **calculate_rmsd** using the same topology and trajectory. Alignment is left to the default (`align_before_rmsd=True`), ensuring that the RMSD reflects conformational changes rather than overall translation or rotation. The output file is written as `analysis/rmsd.dat`.  
+   5. **Compute RMSF** – next, **calculate_rmsf** is called, again employing the default alignment. Its output is stored as `analysis/rmsf.dat`.  
+   6. **Plot RMSD and RMSF together** – **plot_md_multipanel** receives the two data files, is instructed to create a vertical stack of panels, and writes the figure to `analysis/rmsd_rmsf.png`. The agent sets appropriate titles (“RMSD over time” and “Per‑residue RMSF”) and axis labels so that the figure is immediately interpretable.  
+   7. **Analyse energy** – **analyze_energy** is executed on the energy file (`working_dir/hpc/md.edr`) with the terms `["Potential", "Total"]`. The resulting .xvg file is saved as `analysis/energy.xvg`.  
+   8. **Visualise energy** – **plot_md_data** takes the energy file, produces a line plot with distinct colors for potential and total energy, and writes the image to `analysis/energy.png`.  
+   9. **Generate the summary report** – finally, **generate_summary_report** consumes the populated summary file and injects references to the figures, key numerical findings, and any notable observations (e.g., RMSD plateauing, peaks in energy fluctuations). The report is written as `analysis/summary.txt`.  
    
-   ---
+   Throughout the sequence, each tool’s output is automatically captured by the Analysis Agent, so the agent only needs to specify the logical flow and file paths; the underlying implementation will resolve locations and execute the tools in the correct order.
    
-   **Expected Outcomes:**  
-   The final deliverables will include a clean, fully protonated protein structure devoid of ATP and MG ions, an AMBER99SB‑ILDN topology file that reflects only the protein, a solvated cubic box with TIP3P water, a neutralized system with appropriate counter‑ions, and a complete set of MDP files covering the energy minimization, NVT, NPT, and 15‑nanosecond production phases. A SLURM submission script will have been generated and the job submitted to the HPC cluster; the job ID will be logged for status tracking. Verification steps will involve confirming that the protein‑only PDB has no ligand or ion residues, that the topology file lists the correct number of atoms, and that the SLURM job is running or completed as expected.
+   **Expected Outcomes**  
+   - A clean, dedicated *analysis* directory containing:  
+     - `rmsd.dat` – time‑series RMSD values.  
+     - `rmsf.dat` – per‑residue RMSF values.  
+     - `rmsd_rmsf.png` – a two‑panel figure juxtaposing RMSD and RMSF.  
+     - `energy.xvg` – tabulated potential and total energy over time.  
+     - `energy.png` – a line plot of the energy terms.  
+     - `summary.txt` – a concise, human‑readable report summarising the findings and linking to the figures.  
+   - The RMSD plot should reveal the stabilization of the protein structure after initial equilibration, while the RMSF plot should highlight flexible loops or termini.  
+   - The energy plot should demonstrate the stability of the potential and total energy, or flag any drift or spikes that might indicate simulation artefacts.  
+   - All data files and figures are stored in a reproducible, versioned directory that can be referenced by downstream reporting or publication pipelines.
+   
+   This plan fully satisfies the user’s requirement for trajectory analysis, providing both quantitative data and visual representation, all produced by the Analysis Agent’s dedicated tools without any external command‑line intervention.
    ======================================================================
 
 ⚡ AGENT ACTION (planner):
    🎬 Action: Generated Natural Language Execution Plan
    📊 format: natural_language
-   📊 title: Fallback Natural Language Execution Plan: full_pipeline
+   📊 title: Detailed Natural Language Execution Plan
    📊 agent_sequence: [
-      "preprocessing_agent",
-      "setup_agent",
-      "hpc_agent"
+      "analysis_agent"
 ]
-   📊 total_agents: 3
-   📊 plan_preview: **GOAL INTERPRETATION:**
+   📊 total_agents: 1
+   📊 plan_preview: **Goal**  
+The purpose of this workflow is to extract meaningful dynamic information from a pre‑existing protein simulation. Specifically, we will quantify how the structure changes over time using RMSD and per‑residue flexibility via RMSF, and we will examine the energetic behaviour of the trajectory by reporting potential and total energy. All results will be saved to the dedicated analysis directory, plotted in clear, publication‑ready figures, and summarized in a concise report that can be a...
+   📊 method: llm_generated
 
-Preprocess the PDB file at working_dir/3.pdb to extract and clean the protein component only, excluding any ligands or ions.  
-Set up the simulation system for a 15‑ns run, generate the necessary topology and coordinate files, and submit the job to the HPC.  
-Do not perform any simulation analysis.
-
-**PDB Structure Overview:** Protein (1 chains) | Ligands: ATP | Ions: MG
-**Available Protein Chains:** A
-**Ligands Present:** ATP
-
-**PDB STRUCTURE ANALYSIS:**
-
-PDB File: wor...
-   📊 method: fallback
-
-🎛️  SUPERVISOR ROUTING [2026-03-02 18:30:56]:
+🎛️  SUPERVISOR ROUTING [2026-03-04 17:45:17]:
    Current State Summary:
      ✅ raw_pdb: working_dir/3.pdb
      ❌ cleaned_pdb: Not set
@@ -1088,757 +498,244 @@ PDB File: wor...
      ❌ job_id: Not set
      ❌ analysis_results: Not set
    📍 Routing: planner → supervisor
-   💭 Reasoning: Planner: Created natural language plan with 3 agents. Returning to supervisor.
-   ⚠️  Warnings: ['PDB is missing hydrogens - preprocessing will add them']
+   💭 Reasoning: Planner: Created natural language plan with 1 agents. Returning to supervisor.
 
-🎛️  SUPERVISOR ROUTING [2026-03-02 18:30:56]:
+🎛️  SUPERVISOR ROUTING [2026-03-04 17:45:17]:
    Current State Summary:
      ✅ raw_pdb: working_dir/3.pdb
      ❌ cleaned_pdb: Not set
      ❌ coordinates: Not set
      ❌ job_id: Not set
      ❌ analysis_results: Not set
-   📍 Routing: supervisor → preprocess
+   📍 Routing: supervisor → analysis
    💭 Reasoning: Executing Step 1: Unnamed
-   ⚠️  Warnings: ['PDB is missing hydrogens - preprocessing will add them']
 
-🤖 PDB PREPROCESSING WITH LLM TOOL CALLING AGENT (preprocessing) STARTING [2026-03-02 18:30:56]:
+🤖 MD TRAJECTORY ANALYSIS WITH LLM PLANNING AGENT (analysis) STARTING [2026-03-04 17:45:17]:
    Input Data Summary:
-     • raw_pdb: working_dir/3.pdb
-     • planner_instructions: The Preprocessing Agent will clean and prepare the PDB structure by removing ligand molecules. This agent focuses solely on structure preparation and does NOT handle topology generation or force field... [truncated, see full plan above]
-     • force_field: amber99sb-ildn
-     • water_model: tip3p
+     • planner_instructions: **Goal**  
+The purpose of this workflow is to extract meaningful dynamic information from a pre‑existing protein simulation. Specifically, we will quantify how the structure changes over time using RM... [truncated, see full plan above]
 
-🧠 LLM INTERACTION (preprocessing.planning) [2026-03-02 18:31:17]:
+⚡ AGENT ACTION (analysis):
+   🎬 Action: Recorded PDB Structure Info
+   📊 atoms: 2137
+   📊 residues: 258
+   📊 components: {
+      "protein": true,
+      "ligand": true,
+      "water": false,
+      "ions": true,
+      "hydrogens": false
+}
+   📊 summary: Protein: Chain A (255 residues) | Ligands: ATP | Ions: MG (×2) | Needs: missing hydrogens
+
+🧠 LLM INTERACTION (analysis.planning) [2026-03-04 17:45:49]:
    📝 Prompt:
    ======================================================================
-   You are a molecular dynamics preprocessing expert executing a detailed plan from the workflow planner.
+   You are a molecular dynamics analysis expert executing a detailed plan from the workflow planner.
    
-   **PDB Information:**
-   - File: working_dir/3.pdb
-   - Force Field: amber99sb-ildn
-   - Water Model: tip3p
+   **Available Data:**
+   - Topology File: working_dir/hpc/md.gro
+   - Trajectory File: working_dir/hpc/md.xtc
+   - Energy File: working_dir/hpc/md.edr
+   - Working Directory: working_dir
    
-   **Structure Analysis:**
-   - Atoms: unknown
-   - Chains: ['A', 'I', 'J', 'L']
-   - Has Waters: False
-   - Heteroatoms: ['ATP', 'MG']
-   - Alternate Locations: False
-   
-   **DETAILED INSTRUCTIONS FROM PLANNER:**
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   The Preprocessing Agent will clean and prepare the PDB structure by removing ligand molecules. This agent focuses solely on structure preparation and does NOT handle topology generation or force field assignment (those are handled by the Setup Agent).
-   
-   Tools to use: reduce (hydrogens), pdbfixer (missing atoms/residues), Bio.PDB (structure manipulation)
-   
-   Expected output: cleaned_pdb file ready for topology generation
+   **Files Available from HPC:** None registered
    
    
-   **Setup Agent Responsibilities:**
-   
-   The Setup Agent will generate the complete simulation system using amber99sb-ildn force field and tip3p water model. This includes:
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   
-   **Available Tools:**
-   → analyze_pdb
-     Analyze PDB/GRO file structure and composition using MDAnalysis.
-   Provides comprehensive information about proteins, ligands, heteroatoms, and missing atoms.
-   
-   Args:
-       pdb_file: Path to PDB or GRO file to analyze
-   
-   Returns:
-       Dict with detailed analysis including:
-       - Protein info (chains, sequences, residue counts)
-       - Ligand info (residue names, atom counts)
-       - Heteroatom details
-       - Missing hydrogens and protonation state
-       - Water molecules
-       - Ions
-       - Alternate locations
-     Parameters:
-       • pdb_file (required): 
-   
-   → separate_complex_components
-     Automatically detect and separate all components (protein, ligands, ions) from a complex PDB file.
-   Water molecules are automatically removed.
-   
-   Args:
-       pdb_file: Input PDB file path containing protein complex
-       output_dir: Output directory for separated files (optional)
-       protein_output: Specific output path for protein (optional)
-       ligand_output: Specific output path for ligand (optional)
-       ion_output: Specific output path for ions (optional)
-   
-   Returns:
-       Dict with success status, output file paths, and component statistics
-     Parameters:
-       • pdb_file (required): 
-       • output_dir (optional): 
-       • protein_output (optional): 
-       • ligand_output (optional): 
-       • ion_output (optional): 
-   
-   → add_hydrogens
-     Add missing hydrogen atoms to PDB file with appropriate tool based on molecule type.
-   
-   Args:
-       pdb_file: Input PDB file path
-       output_file: Output PDB file path (optional)
-       method: Tool to use:
-           - 'auto': Auto-detect (reduce for protein, obabel for ligand)
-           - 'reduce': Reduce (protein, neutral pH)
-           - 'pdb2pqr': PDB2PQR (protein, pH-dependent with PropKa)
-           - 'obabel': Open Babel (ligand, pH-dependent)
-           - 'none': No hydrogen addition
-       ph: pH value for protonation (used with pdb2pqr and obabel)
-       molecule_type: 'auto' (detect), 'protein', 'ligand', or 'complex'
-   
-   Returns:
-       Dict with success status, output_file, method used, and molecule type
-     Parameters:
-       • pdb_file (required): 
-       • output_file (optional): 
-       • method (optional): 
-       • ph (optional): 
-       • molecule_type (optional): 
-   
-   → validate_structure
-     Validate PDB file structure and integrity.
-   
-   Args:
-       pdb_file: PDB file path to validate
-   
-   Returns:
-       Dict with validation results, issues, warnings, and statistics
-     Parameters:
-       • pdb_file (required): 
-   
-   
-   **CRITICAL FILE PATH RULES:**
-   - Use ONLY filenames (e.g., "3.pdb", "protein_h.pdb") - NO directory paths!
-   - DO NOT include paths like "working_dir/separated/...", "working_dir/preprocess/...", etc.
-   - The system automatically handles directories - you only specify filenames
-   - Example CORRECT: "pdb_file": "protein.pdb"
-   - Example WRONG: "pdb_file": "working_dir/separated/protein.pdb"
-   - If planner mentions paths like "working_dir/separated/protein.pdb", extract ONLY "protein.pdb"
-   
-   **CRITICAL INSTRUCTIONS:**
-   - You MUST ONLY use the tools listed above - do NOT invent or suggest non-existent tools
-   - If a required capability is missing, use the available tools creatively or skip that step
-   - Every "tool_name" in your plan must match exactly one of the tool names listed above
-   - Do NOT create placeholder tools like "custom_file_filter", "none", or "manual"
-   - Do NOT add file concatenation/merging steps - that's handled by the Setup Agent
-   
-   Your task: Create a detailed, step-by-step execution plan that follows the planner's instructions above.
-   The plan should specify which tools to call and in what order to achieve the planner's objectives.
-   
-   Output as JSON with this structure:
-   {
-     "reasoning": "How you'll implement the planner's instructions",
-     "overview": "High-level summary",
-     "steps": [
-       {
-         "name": "step name",
-         "description": "what it does",
-         "tool_name": "tool to call",
-         "tool_params": {"param": "value"},
-         "reason": "why it's needed per planner's instructions"
-       }
-     ],
-     "potential_issues": ["issue1"],
-     "recommendations": ["rec1"]
-   }
-   ======================================================================
-   💭 Response:
-   ======================================================================
-   {
-     "reasoning": "The Preprocessing Agent must clean the structure by removing all ligands and heteroatoms while ensuring the protein is fully protonated and structurally valid. The only tools available for these tasks are `separate_complex_components` to split the complex, `add_hydrogens` to protonate the protein, and `validate_structure` to confirm integrity. We keep the output filenames simple (no paths) as required.",
-     "overview": "1. Split the original PDB into a protein-only file.\n2. Add missing hydrogens to the protein.\n3. Validate the final structure.\nThe resulting file (`protein_h.pdb`) is ready for topology generation by the Setup Agent.",
-     "steps": [
-       {
-         "name": "separate protein component",
-         "description": "Separate the protein from ligands, ions, and water in the original PDB.",
-         "tool_name": "separate_complex_components",
-         "tool_params": {
-           "pdb_file": "3.pdb",
-           "protein_output": "protein.pdb"
-         },
-         "reason": "Removes ATP, MG, and any other heteroatoms, producing a clean protein file."
-       },
-       {
-         "name": "add hydrogens to protein",
-         "description": "Add missing hydrogen atoms to the protein at neutral pH using Reduce.",
-         "tool_name": "add_hydrogens",
-         "tool_params": {
-           "pdb_file": "protein.pdb",
-           "output_file": "protein_h.pdb",
-           "method": "reduce",
-           "ph": 7.0,
-           "molecule_type": "protein"
-         },
-         "reason": "Prepares the protein for force\u2011field assignment by ensuring correct protonation."
-       },
-       {
-         "name": "validate cleaned protein",
-         "description": "Check the cleaned, protonated protein for structural consistency.",
-         "tool_name": "validate_structure",
-         "tool_params": {
-           "pdb_file": "protein_h.pdb"
-         },
-         "reason": "Guarantees that the final file is free of obvious errors before topology generation."
-       }
-     ],
-     "potential_issues": [
-       "If `separate_complex_components` does not automatically delete ions, the resulting protein file may still contain them.",
-       "Missing heavy atoms in the protein cannot be recovered with the available tools."
-     ],
-     "recommendations": [
-       "After validation, inspect `protein_h.pdb` for any remaining heteroatom residues; if present, remove them manually or rerun the separation step with explicit ion removal if supported.",
-       "If missing heavy atoms are detected, consider using an external tool (e.g., pdbfixer) before proceeding, though it is outside the provided tool set."
-     ]
-   }
-   ======================================================================
-
-⚡ AGENT ACTION (preprocessing):
-   🎬 Action: Generated preprocessing plan
-   📊 steps: 3
-   📊 reasoning: The Preprocessing Agent must clean the structure by removing all ligands and heteroatoms while ensuring the protein is fully protonated and structurally valid. The only tools available for these tasks
-
-⚡ AGENT ACTION (preprocessing):
-   🎬 Action: Executing step 1/3
-   📊 step: separate protein component
-   📊 tool: separate_complex_components
-
-⚡ AGENT ACTION (preprocessing):
-   🎬 Action: Step 1/3 completed
-   📊 step: separate protein component
-   📊 tool: separate_complex_components
-   📊 status: ✅ SUCCESS
-   📊 output_files: [
-      "working_dir/preprocess/3_protein.pdb",
-      "working_dir/preprocess/3_ligand.pdb",
-      "working_dir/preprocess/3_ions.pdb"
-]
-
-⚡ AGENT ACTION (preprocessing):
-   🎬 Action: Executing step 2/3
-   📊 step: add hydrogens to protein
-   📊 tool: add_hydrogens
-
-⚡ AGENT ACTION (preprocessing):
-   🎬 Action: Step 2/3 completed
-   📊 step: add hydrogens to protein
-   📊 tool: add_hydrogens
-   📊 status: ✅ SUCCESS
-   📊 output_files: [
-      "working_dir/preprocess/3_protein_h.pdb"
-]
-
-⚡ AGENT ACTION (preprocessing):
-   🎬 Action: Executing step 3/3
-   📊 step: validate cleaned protein
-   📊 tool: validate_structure
-
-⚡ AGENT ACTION (preprocessing):
-   🎬 Action: Step 3/3 completed
-   📊 step: validate cleaned protein
-   📊 tool: validate_structure
-   📊 status: ✅ SUCCESS
-
-📁 FILE OPERATION (preprocessing):
-   Operation: create
-   File: working_dir/preprocess/3_protein.pdb
-   Status: ✅ SUCCESS
-   Details: Protein component
-
-📁 FILE OPERATION (preprocessing):
-   Operation: create
-   File: working_dir/preprocess/3_ligand.pdb
-   Status: ✅ SUCCESS
-   Details: Ligand component
-
-📁 FILE OPERATION (preprocessing):
-   Operation: create
-   File: working_dir/preprocess/3_ions.pdb
-   Status: ✅ SUCCESS
-   Details: Ion component
-
-📁 FILE OPERATION (preprocessing):
-   Operation: create
-   File: working_dir/preprocess/3_protein_h.pdb
-   Status: ✅ SUCCESS
-   Details: Add missing hydrogen atoms to the protein at neutral pH using Reduce.
-
-🏁 PDB PREPROCESSING AGENT (preprocessing) ✅ COMPLETED [2026-03-02 18:31:18]:
-   📤 Output Summary:
-     • cleaned_pdb: working_dir/preprocess/3_protein_h.pdb
-     • preprocessing_report: Preprocessing completed: 3 steps executed
-
-🎛️  SUPERVISOR ROUTING [2026-03-02 18:31:18]:
-   Current State Summary:
-     ✅ raw_pdb: working_dir/3.pdb
-     ✅ cleaned_pdb: working_dir/preprocess/3_protein_h.pdb
-     ❌ coordinates: Not set
-     ❌ job_id: Not set
-     ❌ analysis_results: Not set
-   📍 Routing: supervisor → setup
-   💭 Reasoning: Executing Step 2: Unnamed
-   ⚠️  Warnings: ['PDB is missing hydrogens - preprocessing will add them']
-
-🤖 SIMULATION SYSTEM SETUP WITH LLM TOOL CALLING AGENT (setup) STARTING [2026-03-02 18:31:18]:
-   Input Data Summary:
-     • cleaned_pdb: working_dir/preprocess/3_protein_h.pdb
-     • planner_instructions: Tools to use: reduce (hydrogens), pdbfixer (missing atoms/residues), Bio.PDB (structure manipulation)
-
-Expected output: cleaned_pdb file ready for topology generation
-
-
-**Setup Agent Responsibilities:... [truncated, see full plan above]
-     • force_field: amber99sb-ildn
-     • water_model: tip3p
-
-📁 FILE OPERATION (setup):
-   Operation: copied
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/3_protein_h.pdb
-   Status: ✅ SUCCESS
-   Details: From preprocessing agent
-
-🧠 LLM INTERACTION (setup.planning) [2026-03-02 18:32:22]:
-   📝 Prompt:
-   ======================================================================
-   You are a GROMACS molecular dynamics expert executing a detailed plan from the workflow planner.
-   
-   **System Information:**
-   - Cleaned PDB: /home/akp66103/workspace/agenticAI/working_dir/simsetup/3_protein_h.pdb
-   - Force Field: amber99sb-ildn
-   - Water Model: tip3p
-   - Temperature: 300.0 K
-   - Pressure: 1.0 bar
-   
-   **System Analysis:**
-   - System Type: protein_only
-   - Estimated Atoms: 4237
-   - Has Ligand: False
-   - Has Ions: False
-   
-   **Files Available from Preprocessing:**
-   - 3_protein_h.pdb (type: protein) - Add missing hydrogen atoms to the protein at neutral pH using Reduce.
-   - 3_protein.pdb (type: protein) - Protein component
-   - 3_ligand.pdb (type: ligand) - Ligand component
-   - 3_ions.pdb (type: ion) - Ion component
+   **PDB Structure Information (from supervisor validation):**
+   - Total Atoms: 2137
+   - Total Residues: 258
+   - Components: protein, ligand, water, ions, hydrogens
+   - Protein Chains: Chain chains (0 residues)
+   - Summary: Protein: Chain A (255 residues) | Ligands: ATP | Ions: MG (×2) | Needs: missing hydrogens
    
    
    **DETAILED INSTRUCTIONS FROM PLANNER:**
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   Tools to use: reduce (hydrogens), pdbfixer (missing atoms/residues), Bio.PDB (structure manipulation)
+   **Goal**  
+   The purpose of this workflow is to extract meaningful dynamic information from a pre‑existing protein simulation. Specifically, we will quantify how the structure changes over time using RMSD and per‑residue flexibility via RMSF, and we will examine the energetic behaviour of the trajectory by reporting potential and total energy. All results will be saved to the dedicated analysis directory, plotted in clear, publication‑ready figures, and summarized in a concise report that can be appended to any subsequent documentation.
    
-   Expected output: cleaned_pdb file ready for topology generation
+   **Analysis**  
+   The analysis will be carried out exclusively with the Python tools available in the Analysis Agent. No external GROMACS binaries or shell commands will be invoked. The chosen tools are:
    
+   1. **initialize_summary_file** – sets up a structured, versioned summary file that the other tools will populate.  
+   2. **extract_trajectory_metrics** – provides quick checks on frame count, time span and file size, which is useful for validating the simulation output.  
+   3. **calculate_rmsd** – computes the RMSD of the protein backbone (default CA atoms) relative to the first frame, automatically aligning the trajectory to remove rigid body motion.  
+   4. **calculate_rmsf** – calculates per‑residue RMSF after the same alignment, giving a map of flexible regions.  
+   5. **plot_md_multipanel** – assembles the RMSD and RMSF data into a single multi‑panel figure, keeping the panels vertically stacked for easy comparison.  
+   6. **analyze_energy** – extracts the potential and total energy components from the GROMACS energy file, outputting an .xvg data file.  
+   7. **plot_md_data** – turns the energy data into a clean line plot, labeling each energy term.  
+   8. **generate_summary_report** – consumes the summary file and creates a human‑readable report that references the generated plots and key statistics.
    
-   **Setup Agent Responsibilities:**
+   These tools collectively cover the entire analysis requirement: metric extraction, data processing, visualisation, and reporting.
    
-   The Setup Agent will generate the complete simulation system using amber99sb-ildn force field and tip3p water model. This includes:
+   **Execution Sequence**  
+   1. **Prepare the output structure** – the agent will create a subdirectory named *analysis* under the working directory (`working_dir/analysis`). All data files and figures will be written here to keep the workspace organised.  
+   2. **Initialize the summary infrastructure** – the agent calls **initialize_summary_file** with the working directory as context, which creates an empty summary file ready to be populated by downstream tools.  
+   3. **Capture trajectory basic metrics** – **extract_trajectory_metrics** is invoked with the topology (`working_dir/hpc/md.gro`) and trajectory (`working_dir/hpc/md.xtc`). The resulting metrics (frame count, simulation time, file size) are written to the summary file.  
+   4. **Compute RMSD** – the agent runs **calculate_rmsd** using the same topology and trajectory. Alignment is left to the default (`align_before_rmsd=True`), ensuring that the RMSD reflects conformational changes rather than overall translation or rotation. The output file is written as `analysis/rmsd.dat`.  
+   5. **Compute RMSF** – next, **calculate_rmsf** is called, again employing the default alignment. Its output is stored as `analysis/rmsf.dat`.  
+   6. **Plot RMSD and RMSF together** – **plot_md_multipanel** receives the two data files, is instructed to create a vertical stack of panels, and writes the figure to `analysis/rmsd_rmsf.png`. The agent sets appropriate titles (“RMSD over time” and “Per‑residue RMSF”) and axis labels so that the figure is immediately interpretable.  
+   7. **Analyse energy** – **analyze_energy** is executed on the energy file (`working_dir/hpc/md.edr`) with the terms `["Potential", "Total"]`. The resulting .xvg file is saved as `analysis/energy.xvg`.  
+   8. **Visualise energy** – **plot_md_data** takes the energy file, produces a line plot with distinct colors for potential and total energy, and writes the image to `analysis/energy.png`.  
+   9. **Generate the summary report** – finally, **generate_summary_report** consumes the populated summary file and injects references to the figures, key numerical findings, and any notable observations (e.g., RMSD plateauing, peaks in energy fluctuations). The report is written as `analysis/summary.txt`.  
+   
+   Throughout the sequence, each tool’s output is automatically captured by the Analysis Agent, so the agent only needs to specify the logical flow and file paths; the underlying implementation will resolve locations and execute the tools in the correct order.
+   
+   **Expected Outcomes**  
+   - A clean, dedicated *analysis* directory containing:  
+     - `rmsd.dat` – time‑series RMSD values.  
+     - `rmsf.dat` – per‑residue RMSF values.  
+     - `rmsd_rmsf.png` – a two‑panel figure juxtaposing RMSD and RMSF.  
+     - `energy.xvg` – tabulated potential and total energy over time.  
+     - `energy.png` – a line plot of the energy terms.  
+     - `summary.txt` – a concise, human‑readable report summarising the findings and linking to the figures.  
+   - The RMSD plot should reveal the stabilization of the protein structure after initial equilibration, while the RMSF plot should highlight flexible loops or termini.  
+   - The energy plot should demonstrate the stability of the potential and total energy, or flag any drift or spikes that might indicate simulation artefacts.  
+   - All data files and figures are stored in a reproducible, versioned directory that can be referenced by downstream reporting or publication pipelines.
+   
+   This plan fully satisfies the user’s requirement for trajectory analysis, providing both quantitative data and visual representation, all produced by the Analysis Agent’s dedicated tools without any external command‑line intervention.
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    
    **Available Tools:**
-   → build_topology
-     Generate GROMACS topology and coordinate files using pdb2gmx.
+   → calculate_rmsd: Calculate RMSD (Root Mean Square Deviation) for a trajectory.
+   
+   RMSD measures structural deviation over time, indicating stability.
+   Lower RMSD values suggest stable structures.
+   
+   NOTE: The RMSD calculation in MDAnalysis automatically performs alignment
+   before computing RMSD. Set align_before_rmsd=False to disable this.
    
    Args:
-       pdb_file: Input PDB file path
-       force_field: Force field to use (default: amber99sb-ildn)
-       water_model: Water model to use (default: tip3p)
-       output_file: Output coordinate file (.gro)
-       topology_file: Output topology file (.top)
-       working_dir: Directory for output files and command execution
+       topology_file: Topology file (.gro, .pdb, .tpr)
+       trajectory_file: Trajectory file (.xtc, .trr, .dcd)
+       selection: Atom selection for RMSD calculation (default: "protein and name CA")
+       reference_frame: Reference frame number (default: 0 - first frame)
+       output_file: Output file path for RMSD data (.dat, .csv)
+       working_dir: Working directory for analysis
+       align_before_rmsd: Whether to align before RMSD calculation (default: True)
    
    Returns:
-       Dict with success status, output files, and force field info
-     Parameters:
-       • pdb_file (required): 
-       • force_field (optional): 
-       • water_model (optional): 
-       • output_file (optional): 
-       • topology_file (optional): 
-       • working_dir (optional): 
+       Dict with RMSD results and statistics
+   → calculate_rmsf: Calculate RMSF (Root Mean Square Fluctuation) for a trajectory.
    
-   → generate_ligand_parameters
-     Generate missing ligand topology parameters using acpype or antechamber.
-   Uses GAFF/GAFF2 force field for small molecules.
+   RMSF measures per-residue flexibility. Higher RMSF indicates more flexible regions.
+   Useful for identifying flexible loops, rigid cores, and binding sites.
+   
+   IMPORTANT: Structural alignment is performed by default to remove translational
+   and rotational motions, giving meaningful RMSF values.
    
    Args:
-       ligand_pdb: Path to ligand PDB file (e.g., ATP_cleaned.pdb)
-       output_dir: Directory for output files (if None or empty, uses ligand PDB's directory)
-       charge_method: Charge calculation method (bcc=AM1-BCC, gas=Gasteiger)
-       net_charge: Net molecular charge (auto-detect if None)
-       atom_type: GAFF version (gaff or gaff2, recommended: gaff2)
-       preferred_tool: Preferred tool (acpype or antechamber)
+       topology_file: Topology file (.gro, .pdb, .tpr)
+       trajectory_file: Trajectory file (.xtc, .trr, .dcd)
+       selection: Atom selection for RMSF calculation (default: "protein and name CA")
+       output_file: Output file path for RMSF data (.dat, .csv)
+       working_dir: Working directory for analysis
+       align_trajectory: Whether to align trajectory before RMSF calculation (default: True)
+       align_selection: Atom selection for alignment (default: same as selection)
    
    Returns:
-       Dict with paths to generated topology files and success status
+       Dict with RMSF results and statistics
+   → calculate_radius_of_gyration: Calculate radius of gyration (Rg) for a trajectory.
    
-   Example:
-       >>> result = generate_ligand_parameters(
-       ...     ligand_pdb="working_dir/preprocess/ATP.pdb",
-       ...     output_dir="working_dir/simsetup/ligand_params"
-       ... )
-       >>> print(result["topology"])  # ATP_GMX.itp
-     Parameters:
-       • ligand_pdb (required): 
-       • output_dir (optional): 
-       • charge_method (optional): 
-       • net_charge (optional): 
-       • atom_type (optional): 
-       • preferred_tool (optional): 
-   
-   → convert_amber_to_gromacs
-     Convert AMBER prmtop/inpcrd files to GROMACS top/gro format.
+   Rg measures the compactness of a protein structure. Changes in Rg
+   indicate folding/unfolding events or conformational changes.
    
    Args:
-       prmtop_file: AMBER topology file (.prmtop)
-       inpcrd_file: AMBER coordinate file (.inpcrd)
-       output_top: Output GROMACS topology file (.top)
-       output_gro: Output GROMACS coordinate file (.gro)
+       topology_file: Topology file (.gro, .pdb, .tpr)
+       trajectory_file: Trajectory file (.xtc, .trr, .dcd)
+       selection: Atom selection for Rg calculation (default: "protein")
+       output_file: Output file path for Rg data (.dat, .csv)
+       working_dir: Working directory for analysis
    
    Returns:
-       Dict with success status and converted file paths
-     Parameters:
-       • prmtop_file (required): 
-       • inpcrd_file (required): 
-       • output_top (optional): 
-       • output_gro (optional): 
+       Dict with Rg results and statistics
+   → analyze_energy: Analyze energy terms from GROMACS energy file (.edr).
    
-   → build_simulation_box
-     Define simulation box around molecule using gmx editconf.
+   Extracts and analyzes energy components like potential, kinetic energy,
+   temperature, pressure, and other thermodynamic properties.
    
    Args:
-       coordinate_file: Input coordinate file (.gro or .pdb)
-       box_type: Box type - 'cubic', 'dodecahedron', 'octahedron'
-       box_distance: Distance from molecule to box edge (nm)
-       output_file: Output coordinate file path
-       center_molecule: Center molecule in box
-       working_dir: Directory for output files and command execution
+       energy_file: GROMACS energy file (.edr)
+       terms: List of energy terms to extract (default: ["Potential", "Kinetic-En.", "Temperature"])
+       output_file: Output file path for energy data (.xvg)
+       working_dir: Working directory for analysis
    
    Returns:
-       Dict with success, output_file, box info
-     Parameters:
-       • coordinate_file (required): 
-       • box_type (optional): 
-       • box_distance (optional): 
-       • output_file (optional): 
-       • center_molecule (optional): 
-       • working_dir (optional): 
+       Dict with energy analysis results
+   → extract_trajectory_metrics: Extract basic metrics from trajectory file.
    
-   → solvate_system
-     Add water molecules to simulation system using gmx solvate.
-   
-   CRITICAL: GMX solvate modifies the topology file IN-PLACE via the -p flag.
-   Always pass the same topology file (typically topol.top) that was created by build_topology.
+   Gets trajectory information like number of frames, time range, and file size.
    
    Args:
-       coordinate_file: Input coordinate file with box (.gro)
-       topology_file: Topology file to update IN-PLACE (typically topol.top)
-       water_model: Water model - 'spc216' (default), 'spc', 'tip4p', 'tip5p'
-                    Note: tip3p not supported by gmx solvate, use default or spc216
-                    If default (spc216) or not in valid list, -cs flag is omitted
-       output_file: Output solvated coordinate file
-       working_dir: Directory for output files and command execution
+       trajectory_file: Trajectory file (.xtc, .trr)
+       topology_file: Topology file (.gro, .pdb, .tpr)
+       output_dir: Output directory for extracted data
+       working_dir: Working directory for analysis
    
    Returns:
-       Dict with success status, output files, and water count
-     Parameters:
-       • coordinate_file (required): 
-       • topology_file (required): 
-       • water_model (optional): 
-       • output_file (optional): 
-       • working_dir (optional): 
+       Dict with trajectory metrics
+   → plot_md_data: Plot MD analysis data from one or more data files (single panel).
    
-   → add_ions
-     Add ions to system using gmx genion for neutralization and ionic strength.
+   Creates a single-panel plot for visualizing RMSD, RMSF, Rg, or energy data.
+   Supports overlay of multiple datasets on the same axes.
    
    Args:
-       coordinate_file: Input solvated coordinate file (.gro)
-       topology_file: Input topology file (.top)
-       mdp_file: MDP file for grompp (ions.mdp)
-       positive_ion: Positive ion type (NA, K, etc.)
-       negative_ion: Negative ion type (CL, etc.)
-       neutral: Neutralize system charge (default: True)
-       concentration: Ionic concentration in Molar (default: 0.15, physiological)
-       output_file: Output coordinate file with ions
-       working_dir: Directory for output files and command execution
+       data_files: List of data file paths to plot (.xvg, .dat, .csv)
+       output_file: Output image file path (.png, .pdf, .svg)
+       plot_type: Type of plot ("line", "scatter", "bar") - default: "line"
+       titles: Plot title (optional)
+       xlabel: X-axis label (optional, auto-detected from file if available)
+       ylabel: Y-axis label (optional, auto-detected from file if available)
+       labels: Legend labels for each data file (optional)
+       colors: Line/marker colors for each dataset (optional)
+       figsize: Figure size as (width, height) in inches - default: (10, 6)
+       dpi: Resolution in dots per inch - default: 300
+       working_dir: Working directory for analysis
    
    Returns:
-       Dict with success, output_file, and ion counts
-     Parameters:
-       • coordinate_file (required): 
-       • topology_file (required): 
-       • mdp_file (required): 
-       • positive_ion (optional): 
-       • negative_ion (optional): 
-       • neutral (optional): 
-       • concentration (optional): 
-       • output_file (optional): 
-       • working_dir (optional): 
+       Dict with plotting results
+   → plot_md_multipanel: Create multi-panel plots for comparing multiple MD analyses.
    
-   → generate_tpr_file
-     Generate GROMACS TPR (binary run input) file using gmx grompp.
-   This file contains all simulation parameters and is ready for HPC submission.
+   Creates a figure with multiple subplots, one for each data file.
+   Useful for comparing RMSD, RMSF, Rg, and energy in a single figure.
    
    Args:
-       mdp_file: MDP parameter file (e.g., minim.mdp, nvt.mdp, npt.mdp, md.mdp)
-       coordinate_file: Input coordinate file (.gro)
-       topology_file: Input topology file (.top)
-       output_tpr: Output TPR file (default: derived from mdp_file name)
-       restraint_file: Reference coordinate file for position restraints (optional, typically same as coordinate_file)
-       working_dir: Directory for output files and command execution
-       maxwarn: Maximum number of warnings to accept (default: 3)
+       data_files: List of data file paths, one per panel (.xvg, .dat, .csv)
+       output_file: Output image file path (.png, .pdf, .svg)
+       layout: Subplot layout ("vertical", "horizontal", "grid") - default: "vertical"
+       titles: List of subplot titles (optional)
+       xlabels: List of x-axis labels for each subplot (optional)
+       ylabels: List of y-axis labels for each subplot (optional)
+       plot_types: List of plot types for each panel (optional, default: "line")
+       colors: List of colors for each panel (optional)
+       figsize: Figure size as (width, height) in inches (auto-sized if None)
+       dpi: Resolution in dots per inch - default: 300
+       working_dir: Working directory for analysis
    
    Returns:
-       Dict with success status and output file path
+       Dict with plotting results
+   → plot_combined_data: Create combined plots from a single data file with multiple columns.
    
-   Example:
-       >>> generate_tpr_file(
-       ...     mdp_file="minim.mdp",
-       ...     coordinate_file="system_ions.gro",
-       ...     topology_file="topol.top",
-       ...     output_tpr="minim.tpr",
-       ...     restraint_file="system_ions.gro"
-       ... )
-     Parameters:
-       • mdp_file (required): 
-       • coordinate_file (required): 
-       • topology_file (required): 
-       • output_tpr (optional): 
-       • restraint_file (optional): 
-       • working_dir (optional): 
-       • maxwarn (optional): 
-   
-   → generate_mdp_files
-     Generate all GROMACS MDP files for a complete simulation workflow.
-   Adapts to system composition (protein-only, protein+ligand, protein+ligand+ion).
+   Useful for plotting multiple energy terms, multiple properties, or
+   comparing different metrics from the same simulation.
    
    Args:
-       output_dir: Directory to write MDP files
-       force_field: Force field name (amber99sb-ildn, charmm36-jul2022)
-       temperature: Simulation temperature in Kelvin (default: 310K)
-       pressure: Simulation pressure in bar (default: 1.0)
-       has_ligand: Whether system contains ligand molecules (ATP, GTP, etc.)
-       has_ions: Whether system contains ions (MG, MN, etc.)
-       production_ns: Production simulation length in nanoseconds
+       data_files: List containing one data file with multiple columns
+       output_file: Output image file path (.png, .pdf, .svg)
+       data_columns: List of column indices to plot (e.g., [1, 2, 3] for columns after x-axis)
+       subplot_arrangement: (rows, cols) for subplot grid (auto if None)
+       shared_xaxis: Whether to share x-axis across subplots - default: True
+       titles: List of subplot titles (optional)
+       xlabel: Common x-axis label (optional)
+       ylabels: List of y-axis labels for each subplot (optional)
+       colors: List of colors for each subplot (optional)
+       figsize: Figure size as (width, height) in inches - default: (12, 8)
+       dpi: Resolution in dots per inch - default: 300
+       working_dir: Working directory for analysis
    
    Returns:
-       Dict with success status and paths to generated MDP files
-     Parameters:
-       • output_dir (required): 
-       • force_field (optional): 
-       • temperature (optional): 
-       • pressure (optional): 
-       • has_ligand (optional): 
-       • has_ions (optional): 
-       • production_ns (optional): 
-       • kwargs (optional): 
-   
-   → convert_pdb_to_gro
-     Convert PDB file to GROMACS GRO format using MDAnalysis.
-   
-   Args:
-       pdb_file: Input PDB file path (e.g., "protein_h.pdb")
-       output_gro: Output GRO file path (e.g., "protein.gro")
-       selection: MDAnalysis selection string (default: "all")
-                 Examples: "protein", "resname ATP", "resname MG"
-   
-   Returns:
-       Dict with success status, output file path, and atom count
-   
-   Example:
-       >>> convert_pdb_to_gro("protein_h.pdb", "protein.gro", "protein")
-       {"success": True, "output_file": "protein.gro", "n_atoms": 1234}
-     Parameters:
-       • pdb_file (required): 
-       • output_gro (required): 
-       • selection (optional): 
-   
-   → split_complex_pdb_to_gro
-     Split a complex PDB file into separate GRO files for protein, ligand, and ions.
-   Useful when you have a single PDB with all components together.
-   
-   Args:
-       pdb_file: Input PDB file with all components (protein+ligand+ion)
-       output_dir: Directory for output GRO files
-       ligand_resname: Ligand residue name (e.g., "ATP", "GTP", "ADP")
-       ion_resname: Ion residue name (e.g., "MG", "MN", "ZN")
-   
-   Returns:
-       Dict with paths to generated protein.gro, ligand.gro, ion.gro files
-   
-   Example:
-       >>> split_complex_pdb_to_gro(
-       ...     "complex.pdb", 
-       ...     "output/", 
-       ...     ligand_resname="ATP", 
-       ...     ion_resname="MG"
-       ... )
-       {"success": True, "files": {"protein": "output/protein.gro", ...}}
-     Parameters:
-       • pdb_file (required): 
-       • output_dir (required): 
-       • ligand_resname (optional): 
-       • ion_resname (optional): 
-   
-   → merge_gro_files
-     Merge multiple GROMACS GRO files into a single complex GRO file.
-   Maintains proper atom numbering and coordinates. Order of files matters!
-   
-   Args:
-       gro_files: List of GRO file paths in desired merge order
-                 Example: ["protein_processed.gro", "ATP.gro", "MG.gro"]
-       output_file: Output path for merged GRO file (e.g., "complex.gro")
-   
-   Returns:
-       Dict with success status, total atom count, and component details
-   
-   Example:
-       >>> merge_gro_files(
-       ...     ["protein_processed.gro", "ATP.gro", "MG.gro"],
-       ...     "complex.gro"
-       ... )
-       {"success": True, "total_atoms": 1500, "n_components": 3}
-   
-   Note:
-       - Files are merged in the order provided
-       - Atom IDs are automatically renumbered sequentially
-       - Box dimensions from first file are preserved
-     Parameters:
-       • gro_files (required): 
-       • output_file (required): 
-   
-   → edit_topology_file
-     Edit GROMACS topology file to include ligand and ion parameters.
-   Safely adds includes and molecule entries without creating duplicates.
-   
-   Args:
-       topology_file: Path to topol.top file (generated by gmx pdb2gmx)
-       ligand_itp: Ligand topology filename (e.g., "ATP.itp")
-       ligand_resname: Ligand residue name (e.g., "ATP", "GTP")
-       ligand_count: Number of ligand molecules in system (default: 1)
-       ion_resname: Ion residue name (e.g., "MG", "MN", "ZN")
-       ion_count: Number of ion molecules in system
-   
-   Returns:
-       Dict with success status and list of modifications made
-   
-   Example:
-       >>> edit_topology_file(
-       ...     "topol.top",
-       ...     ligand_itp="ATP.itp",
-       ...     ligand_resname="ATP",
-       ...     ion_resname="MG",
-       ...     ion_count=2
-       ... )
-       {"success": True, "modifications": ["Added ligand include: ATP.itp", ...]}
-   
-   Note:
-       - Detects and prevents duplicate entries
-       - Adds position restraint support (#ifdef POSRES_LIG)
-       - Adds entries to [ molecules ] section in correct order
-     Parameters:
-       • topology_file (required): 
-       • ligand_itp (optional): 
-       • ligand_resname (optional): 
-       • ligand_count (optional): 
-       • ion_resname (optional): 
-       • ion_count (optional): 
-   
-   → map_ligand_atom_names
-     Map ligand atom names from AlphaFold3/PDB format to AMBER force field format.
-   Also reorders atoms to match topology file requirements.
-   
-   Args:
-       input_pdb: Input PDB file with original atom names
-       output_pdb: Output PDB file with mapped atom names
-       mapping_file: Atom name mapping file path
-                    Format: RESNAME OLD_NAME NEW_NAME (one per line)
-       ligand_resname: Ligand residue name (e.g., "ATP", "GTP", "ADP")
-   
-   Returns:
-       Dict with success status, number of atoms renamed/reordered
-   
-   Example:
-       >>> map_ligand_atom_names(
-       ...     "complex_h.pdb",
-       ...     "complex_mapped.pdb",
-       ...     "ATP_AF3_to_amber_mapping.txt",
-       ...     ligand_resname="ATP"
-       ... )
-       {"success": True, "atoms_renamed": 31, "atoms_reordered": 31}
-   
-   Note:
-       - Only ligand atoms are renamed/reordered
-       - Protein, ions, and water remain unchanged
-       - Mapping file should contain: RESNAME OLD_ATOM NEW_ATOM per line
-       - Lines starting with # are treated as comments
-     Parameters:
-       • input_pdb (required): 
-       • output_pdb (required): 
-       • mapping_file (required): 
-       • ligand_resname (optional): 
-   
-   → build_simulation_system
-     Build complete GROMACS simulation system from component PDB files.
-   Orchestrates entire workflow: topology generation → merging → solvation → ionization.
-   
-   Args:
-       protein_pdb: Path to protein PDB file (with hydrogens from preprocessor)
-       output_dir: Directory for all output files
-       ligand_pdb: Path to ligand PDB file (optional)
-       ion_pdb: Path to ion PDB file (optional, e.g., MG ions)
-       ligand_resname: Ligand residue name (e.g., "ATP", "GTP", "ADP")
-       ligand_itp: Ligand topology file path (e.g., "ATP.itp")
-                  If not provided, will need to be generated separately
-       ion_resname: Ion residue name (e.g., "MG", "CA", "ZN", "MN", "FE")
-       force_field: GROMACS force field (default: amber99sb-ildn)
-       water_model: Water model (default: tip3p)
-       box_distance: Distance from solute to box edge in nm (default: 1.2)
-       ion_concentration: Salt concentration in M (default: 0.15 = physiological)
-   
-   Returns:
-       Dict with all generated files and workflow status
-   
-   Example:
-       >>> build_simulation_system(
-       ...     protein_pdb="working_dir/preprocess/protein_h.pdb",
-       ...     output_dir="working_dir/simsetup",
-       ...     ligand_pdb="working_dir/preprocess/ATP_h.pdb",
-       ...     ion_pdb="working_dir/preprocess/MG.pdb",
-       ...     ligand_resname="ATP",
-       ...     ligand_itp="ATP.itp",
-       ...     ion_resname="MG"
-       ... )
-   
-   Generated files:
-       - protein_processed.gro: Protein with GROMACS atom types
-       - complex.gro: Merged protein + ligand + ions
-       - boxed.gro: Complex in simulation box
-       - solvated.gro: Solvated complex
-       - system.gro: Final system with neutralizing ions + salt
-       - topol.top: Complete topology file
-       - posre.itp: Position restraints for protein
-       - ions.tpr: TPR file for adding ions
-     Parameters:
-       • protein_pdb (required): 
-       • output_dir (required): 
-       • ligand_pdb (optional): 
-       • ion_pdb (optional): 
-       • ligand_resname (optional): 
-       • ligand_itp (optional): 
-       • ion_resname (optional): 
-       • force_field (optional): 
-       • water_model (optional): 
-       • box_distance (optional): 
-       • ion_concentration (optional): 
-   
+       Dict with plotting results
    
    **CRITICAL INSTRUCTIONS:**
    - You MUST ONLY use the tools listed above - do NOT invent or suggest non-existent tools
@@ -1853,11 +750,6 @@ Expected output: cleaned_pdb file ready for topology generation
    The plan should specify which tools to call and in what order to achieve the planner's objectives.
    ONLY include steps that use valid tools from the list above.
    
-   **CRITICAL OUTPUT DIRECTORY RULES:**
-   - ALL simulation setup outputs MUST go to working_dir/simsetup/
-   - DO NOT specify output_dir or output_file paths in tool_params unless required
-   - The system will automatically handle all output paths to ensure directory isolation
-   
    Output as JSON with this structure:
    {
      "reasoning": "How you'll implement the planner's instructions",
@@ -1878,756 +770,263 @@ Expected output: cleaned_pdb file ready for topology generation
    💭 Response:
    ======================================================================
    {
-     "reasoning": "The protein-only system requires adding hydrogens (already present in 3_protein_h.pdb), generating a GROMACS topology with amber99sb-ildn and tip3p, creating a box, solvating (using the default spc216 water model since tip3p is unsupported by gmx solvate), adding ions at physiological concentration, and generating TPR files for minimization, NVT, NPT and production stages. All steps use the provided tools and keep outputs in the designated simulation directory.",
-     "overview": "1) Build topology and coordinate file\n2) Define simulation box\n3) Solvate the boxed system\n4) Generate all necessary MDP files\n5) Add neutralizing and salt ions\n6) Create TPR files for each simulation phase",
+     "reasoning": "The planner requires a sequence of analyses and visualisations. Because the Analysis Agent only exposes the tools listed in the toolbox, any step that relies on a non\u2011existent tool (e.g., initialise_summary_file or generate_summary_report) is omitted. All other required analyses are carried out with the available tools, using the working directory \"working_dir\" as the base path and directing output to a dedicated subfolder \"analysis\".",
+     "overview": "1. Create (or assume the existence of) an analysis directory.\n2. Extract trajectory metrics.\n3. Compute RMSD and RMSF with default alignment.\n4. Plot RMSD and RMSF in a vertical multi\u2011panel figure.\n5. Analyse potential and total energy.\n6. Plot the energy terms in a single\u2011panel line plot.",
      "steps": [
        {
-         "name": "Build topology and coordinate file",
-         "description": "Generate GROMACS topology and coordinate files for the protein using amber99sb-ildn force field and tip3p water model.",
-         "tool_name": "build_topology",
+         "name": "Extract trajectory metrics",
+         "description": "Collect basic information (frame count, time span, file size) from the trajectory.",
+         "tool_name": "extract_trajectory_metrics",
          "tool_params": {
-           "pdb_file": "/home/akp66103/workspace/agenticAI/working_dir/simsetup/3_protein_h.pdb",
-           "force_field": "amber99sb-ildn",
-           "water_model": "tip3p",
-           "output_file": "protein_processed.gro",
-           "topology_file": "topol.top",
-           "working_dir": "working_dir/simsetup"
+           "trajectory_file": "working_dir/hpc/md.xtc",
+           "topology_file": "working_dir/hpc/md.gro",
+           "output_dir": "working_dir/analysis",
+           "working_dir": "working_dir"
          },
-         "reason": "Creates the core GROMACS input files needed for the rest of the workflow."
+         "reason": "Required by the planner to validate simulation output and provide context for subsequent analyses."
        },
        {
-         "name": "Create simulation box",
-         "description": "Define a cubic simulation box with 1.2 nm distance from the protein to the box edge.",
-         "tool_name": "build_simulation_box",
+         "name": "Calculate RMSD",
+         "description": "Compute the backbone RMSD relative to the first frame, automatically aligning the trajectory.",
+         "tool_name": "calculate_rmsd",
          "tool_params": {
-           "coordinate_file": "protein_processed.gro",
-           "box_type": "cubic",
-           "box_distance": 1.2,
-           "output_file": "boxed.gro",
-           "working_dir": "working_dir/simsetup"
+           "topology_file": "working_dir/hpc/md.gro",
+           "trajectory_file": "working_dir/hpc/md.xtc",
+           "selection": "protein and name CA",
+           "reference_frame": 0,
+           "output_file": "working_dir/analysis/rmsd.dat",
+           "working_dir": "working_dir",
+           "align_before_rmsd": true
          },
-         "reason": "Prepares the coordinates for solvation."
+         "reason": "Planner step 4 \u2013 generate RMSD data for stability assessment."
        },
        {
-         "name": "Solvate the system",
-         "description": "Add water molecules to the boxed system. Uses default spc216 water model because tip3p is unsupported by gmx solvate.",
-         "tool_name": "solvate_system",
+         "name": "Calculate RMSF",
+         "description": "Determine per\u2011residue RMSF after aligning the trajectory.",
+         "tool_name": "calculate_rmsf",
          "tool_params": {
-           "coordinate_file": "boxed.gro",
-           "topology_file": "topol.top",
-           "output_file": "solvated.gro",
-           "working_dir": "working_dir/simsetup"
+           "topology_file": "working_dir/hpc/md.gro",
+           "trajectory_file": "working_dir/hpc/md.xtc",
+           "selection": "protein and name CA",
+           "output_file": "working_dir/analysis/rmsf.dat",
+           "working_dir": "working_dir",
+           "align_trajectory": true,
+           "align_selection": "protein and name CA"
          },
-         "reason": "Provides a solvated environment for the protein."
+         "reason": "Planner step 5 \u2013 produce RMSF data for flexibility mapping."
        },
        {
-         "name": "Generate all MDP files",
-         "description": "Create MDP files for ions, minimization, NVT, NPT, and production stages.",
-         "tool_name": "generate_mdp_files",
+         "name": "Plot RMSD and RMSF (multi\u2011panel)",
+         "description": "Create a vertical stack of RMSD and RMSF panels with clear titles and axis labels.",
+         "tool_name": "plot_md_multipanel",
          "tool_params": {
-           "output_dir": "working_dir/simsetup",
-           "force_field": "amber99sb-ildn",
-           "temperature": 300.0,
-           "pressure": 1.0,
-           "has_ligand": false,
-           "has_ions": false,
-           "production_ns": 10
+           "data_files": [
+             "working_dir/analysis/rmsd.dat",
+             "working_dir/analysis/rmsf.dat"
+           ],
+           "output_file": "working_dir/analysis/rmsd_rmsf.png",
+           "layout": "vertical",
+           "titles": [
+             "RMSD over time",
+             "Per\u2011residue RMSF"
+           ],
+           "xlabels": [
+             "Time (ns)",
+             "Residue number"
+           ],
+           "ylabels": [
+             "RMSD (\u00c5)",
+             "RMSF (\u00c5)"
+           ],
+           "plot_types": [
+             "line",
+             "line"
+           ],
+           "figsize": [
+             8,
+             10
+           ],
+           "dpi": 300,
+           "working_dir": "working_dir"
          },
-         "reason": "Required parameter files for subsequent steps."
+         "reason": "Planner step 6 \u2013 assemble the RMSD and RMSF plots into a single figure."
        },
        {
-         "name": "Add ions to system",
-         "description": "Neutralize the system and add 0.15 M NaCl using gmx genion.",
-         "tool_name": "add_ions",
+         "name": "Analyse energy terms",
+         "description": "Extract Potential and Total energy from the GROMACS energy file.",
+         "tool_name": "analyze_energy",
          "tool_params": {
-           "coordinate_file": "solvated.gro",
-           "topology_file": "topol.top",
-           "mdp_file": "ions.mdp",
-           "positive_ion": "NA",
-           "negative_ion": "CL",
-           "neutral": true,
-           "concentration": 0.15,
-           "output_file": "system_ions.gro",
-           "working_dir": "working_dir/simsetup"
+           "energy_file": "working_dir/hpc/md.edr",
+           "terms": [
+             "Potential",
+             "Total"
+           ],
+           "output_file": "working_dir/analysis/energy.xvg",
+           "working_dir": "working_dir"
          },
-         "reason": "Ensures overall charge neutrality and physiological salt concentration."
+         "reason": "Planner step 7 \u2013 obtain energy data for stability inspection."
        },
        {
-         "name": "Generate TPR for minimization",
-         "description": "Create the TPR file for energy minimization.",
-         "tool_name": "generate_tpr_file",
+         "name": "Plot energy",
+         "description": "Generate a line plot of the extracted energy terms.",
+         "tool_name": "plot_md_data",
          "tool_params": {
-           "mdp_file": "minim.mdp",
-           "coordinate_file": "system_ions.gro",
-           "topology_file": "topol.top",
-           "output_tpr": "minim.tpr",
-           "working_dir": "working_dir/simsetup",
-           "maxwarn": 3
+           "data_files": [
+             "working_dir/analysis/energy.xvg"
+           ],
+           "output_file": "working_dir/analysis/energy.png",
+           "plot_type": "line",
+           "labels": [
+             "Potential",
+             "Total"
+           ],
+           "xlabel": "Time (ns)",
+           "ylabel": "Energy (kJ/mol)",
+           "colors": [
+             "tab:blue",
+             "tab:orange"
+           ],
+           "figsize": [
+             8,
+             6
+           ],
+           "dpi": 300,
+           "working_dir": "working_dir"
          },
-         "reason": "Prepares the minimization run."
-       },
-       {
-         "name": "Generate TPR for NVT equilibration",
-         "description": "Create the TPR file for NVT equilibration.",
-         "tool_name": "generate_tpr_file",
-         "tool_params": {
-           "mdp_file": "nvt.mdp",
-           "coordinate_file": "system_ions.gro",
-           "topology_file": "topol.top",
-           "output_tpr": "nvt.tpr",
-           "working_dir": "working_dir/simsetup",
-           "maxwarn": 3
-         },
-         "reason": "Prepares the NVT equilibration run."
-       },
-       {
-         "name": "Generate TPR for NPT equilibration",
-         "description": "Create the TPR file for NPT equilibration.",
-         "tool_name": "generate_tpr_file",
-         "tool_params": {
-           "mdp_file": "npt.mdp",
-           "coordinate_file": "system_ions.gro",
-           "topology_file": "topol.top",
-           "output_tpr": "npt.tpr",
-           "working_dir": "working_dir/simsetup",
-           "maxwarn": 3
-         },
-         "reason": "Prepares the NPT equilibration run."
-       },
-       {
-         "name": "Generate TPR for production MD",
-         "description": "Create the TPR file for the production molecular dynamics simulation.",
-         "tool_name": "generate_tpr_file",
-         "tool_params": {
-           "mdp_file": "md.mdp",
-           "coordinate_file": "system_ions.gro",
-           "topology_file": "topol.top",
-           "output_tpr": "md.tpr",
-           "working_dir": "working_dir/simsetup",
-           "maxwarn": 3
-         },
-         "reason": "Prepares the production MD run."
+         "reason": "Planner step 8 \u2013 produce a publication\u2011ready energy plot."
        }
      ],
      "potential_issues": [
-       "gmx solvate does not support tip3p; the system will use spc216 waters instead of the desired tip3p.",
-       "If additional components (ligand or ions) were present, extra steps for parameter generation and topology editing would be required."
+       "The planner requested tools for initializing a summary file and generating a textual report, which are not available in the current toolbox; these steps have been omitted.",
+       "If the \"analysis\" subdirectory does not already exist, the plotting and data\u2011output tools may fail; the tools usually create missing directories, but this behaviour is not guaranteed."
      ],
      "recommendations": [
-       "After the final TPR files are generated, review the .mdp files to ensure all simulation parameters (e.g., time steps, constraints) are appropriate for your specific protein.",
-       "If you later decide to use tip3p waters, consider using the \u2018convert_amber_to_gromacs\u2019 or custom script to replace spc216 with tip3p after solvation, noting that this may require re-running the topology generation.",
-       "Validate the final system (coordinates, charges, box dimensions) with a quick energy minimization run to catch any hidden issues before long production runs."
+       "Create the \"working_dir/analysis\" directory manually before running the plan, or add a preliminary file\u2011system step if the agent supports it.",
+       "After execution, manually verify that all expected output files exist and that the plots display the correct data ranges.",
+       "If additional reporting is required, consider scripting a lightweight text\u2011generation routine outside the provided toolbox."
      ]
    }
    ======================================================================
 
-⚡ AGENT ACTION (setup):
-   🎬 Action: Generated setup plan
-   📊 steps: 9
-   📊 reasoning: The protein-only system requires adding hydrogens (already present in 3_protein_h.pdb), generating a GROMACS topology with amber99sb-ildn and tip3p, creating a box, solvating (using the default spc216
+⚡ AGENT ACTION (analysis):
+   🎬 Action: Generated analysis plan
+   📊 steps: 6
+   📊 reasoning: The planner requires a sequence of analyses and visualisations. Because the Analysis Agent only exposes the tools listed in the toolbox, any step that relies on a non‑existent tool (e.g., initialise_s
 
-⚡ AGENT ACTION (setup):
-   🎬 Action: Executing step 1/9
-   📊 step: Build topology and coordinate file
-   📊 tool: build_topology
+⚡ AGENT ACTION (analysis):
+   🎬 Action: Executing step 1/6
+   📊 step: Extract trajectory metrics
+   📊 tool: extract_trajectory_metrics
 
-📁 FILE OPERATION (setup):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/processed.gro
-   Status: ✅ SUCCESS
-
-📁 FILE OPERATION (setup):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/topol.top
-   Status: ✅ SUCCESS
-
-⚡ AGENT ACTION (setup):
-   🎬 Action: Step 1/9 completed
-   📊 step: Build topology and coordinate file
-   📊 tool: build_topology
+⚡ AGENT ACTION (analysis):
+   🎬 Action: Step 1/6 completed
+   📊 step: Extract trajectory metrics
+   📊 tool: extract_trajectory_metrics
    📊 status: ✅ SUCCESS
 
-⚡ AGENT ACTION (setup):
-   🎬 Action: Executing step 2/9
-   📊 step: Create simulation box
-   📊 tool: build_simulation_box
+⚡ AGENT ACTION (analysis):
+   🎬 Action: Executing step 2/6
+   📊 step: Calculate RMSD
+   📊 tool: calculate_rmsd
 
-📁 FILE OPERATION (setup):
+📁 FILE OPERATION (analysis):
    Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/boxed.gro
+   File: /home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd.dat
    Status: ✅ SUCCESS
 
-⚡ AGENT ACTION (setup):
-   🎬 Action: Step 2/9 completed
-   📊 step: Create simulation box
-   📊 tool: build_simulation_box
+⚡ AGENT ACTION (analysis):
+   🎬 Action: Step 2/6 completed
+   📊 step: Calculate RMSD
+   📊 tool: calculate_rmsd
    📊 status: ✅ SUCCESS
 
-⚡ AGENT ACTION (setup):
-   🎬 Action: Executing step 3/9
-   📊 step: Solvate the system
-   📊 tool: solvate_system
+⚡ AGENT ACTION (analysis):
+   🎬 Action: Executing step 3/6
+   📊 step: Calculate RMSF
+   📊 tool: calculate_rmsf
 
-📁 FILE OPERATION (setup):
+📁 FILE OPERATION (analysis):
    Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/solvated.gro
+   File: /home/akp66103/workspace/agenticAI/working_dir/analysis/rmsf.dat
    Status: ✅ SUCCESS
 
-📁 FILE OPERATION (setup):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/topol.top
-   Status: ✅ SUCCESS
-
-⚡ AGENT ACTION (setup):
-   🎬 Action: Step 3/9 completed
-   📊 step: Solvate the system
-   📊 tool: solvate_system
+⚡ AGENT ACTION (analysis):
+   🎬 Action: Step 3/6 completed
+   📊 step: Calculate RMSF
+   📊 tool: calculate_rmsf
    📊 status: ✅ SUCCESS
 
-⚡ AGENT ACTION (setup):
-   🎬 Action: Executing step 4/9
-   📊 step: Generate all MDP files
-   📊 tool: generate_mdp_files
+⚡ AGENT ACTION (analysis):
+   🎬 Action: Executing step 4/6
+   📊 step: Plot RMSD and RMSF (multi‑panel)
+   📊 tool: plot_md_multipanel
 
-📁 FILE OPERATION (setup):
+📁 FILE OPERATION (analysis):
    Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/ions.mdp
+   File: /home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd_rmsf.png
    Status: ✅ SUCCESS
 
-📁 FILE OPERATION (setup):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/minim.mdp
-   Status: ✅ SUCCESS
-
-📁 FILE OPERATION (setup):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/nvt.mdp
-   Status: ✅ SUCCESS
-
-📁 FILE OPERATION (setup):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/npt.mdp
-   Status: ✅ SUCCESS
-
-📁 FILE OPERATION (setup):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/md.mdp
-   Status: ✅ SUCCESS
-
-⚡ AGENT ACTION (setup):
-   🎬 Action: MDP files generated
-   📊 count: 5
-   📊 phases: [
-      "ions",
-      "minim",
-      "nvt",
-      "npt",
-      "md"
-]
-
-⚡ AGENT ACTION (setup):
-   🎬 Action: Executing step 5/9
-   📊 step: Add ions to system
-   📊 tool: add_ions
-
-📁 FILE OPERATION (setup):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/system.gro
-   Status: ✅ SUCCESS
-
-⚡ AGENT ACTION (setup):
-   🎬 Action: Step 5/9 completed
-   📊 step: Add ions to system
-   📊 tool: add_ions
+⚡ AGENT ACTION (analysis):
+   🎬 Action: Step 4/6 completed
+   📊 step: Plot RMSD and RMSF (multi‑panel)
+   📊 tool: plot_md_multipanel
    📊 status: ✅ SUCCESS
 
-⚡ AGENT ACTION (setup):
-   🎬 Action: Executing step 6/9
-   📊 step: Generate TPR for minimization
-   📊 tool: generate_tpr_file
+⚡ AGENT ACTION (analysis):
+   🎬 Action: Executing step 5/6
+   📊 step: Analyse energy terms
+   📊 tool: analyze_energy
 
-📁 FILE OPERATION (setup):
+📁 FILE OPERATION (analysis):
    Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/minim.tpr
+   File: /home/akp66103/workspace/agenticAI/working_dir/analysis/energy.xvg
    Status: ✅ SUCCESS
 
-⚡ AGENT ACTION (setup):
-   🎬 Action: Step 6/9 completed
-   📊 step: Generate TPR for minimization
-   📊 tool: generate_tpr_file
+⚡ AGENT ACTION (analysis):
+   🎬 Action: Step 5/6 completed
+   📊 step: Analyse energy terms
+   📊 tool: analyze_energy
    📊 status: ✅ SUCCESS
 
-⚡ AGENT ACTION (setup):
-   🎬 Action: Executing step 7/9
-   📊 step: Generate TPR for NVT equilibration
-   📊 tool: generate_tpr_file
+⚡ AGENT ACTION (analysis):
+   🎬 Action: Executing step 6/6
+   📊 step: Plot energy
+   📊 tool: plot_md_data
 
-📁 FILE OPERATION (setup):
+📁 FILE OPERATION (analysis):
    Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/nvt.tpr
+   File: /home/akp66103/workspace/agenticAI/working_dir/analysis/energy.png
    Status: ✅ SUCCESS
 
-⚡ AGENT ACTION (setup):
-   🎬 Action: Step 7/9 completed
-   📊 step: Generate TPR for NVT equilibration
-   📊 tool: generate_tpr_file
+⚡ AGENT ACTION (analysis):
+   🎬 Action: Step 6/6 completed
+   📊 step: Plot energy
+   📊 tool: plot_md_data
    📊 status: ✅ SUCCESS
 
-⚡ AGENT ACTION (setup):
-   🎬 Action: Executing step 8/9
-   📊 step: Generate TPR for NPT equilibration
-   📊 tool: generate_tpr_file
-
-📁 FILE OPERATION (setup):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/npt.tpr
-   Status: ✅ SUCCESS
-
-⚡ AGENT ACTION (setup):
-   🎬 Action: Step 8/9 completed
-   📊 step: Generate TPR for NPT equilibration
-   📊 tool: generate_tpr_file
-   📊 status: ✅ SUCCESS
-
-⚡ AGENT ACTION (setup):
-   🎬 Action: Executing step 9/9
-   📊 step: Generate TPR for production MD
-   📊 tool: generate_tpr_file
-
-📁 FILE OPERATION (setup):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/simsetup/md.tpr
-   Status: ✅ SUCCESS
-
-⚡ AGENT ACTION (setup):
-   🎬 Action: Step 9/9 completed
-   📊 step: Generate TPR for production MD
-   📊 tool: generate_tpr_file
-   📊 status: ✅ SUCCESS
-
-🏁 SIMULATION SYSTEM SETUP AGENT (setup) ✅ COMPLETED [2026-03-02 18:32:25]:
+🏁 MD TRAJECTORY ANALYSIS AGENT (analysis) ✅ COMPLETED [2026-03-04 17:45:51]:
    📤 Output Summary:
-     • topology: /home/akp66103/workspace/agenticAI/working_dir/simsetup/topol.top
-     • coordinates: /home/akp66103/workspace/agenticAI/working_dir/simsetup/system.gro
-     • mdp_files: 5 items
-       - ions: /home/akp66103/workspace/agenticAI/working_dir/simsetup/ions.mdp
-       - minim: /home/akp66103/workspace/agenticAI/working_dir/simsetup/minim.mdp
-       - nvt: /home/akp66103/workspace/agenticAI/working_dir/simsetup/nvt.mdp
-       - npt: /home/akp66103/workspace/agenticAI/working_dir/simsetup/npt.mdp
-       - md: /home/akp66103/workspace/agenticAI/working_dir/simsetup/md.mdp
+     • topology: working_dir/hpc/md.gro
 
-🎛️  SUPERVISOR ROUTING [2026-03-02 18:32:25]:
+🎛️  SUPERVISOR ROUTING [2026-03-04 17:45:51]:
    Current State Summary:
      ✅ raw_pdb: working_dir/3.pdb
-     ✅ cleaned_pdb: /home/akp66103/workspace/agenticAI/working_dir/simsetup/3_protein_h.pdb
-     ✅ coordinates: /home/akp66103/workspace/agenticAI/working_dir/simsetup/system.gro
+     ❌ cleaned_pdb: Not set
+     ❌ coordinates: Not set
      ❌ job_id: Not set
-     ❌ analysis_results: Not set
-   📍 Routing: supervisor → hpc
-   💭 Reasoning: Executing Step 3: Unnamed
-   ⚠️  Warnings: ['PDB is missing hydrogens - preprocessing will add them']
-
-🤖 HPC JOB SUBMISSION AND MONITORING AGENT (hpc) STARTING [2026-03-02 18:32:25]:
-   Input Data Summary:
-     • planner_instructions: **GOAL INTERPRETATION:**
-
-Preprocess the PDB file at working_dir/3.pdb to extract and clean the protein component only, excluding any ligands or ions.  
-Set up the simulation system for a 15‑ns run, g... [truncated, see full plan above]
-     • force_field: amber99sb-ildn
-     • water_model: tip3p
-
-🧠 LLM INTERACTION (hpc.planning) [2026-03-02 18:32:56]:
-   📝 Prompt:
-   ======================================================================
-   You are an HPC job submission and monitoring expert executing a detailed plan from the workflow planner.
-   
-   **System Information:**
-   - Topology: /home/akp66103/workspace/agenticAI/working_dir/simsetup/topol.top
-   - Coordinates: /home/akp66103/workspace/agenticAI/working_dir/simsetup/system.gro
-   - System Size: ~68300 atoms
-   - Force Field: amber99sb-ildn
-   - Water Model: tip3p
-   - MDP Files: ['ions', 'minim', 'nvt', 'npt', 'md']
-   
-   **HPC Configuration:**
-   - Remote Access: Local submission only
-   - SSH Host: None
-   - Max Submission Retries: 2
-   - Monitoring Interval: 3600 seconds
-   
-   **DETAILED INSTRUCTIONS FROM PLANNER:**
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   **GOAL INTERPRETATION:**
-   
-   Preprocess the PDB file at working_dir/3.pdb to extract and clean the protein component only, excluding any ligands or ions.  
-   Set up the simulation system for a 15‑ns run, generate the necessary topology and coordinate files, and submit the job to the HPC.  
-   Do not perform any simulation analysis.
-   
-   **PDB Structure Overview:** Protein (1 chains) | Ligands: ATP | Ions: MG
-   **Available Protein Chains:** A
-   **Ligands Present:** ATP
-   
-   **PDB STRUCTURE ANALYSIS:**
-   
-   PDB File: working_dir/3.pdb
-   Total Atoms: 2137
-   Protein: Present (258 residues)
-   Ligands: ATP
-   
-   **EXECUTION SEQUENCE:**
-   
-   **Preprocessing Agent Responsibilities:**
-   
-   The Preprocessing Agent will clean and prepare the PDB structure by removing ligand molecules. This agent focuses solely on structure preparation and does NOT handle topology generation or force field assignment (those are handled by the Setup Agent).
-   
-   Tools to use: reduce (hydrogens), pdbfixer (missing atoms/residues), Bio.PDB (structure manipulation)
-   
-   Expected output: cleaned_pdb file ready for topology generation
-   
-   
-   **Setup Agent Responsibilities:**
-   
-   The Setup Agent will generate the complete simulation system using amber99sb-ildn force field and tip3p water model. This includes:
-   
-   1. Topology generation (gmx pdb2gmx) for protein components
-   2. Ligand parameterization using acpype or CGenFF if ligands are present and requested
-   3. Defining the simulation box (gmx editconf)
-   4. System solvation (gmx solvate)
-   5. Adding neutralizing ions (gmx genion)
-   6. Generating MDP parameter files for energy minimization, equilibration, and production runs
-   
-   Expected outputs: topology files (.top, .itp), coordinate files (.gro), and parameter files (.mdp)
-   
-   
-   **HPC Agent Responsibilities:**
-   
-   The HPC Agent will submit the simulation to a compute cluster using SLURM job scheduler. The agent will:
-   
-   1. Generate appropriate SLURM job scripts with resource requests
-   2. Submit energy minimization, NVT equilibration, NPT equilibration, and production MD jobs
-   3. Monitor job status and handle failures
-   4. Retrieve trajectory and output files upon completion
-   
-   Expected outputs: job_id, trajectory files (.xtc), energy files (.edr), coordinate files (.gro)
-   
-   
-   **EXPECTED OUTCOMES:**
-   
-   - Cleaned PDB structure ready for topology generation
-   - Complete simulation system (topology, coordinates, parameters)
-   - Completed simulation trajectory and energy data
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   
-   **Available Tools:**
-   → copy_simulation_files
-     Copy simulation files from setup directory to HPC working directory.
-     Parameters:
-       • source_dir (required): No description
-       • dest_dir (required): No description
-       • file_patterns (optional): No description
-       • create_dest (optional): No description
-   
-   → estimate_simulation_time
-     Estimate simulation walltime based on system size and simulation length.
-     Parameters:
-       • production_ns (optional): No description
-       • system_size (optional): No description
-       • timestep_ps (optional): No description
-   
-   → create_slurm_script
-     Create SLURM job submission script for GROMACS simulation.
-     Parameters:
-       • job_name (required): No description
-       • working_dir (required): No description
-       • topology_file (optional): No description
-       • input_structure (optional): No description
-       • simulation_phases (optional): No description
-       • partition (optional): No description
-       • cpus_per_task (optional): No description
-       • memory (optional): No description
-       • time_limit (optional): No description
-       • gpu_count (optional): No description
-       • email (optional): No description
-       • gromacs_module (optional): No description
-   
-   → submit_job
-     Submit SLURM job to HPC system.
-     Parameters:
-       • script_path (required): No description
-       • remote_host (optional): No description
-       • remote_user (optional): No description
-       • remote_dir (optional): No description
-       • ssh_key_path (optional): No description
-   
-   → check_job_status
-     Check status of submitted SLURM job.
-     Parameters:
-       • job_id (required): No description
-       • remote_host (optional): No description
-       • remote_user (optional): No description
-       • ssh_key_path (optional): No description
-   
-   → download_results
-     Download simulation results from HPC system.
-     Parameters:
-       • remote_dir (required): No description
-       • local_dir (required): No description
-       • file_patterns (optional): No description
-       • remote_host (optional): No description
-       • remote_user (optional): No description
-       • ssh_key_path (optional): No description
-   
-   
-   **CRITICAL INSTRUCTIONS:**
-   - You MUST ONLY use the tools listed above
-   - Every "tool_name" must match exactly one of the tool names listed
-   - Tool execution order matters: copy files → estimate time → create script → submit → monitor → download
-   - Maximum 2 job submission attempts (if first fails, retry once)
-   - Monitor job hourly until completion
-   - Only download results after job completes successfully
-   
-   **Your task:** Create a detailed execution plan that:
-   1. Copies simulation files from simsetup to working_dir/hpc
-   2. Estimates simulation time based on system size and production length
-   3. Creates SLURM submission script with appropriate time limit
-   4. Submits job to HPC (with retry logic if needed)
-   5. Monitors job status periodically
-   6. Downloads results when job completes
-   
-   Output as JSON with this structure:
-   {
-     "reasoning": "How you'll implement the planner's instructions",
-     "overview": "High-level summary",
-     "steps": [
-       {
-         "name": "step name",
-         "description": "what it does",
-         "tool_name": "tool to call",
-         "tool_params": {"param": "value"},
-         "reason": "why it's needed",
-         "retry_on_failure": true/false,
-         "max_retries": 2
-       }
-     ],
-     "potential_issues": ["issue1"],
-     "recommendations": ["rec1"]
-   }
-   ======================================================================
-   💭 Response:
-   ======================================================================
-   {
-     "reasoning": "The plan follows the strict execution order mandated by the planner: copy files \u2192 estimate simulation time \u2192 create SLURM script \u2192 submit job \u2192 monitor job \u2192 download results. All interactions use only the provided tools. The plan also respects the maximum of two submission attempts and the 1\u2011hour monitoring interval. For the SLURM script we derive the time limit from the estimated wall\u2011time and add a safety margin of 20\u202f% to account for overhead.",
-     "overview": "1. Transfer all simulation files from the local \u2018simsetup\u2019 directory to the HPC working directory.\n2. Estimate a wall\u2011time for a 15\u2011ns production run of a 68\u202f300\u2011atom system using a 2\u202fps timestep.\n3. Generate a SLURM script that requests 4 CPU cores, 8\u202fGB RAM per task, the estimated time limit, and loads the GROMACS module.\n4. Submit the job and, if the first attempt fails, retry once.\n5. Poll the job status every hour until it finishes (success or failure).\n6. Upon successful completion, copy the trajectory, energy, and coordinate files back to the local working directory.",
-     "steps": [
-       {
-         "name": "Copy simulation files to HPC working directory",
-         "description": "Transfer all relevant topology, coordinate, and MDP files from the local simulation setup to the directory that will be used for job submission.",
-         "tool_name": "copy_simulation_files",
-         "tool_params": {
-           "source_dir": "/home/akp66103/workspace/agenticAI/working_dir/simsetup",
-           "dest_dir": "/home/akp66103/workspace/agenticAI/working_dir/hpc",
-           "file_patterns": [
-             "*"
-           ],
-           "create_dest": true
-         },
-         "reason": "The HPC job must operate on a copy of the prepared files to avoid accidental corruption of the original setup.",
-         "retry_on_failure": false,
-         "max_retries": 1
-       },
-       {
-         "name": "Estimate simulation wall\u2011time",
-         "description": "Compute an approximate runtime for the production MD step based on system size and desired simulation length.",
-         "tool_name": "estimate_simulation_time",
-         "tool_params": {
-           "production_ns": 15,
-           "system_size": 68300,
-           "timestep_ps": 2
-         },
-         "reason": "The resulting estimate is used to set the SLURM time limit and inform resource requests.",
-         "retry_on_failure": false,
-         "max_retries": 1
-       },
-       {
-         "name": "Create SLURM job submission script",
-         "description": "Generate a SLURM script that requests the calculated time limit, loads the GROMACS module, and specifies the simulation phases (minim, nvt, npt, md).",
-         "tool_name": "create_slurm_script",
-         "tool_params": {
-           "job_name": "md_sim",
-           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir/hpc",
-           "topology_file": "topol.top",
-           "input_structure": "system.gro",
-           "simulation_phases": [
-             "minim",
-             "nvt",
-             "npt",
-             "md"
-           ],
-           "partition": "compute",
-           "cpus_per_task": 4,
-           "memory": "8G",
-           "time_limit": "<ESTIMATED_TIME>+2:00:00",
-           "gromacs_module": "gromacs/2021.3"
-         },
-         "reason": "The script encapsulates all steps needed for a complete MD run on the cluster.",
-         "retry_on_failure": false,
-         "max_retries": 1
-       },
-       {
-         "name": "Submit SLURM job",
-         "description": "Send the generated script to the cluster and obtain a job ID. If the first submission fails, retry once.",
-         "tool_name": "submit_job",
-         "tool_params": {
-           "script_path": "/home/akp66103/workspace/agenticAI/working_dir/hpc/md_sim.slurm"
-         },
-         "reason": "Submitting the job starts the simulation pipeline on the HPC.",
-         "retry_on_failure": true,
-         "max_retries": 2
-       },
-       {
-         "name": "Monitor job status (hourly)",
-         "description": "Periodically check the job state until it reaches COMPLETED or FAILED.",
-         "tool_name": "check_job_status",
-         "tool_params": {
-           "job_id": "<JOB_ID>"
-         },
-         "reason": "The monitoring loop ensures that we only download results after a successful run.",
-         "retry_on_failure": false,
-         "max_retries": 1
-       },
-       {
-         "name": "Download simulation results",
-         "description": "Retrieve the trajectory (.xtc), energy (.edr), and coordinate (.gro) files from the HPC directory back to the local working area.",
-         "tool_name": "download_results",
-         "tool_params": {
-           "remote_dir": "/home/akp66103/workspace/agenticAI/working_dir/hpc",
-           "local_dir": "/home/akp66103/workspace/agenticAI/working_dir/results",
-           "file_patterns": [
-             "*.xtc",
-             "*.edr",
-             "*.gro"
-           ]
-         },
-         "reason": "Storing the outputs locally allows downstream analysis or archival.",
-         "retry_on_failure": false,
-         "max_retries": 1
-       }
-     ],
-     "potential_issues": [
-       "Job submission may fail due to transient scheduler load, requiring the retry logic.",
-       "The estimated wall\u2011time might be underestimated for a large system, causing early termination.",
-       "Missing or mis\u2011named input files in the HPC directory could cause GROMACS to abort."
-     ],
-     "recommendations": [
-       "Add a 20\u2011% safety margin to the estimated time when setting the SLURM time limit.",
-       "Verify the presence of all required .top, .gro, and .mdp files before submission.",
-       "Consider logging the job output (stdout/stderr) for debugging if the job fails."
-     ]
-   }
-   ======================================================================
-
-⚡ AGENT ACTION (hpc):
-   🎬 Action: Generated HPC execution plan
-   📊 steps: 4
-   📊 reasoning: Fallback plan: copy files, create script, submit job
-
-⚡ AGENT ACTION (hpc):
-   🎬 Action: Generated HPC plan
-   📊 steps: 4
-
-⚡ AGENT ACTION (hpc):
-   🎬 Action: Executing step 1/4
-   📊 step: Copy simulation files
-   📊 tool: copy_simulation_files
-
-⚡ AGENT ACTION (hpc):
-   🎬 Action: Step 1/4 completed
-   📊 step: Copy simulation files
-   📊 tool: copy_simulation_files
-   📊 status: ✅ SUCCESS
-
-⚡ AGENT ACTION (hpc):
-   🎬 Action: Executing step 2/4
-   📊 step: Estimate time
-   📊 tool: estimate_simulation_time
-
-⚡ AGENT ACTION (hpc):
-   🎬 Action: Step 2/4 completed
-   📊 step: Estimate time
-   📊 tool: estimate_simulation_time
-   📊 status: ✅ SUCCESS
-
-⚡ AGENT ACTION (hpc):
-   🎬 Action: Executing step 3/4
-   📊 step: Create SLURM script
-   📊 tool: create_slurm_script
-
-⚡ AGENT ACTION (hpc):
-   🎬 Action: Step 3/4 completed
-   📊 step: Create SLURM script
-   📊 tool: create_slurm_script
-   📊 status: ✅ SUCCESS
-
-📁 FILE OPERATION (hpc):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/hpc/md_simulation_run.sh
-   Status: ✅ SUCCESS
-   Details: SLURM submission script
-
-⚡ AGENT ACTION (hpc):
-   🎬 Action: Executing step 4/4
-   📊 step: Submit job
-   📊 tool: submit_job
-
-⚡ AGENT ACTION (hpc):
-   🎬 Action: Step 4/4 completed
-   📊 step: Submit job
-   📊 tool: submit_job
-   📊 status: ✅ SUCCESS
-
-🏁 HPC JOB SUBMISSION AND MONITORING AGENT (hpc) ✅ COMPLETED [2026-03-02 18:32:57]:
-   📤 Output Summary:
-     • cleaned_pdb: /home/akp66103/workspace/agenticAI/working_dir/simsetup/3_protein_h.pdb
-     • topology: /home/akp66103/workspace/agenticAI/working_dir/simsetup/topol.top
-     • coordinates: /home/akp66103/workspace/agenticAI/working_dir/simsetup/system.gro
-     • mdp_files: 5 items
-       - ions: /home/akp66103/workspace/agenticAI/working_dir/simsetup/ions.mdp
-       - minim: /home/akp66103/workspace/agenticAI/working_dir/simsetup/minim.mdp
-       - nvt: /home/akp66103/workspace/agenticAI/working_dir/simsetup/nvt.mdp
-       - npt: /home/akp66103/workspace/agenticAI/working_dir/simsetup/npt.mdp
-       - md: /home/akp66103/workspace/agenticAI/working_dir/simsetup/md.mdp
-
-🎛️  SUPERVISOR ROUTING [2026-03-02 18:32:57]:
-   Current State Summary:
-     ✅ raw_pdb: working_dir/3.pdb
-     ✅ cleaned_pdb: /home/akp66103/workspace/agenticAI/working_dir/simsetup/3_protein_h.pdb
-     ✅ coordinates: /home/akp66103/workspace/agenticAI/working_dir/simsetup/system.gro
-     ✅ job_id: 43176982
-     ❌ analysis_results: Not set
-   📍 Routing: hpc → supervisor
-   💭 Reasoning: HPC agent completed - success
-   ⚠️  Warnings: ['PDB is missing hydrogens - preprocessing will add them']
-
-🎛️  SUPERVISOR ROUTING [2026-03-02 18:32:57]:
-   Current State Summary:
-     ✅ raw_pdb: working_dir/3.pdb
-     ✅ cleaned_pdb: /home/akp66103/workspace/agenticAI/working_dir/simsetup/3_protein_h.pdb
-     ✅ coordinates: /home/akp66103/workspace/agenticAI/working_dir/simsetup/system.gro
-     ✅ job_id: 43176982
-     ❌ analysis_results: Not set
+     ✅ analysis_results: {'extract_trajectory_metrics': {'success': True, 'n_frames': 0, 'time_range': (0.0, 0.0), 'file_size_mb': 24.251087188720703, 'trajectory_file': '/home/akp66103/workspace/agenticAI/working_dir/hpc/md.xtc', 'message': 'Trajectory has 0 frames spanning 0.0-0.0 ps'}, 'calculate_rmsd': {'success': True, 'mean_rmsd': 1.5306857223412405, 'std_rmsd': 0.2612115690681243, 'min_rmsd': 3.378352682266599e-07, 'max_rmsd': 2.0506906523164194, 'n_frames': 101, 'selection': 'protein and name CA', 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd.dat', 'message': 'RMSD calculation complete: mean=1.53 Å, std=0.26 Å'}, 'calculate_rmsf': {'success': True, 'mean_rmsf': 0.9286514385552037, 'std_rmsf': 0.3949384955076374, 'min_rmsf': 0.3767928063587787, 'max_rmsf': 2.7110194438924156, 'n_residues': 255, 'most_flexible': [{'residue_id': 22, 'residue_name': 'GLU', 'rmsf': 2.7110194438924156}, {'residue_id': 21, 'residue_name': 'LYS', 'rmsf': 2.444133374154957}, {'residue_id': 23, 'residue_name': 'THR', 'rmsf': 2.2801147459644495}, {'residue_id': 212, 'residue_name': 'LYS', 'rmsf': 2.2267631589288275}, {'residue_id': 24, 'residue_name': 'GLY', 'rmsf': 1.9235134342542703}], 'least_flexible': [{'residue_id': 230, 'residue_name': 'LEU', 'rmsf': 0.3767928063587787}, {'residue_id': 178, 'residue_name': 'ASP', 'rmsf': 0.41084138369168194}, {'residue_id': 180, 'residue_name': 'TRP', 'rmsf': 0.4158673467021137}, {'residue_id': 184, 'residue_name': 'VAL', 'rmsf': 0.42004180101770205}, {'residue_id': 182, 'residue_name': 'LEU', 'rmsf': 0.42590588611346175}], 'selection': 'protein and name CA', 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsf.dat', 'message': 'RMSF calculation complete: mean=0.93 Å, most flexible residue at 22'}, 'plot_rmsd_and_rmsf_(multi‑panel)': {'success': True, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd_rmsf.png', 'n_panels': 2, 'layout': 'vertical', 'message': 'Successfully created 2-panel vertical plot'}, 'analyse_energy_terms': {'success': True, 'n_frames': 101, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/energy.xvg', 'terms': {'Potential': {'mean': -927534.2320544554, 'std': 1044.0988525309683, 'min': -930085.9375, 'max': -925181.5}, 'Kinetic-En.': {'mean': 173132.96813118813, 'std': 665.1984109139098, 'min': 171868.234375, 'max': 174924.96875}, 'Temperature': {'mean': 299.9648486237624, 'std': 1.1525012574502969, 'min': 297.77359, 'max': 303.069611}}, 'message': 'Energy analysis complete. Potential: -927534.23 ± 1044.10, Kinetic-En.: 173132.97 ± 665.20, Temperature: 299.96 ± 1.15'}, 'plot_energy': {'success': True, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/energy.png', 'n_datasets': 1, 'plot_type': 'line', 'message': 'Successfully created line plot with 1 dataset(s)'}}
    📍 Routing: supervisor → final_report
    💭 Reasoning: All workflow tasks complete
-   ⚠️  Warnings: ['PDB is missing hydrogens - preprocessing will add them']
 
-🎯 WORKFLOW COMPLETION [2026-03-02 18:33:18]:
+🎯 WORKFLOW COMPLETION [2026-03-04 17:46:19]:
    Status: ✅ SUCCESS
    📋 Summary:
-      Workflow completed with 0 errors and 1 warnings
-   📁 Files Created: cleaned_pdb, topology, coordinates, 5 MDP files
+      Workflow completed with 0 errors and 0 warnings
+   📁 Files Created: topology
    ⚠️  Errors: 0
-   ⚠️  Warnings: 1
+   ⚠️  Warnings: 0
 ================================================================================
 ================================================================================
-SESSION 20260302_182941 COMPLETED - 2026-03-02 18:33:18
+SESSION 20260304_174437 COMPLETED - 2026-03-04 17:46:19
 ================================================================================
 

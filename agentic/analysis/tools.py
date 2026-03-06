@@ -7,6 +7,7 @@ Exposes stable, reusable @tool functions from src/analysis/ for:
 - Radius of gyration analysis
 - Energy analysis
 - Trajectory metrics extraction
+- Data visualization and plotting
 
 This module follows the pattern of agentic/hpc/tools.py and agentic/simsetup/tools.py:
 actual tool implementations are in src/analysis/* and imported here.
@@ -21,6 +22,8 @@ from src.analysis.rmsd_calculator import calculate_rmsd
 from src.analysis.rmsf_calculator import calculate_rmsf
 from src.analysis.gyration_calculator import calculate_radius_of_gyration
 from src.analysis.energy_analyzer import analyze_energy, extract_trajectory_metrics
+from src.analysis.data_plotter import plot_md_data, plot_md_multipanel, plot_combined_data
+from src.analysis.summary_logger import initialize_summary_file, generate_summary_report
 
 # Export all tools
 __all__ = [
@@ -29,9 +32,14 @@ __all__ = [
     "calculate_radius_of_gyration",
     "analyze_energy",
     "extract_trajectory_metrics",
+    "plot_md_data",
+    "plot_md_multipanel",
+    "plot_combined_data",
     "AnalysisToolExecutor",
     "get_analysis_tools",
-    "get_tool_metadata"
+    "get_tool_metadata",
+    "initialize_summary_file",
+    "generate_summary_report"
 ]
 
 logger = logging.getLogger(__name__)
@@ -50,7 +58,10 @@ def get_analysis_tools() -> list:
         calculate_rmsf,
         calculate_radius_of_gyration,
         analyze_energy,
-        extract_trajectory_metrics
+        extract_trajectory_metrics,
+        plot_md_data,
+        plot_md_multipanel,
+        plot_combined_data
     ]
 
 
@@ -114,12 +125,22 @@ class AnalysisToolExecutor:
             "calculate_rmsf": calculate_rmsf,
             "calculate_radius_of_gyration": calculate_radius_of_gyration,
             "analyze_energy": analyze_energy,
-            "extract_trajectory_metrics": extract_trajectory_metrics
+            "extract_trajectory_metrics": extract_trajectory_metrics,
+            "plot_md_data": plot_md_data,
+            "plot_md_multipanel": plot_md_multipanel,
+            "plot_combined_data": plot_combined_data
         }
         
         # Setup working directory
         self.working_dir = self.config.get("working_directory", "./working_dir/analysis")
         os.makedirs(self.working_dir, exist_ok=True)
+        
+        # Initialize analysis summary file
+        try:
+            summary_path = initialize_summary_file(self.working_dir)
+            logger.info(f"Analysis summary file initialized: {summary_path}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize summary file: {e}")
         
         logger.info(f"AnalysisToolExecutor initialized with working_dir: {self.working_dir}")
     

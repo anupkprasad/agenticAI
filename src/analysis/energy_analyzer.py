@@ -8,6 +8,7 @@ import logging
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 from langchain.tools import tool
+from .summary_logger import append_analysis_summary
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +182,29 @@ def analyze_energy(
         
         results["message"] = f"Energy analysis complete. {', '.join(summary_parts)}"
         
+        # Write to analysis summary file
         if working_dir:
+            try:
+                append_analysis_summary(
+                    working_dir=working_dir,
+                    analysis_type="Energy",
+                    statistics={
+                        "n_frames": results["n_frames"],
+                        **{f"{term}_mean": stats["mean"] for term, stats in results["terms"].items()},
+                        **{f"{term}_std": stats["std"] for term, stats in results["terms"].items()}
+                    },
+                    files={
+                        "energy_file": energy_file,
+                        "output": output_file
+                    },
+                    metadata={
+                        "terms_analyzed": found_terms,
+                        "detailed_statistics": results["terms"]
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Failed to write to summary file: {e}")
+            
             os.chdir(original_dir)
         
         return results

@@ -43,13 +43,18 @@ def validate_and_enrich_inputs(
     user_goal = state.get("user_goal", "")
     working_directory = state.get("working_directory", ".")
     
+    # STEP 1: UNIVERSAL PDB VALIDATION (for all task types)
+    # Extract and analyze PDB structure if PDB file is mentioned in user goal
+    state = _analyze_pdb_if_available(state, user_goal, working_directory, analyze_pdb_tool, logger)
+    
+    # STEP 2: TASK-SPECIFIC VALIDATION
     # Route to appropriate validation based on task type
     if subtask_type == "analysis_only":
         # Analysis-only tasks: validate trajectory/topology files
         state = _validate_analysis_files(state, user_goal, working_directory, llm_client, config, logger)
     else:
-        # PDB-based tasks: validate and analyze PDB structure
-        state = _validate_pdb_structure(state, user_goal, working_directory, llm_client, config, analyze_pdb_tool, logger)
+        # PDB-based tasks: additional setup/preprocessing validation
+        state = _validate_pdb_based_task(state, user_goal, working_directory, llm_client, config, logger)
     
     # Set routing
     state["next_node"] = "supervisor"
@@ -61,40 +66,42 @@ def validate_and_enrich_inputs(
     return state
 
 
-def _validate_pdb_structure(
+def _analyze_pdb_if_available(
     state: Dict[str, Any],
     user_goal: str,
     working_directory: str,
-    llm_client,
-    config: Dict[str, Any],
     analyze_pdb_tool,
     logger
 ) -> Dict[str, Any]:
-    """Validate PDB structure for setup/preprocess/full tasks."""
+    """Universal PDB structure analysis for ALL task types.
+    
+    Extracts PDB filename from user goal and analyzes structure if available.
+    Stores comprehensive PDB analysis in state for all agents to use.
+    
+    If no PDB file is found, continues gracefully (state will have no pdb_analysis).
+    """
     from agentic.utils import log_agent_action
-    from .component_parser import parse_component_selection, validate_feasibility, build_human_summary
-    from .prompt_enricher import enrich_prompt_with_context
     
     # Step 1: Extract PDB filename from user goal
     pdb_pattern = r'([\w\-]+\.pdb)'
     match = re.search(pdb_pattern, user_goal, re.IGNORECASE)
     
-    if match:
-        pdb_filename = match.group(1)
-        pdb_path = os.path.join(working_directory, pdb_filename)
-        state["raw_pdb"] = pdb_path
-        logger.info(f"INPUT_VALIDATION: Extracted PDB filename: {pdb_filename}")
-        logger.info(f"INPUT_VALIDATION: Using working directory: {working_directory}")
+    if not match:
+        logger.info("INPUT_VALIDATION: No PDB file mentioned in user goal - skipping PDB structure analysis")
+        # Don't set error - this is OK for analysis_only tasks
+        return state
+    
+    pdb_filename = match.group(1)
+    pdb_path = os.path.join(working_directory, pdb_filename)
+    state["raw_pdb"] = pdb_path
+    logger.info(f"INPUT_VALIDATION: Extracted PDB filename: {pdb_filename}")
+    logger.info(f"INPUT_VALIDATION: Using working directory: {working_directory}")
 
-        # Validate file exists
-        if not os.path.exists(pdb_path):
-            state["errors"].append(f"PDB file not found: {pdb_path}")
-            logger.error(f"INPUT_VALIDATION: PDB file not found: {pdb_path}")
-            return state
-    else:
-        error_msg = "Could not extract PDB filename from user goal"
-        state["errors"].append(error_msg)
-        logger.error(f"INPUT_VALIDATION: {error_msg}")
+    # Validate file exists
+    if not os.path.exists(pdb_path):
+        warning_msg = f"PDB file mentioned but not found: {pdb_path}"
+        state["warnings"].append(warning_msg)
+        logger.warning(f"INPUT_VALIDATION: {warning_msg}")
         return state
 
     # Step 2: Analyze PDB structure
@@ -153,15 +160,42 @@ def _validate_pdb_structure(
             details=details
         )
     
-    # Get analysis for subsequent steps
-    analysis = state["pdb_analysis"]
+    return state
 
-    # Step 3: Parse user intent and determine component selection
+
+def _validate_pdb_based_task(
+    state: Dict[str, Any],
+    user_goal: str,
+    working_directory: str,
+    llm_client,
+    config: Dict[str, Any],
+    logger
+) -> Dict[str, Any]:
+    """Additional validation for PDB-based tasks (setup/preprocess/full).
+    
+    Assumes PDB has already been analyzed by _analyze_pdb_if_available.
+    """
+    from agentic.utils import log_agent_action
+    from .component_parser import parse_component_selection, validate_feasibility, build_human_summary
+    from .prompt_enricher import enrich_prompt_with_context
+    
+    # Get PDB analysis from state (set by _analyze_pdb_if_available)
+    analysis = state.get("pdb_analysis")
+    
+    if not analysis:
+        error_msg = "PDB analysis not found in state - cannot proceed with setup/preprocessing"
+        state["errors"].append(error_msg)
+        logger.error(f"INPUT_VALIDATION: {error_msg}")
+        return state
+    
+    pdb_path = state.get("raw_pdb")
+
+    # Step 1: Parse user intent and determine component selection
     component_selection = parse_component_selection(user_goal, analysis)
     state["component_selection"] = component_selection
     logger.info(f"INPUT_VALIDATION: Component selection: {component_selection}")
 
-    # Step 4: Validate feasibility
+    # Step 2: Validate feasibility
     validation_result = validate_feasibility(user_goal, analysis, component_selection)
     
     if not validation_result["is_feasible"]:
@@ -174,7 +208,7 @@ def _validate_pdb_structure(
         state["warnings"].append(warning)
         logger.warning(f"INPUT_VALIDATION: {warning}")
 
-    # Step 5: Enrich user prompt with validated information
+    # Step 3: Enrich user prompt with validated information
     pdb_summary = build_human_summary(analysis)
     enriched_prompt = enrich_prompt_with_context(
         user_goal=user_goal,
@@ -328,17 +362,27 @@ def _validate_analysis_files(
     
     logger.info(f"INPUT_VALIDATION: Enriched analysis prompt created: {enriched_prompt[:150]}...")
     
-    # Step 5: Store analysis context in state
-    state["pdb_analysis"] = {
-        "subtask_type": "analysis_only",
-        "requires_pdb_structure": False,
-        "working_directory": working_directory,
-        "hpc_output_dir": hpc_output_dir,
-        "analysis_output_dir": analysis_output_dir,
-        "topology_file": file_info["topology_file"],
-        "trajectory_file": file_info["trajectory_file"],
-        "energy_file": file_info["energy_file"]
-    }
+    # Step 5: Enhance pdb_analysis with analysis-specific file info
+    # Note: pdb_analysis should already exist from _analyze_pdb_if_available
+    # We're just adding analysis-specific metadata here
+    if "pdb_analysis" not in state or not state["pdb_analysis"]:
+        # Fallback: create minimal structure if PDB wasn't analyzed
+        logger.warning("INPUT_VALIDATION: No PDB analysis found, creating minimal structure")
+        state["pdb_analysis"] = {
+            "total_atoms": 0,
+            "total_residues": 0,
+            "components_available": {},
+            "human_readable_summary": "N/A"
+        }
+    
+    # Add analysis-specific metadata to existing pdb_analysis
+    state["pdb_analysis"]["subtask_type"] = "analysis_only"
+    state["pdb_analysis"]["working_directory"] = working_directory
+    state["pdb_analysis"]["hpc_output_dir"] = hpc_output_dir
+    state["pdb_analysis"]["analysis_output_dir"] = analysis_output_dir
+    state["pdb_analysis"]["topology_file"] = file_info["topology_file"]
+    state["pdb_analysis"]["trajectory_file"] = file_info["trajectory_file"]
+    state["pdb_analysis"]["energy_file"] = file_info["energy_file"]
     
     # CRITICAL: Set top-level state fields that analysis agent expects
     state["topology"] = file_info["topology_file"]

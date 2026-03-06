@@ -8,6 +8,7 @@ import logging
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 from langchain.tools import tool
+from .summary_logger import append_analysis_summary
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +35,17 @@ def calculate_rmsd(
     selection: str = "protein and name CA",
     reference_frame: int = 0,
     output_file: Optional[str] = None,
-    working_dir: Optional[str] = None
+    working_dir: Optional[str] = None,
+    align_before_rmsd: bool = True
 ) -> Dict[str, Any]:
     """
     Calculate RMSD (Root Mean Square Deviation) for a trajectory.
     
     RMSD measures structural deviation over time, indicating stability.
     Lower RMSD values suggest stable structures.
+    
+    NOTE: The RMSD calculation in MDAnalysis automatically performs alignment
+    before computing RMSD. Set align_before_rmsd=False to disable this.
     
     Args:
         topology_file: Topology file (.gro, .pdb, .tpr)
@@ -49,6 +54,7 @@ def calculate_rmsd(
         reference_frame: Reference frame number (default: 0 - first frame)
         output_file: Output file path for RMSD data (.dat, .csv)
         working_dir: Working directory for analysis
+        align_before_rmsd: Whether to align before RMSD calculation (default: True)
         
     Returns:
         Dict with RMSD results and statistics
@@ -81,10 +87,12 @@ def calculate_rmsd(
             u = mda.Universe(topology_file, trajectory_file)
             
             # Create RMSD analysis object
+            # Note: MDAnalysis RMSD automatically aligns unless you disable it
             R = rms.RMSD(
                 u,
                 select=selection,
-                ref_frame=reference_frame
+                ref_frame=reference_frame,
+                groupselections=[selection] if not align_before_rmsd else None
             )
             
             # Run analysis
@@ -107,13 +115,39 @@ def calculate_rmsd(
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 
                 with open(output_file, 'w') as f:
-                    f.write("# Frame\tTime(ps)\tRMSD(Angstrom)\n")
-                    for i, (t, r) in enumerate(zip(times, rmsd_values)):
-                        f.write(f"{i}\t{t:.2f}\t{r:.4f}\n")
+                    f.write("# Time(ns)\tRMSD(Angstrom)\n")
+                    for t, r in zip(times, rmsd_values):
+                        f.write(f"{t/1000.0:.4f}\t{r:.4f}\n")  # Convert ps to ns
                 
                 logger.info(f"RMSD data saved to {output_file}")
             
+            # Write to analysis summary file
             if working_dir:
+                try:
+                    append_analysis_summary(
+                        working_dir=working_dir,
+                        analysis_type="RMSD",
+                        statistics={
+                            "n_frames": len(rmsd_values),
+                            "mean_rmsd_angstrom": mean_rmsd,
+                            "std_rmsd_angstrom": std_rmsd,
+                            "min_rmsd_angstrom": min_rmsd,
+                            "max_rmsd_angstrom": max_rmsd
+                        },
+                        files={
+                            "topology": topology_file,
+                            "trajectory": trajectory_file,
+                            "output": output_file
+                        },
+                        metadata={
+                            "selection": selection,
+                            "reference_frame": reference_frame,
+                            "alignment_performed": align_before_rmsd
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to write to summary file: {e}")
+                
                 os.chdir(original_dir)
             
             return {

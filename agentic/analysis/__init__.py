@@ -7,6 +7,7 @@ Provides MD trajectory analysis capabilities including:
 - Radius of gyration - protein compactness
 - Energy analysis - thermodynamic properties
 - Trajectory metrics - basic statistics
+- Data visualization and plotting - single and multi-panel plots
 
 Components:
 - MDAnalysisAgent: Main agent class with LLM-powered planning
@@ -23,6 +24,9 @@ from .tools import (
     calculate_radius_of_gyration,
     analyze_energy,
     extract_trajectory_metrics,
+    plot_md_data,
+    plot_md_multipanel,
+    plot_combined_data,
     AnalysisToolExecutor,
     run_complete_analysis
 )
@@ -40,12 +44,19 @@ __all__ = [
     # Agent
     "MDAnalysisAgent",
     
-    # Tools
+    # Analysis Tools
     "calculate_rmsd",
     "calculate_rmsf",
     "calculate_radius_of_gyration",
     "analyze_energy",
     "extract_trajectory_metrics",
+    
+    # Plotting Tools
+    "plot_md_data",
+    "plot_md_multipanel",
+    "plot_combined_data",
+    
+    # Executor and Workflows
     "AnalysisToolExecutor",
     "run_complete_analysis",
     

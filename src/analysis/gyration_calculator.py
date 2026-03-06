@@ -8,6 +8,7 @@ import logging
 from typing import Dict, Any, Optional
 from pathlib import Path
 from langchain.tools import tool
+from .summary_logger import append_analysis_summary
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,31 @@ def calculate_radius_of_gyration(
                 
                 logger.info(f"Rg data saved to {output_file}")
             
+            # Write to analysis summary file
             if working_dir:
+                try:
+                    append_analysis_summary(
+                        working_dir=working_dir,
+                        analysis_type="Radius_of_Gyration",
+                        statistics={
+                            "n_frames": len(rg_values),
+                            "mean_rg_angstrom": mean_rg,
+                            "std_rg_angstrom": std_rg,
+                            "min_rg_angstrom": min_rg,
+                            "max_rg_angstrom": max_rg
+                        },
+                        files={
+                            "topology": topology_file,
+                            "trajectory": trajectory_file,
+                            "output": output_file
+                        },
+                        metadata={
+                            "selection": selection
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to write to summary file: {e}")
+                
                 os.chdir(original_dir)
             
             return {

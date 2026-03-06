@@ -189,9 +189,12 @@ dependencies:
   - pip:
       - acpype==2023.10.27
       - amberutils==21.0
+      - biopython
       - cryptography==46.0.3
       - edgembar==3.0
+      - langchain
       - langsmith==0.6.4
+      - mdanalysis
       - mmpbsa-py==16.0
       - ollama==0.6.1
       - openbabel-wheel==3.1.1.22

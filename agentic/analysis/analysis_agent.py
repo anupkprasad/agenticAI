@@ -114,6 +114,9 @@ class MDAnalysisAgent:
             # Copy files from HPC output directory if needed
             self._copy_files_from_hpc(state, analysis_dir)
             
+            # Write PDB validation info to summary file if available from supervisor
+            self._write_pdb_info_to_summary(state, analysis_dir)
+            
             # Prepare agent input from state
             agent_input = self._prepare_agent_input(state)
             
@@ -235,6 +238,125 @@ class MDAnalysisAgent:
             
             # Write back modified file_registry to state
             state["file_registry"] = file_registry
+
+    def _format_pdb_info_for_llm(self, state: MDState) -> str:
+        """Format PDB structural information from supervisor for LLM prompts.
+        
+        Args:
+            state: Current MDState with pdb_analysis from supervisor
+            
+        Returns:
+            Formatted string with PDB structural context for LLM
+        """
+        if not state:
+            return ""
+        
+        pdb_analysis = state.get("pdb_analysis")
+        if not pdb_analysis:
+            return ""
+        
+        try:
+            total_atoms = pdb_analysis.get("total_atoms", 0)
+            total_residues = pdb_analysis.get("total_residues", 0)
+            components = pdb_analysis.get("components_available", [])
+            summary = pdb_analysis.get("human_readable_summary", "N/A")
+            
+            # Get protein chain information
+            protein_info = pdb_analysis.get("protein", {})
+            protein_chains_str = ""
+            if protein_info:
+                chains_list = []
+                for chain_id, chain_data in protein_info.items():
+                    if isinstance(chain_data, dict):
+                        res_count = chain_data.get("residue_count", 0)
+                        chains_list.append(f"Chain {chain_id} ({res_count} residues)")
+                if chains_list:
+                    protein_chains_str = ", ".join(chains_list)
+            
+            return f"""
+**PDB Structure Information (from supervisor validation):**
+- Total Atoms: {total_atoms}
+- Total Residues: {total_residues}
+- Components: {', '.join(components) if components else 'None'}
+- Protein Chains: {protein_chains_str if protein_chains_str else 'None'}
+- Summary: {summary}
+"""
+        except Exception as e:
+            logger.warning(f"Failed to format PDB info for LLM: {e}")
+            return ""
+
+    def _write_pdb_info_to_summary(self, state: MDState, analysis_dir: str) -> None:
+        """
+        Write PDB validation info from supervisor to analysis summary file.
+        This provides context about the input structure for LLM and users.
+        
+        Args:
+            state: Workflow state containing pdb_analysis from supervisor
+            analysis_dir: Analysis working directory
+        """
+        from src.analysis.summary_logger import append_analysis_summary
+        
+        # Get PDB analysis from state (populated by supervisor's input validation)
+        pdb_analysis = state.get("pdb_analysis")
+        
+        if not pdb_analysis:
+            logger.info("No PDB analysis info available from supervisor, skipping summary entry")
+            return
+        
+        try:
+            # Extract key information for summary
+            total_atoms = pdb_analysis.get("total_atoms", 0)
+            total_residues = pdb_analysis.get("total_residues", 0)
+            components = pdb_analysis.get("components_available", {})
+            summary = pdb_analysis.get("human_readable_summary", "N/A")
+            
+            # Get topology file path
+            topology_file = state.get("topology") or state.get("cleaned_pdb") or state.get("raw_pdb")
+            
+            # Extract protein sequences if available
+            protein_sequences = {}
+            if pdb_analysis.get("protein", {}).get("present"):
+                chains_info = pdb_analysis.get("protein", {}).get("chains", {})
+                for chain_id, chain_data in chains_info.items():
+                    sequence = chain_data.get("sequence", "")
+                    if sequence:
+                        protein_sequences[chain_id] = sequence
+            
+            # Write to summary file
+            append_analysis_summary(
+                working_dir=analysis_dir,
+                analysis_type="PDB_Input_Validation",
+                statistics={
+                    "total_atoms": total_atoms,
+                    "total_residues": total_residues
+                },
+                files={
+                    "topology_file": topology_file or "N/A"
+                },
+                metadata={
+                    "components_available": components,
+                    "human_readable_summary": summary,
+                    "protein_sequences": protein_sequences,
+                    "source": "supervisor_validation"
+                }
+            )
+            
+            logger.info(f"PDB validation summary written: {summary}")
+            log_agent_action(
+                "analysis",
+                "Recorded PDB Structure Info",
+                {
+                    "atoms": total_atoms,
+                    "residues": total_residues,
+                    "components": components,
+                    "summary": summary
+                }
+            )
+            
+        except Exception as e:
+            logger.warning(f"Failed to write PDB info to summary: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
 
     def _prepare_agent_input(self, state: MDState) -> AnalysisAgentInput:
         """Prepare structured input for analysis from workflow state"""
@@ -419,7 +541,7 @@ class MDAnalysisAgent:
             )
         
         # Otherwise use standard config-based prompt
-        return self._build_standard_analysis_prompt(agent_input)
+        return self._build_standard_analysis_prompt(agent_input, state)
 
     def _build_prompt_from_planner_instructions(self, agent_input: AnalysisAgentInput,
                                                 planner_instructions: str,
@@ -449,6 +571,9 @@ class MDAnalysisAgent:
         else:
             registry_str = "\n**Files Available from HPC:** None registered\n"
         
+        # Extract PDB structural information from supervisor validation
+        pdb_info_str = self._format_pdb_info_for_llm(state)
+        
         return f"""You are a molecular dynamics analysis expert executing a detailed plan from the workflow planner.
 
 **Available Data:**
@@ -457,6 +582,7 @@ class MDAnalysisAgent:
 - Energy File: {agent_input.energy_file or "Not available"}
 - Working Directory: {agent_input.working_directory}
 {registry_str}
+{pdb_info_str}
 
 **DETAILED INSTRUCTIONS FROM PLANNER:**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -497,7 +623,7 @@ Output as JSON with this structure:
 }}
 """
 
-    def _build_standard_analysis_prompt(self, agent_input: AnalysisAgentInput) -> str:
+    def _build_standard_analysis_prompt(self, agent_input: AnalysisAgentInput, state: MDState = None) -> str:
         """Build LLM planning prompt from config template using dynamic tool metadata"""
         config_prompt = self.config.get("llm", {}).get("planning_prompt_template", "")
         
@@ -528,6 +654,9 @@ Output as JSON with this structure:
             f"- Requested analyses: {', '.join(agent_input.analyses) if agent_input.analyses else 'None specified'}"
         ])
         
+        # Extract PDB structural information if state provided
+        pdb_info_str = self._format_pdb_info_for_llm(state) if state else ""
+        
         # Use template from config or build basic prompt
         if config_prompt:
             return config_prompt.format(
@@ -548,6 +677,7 @@ Output as JSON with this structure:
 - Trajectory: {agent_input.trajectory_file or "Not available"}
 - Energy File: {agent_input.energy_file or "Not available"}
 - User Goal: {agent_input.user_goal}
+{pdb_info_str}
 
 **Available Tools:**
 {tools_list_str}

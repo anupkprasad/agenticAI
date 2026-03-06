@@ -8,6 +8,7 @@ import logging
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 from langchain.tools import tool
+from .summary_logger import append_analysis_summary
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,9 @@ def calculate_rmsf(
     trajectory_file: str,
     selection: str = "protein and name CA",
     output_file: Optional[str] = None,
-    working_dir: Optional[str] = None
+    working_dir: Optional[str] = None,
+    align_trajectory: bool = True,
+    align_selection: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Calculate RMSF (Root Mean Square Fluctuation) for a trajectory.
@@ -41,12 +44,17 @@ def calculate_rmsf(
     RMSF measures per-residue flexibility. Higher RMSF indicates more flexible regions.
     Useful for identifying flexible loops, rigid cores, and binding sites.
     
+    IMPORTANT: Structural alignment is performed by default to remove translational
+    and rotational motions, giving meaningful RMSF values.
+    
     Args:
         topology_file: Topology file (.gro, .pdb, .tpr)
         trajectory_file: Trajectory file (.xtc, .trr, .dcd)
         selection: Atom selection for RMSF calculation (default: "protein and name CA")
         output_file: Output file path for RMSF data (.dat, .csv)
         working_dir: Working directory for analysis
+        align_trajectory: Whether to align trajectory before RMSF calculation (default: True)
+        align_selection: Atom selection for alignment (default: same as selection)
         
     Returns:
         Dict with RMSF results and statistics
@@ -78,7 +86,28 @@ def calculate_rmsf(
             # Load universe
             u = mda.Universe(topology_file, trajectory_file)
             
-            # Select atoms
+            # Perform alignment if requested (CRITICAL for meaningful RMSF)
+            if align_trajectory:
+                from MDAnalysis.analysis import align
+                
+                align_sel = align_selection if align_selection else selection
+                logger.info(f"Aligning trajectory using selection: {align_sel}")
+                
+                # Set reference to first frame
+                u.trajectory[0]
+                reference = u.copy()
+                
+                # Align trajectory in memory
+                aligner = align.AlignTraj(
+                    u,
+                    reference,
+                    select=align_sel,
+                    in_memory=True
+                )
+                aligner.run()
+                logger.info(f"Trajectory aligned: {len(u.trajectory)} frames")
+            
+            # Select atoms for RMSF calculation
             atoms = u.select_atoms(selection)
             
             if len(atoms) == 0:
@@ -132,11 +161,42 @@ def calculate_rmsf(
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 
                 with open(output_file, 'w') as f:
-                    f.write("# Residue_ID\tResidue_Name\tRMSF(Angstrom)\n")
-                    for res_id, res_name, rmsf_val in zip(residue_ids, residue_names, rmsf_values):
-                        f.write(f"{res_id}\t{res_name}\t{rmsf_val:.4f}\n")
+                    f.write("# Residue_ID\tRMSF(Angstrom)\n")
+                    for res_id, rmsf_val in zip(residue_ids, rmsf_values):
+                        f.write(f"{res_id}\t{rmsf_val:.4f}\n")
                 
                 logger.info(f"RMSF data saved to {output_file}")
+            
+            # Write to analysis summary file
+            if working_dir:
+                try:
+                    append_analysis_summary(
+                        working_dir=working_dir,
+                        analysis_type="RMSF",
+                        statistics={
+                            "n_residues": len(rmsf_values),
+                            "mean_rmsf_angstrom": mean_rmsf,
+                            "std_rmsf_angstrom": std_rmsf,
+                            "min_rmsf_angstrom": min_rmsf,
+                            "max_rmsf_angstrom": max_rmsf,
+                            "most_flexible_residue": most_flexible[0]['residue_id'] if most_flexible else None,
+                            "most_flexible_rmsf": most_flexible[0]['rmsf'] if most_flexible else None
+                        },
+                        files={
+                            "topology": topology_file,
+                            "trajectory": trajectory_file,
+                            "output": output_file
+                        },
+                        metadata={
+                            "selection": selection,
+                            "top_5_flexible": most_flexible,
+                            "top_5_rigid": least_flexible,
+                            "alignment_performed": align_trajectory,
+                            "align_selection": align_selection if align_selection else selection
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to write to summary file: {e}")
             
             if working_dir:
                 os.chdir(original_dir)

@@ -191,7 +191,7 @@ python run_agenticAIWork.py \
 
 # 5.2. Run analysis-only workflow (trajectory in working_dir/hpc/)
 python run_agenticAIWork.py \
-  --goal "The protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulation production is already done and data output is stored in working_dir/hpc. Please dont preprocess, do not setup simulation and do not job submit the simulation. Only use the analysis agent for simulation analysis for RMSF caculation of trajectory. The trajectory file is md.xtc and topology file is md.gro" \
+  --goal "The protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulation production is already done and data output is stored in working_dir/hpc. Please dont preprocess, do not setup simulation and do not job submit the simulation. Only use the analysis agent for simulation analysis for RMSF, RMSD and energy caculation of trajectory. Please plot in multipanal figure. The trajectory file is md.xtc and topology file is md.gro" \
   --subtask analysis \
   --working-dir working_dir \
   --use-llm \
