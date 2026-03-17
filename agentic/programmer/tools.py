@@ -127,6 +127,10 @@ def generate_python_tool(
         code_parts.append(f"Generated tool: {tool_name}")
         code_parts.append("")
         code_parts.append(description)
+        code_parts.append("")
+        code_parts.append("⚠️ IMPORTANT: If this is an analysis tool, it MUST log results to analysis_summary.jsonl")
+        code_parts.append("using append_analysis_summary() with statistics (min/max/mean/std) and metadata.")
+        code_parts.append("This enables LLMs to answer questions about analysis results.")
         code_parts.append('"""')
         
         # Add all imports (sorted for consistency)

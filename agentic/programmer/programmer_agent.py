@@ -550,6 +550,71 @@ cmd = ["gmx", "dssp", "-s", str(topo_path), "-f", str(traj_path), ...]
 
 This ensures tools work correctly when inputs come from different directories (e.g., trajectories from working_dir/hpc).
 
+**Analysis Summary Logging (CRITICAL for Analysis Tools):**
+⚠️ MANDATORY: If generating an ANALYSIS tool, you MUST include logging to analysis_summary.jsonl.
+This enables LLMs to extract insights from analysis results and answer user questions.
+
+Required imports (add these to implementation):
+```python
+from src.analysis.summary_logger import append_analysis_summary
+```
+
+Required logging pattern (add at end of implementation, before return):
+```python
+# Log important metrics to analysis summary file (REQUIRED for analysis tools)
+if working_dir:
+    try:
+        append_analysis_summary(
+            working_dir=working_dir or os.getcwd(),  # Use provided working_dir
+            analysis_type="YourAnalysisType",  # e.g., "Contact_Analysis", "Distance_Matrix"
+            statistics={{
+                "n_frames": num_frames,
+                "mean_value": mean_val,      # REQUIRED: Calculate mean
+                "std_value": std_val,        # REQUIRED: Calculate std deviation
+                "min_value": min_val,        # REQUIRED: Calculate minimum
+                "max_value": max_val,        # REQUIRED: Calculate maximum
+                # Add other important statistics specific to your analysis
+            }},
+            files={{
+                "topology": topology_file,
+                "trajectory": trajectory_file,
+                "output": output_filename    # Use filename only, not full path
+            }},
+            metadata={{
+                "selection": selection_string,
+                # Add important metadata like:
+                # "most_important_region": {{"residue_id": X, "value": Y}},
+                # "top_5_highest": [{{"id": 1, "value": 5.0}}, ...],
+                # "threshold": cutoff_value,
+                # "interpretation": "Description of what the values mean"
+            }}
+        )
+        logger.info(f"Analysis summary logged for {{analysis_type}}")
+    except Exception as e:
+        logger.warning(f"Failed to write to summary file: {{e}}")
+```
+
+**What to Log:**
+- Statistics: min, max, mean, std of your primary metric
+- Important regions/residues (e.g., most active sites, flexible regions)
+- Thresholds or cutoff values used
+- Top N results (e.g., top 5 contacts, most variable residues)
+
+**Example for Contact Analysis:**
+```python
+statistics={{
+    "n_frames": len(contact_counts),
+    "mean_contacts": np.mean(contact_counts),
+    "std_contacts": np.std(contact_counts),
+    "min_contacts": np.min(contact_counts),
+    "max_contacts": np.max(contact_counts)
+}},
+metadata={{
+    "cutoff_distance": cutoff,
+    "most_frequent_contacts": top_5_contacts  # List of dicts
+}}
+```
+
 **Output Format (JSON):**
 {{
   "reasoning": "Why these tools are needed",

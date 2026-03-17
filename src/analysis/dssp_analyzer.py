@@ -358,6 +358,40 @@ Average Secondary Structure Content:
         # Print summary to log
         logger.info("\n" + summary_text)
         
+        # Calculate per-residue secondary structure stability for important regions
+        per_residue_stability = []
+        for res_idx in range(n_residues):
+            # Get all assignments for this residue across frames
+            residue_assignments = dssp_array[:, res_idx]
+            # Count how many different SS types this residue adopts
+            unique_types = len(np.unique(residue_assignments))
+            # Calculate most common SS type
+            unique, counts = np.unique(residue_assignments, return_counts=True)
+            most_common_ss = unique[np.argmax(counts)]
+            persistence = (np.max(counts) / n_frames) * 100  # % time in most common state
+            
+            per_residue_stability.append({
+                'residue_id': int(res_idx + 1),  # 1-indexed
+                'most_common_ss': most_common_ss,
+                'persistence_percent': float(persistence),
+                'n_transitions': int(unique_types - 1)
+            })
+        
+        # Find most stable helix regions (residues persistent in H state)
+        stable_helices = [r for r in per_residue_stability 
+                         if r['most_common_ss'] == 'H' and r['persistence_percent'] > 80]
+        stable_helices_sorted = sorted(stable_helices, key=lambda x: x['persistence_percent'], reverse=True)[:5]
+        
+        # Find most stable sheet regions (residues persistent in E state)
+        stable_sheets = [r for r in per_residue_stability 
+                        if r['most_common_ss'] == 'E' and r['persistence_percent'] > 80]
+        stable_sheets_sorted = sorted(stable_sheets, key=lambda x: x['persistence_percent'], reverse=True)[:5]
+        
+        # Find most flexible regions (residues with many transitions)
+        flexible_regions = sorted(per_residue_stability, 
+                                 key=lambda x: (x['n_transitions'], -x['persistence_percent']), 
+                                 reverse=True)[:5]
+        
         # Write to analysis summary file
         if working_dir:
             try:
@@ -381,7 +415,10 @@ Average Secondary Structure Content:
                     },
                     metadata={
                         "selection": selection,
-                        "dssp_codes_used": list(DSSP_CODE_MAP.keys())
+                        "dssp_codes_used": list(DSSP_CODE_MAP.keys()),
+                        "most_stable_helix_residues": stable_helices_sorted,
+                        "most_stable_sheet_residues": stable_sheets_sorted,
+                        "most_flexible_residues": flexible_regions
                     }
                 )
             except Exception as e:

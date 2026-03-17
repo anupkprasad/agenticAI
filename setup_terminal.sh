@@ -35,11 +35,20 @@ fi
 
 echo "✅ Node found: $NODE"
 echo ""
-echo "💡 After connecting, run:"
-echo "   conda activate ~/conda_envs/ollama_env/"
-echo "   python llm_chat.py"
+echo "💡 Auto-activating conda environment in 3 seconds..."
+echo "💡 Then you can run: python llm_chat.py"
 echo ""
 
 # Use srun with --overlap to avoid resource conflicts
 # This is SLURM-native and more reliable than SSH
-srun --overlap --jobid=$JOB_ID --pty bash
+# Auto-activate conda environment after connection
+srun --overlap --jobid=$JOB_ID --pty bash -c "
+    echo '⏳ Waiting 3 seconds for node connection...'
+    sleep 3
+    echo '🔧 Activating conda environment...'
+    source ~/conda_envs/ollama_env/bin/activate || conda activate ~/conda_envs/ollama_env/
+    echo '✅ Conda environment activated: ollama_env'
+    echo '💡 You can now run: python llm_chat.py'
+    echo ''
+    exec bash
+"

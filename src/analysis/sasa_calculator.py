@@ -227,21 +227,35 @@ def calculate_sasa(
         df.to_csv(csv_filename, index=False)
         logger.info(f"SASA data saved to: {csv_filename}")
         
-        # Write to analysis summary
-        try:
-            summary_entry = f"""
-SASA Analysis Results (GROMACS):
-  Selection: {selection}
-  Probe radius: {probe_radius} nm ({probe_radius * 10:.1f} Å)
-  Frames analyzed: {len(sasa_values)}
-  Mean SASA: {mean_sasa:.2f} nm² (± {std_sasa:.2f})
-  Range: {min_sasa:.2f} - {max_sasa:.2f} nm²
-  Output CSV: {csv_filename}
-"""
-            
-            append_analysis_summary(summary_entry, working_dir or ".")
-        except Exception as e:
-            logger.warning(f"Failed to write to summary file: {e}")
+        # Write to analysis summary file
+        if working_dir:
+            try:
+                append_analysis_summary(
+                    working_dir=working_dir,
+                    analysis_type="SASA",
+                    statistics={
+                        "n_frames": len(sasa_values),
+                        "mean_sasa_nm2": mean_sasa,
+                        "std_sasa_nm2": std_sasa,
+                        "min_sasa_nm2": min_sasa,
+                        "max_sasa_nm2": max_sasa,
+                        "mean_sasa_angstrom2": mean_sasa * 100,  # Convert nm² to Ų
+                        "min_sasa_angstrom2": min_sasa * 100,
+                        "max_sasa_angstrom2": max_sasa * 100
+                    },
+                    files={
+                        "topology": topology_file,
+                        "trajectory": trajectory_file,
+                        "output_csv": csv_filename
+                    },
+                    metadata={
+                        "selection": selection,
+                        "probe_radius_nm": probe_radius,
+                        "probe_radius_angstrom": probe_radius * 10
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Failed to write to summary file: {e}")
         
         # Clean up temp files
         for temp_file in temp_files:

@@ -94,6 +94,50 @@ templates:
       - "MDAnalysis"
       - "numpy"
       - "matplotlib"
+    
+    # CRITICAL: Analysis Summary Logging Requirements
+    logging_requirements:
+      description: |
+        All analysis tools MUST log results to analysis_summary.jsonl 
+        for LLM inference and result extraction.
+      required_import: "from src.analysis.summary_logger import append_analysis_summary"
+      required_statistics:
+        - "n_frames: Number of frames analyzed"
+        - "mean_value: Mean of primary metric"
+        - "std_value: Standard deviation"
+        - "min_value: Minimum value"
+        - "max_value: Maximum value"
+      recommended_metadata:
+        - "selection: Atom selection string"
+        - "important_regions: List of significant regions/residues"
+        - "top_N_results: Top N highest/lowest values"
+        - "threshold: Cutoff values used"
+      example_usage: |
+        # At end of analysis function, before return:
+        if working_dir:
+            try:
+                append_analysis_summary(
+                    working_dir=working_dir,
+                    analysis_type="YourAnalysisName",
+                    statistics={
+                        "n_frames": num_frames,
+                        "mean_value": float(np.mean(values)),
+                        "std_value": float(np.std(values)),
+                        "min_value": float(np.min(values)),
+                        "max_value": float(np.max(values))
+                    },
+                    files={
+                        "topology": topology_file,
+                        "trajectory": trajectory_file,
+                        "output": output_filename  # filename only
+                    },
+                    metadata={
+                        "selection": selection_string,
+                        "important_regions": top_regions
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Failed to write to summary file: {e}")
       
   slurm:
     description: "HPC job submission scripts"
