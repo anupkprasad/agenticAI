@@ -173,6 +173,9 @@ def generate_python_tool(
         code_parts.append('        f"(tried: {file_path}, {cwd_path}, {resolved})"')
         code_parts.append('    )')
         code_parts.append("")
+        code_parts.append("# ⚠️ IMPORTANT: Use _resolve_input_path() for INPUT files ONLY (trajectory, topology)")
+        code_parts.append("# For OUTPUT files, use the filename directly - you're already in working_dir!")
+        code_parts.append("")
         
         # Function definition
         if add_langchain_decorator:

@@ -28,6 +28,7 @@ def check_tool_has_logging(tool_path: str) -> Dict[str, any]:
         "has_append_call": False,
         "has_statistics": False,
         "has_min_max": False,
+        "has_output_path_bug": False,  # NEW: Check for common bug
         "issues": []
     }
     
@@ -61,6 +62,11 @@ def check_tool_has_logging(tool_path: str) -> Dict[str, any]:
         else:
             result["issues"].append("Missing: min/max values in statistics")
         
+        # NEW: Check for common bug - using _resolve_input_path on output files
+        if "_resolve_input_path(output_" in content or "_resolve_input_path(output" in content:
+            result["has_output_path_bug"] = True
+            result["issues"].append("⚠️ BUG: Using _resolve_input_path() on OUTPUT file - use filename directly!")
+        
         # Parse AST to check structure
         try:
             tree = ast.parse(content)
@@ -84,7 +90,8 @@ def check_tool_has_logging(tool_path: str) -> Dict[str, any]:
                 result["has_summary_import"],
                 result["has_append_call"],
                 result["has_statistics"],
-                result["has_min_max"]
+                result["has_min_max"],
+                not result["has_output_path_bug"]  # Must NOT have this bug
             ])
         else:
             result["passes_validation"] = True  # Non-analysis tools don't need logging

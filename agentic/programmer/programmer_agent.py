@@ -535,20 +535,38 @@ For each tool specification above, create a corresponding generation step with t
 - The code will be automatically wrapped in proper function structure
 
 **Path Resolution for File Parameters:**
-A helper function `_resolve_input_path(file_ref, param_name)` is automatically available.
-Use it to resolve file paths that may come from other agent directories:
+⚠️ CRITICAL DISTINCTION between INPUT and OUTPUT files:
 
-Example for trajectory/topology files:
+**INPUT FILES** (trajectory, topology, etc.) - Use `_resolve_input_path()`:
+A helper function `_resolve_input_path(file_ref, param_name)` is automatically available
+to resolve INPUT file paths that may come from other agent directories.
+
 ```python
-# Resolve input file paths (may be from HPC agent directory)
+# ✅ CORRECT: Resolve INPUT file paths (may be from HPC agent directory)
 traj_path = _resolve_input_path(trajectory, "trajectory")
 topo_path = _resolve_input_path(topology, "topology")
 
 # Use resolved paths in commands
+u = mda.Universe(str(topo_path), str(traj_path))
+# or
 cmd = ["gmx", "dssp", "-s", str(topo_path), "-f", str(traj_path), ...]
 ```
 
-This ensures tools work correctly when inputs come from different directories (e.g., trajectories from working_dir/hpc).
+**OUTPUT FILES** - Use filename directly (NO path resolution):
+The tool executor already changes to working_dir, so just write files using the filename.
+
+```python
+# ✅ CORRECT: Use output filename directly (already in working_dir)
+df.to_csv(output_csv, index=False)
+plt.savefig(output_png)
+
+# ❌ WRONG: Do NOT use _resolve_input_path for OUTPUT files
+# output_path = _resolve_input_path(output_file, "output_file")  # NEVER DO THIS!
+```
+
+This ensures:
+- INPUT files are found across agent directories
+- OUTPUT files are created in the correct working_dir
 
 **Analysis Summary Logging (CRITICAL for Analysis Tools):**
 ⚠️ MANDATORY: If generating an ANALYSIS tool, you MUST include logging to analysis_summary.jsonl.
