@@ -163,7 +163,7 @@ def calculate_rmsf(
             
             with open(output_filename, 'w') as f:
                 f.write("# Residue\tRMSF(Angstrom)\n")
-                for res_id, rmsf_val in zip(resids, rmsf_values):
+                for res_id, rmsf_val in zip(residue_ids, rmsf_values):
                     f.write(f"{res_id}\t{rmsf_val:.4f}\n")
             
             logger.info(f"RMSF data saved to {output_filename}")

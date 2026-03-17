@@ -224,7 +224,7 @@ def generate_python_tool(
         # Indent cleaned implementation (without import statements)
         for line in cleaned_implementation.split("\n"):
             if line.strip():  # Skip empty lines at the start
-                code_parts.append(f"        {line}")
+                code_parts.append("        " + line)  # Don't use f-string - breaks if line contains {}
             elif code_parts[-1].strip():  # Keep blank lines between code blocks
                 code_parts.append("        ")
         code_parts.append("")

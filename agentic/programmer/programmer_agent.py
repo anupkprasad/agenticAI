@@ -531,8 +531,61 @@ For each tool specification above, create a corresponding generation step with t
 **CRITICAL for implementation:**
 - Provide ONLY the function body code (what goes inside the function)
 - DO NOT include 'def function_name(...):' - this will be auto-generated
-- DO include imports, logic, return statements
-- The code will be automatically wrapped in proper function structure
+- DO include imports and logic
+- DO NOT include return statements - the template automatically generates proper return with success flag
+- Just perform the work and the template will handle returning results
+- The code will be automatically wrapped in proper function structure with error handling
+
+**COMPLETE EXAMPLE of implementation code:**
+```python
+# ✅ CORRECT: No function definition, no return statement
+import MDAnalysis as mda
+import pandas as pd
+
+# Resolve input paths
+traj_path = _resolve_input_path(trajectory, "trajectory")
+topo_path = _resolve_input_path(topology, "topology")
+
+# Load universe and perform analysis
+u = mda.Universe(str(topo_path), str(traj_path))
+selection = u.select_atoms("protein")
+
+# Calculate values
+com_data = []
+for ts in u.trajectory:
+    com = selection.center_of_mass()
+    com_data.append({
+        "frame": ts.frame,
+        "time": ts.time,
+        "x": com[0],
+        "y": com[1],
+        "z": com[2]
+    })
+
+# Save results
+df = pd.DataFrame(com_data)
+df.to_csv(output_file, index=False)
+
+# Log statistics (no return after this!)
+try:
+    append_analysis_summary(
+        working_dir=os.getcwd(),
+        analysis_type="COM_Analysis",
+        statistics={
+            "n_frames": len(df),
+            "mean_x": float(df["x"].mean()),
+            "std_x": float(df["x"].std()),
+            "min_x": float(df["x"].min()),
+            "max_x": float(df["x"].max())
+        },
+        files={"output": output_file},
+        metadata={"selection": "protein"}
+    )
+except Exception as e:
+    logger.warning(f"Summary logging failed: {e}")
+
+# NO return statement here - template adds it automatically!
+```
 
 ⚠️ **CRITICAL: DO NOT CREATE ORCHESTRATOR TOOLS**
 Tools must be SELF-CONTAINED and implement their own logic. NEVER create tools that:
@@ -602,12 +655,12 @@ Required imports (add these to implementation):
 from src.analysis.summary_logger import append_analysis_summary
 ```
 
-Required logging pattern (add at end of implementation, before return):
+Required logging pattern (add at end of implementation - DO NOT add return after this):
 ```python
 # Log important metrics to analysis summary file (REQUIRED for analysis tools)
-if working_dir:
-    try:
-        append_analysis_summary(
+# NOTE: Do NOT add return statement - template handles that automatically
+try:
+    append_analysis_summary(
             working_dir=working_dir or os.getcwd(),  # Use provided working_dir
             analysis_type="YourAnalysisType",  # e.g., "Contact_Analysis", "Distance_Matrix"
             statistics={{
@@ -794,7 +847,7 @@ metadata={{
                     "tool_name": "workflow_tool",
                     "description": "Generated workflow tool",
                     "parameters": {},
-                    "implementation": "logger.info('Tool executed')\\nreturn {}"
+                    "implementation": "# Minimal tool implementation\nlogger.info('Tool executed')"
                 },
                 reason="Default tool for workflow"
             ))
