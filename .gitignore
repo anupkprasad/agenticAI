@@ -3,6 +3,11 @@ __pycache__/
 .env
 *.pyc
 *.pdb
+*.xtc
+*.top
+*.tpr
+*.gro
+*.log
 *.cache
 results/
 jobs/
@@ -10,6 +15,7 @@ working_dir/
 backup/
 tests/
 tmp/
+docs/
 
 # Log files
 *.log

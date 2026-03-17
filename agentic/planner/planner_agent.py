@@ -212,39 +212,398 @@ class MDPlanner:
             subtask_type=subtask_type  # Pass subtask type to prompt
         )
         
-        # Call LLM to create plan
+        # Call LLM to create plan (with potential tool creation iteration)
+        plan = self._create_plan_with_tool_creation(
+            planning_prompt,
+            structured_prompt,
+            pdb_path,
+            pdb_analysis,
+            component_selection,
+            state,
+            tools_context,
+            knowledge_context,
+            subtask_type
+        )
+        
+        return plan
+    
+    def _create_plan_with_tool_creation(
+        self,
+        initial_prompt: str,
+        structured_prompt: str,
+        pdb_path: str,
+        pdb_analysis: Dict[str, Any],
+        component_selection: Dict[str, Any],
+        state: MDState,
+        tools_context: str,
+        knowledge_context: str,
+        subtask_type: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Create plan with automatic tool creation if LLM indicates tools are missing.
+        
+        Workflow:
+        1. Ask LLM to create plan
+        2. Check if LLM indicates missing tools
+        3. If missing: Generate tool specs → Invoke programmer → Retry planning
+        4. Return final plan
+        
+        Args:
+            initial_prompt: Initial planning prompt
+            structured_prompt: User's structured goal
+            pdb_path: Path to PDB file
+            pdb_analysis: PDB analysis results
+            component_selection: Component selection
+            state: Current workflow state
+            tools_context: Available tools context
+            knowledge_context: Knowledge base context
+            subtask_type: Type of subtask (if any)
+            
+        Returns:
+            Complete execution plan
+        """
+        tool_creation_enabled = self.config.get("planner", {}).get("behavior", {}).get("enable_tool_creation", True)
+        max_iterations = self.config.get("planner", {}).get("behavior", {}).get("max_tool_creation_iterations", 2)
+        
+        current_prompt = initial_prompt
+        current_tools_context = tools_context
+        
+        for iteration in range(max_iterations + 1):  # +1 for initial attempt
+            # Call LLM to create plan
+            try:
+                logger.info(f"PLANNER: Creating execution plan (iteration {iteration + 1}/{max_iterations + 1})...")
+                response = self.llm.prompt(
+                    prompt=current_prompt,
+                    temperature=0.2,
+                    max_tokens=2000
+                )
+                
+                log_llm_interaction(
+                    agent_name="planner.execution_planning",
+                    prompt=current_prompt,
+                    response=response
+                )
+                
+                # Check if LLM indicates missing tools
+                if tool_creation_enabled and iteration < max_iterations:
+                    missing_tools_detected, tool_needs = self._detect_missing_tools_in_response(response)
+                    
+                    if missing_tools_detected:
+                        logger.info(f"PLANNER: LLM indicates missing tools: {tool_needs}")
+                        logger.info("PLANNER: Invoking programmer to create needed tools...")
+                        
+                        # Generate tool specifications via LLM
+                        tool_specs = self._generate_tool_specifications(tool_needs, state)
+                        
+                        # Invoke programmer directly (not through supervisor)
+                        programmer_result = self._invoke_programmer_for_tools(tool_specs, state)
+                        
+                        if programmer_result.get("success"):
+                            logger.info("PLANNER: Programmer successfully created tools. Recreating tools context...")
+                            
+                            # Refresh tools registry to include new tools
+                            self.tools_registry.discover_all_tools()
+                            
+                            # Rebuild tools context with new tools
+                            if subtask_type == "analysis_only":
+                                current_tools_context = self._get_tools_context(agent_name="analysis")
+                            elif subtask_type == "setup_only":
+                                current_tools_context = self._get_tools_context(agent_name="simsetup")
+                            elif subtask_type == "preprocess_only":
+                                current_tools_context = self._get_tools_context(agent_name="preprocess")
+                            else:
+                                current_tools_context = self._get_tools_context()
+                            
+                            # Rebuild prompt with updated tools
+                            current_prompt = self._build_planning_prompt(
+                                structured_prompt,
+                                pdb_path,
+                                pdb_analysis,
+                                component_selection,
+                                state,
+                                current_tools_context,
+                                knowledge_context,
+                                subtask_type=subtask_type,
+                                include_new_tools_note=True
+                            )
+                            
+                            logger.info("PLANNER: Retrying plan creation with new tools...")
+                            continue  # Retry planning with new tools
+                        else:
+                            logger.warning("PLANNER: Programmer failed to create tools. Proceeding with available tools.")
+                
+                # Parse LLM response into structured plan
+                plan = self._parse_llm_plan_response(response, state)
+                
+                # If LLM response was not a valid plan, use fallback
+                if plan is None:
+                    logger.warning("PLANNER: LLM response not suitable - using fallback plan")
+                    plan = self._create_fallback_plan(
+                        structured_prompt, pdb_path, pdb_analysis, component_selection, state
+                    )
+                
+                return plan
+                
+            except Exception as e:
+                logger.error(f"PLANNER: LLM planning failed: {e}", exc_info=True)
+                if iteration == max_iterations:
+                    logger.warning("PLANNER: Max iterations reached. Falling back to template-based planning")
+                    return self._create_fallback_plan(
+                        structured_prompt, pdb_path, pdb_analysis, component_selection, state
+                    )
+        
+        # Should not reach here, but return fallback just in case
+        return self._create_fallback_plan(
+            structured_prompt, pdb_path, pdb_analysis, component_selection, state
+        )
+    
+    def _detect_missing_tools_in_response(self, llm_response: str) -> tuple[bool, str]:
+        """
+        Detect if LLM response indicates missing tools.
+        
+        Looks for keywords like "missing tool", "need to create", etc.
+        
+        Args:
+            llm_response: LLM's planning response
+            
+        Returns:
+            Tuple of (missing_detected: bool, tool_needs: str)
+        """
+        indicators = self.config.get("planner", {}).get("tool_creation", {}).get("missing_tool_indicators", [
+            "missing tool",
+            "tool not available",
+            "need to create",
+            "require custom tool",
+            "no existing tool",
+            "should generate",
+            "programmer should create"
+        ])
+        
+        response_lower = llm_response.lower()
+        
+        for indicator in indicators:
+            if indicator.lower() in response_lower:
+                # Extract context around the indicator
+                import re
+                # Find sentences containing the indicator
+                sentences = re.split(r'[.!?]\s+', llm_response)
+                relevant_sentences = [s for s in sentences if indicator.lower() in s.lower()]
+                
+                tool_needs = " ".join(relevant_sentences) if relevant_sentences else llm_response[:500]
+                
+                logger.info(f"PLANNER: Detected missing tool indicator: '{indicator}'")
+                logger.debug(f"PLANNER: Tool needs context: {tool_needs}")
+                
+                return True, tool_needs
+        
+        return False, ""
+    
+    def _generate_tool_specifications(self, tool_needs: str, state: MDState) -> List[Dict[str, Any]]:
+        """
+        Generate detailed tool specifications via LLM for programmer.
+        
+        Args:
+            tool_needs: Description of what tools are needed
+            state: Current workflow state
+            
+        Returns:
+            List of tool specifications
+        """
+        if not self.llm.available:
+            logger.warning("PLANNER: LLM unavailable for tool specification generation")
+            return []
+        
+        logger.info("PLANNER: Generating tool specifications via LLM...")
+        
+        spec_prompt = f"""You are a molecular dynamics workflow expert tasked with specifying custom tools that need to be created.
+
+**CONTEXT:**
+The planner has identified that existing tools are insufficient. Here's what's needed:
+
+{tool_needs}
+
+**WORKFLOW CONTEXT:**
+- User Goal: {state.get('user_goal', 'Not specified')}
+- Force Field: {state.get('force_field', 'amber99sb-ildn')}
+- MD Engine: {state.get('md_engine', 'gromacs')}
+
+**YOUR TASK:**
+Create detailed specifications for the tools/scripts that need to be generated. For each tool, specify:
+
+1. **name**: A descriptive function/script name (snake_case)
+2. **description**: Brief one-line description of what the tool does
+3. **language**: python or tcl
+4. **purpose**: Detailed explanation of what problem this tool solves and how
+5. **parameters**: What inputs does it need? (name, type, description, default)
+6. **return_type**: What type of value it returns (default: "Dict[str, Any]")
+7. **dependencies**: Required imports/modules (list of strings)
+8. **examples**: Optional usage examples
+
+**OUTPUT FORMAT (JSON array):**
+```json
+[
+  {{
+    "name": "custom_analysis_function",
+    "description": "Calculate specific metric from trajectory",
+    "language": "python",
+    "purpose": "This tool analyzes MD trajectories to compute a specific metric over time. It processes each frame, calculates the metric, and saves results to a file for plotting and analysis.",
+    "parameters": {{
+      "trajectory": {{"type": "str", "description": "Path to .xtc trajectory file"}},
+      "topology": {{"type": "str", "description": "Path to .tpr/.gro topology file"}},
+      "output_file": {{"type": "str", "description": "Output CSV/DAT file path"}}
+    }},
+    "return_type": "Dict[str, Any]",
+    "dependencies": ["MDAnalysis", "numpy", "pandas"],
+    "examples": "result = custom_analysis_function('traj.xtc', 'topol.gro', 'output.csv')\\n# Result contains path to output file"
+  }}
+]
+```
+
+**IMPORTANT:** The "examples" field should be a single string (not an array). Use \\n for multiple lines if needed.
+
+Generate tool specifications now:"""
+        
         try:
-            logger.info("PLANNER: Calling LLM to create execution plan...")
-            response = self.llm.prompt(
-                prompt=planning_prompt,
-                temperature=0.2,
-                max_tokens=2000
-            )
+            response = self.llm.prompt(spec_prompt, temperature=0.1, max_tokens=1500)
             
             log_llm_interaction(
-                agent_name="planner.execution_planning",
-                prompt=planning_prompt,
+                agent_name="planner.tool_specification",
+                prompt=spec_prompt,
                 response=response
             )
             
-            # Parse LLM response into structured plan
-            plan = self._parse_llm_plan_response(response, state)
+            # Parse JSON response
+            import json
+            import re
             
-            # If LLM response was not a valid plan (e.g., asking questions), use fallback
-            if plan is None:
-                logger.warning("PLANNER: LLM response not suitable - using fallback plan")
-                plan = self._create_fallback_plan(
-                    structured_prompt, pdb_path, pdb_analysis, component_selection, state
-                )
-            
+            # Extract JSON array
+            json_match = re.search(r'\[[\s\S]*\]', response)
+            if json_match:
+                specs = json.loads(json_match.group())
+                logger.info(f"PLANNER: Generated {len(specs)} tool specifications")
+                return specs
+            else:
+                logger.warning("PLANNER: Could not parse tool specifications from LLM response")
+                return []
+                
         except Exception as e:
-            logger.error(f"PLANNER: LLM planning failed: {e}", exc_info=True)
-            logger.warning("PLANNER: Falling back to template-based planning")
-            plan = self._create_fallback_plan(
-                structured_prompt, pdb_path, pdb_analysis, component_selection, state
+            logger.error(f"PLANNER: Tool specification generation failed: {e}")
+            return []
+    
+    def _invoke_programmer_for_tools(
+        self, 
+        tool_specs: List[Dict[str, Any]], 
+        state: MDState
+    ) -> Dict[str, Any]:
+        """
+        Directly invoke programmer agent to create specified tools.
+        
+        This bypasses the supervisor and directly calls programmer.programmer_node().
+        
+        Args:
+            tool_specs: List of tool specifications from LLM
+            state: Current workflow state
+            
+        Returns:
+            Programmer result with success status and created tools
+        """
+        if not tool_specs:
+            logger.warning("PLANNER: No tool specifications provided to programmer")
+            return {"success": False, "error": "No specifications"}
+        
+        logger.info(f"PLANNER: Invoking programmer to create {len(tool_specs)} tools...")
+        
+        # Prepare programmer instructions from tool specs
+        instructions_parts = []
+        for spec in tool_specs:
+            tool_name = spec.get("name", "unknown_tool")
+            language = spec.get("language", "python")
+            description = spec.get("description", "")
+            purpose = spec.get("purpose", "")
+            params = spec.get("parameters", {})
+            
+            instructions_parts.append(
+                f"**Tool: {tool_name} ({language})**\n"
+                f"Description: {description}\n"
+                f"Purpose: {purpose}\n"
+                f"Parameters: {', '.join(params.keys()) if params else 'None'}\n"
             )
         
-        return plan
+        programmer_instructions = "\n\n".join(instructions_parts)
+        
+        # Normalize tool specifications - convert examples from list to string
+        # The programmer expects examples as a string, but LLM often returns it as a list
+        normalized_specs = []
+        for spec in tool_specs:
+            spec_copy = spec.copy()
+            if "examples" in spec_copy and isinstance(spec_copy["examples"], list):
+                # Join list examples with newlines
+                spec_copy["examples"] = "\n".join(spec_copy["examples"])
+                logger.debug(f"PLANNER: Converted examples list to string for tool '{spec_copy.get('name')}'")
+            normalized_specs.append(spec_copy)
+        
+        # Store in state for programmer
+        state["programmer_instructions"] = programmer_instructions
+        state["tool_specifications"] = normalized_specs
+        
+        # Log programmer invocation
+        from ..utils import log_agent_action
+        log_agent_action(
+            agent_name="planner",
+            action="Invoking Programmer Agent",
+            details={
+                "tool_count": len(tool_specs),
+                "tools": [spec.get("name") for spec in tool_specs],
+                "bypass_supervisor": True
+            }
+        )
+        
+        try:
+            # Directly call programmer node (bypass supervisor)
+            updated_state = self.programmer.programmer_node(state)
+            
+            # Extract programmer result
+            programmer_output = updated_state.get("programmer_output", {})
+            
+            result = {
+                "success": programmer_output.get("success", False),
+                "generated_tools": programmer_output.get("generated_tools", []),
+                "tools_available": programmer_output.get("tools_available", {}),
+                "output_directory": programmer_output.get("output_directory", ""),
+                "errors": programmer_output.get("errors", [])
+            }
+            
+            if result["success"]:
+                logger.info(f"PLANNER: Programmer created {len(result['generated_tools'])} tools successfully")
+                log_agent_action(
+                    agent_name="planner",
+                    action="Programmer Completed",
+                    details={
+                        "tools_created": [t.get("name") for t in result["generated_tools"]],
+                        "status": "✅ SUCCESS"
+                    }
+                )
+            else:
+                logger.warning(f"PLANNER: Programmer failed or incomplete: {result['errors']}")
+                log_agent_action(
+                    agent_name="planner",
+                    action="Programmer Failed",
+                    details={
+                        "errors": result["errors"],
+                        "status": "❌ FAILED"
+                    }
+                )
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"PLANNER: Programmer invocation failed: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e),
+                "generated_tools": [],
+                "tools_available": {}
+            }
     
     def _build_planning_prompt(
         self,
@@ -255,7 +614,8 @@ class MDPlanner:
         state: MDState,
         tools_context: str,
         knowledge_context: str,
-        subtask_type: Optional[str] = None
+        subtask_type: Optional[str] = None,
+        include_new_tools_note: bool = False
     ) -> str:
         """Build planning prompt for execution plan creation."""
         
@@ -294,6 +654,12 @@ CRITICAL: If you output JSON, YAML, or any structured format, the plan will be r
 USER GOAL:
 {structured_prompt}
 
+**Available Files:**
+Topology: {working_dir}/hpc/md.gro
+Trajectory: {working_dir}/hpc/md.xtc
+Energy: {working_dir}/hpc/md.edr
+HPC Output Directory: {working_dir}/hpc
+
 TASK: Analysis-only - perform trajectory analysis on existing simulation data.
 DO NOT include preprocessing, setup, or HPC agents.
 ONLY create execution plan for Analysis Agent.
@@ -306,12 +672,33 @@ File Structure:
 **Available Analysis Agent Tools:**
 {tools_context}
 
+{self._get_tool_creation_instructions(include_new_tools_note)}
+
 **CRITICAL INSTRUCTIONS:**
-- Use the analysis agent's Python tools listed above (calculate_rmsd, calculate_rmsf, etc.)
+- FIRST: Check if the requested analysis is available in the tools list above
+- If a required analysis tool is missing (e.g., DSSP, SASA, hydrogen bonds, distance calculations, etc.), you MUST state "Missing tool for [analysis type]" explicitly
+- Use the analysis agent's Python tools listed above (calculate_rmsd, calculate_rmsf, etc.) when available
+- Do NOT assume tools exist - check the list carefully
 - Do NOT use bash/shell commands or GROMACS CLI tools (gmx rmsf, etc.)
 - The analysis agent will handle file discovery and tool execution
 - Specify WHICH tools to use and what analysis to perform
 - Let the analysis agent handle the implementation details
+
+**ANALYSIS TYPES TO CHECK FOR:**
+If the user requests any of these analyses, verify a tool exists:
+- Secondary structure (DSSP)
+- Solvent accessible surface area (SASA)
+- Hydrogen bonds
+- Salt bridges
+- Protein-ligand contacts
+- Distance measurements
+- Angle calculations
+- Dihedral angles
+- Principal component analysis (PCA)
+- Clustering
+- Free energy calculations
+
+If any requested analysis is NOT in the available tools, state it clearly.
 
 {nl_format_instructions}
 
@@ -382,6 +769,18 @@ Water Model: {state.get('water_model', 'tip3p')}
 **Available Agents and Their Tools:**
 {tools_context}
 
+{self._get_tool_creation_instructions(include_new_tools_note)}
+
+**CRITICAL INSTRUCTIONS FOR TOOL CHECKING:**
+- BEFORE creating your plan, verify that all required tools are available in the lists above
+- If any preprocessing, setup, simulation, or analysis capability is missing, explicitly state "Missing tool for [functionality]"
+- Do NOT assume capabilities exist - check the actual tools list
+- Examples of specialized tools that may need creation:
+  * Custom analysis (DSSP, SASA, hydrogen bonds, contacts, etc.)
+  * Specialized structure modifications
+  * Custom force field parameters
+  * Non-standard MD parameters or protocols
+
 **CRITICAL INSTRUCTIONS FOR AGENT NAMING:**
 You MUST explicitly name each agent involved in your plan using these EXACT phrases:
 - "Preprocessing Agent" or "preprocessing agent" - for structure cleaning
@@ -418,6 +817,64 @@ The HPC Agent will handle job submission to the compute cluster. It will use cre
 CRITICAL: Use the section headers exactly as shown above with ** markers (e.g., **Preprocessing Agent:**, **Simulation Setup Agent:**, **HPC Agent:**, **Analysis Agent:**). This allows each agent to extract only its relevant instructions.
 
 Provide a comprehensive natural language plan following this structure. DO NOT output JSON, YAML, or any structured data format."""
+    
+    def _get_tool_creation_instructions(self, include_new_tools_note: bool = False) -> str:
+        """
+        Get instructions about tool creation capability for LLM prompt.
+        
+        Args:
+            include_new_tools_note: Whether to note that new tools were just created
+            
+        Returns:
+            Formatted instructions string
+        """
+        tool_creation_enabled = self.config.get("planner", {}).get("behavior", {}).get("enable_tool_creation", True)
+        
+        if not tool_creation_enabled:
+            return ""
+        
+        if include_new_tools_note:
+            return """
+**NOTE ON NEW TOOLS:**
+Custom tools have just been created by the Programmer Agent and are now available.
+These new tools are included in the tools list above. Please create your execution plan
+using both the original tools and the newly created tools.
+"""
+        else:
+            return """
+**CRITICAL: TOOL AVAILABILITY CHECK**
+
+BEFORE creating your execution plan, you MUST:
+
+1. **Review the requested task** - Identify what specific analyses, calculations, or operations are needed
+
+2. **Check available tools** - Carefully examine the tools list above to see if they can accomplish the task
+
+3. **Identify missing capabilities** - If the required functionality is NOT available in existing tools, you MUST explicitly state this
+
+**HOW TO REQUEST MISSING TOOLS:**
+
+If you identify that a tool is missing, you MUST include a clear statement in your response using one of these EXACT phrases:
+- "Missing tool for [specific functionality]"
+- "Need to create custom tool for [specific purpose]"  
+- "No existing tool available for [task]"
+- "Tool not available for [functionality]"
+- "Require custom tool for [specific analysis]"
+- "Programmer should create [tool description]"
+
+**EXAMPLE:**
+If the user requests DSSP (secondary structure) analysis but you don't see a DSSP tool in the available tools list, you MUST state:
+"Missing tool for DSSP secondary structure analysis. Need to create custom tool for calculating time-dependent helix, sheet, turn, and coil fractions from trajectory data."
+
+**WHAT HAPPENS NEXT:**
+When you indicate missing tools, the Programmer Agent will be automatically invoked to create them before your execution plan is finalized. The tools will then be available for the field agents to use.
+
+**IMPORTANT:**
+- DO check the tools list carefully - don't request tools that already exist
+- DO be specific about what functionality is missing
+- DO indicate missing tools explicitly even if you think they "should" exist
+- DO request tool creation for ANY specialized analysis not covered by existing tools
+"""
     
     def _parse_llm_plan_response(self, response: str, state: MDState) -> Optional[Dict[str, Any]]:
         """Parse LLM response. Return None if response is just asking questions."""

@@ -155,17 +155,18 @@ def calculate_rmsf(
                 for i in least_flexible_idx
             ]
             
-            # Save data if requested
+            # Save data if requested (use filename only, already in working_dir)
             if output_file:
-                output_path = Path(output_file)
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                with open(output_file, 'w') as f:
-                    f.write("# Residue_ID\tRMSF(Angstrom)\n")
-                    for res_id, rmsf_val in zip(residue_ids, rmsf_values):
-                        f.write(f"{res_id}\t{rmsf_val:.4f}\n")
-                
-                logger.info(f"RMSF data saved to {output_file}")
+                output_filename = output_file
+            else:
+                output_filename = "rmsf.dat"
+            
+            with open(output_filename, 'w') as f:
+                f.write("# Residue\tRMSF(Angstrom)\n")
+                for res_id, rmsf_val in zip(resids, rmsf_values):
+                    f.write(f"{res_id}\t{rmsf_val:.4f}\n")
+            
+            logger.info(f"RMSF data saved to {output_filename}")
             
             # Write to analysis summary file
             if working_dir:

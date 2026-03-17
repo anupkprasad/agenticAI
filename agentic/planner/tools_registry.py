@@ -53,6 +53,11 @@ class ToolsRegistry:
         """
         logger.info("Starting tool discovery...")
         
+        # CRITICAL: Clear existing tools to prevent duplication when refreshing
+        self.tools.clear()
+        self.tools_by_agent.clear()
+        logger.debug("Cleared existing tools before rediscovery")
+        
         # Agent directories to scan
         agent_dirs = [
             "supervisor",
@@ -75,8 +80,54 @@ class ToolsRegistry:
             if tools_file.exists():
                 self._scan_tools_file(str(tools_file), agent_name)
         
+        # Also scan programmer-generated tools in working_dir
+        self._scan_programmer_generated_tools()
+        
         logger.info(f"Tool discovery complete. Found {len(self.tools)} tools across {len(self.tools_by_agent)} agents")
         return self.tools
+    
+    def _scan_programmer_generated_tools(self):
+        """Scan working_dir/programmer for dynamically generated tools."""
+        try:
+            from agentic.utils import get_dynamic_tool_loader
+            import os
+            
+            # Ensure programmer directory exists
+            programmer_dir = "working_dir/programmer"
+            if not os.path.exists(programmer_dir):
+                logger.debug(f"Programmer directory does not exist: {programmer_dir}")
+                return
+            
+            # Load programmer tools - MUST use refresh=True to reload from disk
+            tool_loader = get_dynamic_tool_loader(refresh=True)
+            programmer_tools = tool_loader.get_tools_for_agent("all")
+            tool_metadata_list = tool_loader.get_tool_metadata_list()
+            
+            if not programmer_tools:
+                logger.debug("No programmer-generated tools found")
+                return
+            
+            logger.info(f"Discovered {len(programmer_tools)} programmer-generated tools")
+            
+            # Add to registry
+            if "programmer_generated" not in self.tools_by_agent:
+                self.tools_by_agent["programmer_generated"] = []
+            
+            for tool_metadata in tool_metadata_list:
+                tool_name = tool_metadata["name"]
+                self.tools[f"programmer.{tool_name}"] = tool_metadata
+                self.tools_by_agent["programmer_generated"].append(tool_metadata)
+                
+                # CRITICAL: Also add programmer tools to the analysis agent category
+                # so they appear when planner requests analysis tools
+                if "analysis" not in self.tools_by_agent:
+                    self.tools_by_agent["analysis"] = []
+                self.tools_by_agent["analysis"].append(tool_metadata)
+                
+                logger.info(f"  Registered programmer tool: {tool_name} (available to analysis agent)")
+                
+        except Exception as e:
+            logger.warning(f"Could not load programmer-generated tools: {e}")
     
     def _scan_tools_file(self, file_path: str, agent_name: str):
         """

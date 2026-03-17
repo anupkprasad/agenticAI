@@ -39,6 +39,8 @@ planner:
     use_knowledge_base: true  # Load domain knowledge from /knowledge
     respect_user_exclusions: true  # CRITICAL: Honor "protein only", "no HPC", "no analysis" instructions
     match_component_selection: true  # Only plan for components user explicitly selected
+    enable_tool_creation: true  # Allow planner to invoke programmer for missing tools
+    max_tool_creation_iterations: 2  # Max iterations of tool creation before giving up
     
   # Output format for plans - ALWAYS NATURAL LANGUAGE
   output_format:
@@ -82,6 +84,20 @@ planner:
       - "md_fundamentals"  # MD theory and best practices
     max_tools_chars: 8000  # Max characters for tools context
     max_knowledge_chars: 8000  # Max characters for knowledge context
+  
+  # Tool creation (programmer invocation)
+  tool_creation:
+    enabled: true
+    # Keywords in LLM response that trigger tool creation
+    missing_tool_indicators:
+      - "missing tool"
+      - "tool not available"
+      - "need to create"
+      - "require custom tool"
+      - "no existing tool"
+      - "should generate"
+      - "programmer should create"
+    output_directory: "working_dir/programmer"  # Where programmer creates tools
     
   # When to use fallback plan (keyword-based)
   fallback_triggers:

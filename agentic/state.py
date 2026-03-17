@@ -64,8 +64,14 @@ class MDState(TypedDict):
     current_node: Optional[str]        # Track which node we're currently in
     next_node: Optional[str]
     human_feedback: Optional[str]
-    working_directory: Optional[str]
-    preprocess_directory: Optional[str]  # Subdirectory for preprocessing outputs
+    working_directory: Optional[str]   # Root working directory (e.g., ./working_dir)
+    
+    # Agent-specific output directories (hardcoded structure)
+    preprocess_dir: Optional[str]      # working_dir/preprocess/
+    simsetup_dir: Optional[str]        # working_dir/simsetup/
+    hpc_dir: Optional[str]             # working_dir/hpc/
+    analysis_dir: Optional[str]        # working_dir/analysis/
+    
     execution_path: List[str]          # Track which nodes have been visited
     execution_plan: Optional[Dict[str, Any]]  # Detailed execution plan from planner
     plan_executed: bool                # Whether execution plan has been created

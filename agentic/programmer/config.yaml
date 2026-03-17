@@ -1,0 +1,253 @@
+# Programmer Agent Configuration
+#
+# Generates custom tools and scripts for MD workflow execution
+# Called by planner when new functionality is needed
+
+# Agent Identity
+agent:
+  name: "Programmer Agent"
+  role: "Code Generation Specialist"
+  description: |
+    Creates custom Python and TCL tools for MD workflow automation.
+    Invoked by planner when existing tools are insufficient.
+    Generated tools are saved in working_dir/programmer/ for use by field agents.
+  
+  capabilities:
+    - "Generate Python tools with @tool decorator for LangChain integration"
+    - "Create TCL scripts for VMD/NAMD analysis"
+    - "Generate GROMACS MDP parameter files"
+    - "Create analysis scripts (RMSD, RMSF, energy, etc.)"
+    - "Generate SLURM job submission scripts"
+    - "Validate generated code syntax and imports"
+    - "Create complete tool documentation"
+  
+  # Execution limits
+  max_tools_per_request: 10  # Max tools to generate in one call
+  max_code_length: 5000      # Max lines per generated file
+  validate_before_save: true # Validate syntax before writing
+  fail_fast: false           # Continue on error or stop
+
+# Output directories
+output:
+  base_directory: "working_dir/programmer"
+  python_tools: "working_dir/programmer/python"
+  tcl_scripts: "working_dir/programmer/tcl"
+  mdp_files: "working_dir/programmer/mdp"
+  slurm_scripts: "working_dir/programmer/slurm"
+  analysis_scripts: "working_dir/programmer/analysis"
+
+# Default settings for code generation
+defaults:
+  language: "python"
+  add_langchain_decorator: true
+  include_docstrings: true
+  include_type_hints: true
+  include_error_handling: true
+  include_logging: true
+  include_examples: false  # Add usage examples in docstring
+  
+# Supported languages and their configurations
+languages:
+  python:
+    version: "3.11+"
+    style_guide: "PEP 8"
+    default_imports:
+      - "import logging"
+      - "from typing import Dict, Any, Optional, List"
+      - "from pathlib import Path"
+    tool_decorator: "from langchain.tools import tool"
+    
+  tcl:
+    version: "8.6+"
+    context: "VMD/NAMD scripting"
+    common_packages:
+      - "mol"
+      - "atomselect"
+      - "measure"
+
+# Template categories
+templates:
+  mdp:
+    description: "GROMACS molecular dynamics parameter files"
+    common_types:
+      - "minimization"
+      - "equilibration_nvt"
+      - "equilibration_npt"
+      - "production_md"
+      - "free_energy"
+    default_parameters:
+      integrator: "md"
+      dt: 0.002
+      nsteps: 50000
+      nstenergy: 1000
+      nstlog: 1000
+      
+  analysis:
+    description: "MD trajectory analysis scripts"
+    common_types:
+      - "rmsd_analysis"
+      - "rmsf_analysis"
+      - "distance_calculation"
+      - "hydrogen_bond_analysis"
+      - "secondary_structure"
+    default_libraries:
+      - "MDAnalysis"
+      - "numpy"
+      - "matplotlib"
+      
+  slurm:
+    description: "HPC job submission scripts"
+    default_settings:
+      partition: "compute"
+      time: "24:00:00"
+      nodes: 1
+      ntasks_per_node: 1
+      cpus_per_task: 8
+      mem: "16GB"
+      
+  preprocessing:
+    description: "PDB preprocessing scripts"
+    common_operations:
+      - "clean_structure"
+      - "add_hydrogens"
+      - "fix_residues"
+      - "extract_chains"
+
+# Code validation rules
+validation:
+  python:
+    check_syntax: true
+    check_imports: true
+    required_sections:
+      - "docstring"
+      - "function_definition"
+      - "return_statement"
+    banned_functions:
+      - "eval"
+      - "exec"
+      - "compile"
+    
+  tcl:
+    check_syntax: true
+    check_braces: true
+    required_sections:
+      - "proc_definition"
+
+# LLM prompting configuration
+llm:
+  system_prompt: |
+    You are an expert MD workflow programmer specializing in:
+    - Python tool development with LangChain @tool decorators
+    - TCL scripting for VMD/NAMD
+    - GROMACS parameter file generation
+    - HPC job submission scripts
+    
+    Generate production-ready, well-documented code that follows best practices.
+    Include proper error handling, type hints, logging, and clear documentation.
+    
+  code_generation_guidelines:
+    - "Use clear, descriptive variable and function names"
+    - "Add comprehensive docstrings with Args, Returns, Examples"
+    - "Include type hints for all parameters and returns"
+    - "Add error handling for common failure cases"
+    - "Use logging instead of print statements"
+    - "Follow language-specific style guides (PEP 8 for Python)"
+    - "Make code modular and reusable"
+    - "Add inline comments for complex logic"
+    
+  example_structure: |
+    For Python tools:
+    '''
+    from langchain.tools import tool
+    from typing import Dict, Any
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    @tool
+    def my_custom_tool(param1: str, param2: int = 10) -> Dict[str, Any]:
+        """
+        Brief description of what this tool does.
+        
+        Args:
+            param1: Description of param1
+            param2: Description of param2 (default: 10)
+            
+        Returns:
+            Dict with:
+                - success (bool): Whether operation succeeded
+                - result: The computation result
+                - message: Status message
+                
+        Example:
+            >>> result = my_custom_tool("input.pdb", param2=20)
+            >>> print(result["success"])
+        """
+        try:
+            logger.info(f"Running my_custom_tool with {param1}")
+            
+            # Tool logic here
+            result = {"data": "processed"}
+            
+            return {
+                "success": True,
+                "result": result,
+                "message": "Tool completed successfully"
+            }
+        except Exception as e:
+            logger.error(f"Tool failed: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    '''
+
+# Tool naming conventions
+naming:
+  python_functions: "snake_case"
+  tcl_procedures: "camelCase"
+  file_names: "snake_case"
+  prefixes:
+    analysis: "analyze_"
+    calculation: "calculate_"
+    generation: "generate_"
+    validation: "validate_"
+    plotting: "plot_"
+
+# Documentation templates
+documentation:
+  function_docstring: |
+    Brief one-line description.
+    
+    Detailed explanation of what the function does,
+    when to use it, and any important considerations.
+    
+    Args:
+        param_name (type): Parameter description
+        
+    Returns:
+        return_type: Description of return value
+        
+    Raises:
+        ExceptionType: When and why this is raised
+        
+    Example:
+        >>> result = function_name(args)
+        >>> # What to expect
+        
+  module_docstring: |
+    Module Name - Brief Description
+    
+    Detailed module purpose and contents.
+    
+    Available Functions:
+        - function1: Description
+        - function2: Description
+        
+    Dependencies:
+        - dependency1
+        - dependency2
+        
+    Usage:
+        from module_name import function_name
+        result = function_name(args)

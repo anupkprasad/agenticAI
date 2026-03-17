@@ -41,12 +41,11 @@ def calculate_radius_of_gyration(
     indicate folding/unfolding events or conformational changes.
     
     Args:
-        topology_file: Topology file (.gro, .pdb, .tpr)
-        trajectory_file: Trajectory file (.xtc, .trr, .dcd)
+        topology_file: Topology file (.gro, .pdb, .tpr) - full path
+        trajectory_file: Trajectory file (.xtc, .trr, .dcd) - full path  
         selection: Atom selection for Rg calculation (default: "protein")
-        output_file: Output file path for Rg data (.dat, .csv)
-        working_dir: Working directory for analysis
-        
+        output_file: Output filename only (default: "rg.dat") - file saved in working_dir
+        working_dir: Working directory for analysis (files will be written here)
     Returns:
         Dict with Rg results and statistics
     """
@@ -106,17 +105,18 @@ def calculate_radius_of_gyration(
             min_rg = float(np.min(rg_values))
             max_rg = float(np.max(rg_values))
             
-            # Save data if requested
+            # Save data if requested (use filename only, already in working_dir)
             if output_file:
-                output_path = Path(output_file)
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                with open(output_file, 'w') as f:
-                    f.write("# Time(ps)\tRg(Angstrom)\n")
-                    for t, rg in zip(times, rg_values):
-                        f.write(f"{t:.2f}\t{rg:.4f}\n")
-                
-                logger.info(f"Rg data saved to {output_file}")
+                output_filename = output_file
+            else:
+                output_filename = "rg.dat"
+            
+            with open(output_filename, 'w') as f:
+                f.write("# Time(ps)\tRg(Angstrom)\n")
+                for t, rg in zip(times, rg_values):
+                    f.write(f"{t:.4f}\t{rg:.4f}\n")
+            
+            logger.info(f"Radius of gyration data saved to {output_filename}")
             
             # Write to analysis summary file
             if working_dir:

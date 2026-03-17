@@ -16,6 +16,7 @@ import time
 import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, List
+from functools import wraps
 
 # Import modular tools from src/hpc/
 from src.hpc.file_copy import copy_simulation_files
@@ -55,6 +56,12 @@ class HPCToolExecutor:
             config: HPC configuration (ssh, paths, slurm defaults)
         """
         self.config = config or {}
+        
+        # Set working directory for programmer tool outputs
+        paths = self.config.get("paths", {})
+        self.working_dir = Path(paths.get("local_hpc_dir", "working_dir/hpc"))
+        self.working_dir.mkdir(parents=True, exist_ok=True)
+        
         self.tools = {
             "copy_simulation_files": copy_simulation_files,
             "estimate_simulation_time": estimate_simulation_time,
@@ -63,7 +70,82 @@ class HPCToolExecutor:
             "check_job_status": check_job_status,
             "download_results": download_results
         }
-        logger.info("HPCToolExecutor initialized")
+        
+        # Load programmer-generated tools
+        self._load_programmer_tools()
+        
+        logger.info(f"HPCToolExecutor initialized with {len(self.tools)} tools (working_dir: {self.working_dir})")
+    
+    def _wrap_tool_for_working_dir(self, tool_func, tool_name: str):
+        """
+        Wrap a programmer-generated tool to execute in the agent's working directory.
+        This ensures all file outputs go to working_dir/hpc.
+        
+        Args:
+            tool_func: The tool function to wrap
+            tool_name: Name of the tool (for logging)
+            
+        Returns:
+            Wrapped function that executes in the agent's working directory
+        """
+        # Get the actual function if it's a StructuredTool
+        actual_func = tool_func.func if hasattr(tool_func, 'func') else tool_func
+        
+        @wraps(actual_func)
+        def wrapped_tool(**kwargs):
+            """
+            Execute tool in the agent's working directory context.
+            Changes to working_dir before execution and restores original directory after.
+            """
+            original_dir = os.getcwd()
+            try:
+                # Change to agent's working directory
+                os.chdir(self.working_dir)
+                logger.debug(f"Executing {tool_name} in directory: {self.working_dir}")
+                
+                # Execute the tool
+                if hasattr(tool_func, 'func'):
+                    result = tool_func.func(**kwargs)
+                elif hasattr(tool_func, 'invoke'):
+                    result = tool_func.invoke(kwargs)
+                else:
+                    result = tool_func(**kwargs)
+                
+                return result
+            finally:
+                # Always restore original directory
+                os.chdir(original_dir)
+        
+        # Preserve StructuredTool attributes if needed
+        if hasattr(tool_func, 'name'):
+            wrapped_tool.name = tool_func.name
+        if hasattr(tool_func, 'description'):
+            wrapped_tool.description = tool_func.description
+        if hasattr(tool_func, 'args_schema'):
+            wrapped_tool.args_schema = tool_func.args_schema
+            
+        return wrapped_tool
+    
+    def _load_programmer_tools(self):
+        """Load dynamically generated tools from programmer agent."""
+        try:
+            from agentic.utils import get_dynamic_tool_loader
+            
+            tool_loader = get_dynamic_tool_loader(refresh=True)
+            programmer_tools = tool_loader.get_tools_for_agent("hpc")
+            
+            if programmer_tools:
+                logger.info(f"Loading {len(programmer_tools)} programmer-generated tools for hpc agent")
+                for tool_name, tool_func in programmer_tools.items():
+                    # Wrap the tool to execute in the agent's working directory
+                    wrapped_tool = self._wrap_tool_for_working_dir(tool_func, tool_name)
+                    self.tools[tool_name] = wrapped_tool
+                    logger.info(f"  Registered programmer tool: {tool_name} (wrapped for {self.working_dir})")
+            else:
+                logger.debug("No programmer-generated tools found")
+                
+        except Exception as e:
+            logger.warning(f"Failed to load programmer tools: {e}")
     
     def execute(self, tool_name: str, **kwargs) -> Dict[str, Any]:
         """

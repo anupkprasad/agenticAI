@@ -48,12 +48,12 @@ def calculate_rmsd(
     before computing RMSD. Set align_before_rmsd=False to disable this.
     
     Args:
-        topology_file: Topology file (.gro, .pdb, .tpr)
-        trajectory_file: Trajectory file (.xtc, .trr, .dcd)
+        topology_file: Topology file (.gro, .pdb, .tpr) - full path
+        trajectory_file: Trajectory file (.xtc, .trr, .dcd) - full path
         selection: Atom selection for RMSD calculation (default: "protein and name CA")
         reference_frame: Reference frame number (default: 0 - first frame)
-        output_file: Output file path for RMSD data (.dat, .csv)
-        working_dir: Working directory for analysis
+        output_file: Output filename only (default: "rmsd.dat") - file saved in working_dir
+        working_dir: Working directory for analysis (files will be written here)
         align_before_rmsd: Whether to align before RMSD calculation (default: True)
         
     Returns:
@@ -109,17 +109,18 @@ def calculate_rmsd(
             min_rmsd = float(np.min(rmsd_values))
             max_rmsd = float(np.max(rmsd_values))
             
-            # Save data if requested
+            # Save data if requested (use filename only, already in working_dir)
             if output_file:
-                output_path = Path(output_file)
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                with open(output_file, 'w') as f:
-                    f.write("# Time(ns)\tRMSD(Angstrom)\n")
-                    for t, r in zip(times, rmsd_values):
-                        f.write(f"{t/1000.0:.4f}\t{r:.4f}\n")  # Convert ps to ns
-                
-                logger.info(f"RMSD data saved to {output_file}")
+                output_filename = output_file
+            else:
+                output_filename = "rmsd.dat"
+            
+            with open(output_filename, 'w') as f:
+                f.write("# Time(ns)\tRMSD(Angstrom)\n")
+                for t, r in zip(times, rmsd_values):
+                    f.write(f"{t/1000.0:.4f}\t{r:.4f}\n")  # Convert ps to ns
+            
+            logger.info(f"RMSD data saved to {output_filename}")
             
             # Write to analysis summary file
             if working_dir:
@@ -137,7 +138,7 @@ def calculate_rmsd(
                         files={
                             "topology": topology_file,
                             "trajectory": trajectory_file,
-                            "output": output_file
+                            "output": output_filename if output_file else None
                         },
                         metadata={
                             "selection": selection,

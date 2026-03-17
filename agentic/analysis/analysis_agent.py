@@ -19,7 +19,8 @@ from ..state import MDState
 from ..llm import LLMClient
 from ..utils import (
     log_supervisor_routing, log_agent_start, log_llm_interaction,
-    log_agent_action, log_file_operation, log_agent_completion, log_error
+    log_agent_action, log_file_operation, log_agent_completion, log_error,
+    SecureFileManager, sanitize_tool_output_params
 )
 from .schemas import (
     AnalysisPlan, AnalysisStep,
@@ -47,6 +48,8 @@ class MDAnalysisAgent:
         self.llm = llm_client
         self.config_path = config_path or os.path.join(os.path.dirname(__file__), "config.yaml")
         self.config = self._load_config()
+        self.tool_executor = None  # Initialized per execution
+        self.file_manager = None  # Initialized per execution for state-specific file registry
         self.tool_executor = None
         logger.info("MD Analysis Agent initialized")
 
@@ -101,18 +104,27 @@ class MDAnalysisAgent:
         log_agent_start("analysis", "MD Trajectory Analysis with LLM Planning", input_summary)
         
         try:
-            # Initialize tool executor with agent-specific subdirectory
-            base_working_dir = state.get("working_directory", "working_dir")
-            analysis_dir = str(Path(base_working_dir) / "analysis")
-            Path(analysis_dir).mkdir(parents=True, exist_ok=True)
+            # Initialize secure file manager
+            working_dir = state.get("working_directory", "working_dir")
+            file_registry = state.get("file_registry", {})
             
-            # Set analysis_directory in state
-            state["analysis_directory"] = analysis_dir
+            self.file_manager = SecureFileManager(
+                working_dir=working_dir,
+                agent_name="analysis",
+                file_registry=file_registry
+            )
+            
+            logger.info(f"Analysis agent directory: {self.file_manager.agent_dir}")
+            
+            # Get analysis directory from file manager (ensures consistency)
+            analysis_dir = self.file_manager.agent_dir
+            state["analysis_dir"] = analysis_dir
+            state["analysis_directory"] = analysis_dir  # Backward compatibility
             
             self.tool_executor = AnalysisToolExecutor(config={"working_directory": analysis_dir})
             
-            # Copy files from HPC output directory if needed
-            self._copy_files_from_hpc(state, analysis_dir)
+            # Copy files from HPC output directory if needed (using secure file manager)
+            self._copy_files_from_hpc_secure(state)
             
             # Write PDB validation info to summary file if available from supervisor
             self._write_pdb_info_to_summary(state, analysis_dir)
@@ -195,49 +207,43 @@ class MDAnalysisAgent:
         # Return full plan so agent still has context
         return full_plan
 
-    def _copy_files_from_hpc(self, state: MDState, analysis_dir: str):
-        """Copy trajectory and topology files from HPC output directory to analysis directory"""
-        hpc_output_dir = state.get("hpc_output_directory")
+    def _copy_files_from_hpc_secure(self, state: MDState):
+        """Copy trajectory and topology files from HPC using SecureFileManager."""
+        # Get all HPC files from registry
+        hpc_files = []
+        for file_path, metadata in self.file_manager.file_registry.items():
+            if metadata.get("stage") == "hpc" and Path(file_path).exists():
+                hpc_files.append((file_path, metadata))
         
-        if not hpc_output_dir or not os.path.exists(hpc_output_dir):
-            logger.warning(f"HPC output directory not found: {hpc_output_dir}")
+        if not hpc_files:
+            logger.info("No HPC files found in registry to copy")
             return
         
-        # Copy files using file_registry (preferred method)
-        file_registry = state.get("file_registry", {})
-        copied_files = set()
-        
-        if file_registry:
-            # Copy all HPC output files from registry
-            for file_path, metadata in list(file_registry.items()):
-                if metadata.get("stage") == "hpc" and os.path.exists(file_path):
-                    filename = Path(file_path).name
-                    new_path = str(Path(analysis_dir) / filename)
-                    
-                    if file_path != new_path and new_path not in copied_files:
-                        shutil.copy2(file_path, new_path)
-                        copied_files.add(new_path)
-                        
-                        # Update registry with new location
-                        new_metadata = metadata.copy()
-                        new_metadata["stage"] = "analysis"
-                        file_registry[new_path] = new_metadata
-                        
-                        # Update state paths
-                        file_type = metadata.get("type")
-                        if file_type == "trajectory":
-                            state["trajectory_path"] = new_path
-                            logger.info(f"Updated trajectory_path to: {new_path}")
-                        elif file_type == "topology":
-                            state["topology"] = new_path
-                            logger.info(f"Updated topology to: {new_path}")
-                        
-                        description = metadata.get("description", "N/A")
-                        logger.info(f"Copied {filename} ({file_type}) from HPC to analysis")
-                        log_file_operation("analysis", "copied", new_path, True, f"From HPC: {description}")
+        # Copy each HPC file to analysis directory using file manager
+        for file_path, metadata in hpc_files:
+            filename = Path(file_path).name
+            file_type = metadata.get("type", "unknown")
+            description = metadata.get("description", "HPC output file")
             
-            # Write back modified file_registry to state
-            state["file_registry"] = file_registry
+            # Use secure copy (automatically registers in file_registry)
+            new_path = self.file_manager.copy_file(
+                source_path=file_path,
+                dest_filename=filename,
+                file_type=file_type,
+                description=f"Copy from HPC: {description}"
+            )
+            
+            if new_path:
+                # Update state paths for known file types
+                if file_type == "trajectory":
+                    state["trajectory_path"] = new_path
+                    logger.info(f"Updated trajectory_path to: {new_path}")
+                elif file_type == "topology":
+                    state["topology"] = new_path
+                    logger.info(f"Updated topology to: {new_path}")
+                
+                logger.info(f"Copied {filename} ({file_type}) from HPC to analysis")
+                log_file_operation("analysis", "copied", new_path, True, f"From HPC: {description}")
 
     def _format_pdb_info_for_llm(self, state: MDState) -> str:
         """Format PDB structural information from supervisor for LLM prompts.
@@ -825,29 +831,53 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 # Prepare tool parameters
                 tool_params = dict(step.tool_params) if step.tool_params else {}
                 
-                # Get base working directory for path resolution
-                base_working_dir = state.get("working_directory", "working_dir")
+                # SECURITY: Sanitize output parameters (LLM may specify full paths)
+                tool_params = sanitize_tool_output_params(tool_params)
                 
-                # Normalize file paths to avoid double-nesting issues
-                # If paths start with working_dir prefix and we're setting working_dir parameter,
-                # we need to convert them to absolute paths or remove the prefix
-                path_params = ["topology_file", "trajectory_file", "energy_file", "output_file", 
-                              "pdb_file", "gro_file", "output_dir"]
+                # Prepend agent directory to output parameters  
+                output_param_names = [
+                    "output_file", "output_prefix", "plot_file", "figure_path",
+                    "csv_file", "dat_file", "save_path", "output_csv", "output_fig"
+                ]
                 
-                for param_name in path_params:
+                for param_name in output_param_names:
                     if param_name in tool_params and tool_params[param_name]:
-                        path_value = str(tool_params[param_name])
+                        # Convert filename to full path in agent's directory
+                        filename = str(tool_params[param_name])
+                        full_path = self.file_manager.get_agent_path(filename)
+                        tool_params[param_name] = full_path
+                        logger.debug(f"  {param_name}: {filename} -> {full_path}")
+                
+                # Resolve input file references (cross-agent access via file_registry)
+                input_param_names = [
+                    "trajectory_file", "trajectory", "traj",
+                    "topology_file", "topology", "structure",
+                    "energy_file", "edr"
+                ]
+                
+                for param_name in input_param_names:
+                    if param_name in tool_params and tool_params[param_name]:
+                        file_ref = str(tool_params[param_name])
                         
-                        # If path starts with the working_dir prefix, convert to absolute path
-                        if path_value.startswith(base_working_dir + "/") or path_value.startswith(base_working_dir + os.sep):
-                            # Convert to absolute path from current directory
-                            abs_path = os.path.abspath(path_value)
-                            tool_params[param_name] = abs_path
-                            logger.debug(f"Normalized {param_name}: {path_value} -> {abs_path}")
+                        # Try to resolve from file_registry
+                        resolved_path = self.file_manager.resolve_input_file(
+                            file_reference=file_ref,
+                            search_stages=["hpc", "simsetup", "preprocess"]
+                        )
+                        
+                        if resolved_path:
+                            tool_params[param_name] = resolved_path
+                            logger.debug(f"  {param_name}: {file_ref} -> {resolved_path}")
+                        else:
+                            # File not in registry, try as direct path if absolute
+                            if Path(file_ref).is_absolute() and Path(file_ref).exists():
+                                logger.debug(f"  {param_name}: Using direct path {file_ref}")
+                            else:
+                                logger.warning(f"  Could not resolve {param_name}={file_ref}")
                 
                 # Ensure working_dir is set (as absolute path)
                 if "working_dir" not in tool_params:
-                    tool_params["working_dir"] = os.path.abspath(analysis_dir)
+                    tool_params["working_dir"] = self.file_manager.agent_dir
                 elif not os.path.isabs(tool_params["working_dir"]):
                     tool_params["working_dir"] = os.path.abspath(tool_params["working_dir"])
                 
@@ -877,16 +907,37 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     analysis_name = step.name.lower().replace(" ", "_")
                     results[analysis_name] = result
                     
-                    # Track generated files
-                    if "output_file" in result:
-                        output_file = result["output_file"]
-                        generated_files[output_file] = step.description
-                        log_file_operation("analysis", "create", output_file, True)
+                    # Track and register generated files using SecureFileManager
+                    file_keys = ["output_file", "plot_file", "csv_file", "heatmap_file", 
+                                "timeseries_file", "figure_path"]
                     
-                    if "output_files" in result:
-                        for out_file in result["output_files"]:
-                            generated_files[out_file] = step.description
-                            log_file_operation("analysis", "create", out_file, True)
+                    for file_key in file_keys:
+                        if file_key in result and result[file_key]:
+                            file_path = result[file_key]
+                            
+                            # Register using file manager (automatic tracking)
+                            file_type = self._classify_file_type(file_key, file_path)
+                            self.file_manager.register_external_file(
+                                file_path=file_path,
+                                file_type=file_type,
+                                description=f"{step.name}: {step.description}"
+                            )
+                            
+                            generated_files[file_path] = step.description
+                            log_file_operation("analysis", "create", file_path, True)
+                    
+                    # Also handle output_files dict (common in tools like DSSP)
+                    if "output_files" in result and isinstance(result["output_files"], dict):
+                        for out_name, out_path in result["output_files"].items():
+                            if out_path and Path(out_path).exists():
+                                file_type = self._classify_file_type(out_name, out_path)
+                                self.file_manager.register_external_file(
+                                    file_path=out_path,
+                                    file_type=file_type,
+                                    description=f"{step.name} {out_name}"
+                                )
+                                generated_files[out_path] = f"{step.name} {out_name}"
+                                log_file_operation("analysis", "create", out_path, True)
                     
                     log_agent_action("analysis", f"Step {i+1}/{len(plan.steps)} completed", {
                         "step": step.name,
@@ -995,6 +1046,36 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         report_lines.append("\n" + "=" * 80)
         
         return "\n".join(report_lines)
+    
+    def _classify_file_type(self, key_or_extension: str, file_path: str = "") -> str:
+        """Classify file type based on parameter name or extension."""
+        
+        key_lower = key_or_extension.lower()
+        path_lower = file_path.lower()
+        
+        # Classify by parameter name/key
+        if "plot" in key_lower or "figure" in key_lower or "heatmap" in key_lower or "timeseries" in key_lower:
+            return "plot"
+        elif "trajectory" in key_lower or "traj" in key_lower:
+            return "trajectory"
+        elif "topology" in key_lower or "structure" in key_lower:
+            return "topology"
+        elif "energy" in key_lower:
+            return "energy"
+        
+        # Classify by file extension
+        if path_lower.endswith((".png", ".pdf", ".svg", ".jpg")):
+            return "plot"
+        elif path_lower.endswith(".xtc") or path_lower.endswith(".trr"):
+            return "trajectory"
+        elif path_lower.endswith((".gro", ".pdb", ".tpr")):
+            return "topology"
+        elif path_lower.endswith(".edr"):
+            return "energy"
+        elif path_lower.endswith((".csv", ".dat", ".xvg")):
+            return "data"
+        else:
+            return "output"
 
     # ========== Legacy methods (kept for backward compatibility) ==========
 

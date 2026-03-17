@@ -14,7 +14,8 @@ from ..state import MDState
 from ..llm import LLMClient
 from ..utils import (
     log_agent_start, log_llm_interaction, log_agent_action, 
-    log_file_operation, log_agent_completion, log_error
+    log_file_operation, log_agent_completion, log_error,
+    SecureFileManager
 )
 from .schemas import (
     SimSetupPlan, SimSetupStep, 
@@ -45,6 +46,7 @@ class SimulationSetupAgent:
             self.llm = llm_client
         
         self.tool_executor = None
+        self.file_manager = None  # Initialized per execution for state-specific file registry
         self.config = self._load_config(config_path)
         
     def _load_config(self, config_path: Optional[str] = None) -> Dict[str, Any]:
@@ -94,13 +96,20 @@ class SimulationSetupAgent:
         log_agent_start("setup", "Simulation System Setup with LLM Tool Calling", input_summary)
         
         try:
-            # Initialize tool executor with agent-specific subdirectory
+            # Initialize secure file manager
             base_working_dir = state.get("working_directory", "working_dir")
-            # Ensure absolute path to avoid path doubling in subprocess calls
-            if not Path(base_working_dir).is_absolute():
-                base_working_dir = str(Path.cwd() / base_working_dir)
-            simsetup_dir = str(Path(base_working_dir) / "simsetup")
-            Path(simsetup_dir).mkdir(parents=True, exist_ok=True)
+            file_registry = state.get("file_registry", {})
+            
+            self.file_manager = SecureFileManager(
+                working_dir=base_working_dir,
+                agent_name="simsetup",
+                file_registry=file_registry
+            )
+            
+            logger.info(f"SimSetup agent directory: {self.file_manager.agent_dir}")
+            
+            # Get simsetup directory from file manager (ensures consistency)
+            simsetup_dir = self.file_manager.agent_dir
             
             # CRITICAL: Set simsetup_directory in state BEFORE creating tool executor
             state["simsetup_directory"] = simsetup_dir
@@ -206,25 +215,31 @@ class SimulationSetupAgent:
                 logger.info("Setup will use files from their current locations")
                 return
         
-        # Copy files using file_registry (preferred method)
-        file_registry = state.get("file_registry", {})
+        # Copy files using file_registry via SecureFileManager (preferred method)
+        preprocess_files = [
+            (file_path, metadata) 
+            for file_path, metadata in self.file_manager.file_registry.items()
+            if metadata.get("stage") == "preprocess" and Path(file_path).exists()
+        ]
+        
         copied_files = set()  # Track what we've copied to avoid duplicates
         
-        if file_registry:
-            # Copy all preprocessing files from registry
-            for file_path, metadata in list(file_registry.items()):
-                if metadata.get("stage") == "preprocess" and os.path.exists(file_path):
-                    filename = Path(file_path).name
-                    new_path = str(Path(simsetup_dir) / filename)
+        if preprocess_files:
+            # Copy all preprocessing files using SecureFileManager
+            for file_path, metadata in preprocess_files:
+                filename = Path(file_path).name
+                
+                if filename not in copied_files:
+                    # Use secure copy (automatically registers)
+                    new_path = self.file_manager.copy_file(
+                        source_path=file_path,
+                        dest_filename=filename,
+                        file_type=metadata.get("type", "file"),
+                        description=f"Copy from preprocess: {metadata.get('description', 'N/A')}"
+                    )
                     
-                    if file_path != new_path and new_path not in copied_files:
-                        shutil.copy2(file_path, new_path)
-                        copied_files.add(new_path)
-                        
-                        # Update registry with new location
-                        new_metadata = metadata.copy()
-                        new_metadata["stage"] = "simsetup"
-                        file_registry[new_path] = new_metadata
+                    if new_path:
+                        copied_files.add(filename)
                         
                         # Update cleaned_pdb if this is the protein component
                         if metadata.get("component") == "protein":
@@ -234,23 +249,24 @@ class SimulationSetupAgent:
                         file_type = metadata.get("type", "file")
                         description = metadata.get("description", "N/A")
                         logger.info(f"Copied {filename} ({file_type}) from preprocess to simsetup")
-                        log_file_operation("setup", "copied", new_path, True, f"From preprocessing: {description}")
-            
-            # Write back modified file_registry to state
-            state["file_registry"] = file_registry
         
         # Fallback: if no file_registry, use cleaned_pdb from state
-        if not file_registry or not copied_files:
+        if not copied_files:
             cleaned_pdb = state.get("cleaned_pdb")
             if cleaned_pdb and os.path.exists(cleaned_pdb):
                 filename = Path(cleaned_pdb).name
-                new_path = str(Path(simsetup_dir) / filename)
                 
-                if cleaned_pdb != new_path:
-                    shutil.copy2(cleaned_pdb, new_path)
+                # Use secure copy
+                new_path = self.file_manager.copy_file(
+                    source_path=cleaned_pdb,
+                    dest_filename=filename,
+                    file_type="pdb",
+                    description="From preprocessing agent (fallback)"
+                )
+                
+                if new_path:
                     state["cleaned_pdb"] = new_path
                     logger.info(f"Copied {filename} from preprocessing (fallback method)")
-                    log_file_operation("setup", "copied", new_path, True, "From preprocessing agent")
     
     def _prepare_agent_input(self, state: MDState) -> SimSetupAgentInput:
         """Prepare structured input for setup from workflow state"""
@@ -298,36 +314,28 @@ class SimulationSetupAgent:
             # Step 2: Execute plan using tool executor
             result = self._execute_plan(agent_input, plan, state)
             
-            # Step 3: Register created files in file_registry
-            file_registry = state.get("file_registry", {})
-            
+            # Step 3: Register created files using SecureFileManager
             if result.topology:
-                file_registry[result.topology] = {
-                    "type": "topology",
-                    "description": "GROMACS topology file (.top)",
-                    "stage": "simsetup",
-                    "component": "topology"
-                }
+                self.file_manager.register_external_file(
+                    file_path=result.topology,
+                    file_type="topology",
+                    description="GROMACS topology file (.top)"
+                )
             
             if result.coordinates:
-                file_registry[result.coordinates] = {
-                    "type": "coordinates",
-                    "description": "GROMACS coordinate file (.gro)",
-                    "stage": "simsetup",
-                    "component": "coordinates"
-                }
+                self.file_manager.register_external_file(
+                    file_path=result.coordinates,
+                    file_type="coordinates",
+                    description="GROMACS coordinate file (.gro)"
+                )
             
             # Register MDP files
             for mdp_type, mdp_path in result.mdp_files.items():
-                file_registry[mdp_path] = {
-                    "type": "mdp",
-                    "description": f"GROMACS MDP file for {mdp_type}",
-                    "stage": "simsetup",
-                    "component": f"mdp_{mdp_type}"
-                }
-            
-            # Write back modified file_registry to state
-            state["file_registry"] = file_registry
+                self.file_manager.register_external_file(
+                    file_path=mdp_path,
+                    file_type="mdp",
+                    description=f"GROMACS MDP file for {mdp_type}"
+                )
             
             # Step 4: Prepare supervisor update
             supervisor_update = {
@@ -335,7 +343,7 @@ class SimulationSetupAgent:
                 "topology": result.topology,
                 "mdp_files": result.mdp_files,
                 "setup_report": result.report,
-                "file_registry": file_registry
+                "file_registry": self.file_manager.file_registry  # Use file_registry from file_manager
             }
             
             return SimSetupAgentOutput(
@@ -526,14 +534,19 @@ class SimulationSetupAgent:
   b) OMIT that step entirely from your plan (do NOT include it with tool_name="none")
 - When you cannot perform a step, simply do NOT include it in the steps array
 
+**FILE PATH REQUIREMENTS:**
+- In tool_params, you MUST specify only FILENAMES, never full paths
+- ❌ WRONG: "output_file": "/path/to/file.gro" or "output_file": "working_dir/simsetup/file.gro"
+- ✅ CORRECT: "output_file": "file.gro"
+- The system automatically handles directory management - all outputs go to working_dir/simsetup/
+- Examples:
+  • "topology_file": "topol.top" (not "/home/user/working_dir/simsetup/topol.top")
+  • "coordinate_file": "processed.gro" (not "working_dir/simsetup/processed.gro")
+  • "output_file": "solvated.gro" (not "./solvated.gro")
+
 Your task: Create a detailed, step-by-step execution plan that follows the planner's instructions above.
 The plan should specify which tools to call and in what order to achieve the planner's objectives.
 ONLY include steps that use valid tools from the list above.
-
-**CRITICAL OUTPUT DIRECTORY RULES:**
-- ALL simulation setup outputs MUST go to working_dir/simsetup/
-- DO NOT specify output_dir or output_file paths in tool_params unless required
-- The system will automatically handle all output paths to ensure directory isolation
 
 Output as JSON with this structure:
 {{
@@ -772,82 +785,67 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 # Prepare tool parameters
                 tool_params = dict(step.tool_params) if step.tool_params else {}
                 
-                # HARDCODE: Normalize input file paths
-                # Since we pass working_dir to GROMACS tools, they need RELATIVE paths (just filenames)
-                # not absolute paths. Extract filenames and let tools handle them with cwd=working_dir
-                # Extended list to cover all tools including build_simulation_system
-                path_keys = [
-                    "pdb_file", "coordinate_file", "topology_file", "mdp_file",
-                    "protein_pdb", "ligand_pdb", "ion_pdb", "ligand_itp",  # For build_simulation_system
-                    "input_structure", "restraint_file"  # For other tools
-                ]
+                # CRITICAL: Normalize all file paths to ensure directory isolation
+                # Tools should only receive filenames, and working_dir handles the rest
+                from ..utils import normalize_tool_params_for_agent
+                tool_params = normalize_tool_params_for_agent(
+                    tool_params,
+                    simsetup_dir,
+                    param_names=[
+                        "pdb_file", "coordinate_file", "topology_file", "mdp_file",
+                        "protein_pdb", "ligand_pdb", "ion_pdb", "ligand_itp",
+                        "input_structure", "restraint_file", "output_file", "output_path"
+                    ]
+                )
+                
+                # Copy input files to simsetup directory if they exist elsewhere
+                path_keys = ["pdb_file", "coordinate_file", "topology_file", "mdp_file",
+                            "protein_pdb", "ligand_pdb", "ion_pdb", "ligand_itp",
+                            "input_structure", "restraint_file"]
+                            
                 for path_key in path_keys:
                     if path_key in tool_params:
-                        file_value = tool_params[path_key]
-                        if isinstance(file_value, str):
-                            # Extract just filename - tools will use it with cwd=simsetup_dir
-                            filename = Path(file_value).name
-                            
-                            # Check if file exists in simsetup directory
+                        filename = tool_params[path_key]  # Already normalized to filename
+                        if isinstance(filename, str) and filename:
                             simsetup_path = Path(simsetup_dir) / filename
-                            if not simsetup_path.exists():
-                                # Check if original path exists (might be absolute or from different dir)
-                                original_path = Path(file_value)
-                                if original_path.is_absolute() and original_path.exists():
-                                    # Copy file to simsetup directory
-                                    shutil.copy2(file_value, str(simsetup_path))
-                                    logger.info(f"Copied {file_value} to {simsetup_path}")
-                                else:
-                                    # Try relative to workspace root
-                                    workspace_path = Path(state.get("working_directory", "working_dir")).parent / file_value
-                                    if workspace_path.exists():
-                                        shutil.copy2(str(workspace_path), str(simsetup_path))
-                                        logger.info(f"Copied {workspace_path} to {simsetup_path}")
                             
-                            # Always use just filename since working_dir is set
-                            tool_params[path_key] = filename
+                            if not simsetup_path.exists():
+                                # Try to find file from state or other directories
+                                # Check preprocess directory
+                                preprocess_dir = str(Path(state.get("working_directory", "working_dir")) / "preprocess")
+                                preprocess_path = Path(preprocess_dir) / filename
+                                
+                                if preprocess_path.exists():
+                                    shutil.copy2(str(preprocess_path), str(simsetup_path))
+                                    logger.info(f"Copied {filename} from preprocess to simsetup")
+                                else:
+                                    # Check if absolute path was stored in state
+                                    for state_key in ["cleaned_pdb", "raw_pdb", "topology", "coordinates"]:
+                                        state_value = state.get(state_key)
+                                        if state_value and Path(state_value).name == filename and Path(state_value).exists():
+                                            shutil.copy2(state_value, str(simsetup_path))
+                                            logger.info(f"Copied {filename} from {state_value} to simsetup")
+                                            break
                 
-                # Special handling for output_dir parameter (for build_simulation_system)
-                if "output_dir" in tool_params:
-                    # Ensure output_dir is set to simsetup_dir (absolute path for tool initialization)
+                # Special handling for output_dir and working_dir parameters
+                # These ensure all outputs go to simsetup directory
+                if "output_dir" not in tool_params:
                     tool_params["output_dir"] = simsetup_dir
                 
-                # HARDCODE: Force all outputs to simsetup directory (use relative paths for working_dir)
-                # Chain inputs from previous steps
-                # CRITICAL: Always pass working_dir to ensure GROMACS creates files in correct location
-                # Since working_dir is set, use RELATIVE paths (just filenames) not absolute paths
-                if step.tool_name == "build_simulation_system":
-                    # This tool handles everything internally, just ensure paths are set
-                    # Input file paths already normalized above to just filenames
-                    # Output dir already set to simsetup_dir
-                    pass  # Tool will create all files in output_dir
-                    
-                elif step.tool_name == "build_topology":
-                    # Ensure PDB file path is set (already normalized to filename above)
-                    if "pdb_file" not in tool_params:
-                        tool_params["pdb_file"] = Path(agent_input.cleaned_pdb).name  # Just filename
-                    tool_params["output_file"] = "processed.gro"  # Relative to working_dir
-                    tool_params["topology_file"] = "topol.top"  # Explicitly set topology output
-                    tool_params["working_dir"] = simsetup_dir  # Critical for posre_* files
-                    
-                elif step.tool_name == "build_simulation_box":
-                    if current_gro:
-                        tool_params["coordinate_file"] = Path(current_gro).name  # Just filename
-                    tool_params["output_file"] = "boxed.gro"  # Relative to working_dir
+                if "working_dir" not in tool_params:
                     tool_params["working_dir"] = simsetup_dir
+                
+                # Tool-specific default output filenames (relative paths)
+                if step.tool_name == "build_topology" and "output_file" not in tool_params:
+                    tool_params["output_file"] = "processed.gro"
+                    if "topology_file" not in tool_params:
+                        tool_params["topology_file"] = "topol.top"
+                        
+                elif step.tool_name == "build_simulation_box" and "output_file" not in tool_params:
+                    tool_params["output_file"] = "boxed.gro"
                     
-                elif step.tool_name == "solvate_system":
-                    if current_gro:
-                        tool_params["coordinate_file"] = Path(current_gro).name  # Just filename
-                    if topology_file:
-                        tool_params["topology_file"] = Path(topology_file).name  # Just filename
-                    tool_params["output_file"] = "solvated.gro"  # Relative to working_dir
-                    tool_params["working_dir"] = simsetup_dir
-                    
-                elif step.tool_name == "generate_mdp_files":
-                    # Generate all MDP files at once - the tool creates all phases automatically
-                    # The function signature is: generate_mdp_files(output_dir, temperature, pressure, ...)
-                    tool_params["output_dir"] = simsetup_dir
+                elif step.tool_name == "solvate_system" and "output_file" not in tool_params:
+                    tool_params["output_file"] = "solvated.gro"
                     # Set defaults if not specified
                     if "temperature" not in tool_params:
                         tool_params["temperature"] = 300.0

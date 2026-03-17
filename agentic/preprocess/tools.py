@@ -3,8 +3,10 @@ Preprocessing Tools for PDB Structure Preparation
 Thin wrapper that exposes modular @tool functions from src/preprocess/ and src/utils/
 """
 import logging
+import os
 from typing import Dict, Any, Optional
 from pathlib import Path
+from functools import wraps
 
 # Import modular @tool functions from src/utils/ and src/preprocess/
 from src.utils.pdb_analyzer import analyze_pdb
@@ -98,6 +100,90 @@ class PreprocessingToolExecutor:
         self.config = config or {}
         self.logger = logging.getLogger(__name__)
         
+        # Tool map for built-in tools
+        self.tool_map = {
+            "analyze_pdb": analyze_pdb,
+            "separate_complex_components": separate_complex_components,
+            "add_hydrogens": add_hydrogens,
+            "validate_structure": validate_structure,
+        }
+        
+        # Load programmer-generated tools
+        self._load_programmer_tools()
+        
+        self.logger.info(f"PreprocessingToolExecutor initialized with {len(self.tool_map)} tools (working_dir: {self.working_dir})")
+    
+    def _wrap_tool_for_working_dir(self, tool_func, tool_name: str):
+        """
+        Wrap a programmer-generated tool to execute in the agent's working directory.
+        This ensures all file outputs go to working_dir/preprocess.
+        
+        Args:
+            tool_func: The tool function to wrap
+            tool_name: Name of the tool (for logging)
+            
+        Returns:
+            Wrapped function that executes in the agent's working directory
+        """
+        # Get the actual function if it's a StructuredTool
+        actual_func = tool_func.func if hasattr(tool_func, 'func') else tool_func
+        
+        @wraps(actual_func)
+        def wrapped_tool(**kwargs):
+            """
+            Execute tool in the agent's working directory context.
+            Changes to working_dir before execution and restores original directory after.
+            """
+            original_dir = os.getcwd()
+            try:
+                # Change to agent's working directory
+                os.chdir(self.working_dir)
+                self.logger.debug(f"Executing {tool_name} in directory: {self.working_dir}")
+                
+                # Execute the tool
+                if hasattr(tool_func, 'func'):
+                    result = tool_func.func(**kwargs)
+                elif hasattr(tool_func, 'invoke'):
+                    result = tool_func.invoke(kwargs)
+                else:
+                    result = tool_func(**kwargs)
+                
+                return result
+            finally:
+                # Always restore original directory
+                os.chdir(original_dir)
+        
+        # Preserve StructuredTool attributes if needed
+        if hasattr(tool_func, 'name'):
+            wrapped_tool.name = tool_func.name
+        if hasattr(tool_func, 'description'):
+            wrapped_tool.description = tool_func.description
+        if hasattr(tool_func, 'args_schema'):
+            wrapped_tool.args_schema = tool_func.args_schema
+            
+        return wrapped_tool
+    
+    def _load_programmer_tools(self):
+        """Load dynamically generated tools from programmer agent."""
+        try:
+            from agentic.utils import get_dynamic_tool_loader
+            
+            tool_loader = get_dynamic_tool_loader(refresh=True)
+            programmer_tools = tool_loader.get_tools_for_agent("preprocess")
+            
+            if programmer_tools:
+                self.logger.info(f"Loading {len(programmer_tools)} programmer-generated tools for preprocess agent")
+                for tool_name, tool_func in programmer_tools.items():
+                    # Wrap the tool to execute in the agent's working directory
+                    wrapped_tool = self._wrap_tool_for_working_dir(tool_func, tool_name)
+                    self.tool_map[tool_name] = wrapped_tool
+                    self.logger.info(f"  Registered programmer tool: {tool_name} (wrapped for {self.working_dir})")
+            else:
+                self.logger.debug("No programmer-generated tools found")
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to load programmer tools: {e}")
+        
     def execute_tool(self, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute a preprocessing tool by name.
@@ -109,14 +195,7 @@ class PreprocessingToolExecutor:
         Returns:
             Dict with 'success', 'error', and tool-specific results
         """
-        tool_map = {
-            "analyze_pdb": analyze_pdb,
-            "separate_complex_components": separate_complex_components,
-            "add_hydrogens": add_hydrogens,
-            "validate_structure": validate_structure,
-        }
-        
-        tool_func = tool_map.get(tool_name)
+        tool_func = self.tool_map.get(tool_name)
         if not tool_func:
             return {
                 "success": False,

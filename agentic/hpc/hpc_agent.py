@@ -17,7 +17,7 @@ from ..llm import LLMClient
 from ..utils import (
     log_agent_start, log_llm_interaction, log_agent_action,
     log_file_operation, log_agent_completion, log_error,
-    log_supervisor_routing
+    log_supervisor_routing, SecureFileManager
 )
 from .tools import (
     copy_simulation_files, estimate_simulation_time, create_slurm_script,
@@ -58,6 +58,7 @@ class MDHPCAgent:
             self.llm = llm_client
         
         self.config = self._load_config(config_path)
+        self.file_manager = None  # Initialized per execution for state-specific file registry
         logger.info("MD HPC Agent initialized")
         
     def _load_config(self, config_path: Optional[str] = None) -> Dict[str, Any]:
@@ -131,11 +132,23 @@ class MDHPCAgent:
         log_agent_start("hpc", "HPC Job Submission and Monitoring", input_summary)
         
         try:
-            # Initialize HPC working directory
-            base_working_dir = state.get("working_directory", "working_dir")
-            hpc_dir = str(Path(base_working_dir) / "hpc")
-            Path(hpc_dir).mkdir(parents=True, exist_ok=True)
-            state["hpc_directory"] = hpc_dir
+            # Initialize secure file manager
+            working_dir = state.get("working_directory", "working_dir")
+            file_registry = state.get("file_registry", {})
+            
+            self.file_manager = SecureFileManager(
+                working_dir=working_dir,
+                agent_name="hpc",
+                file_registry=file_registry
+            )
+            
+            logger.info(f"HPC agent directory: {self.file_manager.agent_dir}")
+            
+            # Get HPC directory from file manager (ensures consistency)
+            hpc_dir = self.file_manager.agent_dir
+            state["hpc_dir"] = hpc_dir
+            state["hpc_directory"] = hpc_dir  # Backward compatibility
+            state["hpc_output_directory"] = hpc_dir  # Also set this for analysis agent
             
             # Generate execution plan using LLM
             plan = self._create_execution_plan(state)
@@ -671,7 +684,46 @@ Output as JSON with this structure:
         
         elif tool_name == "download_results":
             downloaded = result.get("downloaded_files", [])
+            
             for file_info in downloaded:
-                if file_info.get("filename", "").endswith(".xtc"):
-                    state["trajectory_path"] = file_info.get("local_path")
-                    log_file_operation("hpc", "download", state["trajectory_path"], True, "Trajectory file")
+                filename = file_info.get("filename", "")
+                local_path = file_info.get("local_path")
+                
+                if not local_path:
+                    continue
+                
+                # Register in file_registry using SecureFileManager based on file type
+                if filename.endswith(".xtc"):
+                    state["trajectory_path"] = local_path
+                    log_file_operation("hpc", "download", local_path, True, "Trajectory file")
+                    self.file_manager.register_external_file(
+                        file_path=local_path,
+                        file_type="trajectory",
+                        description="MD production trajectory"
+                    )
+                elif filename.endswith(".gro"):
+                    self.file_manager.register_external_file(
+                        file_path=local_path,
+                        file_type="coordinates",
+                        description="Final MD coordinates"
+                    )
+                elif filename.endswith(".tpr"):
+                    self.file_manager.register_external_file(
+                        file_path=local_path,
+                        file_type="topology",
+                        description="Processed topology"
+                    )
+                elif filename.endswith(".edr"):
+                    state["energy_file"] = local_path
+                    log_file_operation("hpc", "download", local_path, True, "Energy file")
+                    self.file_manager.register_external_file(
+                        file_path=local_path,
+                        file_type="energy",
+                        description="MD energy output"
+                    )
+                elif filename.endswith(".log"):
+                    self.file_manager.register_external_file(
+                        file_path=local_path,
+                        file_type="log",
+                        description="MD simulation log"
+                    )

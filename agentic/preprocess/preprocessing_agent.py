@@ -13,7 +13,8 @@ from ..state import MDState
 from ..llm import LLMClient
 from ..utils import (
     log_agent_start, log_llm_interaction, log_agent_action, 
-    log_file_operation, log_agent_completion, log_error
+    log_file_operation, log_agent_completion, log_error,
+    SecureFileManager
 )
 from .schemas import (
     PreprocessingPlan, PreprocessingStep, 
@@ -44,6 +45,7 @@ class PreprocessingAgent:
             self.llm = llm_client
         
         self.tool_executor = None
+        self.file_manager = None  # Initialized per execution for state-specific file registry
         self.config = self._load_config(config_path)
         
     def _load_config(self, config_path: Optional[str] = None) -> Dict[str, Any]:
@@ -93,10 +95,20 @@ class PreprocessingAgent:
         log_agent_start("preprocessing", "PDB Preprocessing with LLM Tool Calling", input_summary)
         
         try:
-            # Initialize tool executor with agent-specific subdirectory
+            # Initialize secure file manager
             base_working_dir = state.get("working_directory", "working_dir")
-            preprocess_dir = str(Path(base_working_dir) / "preprocess")
-            Path(preprocess_dir).mkdir(parents=True, exist_ok=True)
+            file_registry = state.get("file_registry", {})
+            
+            self.file_manager = SecureFileManager(
+                working_dir=base_working_dir,
+                agent_name="preprocess",
+                file_registry=file_registry
+            )
+            
+            logger.info(f"Preprocessing agent directory: {self.file_manager.agent_dir}")
+            
+            # Get preprocess directory from file manager (ensures consistency)
+            preprocess_dir = self.file_manager.agent_dir
             
             # CRITICAL: Set preprocess_directory in state BEFORE creating tool executor
             # This allows tools to access the directory during execution
@@ -225,17 +237,14 @@ class PreprocessingAgent:
             # Step 2: Execute plan using tool executor
             result = self._execute_plan(agent_input, plan, state)
             
-            # Step 3: Register all created files in file_registry
-            file_registry = state.get("file_registry", {})
-            
+            # Step 3: Register all created files using SecureFileManager
             # Register protein file
             if result.cleaned_pdb:
-                file_registry[result.cleaned_pdb] = {
-                    "type": "protein",
-                    "description": "Preprocessed protein structure with hydrogens",
-                    "stage": "preprocess",
-                    "component": "protein"
-                }
+                self.file_manager.register_external_file(
+                    file_path=result.cleaned_pdb,
+                    file_type="protein",
+                    description="Preprocessed protein structure with hydrogens"
+                )
             
             # Register all generated files from preprocessing
             for file_path, description in result.generated_files.items():
@@ -245,36 +254,30 @@ class PreprocessingAgent:
                 filename = Path(file_path).name
                 # Determine component type from filename
                 if "ligand" in filename.lower():
-                    file_registry[file_path] = {
-                        "type": "ligand",
-                        "description": description or "Preprocessed ligand structure",
-                        "stage": "preprocess",
-                        "component": "ligand"
-                    }
+                    self.file_manager.register_external_file(
+                        file_path=file_path,
+                        file_type="ligand",
+                        description=description or "Preprocessed ligand structure"
+                    )
                 elif "ion" in filename.lower():
-                    file_registry[file_path] = {
-                        "type": "ion",
-                        "description": description or "Preprocessed ion structure",
-                        "stage": "preprocess",
-                        "component": "ion"
-                    }
+                    self.file_manager.register_external_file(
+                        file_path=file_path,
+                        file_type="ion",
+                        description=description or "Preprocessed ion structure"
+                    )
                 else:
                     # Generic file registration
-                    file_registry[file_path] = {
-                        "type": "other",
-                        "description": description or "Preprocessed file",
-                        "stage": "preprocess",
-                        "component": "unknown"
-                    }
-            
-            # Write back modified file_registry to state
-            state["file_registry"] = file_registry
+                    self.file_manager.register_external_file(
+                        file_path=file_path,
+                        file_type="other",
+                        description=description or "Preprocessed file"
+                    )
             
             # Step 4: Prepare supervisor update - preprocessing outputs cleaned PDB and file registry
             supervisor_update = {
                 "cleaned_pdb": result.cleaned_pdb,
                 "preprocessing_report": result.report,
-                "file_registry": file_registry
+                "file_registry": self.file_manager.file_registry  # Use file_registry from file_manager
             }
             
             return PreprocessingAgentOutput(
@@ -631,60 +634,53 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 # Prepare tool parameters
                 tool_params = dict(step.tool_params) if step.tool_params else {}
                 
-                # HARDCODE: Strip any LLM-generated output directory parameters
-                # All preprocessing outputs MUST go to working_dir/preprocess/
-                for unwanted_key in ["output_dir", "output_file", "protein_output", "ligand_output", "ion_output"]:
-                    if unwanted_key in tool_params:
-                        del tool_params[unwanted_key]
+                # CRITICAL: Normalize all paths to ensure preprocessing outputs stay in preprocess directory
+                from ..utils import normalize_tool_params_for_agent, get_output_path_for_agent
                 
-                # HARDCODE: Normalize input paths - convert LLM-generated paths to agent directory
-                # LLM may specify "working_dir/3.pdb" or just "3.pdb" - we need full path in preprocess dir
+                preprocess_dir = self.tool_executor.working_dir
+                
+                # Normalize to filenames only
+                tool_params = normalize_tool_params_for_agent(
+                    tool_params,
+                    preprocess_dir,
+                    param_names=[
+                        "pdb_file", "output_file", "output_dir",
+                        "protein_output", "ligand_output", "ion_output"
+                    ]
+                )
+                
+                # Resolve input file paths from preprocess directory
                 if "pdb_file" in tool_params:
-                    pdb_value = tool_params["pdb_file"]
-                    # Extract just the filename (strip any directory prefix LLM added)
-                    if isinstance(pdb_value, str):
-                        filename = Path(pdb_value).name  # Gets just "3.pdb" from "working_dir/3.pdb"
-                        # Check if file exists in preprocess directory
-                        preprocess_path = Path(self.tool_executor.working_dir) / filename
-                        if preprocess_path.exists():
-                            tool_params["pdb_file"] = str(preprocess_path)
-                        elif current_pdb and os.path.exists(current_pdb):
-                            # Fallback to chained current_pdb if specified file not found
-                            tool_params["pdb_file"] = current_pdb
-                        else:
-                            # Try original input path as last resort
-                            tool_params["pdb_file"] = str(preprocess_path)  # Use preprocess dir anyway
+                    filename = tool_params["pdb_file"]
+                    preprocess_path = Path(preprocess_dir) / filename
+                    
+                    if preprocess_path.exists():
+                        tool_params["pdb_file"] = str(preprocess_path)
+                    elif current_pdb and os.path.exists(current_pdb):
+                        tool_params["pdb_file"] = current_pdb
+                    else:
+                        tool_params["pdb_file"] = str(preprocess_path)
                 else:
                     # Auto-inject pdb_file for tools that need it
-                    if step.tool_name in [
-                        "add_hydrogens", "validate_structure", "separate_complex_components"
-                    ]:
+                    if step.tool_name in ["add_hydrogens", "validate_structure", "separate_complex_components"]:
                         tool_params["pdb_file"] = current_pdb if current_pdb else agent_input.pdb_path
                 
-                # Override output paths to ensure ALL files go to preprocess directory
-                # This fixes LLM-generated plans that specify working_dir paths
+                # Generate appropriate output paths for specific tools
                 if step.tool_name in ["add_hydrogens", "separate_complex_components"]:
                     input_file = tool_params.get("pdb_file", current_pdb)
                     base_name = Path(input_file).stem
                     
-                    # Remove existing _h suffixes to prevent repeated _h_h_h patterns
+                    # Remove repeated _h suffixes
                     while base_name.endswith("_h"):
-                        base_name = base_name[:-2]  # Remove "_h"
+                        base_name = base_name[:-2]
                     
-                    # Generate output filename based on tool
                     if step.tool_name == "separate_complex_components":
-                        # Separation tools - ALWAYS set output_dir to preprocess directory
-                        tool_params["output_dir"] = str(self.tool_executor.working_dir)
-                        # Also explicitly set output paths to prevent any other directory usage
-                        tool_params["protein_output"] = str(Path(self.tool_executor.working_dir) / f"{base_name}_protein.pdb")
-                        tool_params["ligand_output"] = str(Path(self.tool_executor.working_dir) / f"{base_name}_ligand.pdb")
-                        if step.tool_name == "separate_complex_components":
-                            tool_params["ion_output"] = str(Path(self.tool_executor.working_dir) / f"{base_name}_ions.pdb")
-                    else:
-                        # add_hydrogens tool - only add _h suffix once
-                        suffix = "_h"
-                        output_file = str(Path(self.tool_executor.working_dir) / f"{base_name}{suffix}.pdb")
-                        tool_params["output_file"] = output_file
+                        tool_params["output_dir"] = preprocess_dir
+                        tool_params["protein_output"] = get_output_path_for_agent(f"{base_name}_protein.pdb", preprocess_dir)
+                        tool_params["ligand_output"] = get_output_path_for_agent(f"{base_name}_ligand.pdb", preprocess_dir)
+                        tool_params["ion_output"] = get_output_path_for_agent(f"{base_name}_ions.pdb", preprocess_dir)
+                    else:  # add_hydrogens
+                        tool_params["output_file"] = get_output_path_for_agent(f"{base_name}_h.pdb", preprocess_dir)
                 
                 # Log actual paths being used (after overrides)
                 execution_log.append(f"Parameters: {json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in tool_params.items()}, indent=2)}")
@@ -823,11 +819,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         state["preprocessing_warnings"] = agent_output.result.warnings
         state["preprocessing_execution_log"] = agent_output.result.execution_log
         
-        # Initialize file registry if not present
-        if "file_registry" not in state or state["file_registry"] is None:
-            state["file_registry"] = {}
-        
-        # Register all generated files with metadata
+        # Register all generated files using SecureFileManager
         for file_path, description in agent_output.result.generated_files.items():
             # Determine file type from filename
             file_type = "unknown"
@@ -838,12 +830,11 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             elif "ion" in file_path.lower() or "mg" in file_path.lower() or "mn" in file_path.lower():
                 file_type = "ion"
             
-            state["file_registry"][file_path] = {
-                "type": file_type,
-                "description": description,
-                "stage": "preprocessing"
-            }
-        
-        # Log file operations
-        for file_path, description in agent_output.result.generated_files.items():
+            self.file_manager.register_external_file(
+                file_path=file_path,
+                file_type=file_type,
+                description=description
+            )
+            
+            # Log file operation
             log_file_operation("preprocessing", "create", file_path, True, description)

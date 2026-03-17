@@ -1,10 +1,10 @@
 ================================================================================
-NEW MD WORKFLOW SESSION STARTED - 2026-03-04 17:44:37
-Session ID: 20260304_174437
+NEW MD WORKFLOW SESSION STARTED - 2026-03-17 12:52:28
+Session ID: 20260317_125228
 ================================================================================
 
-🎯 USER PROMPT [2026-03-04 17:44:37]:
-   Goal: The protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulation production is already done and data output is stored in working_dir/hpc. Please dont preprocess, do not setup simulation and do not job submit the simulation. Only use the analysis agent for simulation analysis for RMSF, RMSD and energy caculation of trajectory. Please plot in multipanal figure.please plot energy plot seperately. The trajectory file is md.xtc and topology file is md.gro
+🎯 USER PROMPT [2026-03-17 12:52:28]:
+   Goal: The protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulation production is already done and data output is stored in working_dir/hpc. Please dont preprocess, do not setup simulation and do not job submit the simulation. Only use the analysis agent to analyze the solvant accessible surface area (SASA) of simulation trajectory. Please plot in the figure if needed. The trajectory file is md.xtc and topology file is md.gro
    Configuration: {
     "force_field": "amber99sb-ildn",
     "water_model": "tip3p",
@@ -20,7 +20,7 @@ Session ID: 20260304_174437
 
 ⚡ AGENT ACTION (supervisor.input_validation):
    🎬 Action: PDB Structure Analysis
-   📊 file: working_dir/3.pdb
+   📊 file: /home/akp66103/workspace/agenticAI/working_dir/3.pdb
    📊 total_atoms: 2137
    📊 total_residues: 258
    📊 components_available: {
@@ -34,20 +34,20 @@ Session ID: 20260304_174437
       "A": "FERIKTLGTGSFGRVMLVKHKETGNHYAMKILDKQKVVKLKQIEHTLNEKRILQAVNFPFLVKLEFSFKDNSNLYMVMEYVPGGEMFSHLRRIGRFSEPHARFYAAQIVLTFEYLHSLDLIYRDLKPENLLIDQQGYIQVTDFGFAKRVKGRTWTLCGTPEYLAPEIILSKGYNKAVDWWALGVLIYEMAAGYPPFFADQPIQIYEKIVSGKVRFPSHFSSDLKDLLRNLLQVDLTKRFGNLKNGVNDIKNHKWF"
 }
 
-🧠 LLM INTERACTION (supervisor.analysis_goal_rephrasing) [2026-03-04 17:44:44]:
+🧠 LLM INTERACTION (supervisor.analysis_goal_rephrasing) [2026-03-17 12:52:38]:
    📝 Prompt:
    ======================================================================
    You are an expert in molecular dynamics trajectory analysis. Rephrase the user's analysis goal 
    into a clear, unambiguous statement that captures their analytical intent.
    
    USER'S ORIGINAL GOAL:
-   The protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulation production is already done and data output is stored in working_dir/hpc. Please dont preprocess, do not setup simulation and do not job submit the simulation. Only use the analysis agent for simulation analysis for RMSF, RMSD and energy caculation of trajectory. Please plot in multipanal figure.please plot energy plot seperately. The trajectory file is md.xtc and topology file is md.gro
+   The protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulation production is already done and data output is stored in working_dir/hpc. Please dont preprocess, do not setup simulation and do not job submit the simulation. Only use the analysis agent to analyze the solvant accessible surface area (SASA) of simulation trajectory. Please plot in the figure if needed. The trajectory file is md.xtc and topology file is md.gro
    
    AVAILABLE FILES:
-   Topology: working_dir/hpc/md.gro
-   Trajectory: working_dir/hpc/md.xtc
-   Energy: working_dir/hpc/md.edr
-   HPC Output Directory: working_dir/hpc
+   Topology: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro
+   Trajectory: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.xtc
+   Energy: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.edr
+   HPC Output Directory: /home/akp66103/workspace/agenticAI/working_dir/hpc
    
    CRITICAL INSTRUCTIONS:
    1. Identify what analysis calculations the user wants (RMSD, RMSF, SASA, energy, etc.)
@@ -95,23 +95,29 @@ Session ID: 20260304_174437
    ======================================================================
    💭 Response:
    ======================================================================
-   Perform Root Mean Square Deviation (RMSD) and Root Mean Square Fluctuation (RMSF) analyses on the protein in the trajectory file working_dir/hpc/md.xtc using the topology working_dir/hpc/md.gro. Generate a multi‑panel figure containing both the RMSD and RMSF plots. Extract the energy data from working_dir/hpc/md.edr and plot the energy (potential/total) as a separate figure. Save all plots and accompanying data files.
+   Perform Solvent Accessible Surface Area (SASA) analysis on the trajectory file `md.xtc` with topology `md.gro` located in `working_dir/hpc`.  
+   Calculate SASA for the entire protein over the course of the simulation trajectory.  
+   Generate a time‑series plot of the SASA values and save the figure.
    ======================================================================
 
 ⚡ AGENT ACTION (supervisor.input_validation-analysis):
    🎬 Action: Analysis-Only Input Validation Complete
    📊 subtask_type: analysis-only
    📊 original_goal: The protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulati
-   📊 enriched_prompt: Perform Root Mean Square Deviation (RMSD) and Root Mean Square Fluctuation (RMSF) analyses on the protein in the trajectory file working_dir/hpc/md.xtc using the topology working_dir/hpc/md.gro. Generate a multi‑panel figure containing both the RMSD and RMSF plots. Extract the energy data from worki
-   📊 topology_file: working_dir/hpc/md.gro
-   📊 trajectory_file: working_dir/hpc/md.xtc
-   📊 energy_file: working_dir/hpc/md.edr
-   📊 hpc_output_directory: working_dir/hpc
-   📊 working_directory: working_dir
+   📊 enriched_prompt: Perform Solvent Accessible Surface Area (SASA) analysis on the trajectory file `md.xtc` with topology `md.gro` located in `working_dir/hpc`.  
+Calculate SASA for the entire protein over the course of the simulation trajectory.  
+Generate a time‑series plot of the SASA values and save the figure.
 
-🎛️  SUPERVISOR ROUTING [2026-03-04 17:44:44]:
+**
+   📊 topology_file: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro
+   📊 trajectory_file: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.xtc
+   📊 energy_file: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.edr
+   📊 hpc_output_directory: /home/akp66103/workspace/agenticAI/working_dir/hpc
+   📊 working_directory: /home/akp66103/workspace/agenticAI/working_dir
+
+🎛️  SUPERVISOR ROUTING [2026-03-17 12:52:38]:
    Current State Summary:
-     ✅ raw_pdb: working_dir/3.pdb
+     ✅ raw_pdb: /home/akp66103/workspace/agenticAI/working_dir/3.pdb
      ❌ cleaned_pdb: Not set
      ❌ coordinates: Not set
      ❌ job_id: Not set
@@ -119,28 +125,36 @@ Session ID: 20260304_174437
    📍 Routing: input_validation → supervisor
    💭 Reasoning: Input validation complete for analysis_only, returning to supervisor for planning
 
-🧠 LLM INTERACTION (planner.execution_planning) [2026-03-04 17:45:17]:
+🧠 LLM INTERACTION (planner.execution_planning) [2026-03-17 12:52:57]:
    📝 Prompt:
    ======================================================================
    Create a detailed natural language execution plan for trajectory analysis.
    
    USER GOAL:
-   Perform Root Mean Square Deviation (RMSD) and Root Mean Square Fluctuation (RMSF) analyses on the protein in the trajectory file working_dir/hpc/md.xtc using the topology working_dir/hpc/md.gro. Generate a multi‑panel figure containing both the RMSD and RMSF plots. Extract the energy data from working_dir/hpc/md.edr and plot the energy (potential/total) as a separate figure. Save all plots and accompanying data files.
+   Perform Solvent Accessible Surface Area (SASA) analysis on the trajectory file `md.xtc` with topology `md.gro` located in `working_dir/hpc`.  
+   Calculate SASA for the entire protein over the course of the simulation trajectory.  
+   Generate a time‑series plot of the SASA values and save the figure.
    
    **Available Files:**
-   Topology: working_dir/hpc/md.gro
-   Trajectory: working_dir/hpc/md.xtc
-   Energy: working_dir/hpc/md.edr
-   HPC Output Directory: working_dir/hpc
+   Topology: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro
+   Trajectory: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.xtc
+   Energy: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.edr
+   HPC Output Directory: /home/akp66103/workspace/agenticAI/working_dir/hpc
+   
+   **Available Files:**
+   Topology: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro
+   Trajectory: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.xtc
+   Energy: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.edr
+   HPC Output Directory: /home/akp66103/workspace/agenticAI/working_dir/hpc
    
    TASK: Analysis-only - perform trajectory analysis on existing simulation data.
    DO NOT include preprocessing, setup, or HPC agents.
    ONLY create execution plan for Analysis Agent.
    
    File Structure:
-   - Working Directory: working_dir
-   - Trajectory/Topology Location: working_dir/hpc/ (auto-discovery)
-   - Analysis Output Directory: working_dir/analysis/
+   - Working Directory: /home/akp66103/workspace/agenticAI/working_dir
+   - Trajectory/Topology Location: /home/akp66103/workspace/agenticAI/working_dir/hpc/ (auto-discovery)
+   - Analysis Output Directory: /home/akp66103/workspace/agenticAI/working_dir/analysis/
    
    **Available Analysis Agent Tools:**
    
@@ -166,6 +180,53 @@ Session ID: 20260304_174437
        • output_file (optional): No description
        • working_dir (optional): No description
    
+   → analyze_secondary_structure
+     Analyze protein secondary structure using DSSP algorithm.
+   
+   This tool:
+   - Calculates secondary structure for each residue at each frame
+   - Computes percentage of each secondary structure type over time
+   - Generates heatmap showing residue-by-residue secondary structure evolution
+   - Creates time series plots of secondary structure percentages
+   
+   DSSP Secondary Structure Types:
+   - H: α-helix (alpha helix)
+   - B: β-bridge (isolated beta bridge)
+   - E: β-strand (extended strand, participates in beta ladder)
+   - G: 3-helix (3-10 helix)
+   - I: π-helix (pi helix)
+   - T: Turn (hydrogen bonded turn)
+   - S: Bend (bend)
+   - -: Coil (loops/random coil)
+   
+   Args:
+       topology_file: Topology file (.gro, .pdb, .tpr) - full path
+       trajectory_file: Trajectory file (.xtc, .trr, .dcd) - full path
+       selection: Atom selection for DSSP analysis (default: "protein")
+       output_prefix: Prefix for output files (default: "dssp")
+       create_heatmap: Generate heatmap of secondary structure per residue (default: True)
+       create_time_series: Generate time series plot of SS percentages (default: True)
+       save_raw_data: Save raw DSSP data to file (default: True)
+       working_dir: Working directory for analysis (optional)
+   
+   Returns:
+       Dict with secondary structure analysis results including:
+       - success: bool
+       - n_frames: Number of analyzed frames
+       - n_residues: Number of protein residues
+       - ss_percentages: Average percentage of each SS type
+       - ss_percentages_per_frame: SS percentages for each frame
+       - output_files: Dictionary of output filenames (not full paths)
+     Parameters:
+       • topology_file (required): No description
+       • trajectory_file (required): No description
+       • selection (optional): No description
+       • output_prefix (optional): No description
+       • create_heatmap (optional): No description
+       • create_time_series (optional): No description
+       • save_raw_data (optional): No description
+       • working_dir (optional): No description
+   
    → calculate_radius_of_gyration
      Calculate radius of gyration (Rg) for a trajectory.
    
@@ -173,12 +234,11 @@ Session ID: 20260304_174437
    indicate folding/unfolding events or conformational changes.
    
    Args:
-       topology_file: Topology file (.gro, .pdb, .tpr)
-       trajectory_file: Trajectory file (.xtc, .trr, .dcd)
+       topology_file: Topology file (.gro, .pdb, .tpr) - full path
+       trajectory_file: Trajectory file (.xtc, .trr, .dcd) - full path  
        selection: Atom selection for Rg calculation (default: "protein")
-       output_file: Output file path for Rg data (.dat, .csv)
-       working_dir: Working directory for analysis
-   
+       output_file: Output filename only (default: "rg.dat") - file saved in working_dir
+       working_dir: Working directory for analysis (files will be written here)
    Returns:
        Dict with Rg results and statistics
      Parameters:
@@ -198,12 +258,12 @@ Session ID: 20260304_174437
    before computing RMSD. Set align_before_rmsd=False to disable this.
    
    Args:
-       topology_file: Topology file (.gro, .pdb, .tpr)
-       trajectory_file: Trajectory file (.xtc, .trr, .dcd)
+       topology_file: Topology file (.gro, .pdb, .tpr) - full path
+       trajectory_file: Trajectory file (.xtc, .trr, .dcd) - full path
        selection: Atom selection for RMSD calculation (default: "protein and name CA")
        reference_frame: Reference frame number (default: 0 - first frame)
-       output_file: Output file path for RMSD data (.dat, .csv)
-       working_dir: Working directory for analysis
+       output_file: Output filename only (default: "rmsd.dat") - file saved in working_dir
+       working_dir: Working directory for analysis (files will be written here)
        align_before_rmsd: Whether to align before RMSD calculation (default: True)
    
    Returns:
@@ -246,6 +306,32 @@ Session ID: 20260304_174437
        • align_trajectory (optional): No description
        • align_selection (optional): No description
    
+   → calculate_sasa
+     Calculate SASA (Solvent Accessible Surface Area) using GROMACS gmx sasa.
+   
+   SASA measures the surface area of a biomolecule that is accessible to a 
+   solvent (typically water). This is useful for understanding protein folding,
+   binding interfaces, and conformational changes.
+   
+   Args:
+       topology_file: Topology file (.tpr preferred, or .gro with warnings) - full path
+       trajectory_file: Trajectory file (.xtc, .trr) - full path
+       selection: GROMACS selection (default: "Protein"). Can use: "Protein", "Protein-H", 
+                  custom index groups, or combinations like "Protein_LIG" for protein+ligand
+       probe_radius: Probe radius in nm (default: 0.14 nm = 1.4 Å for water)
+       output_csv: Output CSV filename only (default: "sasa.csv") - file saved in working_dir
+       working_dir: Working directory for analysis (files will be written here)
+   
+   Returns:
+       Dict with SASA results and statistics
+     Parameters:
+       • topology_file (required): No description
+       • trajectory_file (required): No description
+       • selection (optional): No description
+       • probe_radius (optional): No description
+       • output_csv (optional): No description
+       • working_dir (optional): No description
+   
    → extract_trajectory_metrics
      Extract basic metrics from trajectory file.
    
@@ -271,6 +357,14 @@ Session ID: 20260304_174437
        Formatted summary report string
      Parameters:
        • working_dir (required): Working directory for analysis
+   
+   → get_dynamic_tool_loader
+     Get or create global dynamic tool loader instance.
+   
+       DynamicToolLoader instance
+     Parameters:
+       • programmer_dir (optional): Directory containing programmer-generated tools
+       • refresh (optional): If True, reload all tools from disk
    
    → initialize_summary_file
      Initialize the analysis summary file.
@@ -324,7 +418,7 @@ Session ID: 20260304_174437
    
    Args:
        data_files: List of data file paths to plot (.xvg, .dat, .csv)
-       output_file: Output image file path (.png, .pdf, .svg)
+       output_file: Output image filename only (e.g., "plot.png") - saved in working_dir
        plot_type: Type of plot ("line", "scatter", "bar") - default: "line"
        titles: Plot title (optional)
        xlabel: X-axis label (optional, auto-detected from file if available)
@@ -333,7 +427,7 @@ Session ID: 20260304_174437
        colors: Line/marker colors for each dataset (optional)
        figsize: Figure size as (width, height) in inches - default: (10, 6)
        dpi: Resolution in dots per inch - default: 300
-       working_dir: Working directory for analysis
+       working_dir: Working directory for analysis (files will be written here)
    
    Returns:
        Dict with plotting results
@@ -384,6 +478,27 @@ Session ID: 20260304_174437
        • dpi (optional): No description
        • working_dir (optional): No description
    
+   → plot_sasa
+     Plot SASA time-series from a CSV file (generated by calculate_sasa).
+   
+   Args:
+       csv_file: CSV filename in working_dir (e.g., "sasa.csv")
+       output_figure: Output figure filename only (default: "sasa_plot.png") - saved in working_dir
+       time_col: Column name for time data (default: "time")
+       sasa_col: Column name for SASA data (default: "sasa")
+       title: Plot title (default: "SASA vs Time")
+       working_dir: Working directory for analysis (where CSV is located)
+   
+   Returns:
+       Dict with plot generation results
+     Parameters:
+       • csv_file (required): No description
+       • output_figure (optional): No description
+       • time_col (optional): No description
+       • sasa_col (optional): No description
+       • title (optional): No description
+       • working_dir (optional): No description
+   
    → run_complete_analysis
      Convenience function to run complete analysis workflow.
    
@@ -395,12 +510,66 @@ Session ID: 20260304_174437
        • working_dir (optional): Working directory for outputs
        • analyses (optional): List of analyses to perform
    
+   
+   **CRITICAL: TOOL AVAILABILITY CHECK**
+   
+   BEFORE creating your execution plan, you MUST:
+   
+   1. **Review the requested task** - Identify what specific analyses, calculations, or operations are needed
+   
+   2. **Check available tools** - Carefully examine the tools list above to see if they can accomplish the task
+   
+   3. **Identify missing capabilities** - If the required functionality is NOT available in existing tools, you MUST explicitly state this
+   
+   **HOW TO REQUEST MISSING TOOLS:**
+   
+   If you identify that a tool is missing, you MUST include a clear statement in your response using one of these EXACT phrases:
+   - "Missing tool for [specific functionality]"
+   - "Need to create custom tool for [specific purpose]"  
+   - "No existing tool available for [task]"
+   - "Tool not available for [functionality]"
+   - "Require custom tool for [specific analysis]"
+   - "Programmer should create [tool description]"
+   
+   **EXAMPLE:**
+   If the user requests DSSP (secondary structure) analysis but you don't see a DSSP tool in the available tools list, you MUST state:
+   "Missing tool for DSSP secondary structure analysis. Need to create custom tool for calculating time-dependent helix, sheet, turn, and coil fractions from trajectory data."
+   
+   **WHAT HAPPENS NEXT:**
+   When you indicate missing tools, the Programmer Agent will be automatically invoked to create them before your execution plan is finalized. The tools will then be available for the field agents to use.
+   
+   **IMPORTANT:**
+   - DO check the tools list carefully - don't request tools that already exist
+   - DO be specific about what functionality is missing
+   - DO indicate missing tools explicitly even if you think they "should" exist
+   - DO request tool creation for ANY specialized analysis not covered by existing tools
+   
+   
    **CRITICAL INSTRUCTIONS:**
-   - Use the analysis agent's Python tools listed above (calculate_rmsd, calculate_rmsf, etc.)
+   - FIRST: Check if the requested analysis is available in the tools list above
+   - If a required analysis tool is missing (e.g., DSSP, SASA, hydrogen bonds, distance calculations, etc.), you MUST state "Missing tool for [analysis type]" explicitly
+   - Use the analysis agent's Python tools listed above (calculate_rmsd, calculate_rmsf, etc.) when available
+   - Do NOT assume tools exist - check the list carefully
    - Do NOT use bash/shell commands or GROMACS CLI tools (gmx rmsf, etc.)
    - The analysis agent will handle file discovery and tool execution
    - Specify WHICH tools to use and what analysis to perform
    - Let the analysis agent handle the implementation details
+   
+   **ANALYSIS TYPES TO CHECK FOR:**
+   If the user requests any of these analyses, verify a tool exists:
+   - Secondary structure (DSSP)
+   - Solvent accessible surface area (SASA)
+   - Hydrogen bonds
+   - Salt bridges
+   - Protein-ligand contacts
+   - Distance measurements
+   - Angle calculations
+   - Dihedral angles
+   - Principal component analysis (PCA)
+   - Clustering
+   - Free energy calculations
+   
+   If any requested analysis is NOT in the available tools, state it clearly.
    
    **OUTPUT FORMAT - MANDATORY:**
    
@@ -434,48 +603,63 @@ Session ID: 20260304_174437
    💭 Response:
    ======================================================================
    **Goal**  
-   The purpose of this workflow is to extract meaningful dynamic information from a pre‑existing protein simulation. Specifically, we will quantify how the structure changes over time using RMSD and per‑residue flexibility via RMSF, and we will examine the energetic behaviour of the trajectory by reporting potential and total energy. All results will be saved to the dedicated analysis directory, plotted in clear, publication‑ready figures, and summarized in a concise report that can be appended to any subsequent documentation.
+   Generate a time‑dependent surface area profile for the protein in the trajectory `md.xtc` (topology `md.gro`) and produce a clear, publication‑ready plot of SASA versus simulation time. The analysis should be self‑contained, using only the tools provided to the Analysis Agent, and the output should be stored in the designated analysis directory.
    
-   **Analysis**  
-   The analysis will be carried out exclusively with the Python tools available in the Analysis Agent. No external GROMACS binaries or shell commands will be invoked. The chosen tools are:
+   ---
    
-   1. **initialize_summary_file** – sets up a structured, versioned summary file that the other tools will populate.  
-   2. **extract_trajectory_metrics** – provides quick checks on frame count, time span and file size, which is useful for validating the simulation output.  
-   3. **calculate_rmsd** – computes the RMSD of the protein backbone (default CA atoms) relative to the first frame, automatically aligning the trajectory to remove rigid body motion.  
-   4. **calculate_rmsf** – calculates per‑residue RMSF after the same alignment, giving a map of flexible regions.  
-   5. **plot_md_multipanel** – assembles the RMSD and RMSF data into a single multi‑panel figure, keeping the panels vertically stacked for easy comparison.  
-   6. **analyze_energy** – extracts the potential and total energy components from the GROMACS energy file, outputting an .xvg data file.  
-   7. **plot_md_data** – turns the energy data into a clean line plot, labeling each energy term.  
-   8. **generate_summary_report** – consumes the summary file and creates a human‑readable report that references the generated plots and key statistics.
+   ### Analysis Overview
    
-   These tools collectively cover the entire analysis requirement: metric extraction, data processing, visualisation, and reporting.
+   The required workflow involves two distinct stages:
    
-   **Execution Sequence**  
-   1. **Prepare the output structure** – the agent will create a subdirectory named *analysis* under the working directory (`working_dir/analysis`). All data files and figures will be written here to keep the workspace organised.  
-   2. **Initialize the summary infrastructure** – the agent calls **initialize_summary_file** with the working directory as context, which creates an empty summary file ready to be populated by downstream tools.  
-   3. **Capture trajectory basic metrics** – **extract_trajectory_metrics** is invoked with the topology (`working_dir/hpc/md.gro`) and trajectory (`working_dir/hpc/md.xtc`). The resulting metrics (frame count, simulation time, file size) are written to the summary file.  
-   4. **Compute RMSD** – the agent runs **calculate_rmsd** using the same topology and trajectory. Alignment is left to the default (`align_before_rmsd=True`), ensuring that the RMSD reflects conformational changes rather than overall translation or rotation. The output file is written as `analysis/rmsd.dat`.  
-   5. **Compute RMSF** – next, **calculate_rmsf** is called, again employing the default alignment. Its output is stored as `analysis/rmsf.dat`.  
-   6. **Plot RMSD and RMSF together** – **plot_md_multipanel** receives the two data files, is instructed to create a vertical stack of panels, and writes the figure to `analysis/rmsd_rmsf.png`. The agent sets appropriate titles (“RMSD over time” and “Per‑residue RMSF”) and axis labels so that the figure is immediately interpretable.  
-   7. **Analyse energy** – **analyze_energy** is executed on the energy file (`working_dir/hpc/md.edr`) with the terms `["Potential", "Total"]`. The resulting .xvg file is saved as `analysis/energy.xvg`.  
-   8. **Visualise energy** – **plot_md_data** takes the energy file, produces a line plot with distinct colors for potential and total energy, and writes the image to `analysis/energy.png`.  
-   9. **Generate the summary report** – finally, **generate_summary_report** consumes the populated summary file and injects references to the figures, key numerical findings, and any notable observations (e.g., RMSD plateauing, peaks in energy fluctuations). The report is written as `analysis/summary.txt`.  
+   1. **Computation of SASA** – Using the GROMACS‑based `calculate_sasa` tool, which internally wraps the `gmx sasa` routine.  
+   2. **Visualization** – Using the `plot_sasa` tool to convert the resulting CSV into a line plot of SASA against time, automatically handling axis labels, titles, and figure export.
    
-   Throughout the sequence, each tool’s output is automatically captured by the Analysis Agent, so the agent only needs to specify the logical flow and file paths; the underlying implementation will resolve locations and execute the tools in the correct order.
+   No other analyses (e.g., secondary structure, RMSD) are required for this specific task, so we focus exclusively on SASA.
    
-   **Expected Outcomes**  
-   - A clean, dedicated *analysis* directory containing:  
-     - `rmsd.dat` – time‑series RMSD values.  
-     - `rmsf.dat` – per‑residue RMSF values.  
-     - `rmsd_rmsf.png` – a two‑panel figure juxtaposing RMSD and RMSF.  
-     - `energy.xvg` – tabulated potential and total energy over time.  
-     - `energy.png` – a line plot of the energy terms.  
-     - `summary.txt` – a concise, human‑readable report summarising the findings and linking to the figures.  
-   - The RMSD plot should reveal the stabilization of the protein structure after initial equilibration, while the RMSF plot should highlight flexible loops or termini.  
-   - The energy plot should demonstrate the stability of the potential and total energy, or flag any drift or spikes that might indicate simulation artefacts.  
-   - All data files and figures are stored in a reproducible, versioned directory that can be referenced by downstream reporting or publication pipelines.
+   ---
    
-   This plan fully satisfies the user’s requirement for trajectory analysis, providing both quantitative data and visual representation, all produced by the Analysis Agent’s dedicated tools without any external command‑line intervention.
+   ### Execution Sequence
+   
+   1. **Preparation of File Paths**  
+      - The Analysis Agent will locate the topology file `/home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro` and trajectory file `/home/akp66103/workspace/agenticAI/working_dir/hpc/md.xtc`.  
+      - The analysis output directory is set to `/home/akp66103/workspace/agenticAI/working_dir/analysis/`.  
+      - All tool calls will reference this directory for reading inputs and writing outputs.
+   
+   2. **SASA Calculation**  
+      - **Agent**: `calculate_sasa`  
+      - **Arguments**:  
+        - `topology_file` – full path to `md.gro`  
+        - `trajectory_file` – full path to `md.xtc`  
+        - `selection` – “Protein” (default, ensures the whole protein is considered)  
+        - `probe_radius` – 0.14 nm (default, suitable for water)  
+        - `output_csv` – “sasa.csv” (only the filename; the tool will write it into the working directory)  
+        - `working_dir` – analysis directory  
+      - **Outcome**: A CSV file containing two columns: time (in ps) and SASA (in nm²). The tool returns a dictionary summarizing the number of frames processed and the mean SASA value, which the Analysis Agent can record in a log.
+   
+   3. **Plot Generation**  
+      - **Agent**: `plot_sasa`  
+      - **Arguments**:  
+        - `csv_file` – “sasa.csv” (file located in the working directory)  
+        - `output_figure` – “sasa_plot.png” (the agent will write this file in the same directory)  
+        - `time_col` – “time” (default)  
+        - `sasa_col` – “sasa” (default)  
+        - `title` – “SASA vs Time” (default, but can be overridden if desired)  
+        - `working_dir` – analysis directory  
+      - **Outcome**: A PNG image visualizing the SASA trajectory. The plot will feature a time axis in ps, a y‑axis in nm², and appropriate labels, ensuring readability for a manuscript figure.
+   
+   4. **Result Consolidation**  
+      - The Analysis Agent records the paths of `sasa.csv` and `sasa_plot.png` in a summary dictionary.  
+      - It may optionally invoke `generate_summary_report` to produce a human‑readable text file summarizing the SASA analysis, but this is not mandatory for the core task.
+   
+   ---
+   
+   ### Expected Outcomes
+   
+   - **Data File**: `sasa.csv` in `/home/akp66103/workspace/agenticAI/working_dir/analysis/` containing per‑frame SASA values.  
+   - **Figure**: `sasa_plot.png` in the same directory, displaying SASA versus simulation time.  
+   - **Log/Metadata**: A concise record of frames processed, average SASA, and file locations, useful for traceability.  
+   
+   Because the `calculate_sasa` tool handles all necessary GROMACS interactions and the `plot_sasa` tool abstracts figure creation, no additional custom tools or manual GROMACS commands are required. The Analysis Agent can execute the entire workflow autonomously, delivering the requested trajectory analysis outputs.
    ======================================================================
 
 ⚡ AGENT ACTION (planner):
@@ -487,12 +671,20 @@ Session ID: 20260304_174437
 ]
    📊 total_agents: 1
    📊 plan_preview: **Goal**  
-The purpose of this workflow is to extract meaningful dynamic information from a pre‑existing protein simulation. Specifically, we will quantify how the structure changes over time using RMSD and per‑residue flexibility via RMSF, and we will examine the energetic behaviour of the trajectory by reporting potential and total energy. All results will be saved to the dedicated analysis directory, plotted in clear, publication‑ready figures, and summarized in a concise report that can be a...
+Generate a time‑dependent surface area profile for the protein in the trajectory `md.xtc` (topology `md.gro`) and produce a clear, publication‑ready plot of SASA versus simulation time. The analysis should be self‑contained, using only the tools provided to the Analysis Agent, and the output should be stored in the designated analysis directory.
+
+---
+
+### Analysis Overview
+
+The required workflow involves two distinct stages:
+
+1. **Computation of SASA** – Using the GROMACS‑based `calcu...
    📊 method: llm_generated
 
-🎛️  SUPERVISOR ROUTING [2026-03-04 17:45:17]:
+🎛️  SUPERVISOR ROUTING [2026-03-17 12:52:57]:
    Current State Summary:
-     ✅ raw_pdb: working_dir/3.pdb
+     ✅ raw_pdb: /home/akp66103/workspace/agenticAI/working_dir/3.pdb
      ❌ cleaned_pdb: Not set
      ❌ coordinates: Not set
      ❌ job_id: Not set
@@ -500,9 +692,9 @@ The purpose of this workflow is to extract meaningful dynamic information from a
    📍 Routing: planner → supervisor
    💭 Reasoning: Planner: Created natural language plan with 1 agents. Returning to supervisor.
 
-🎛️  SUPERVISOR ROUTING [2026-03-04 17:45:17]:
+🎛️  SUPERVISOR ROUTING [2026-03-17 12:52:57]:
    Current State Summary:
-     ✅ raw_pdb: working_dir/3.pdb
+     ✅ raw_pdb: /home/akp66103/workspace/agenticAI/working_dir/3.pdb
      ❌ cleaned_pdb: Not set
      ❌ coordinates: Not set
      ❌ job_id: Not set
@@ -510,10 +702,12 @@ The purpose of this workflow is to extract meaningful dynamic information from a
    📍 Routing: supervisor → analysis
    💭 Reasoning: Executing Step 1: Unnamed
 
-🤖 MD TRAJECTORY ANALYSIS WITH LLM PLANNING AGENT (analysis) STARTING [2026-03-04 17:45:17]:
+🤖 MD TRAJECTORY ANALYSIS WITH LLM PLANNING AGENT (analysis) STARTING [2026-03-17 12:52:57]:
    Input Data Summary:
-     • planner_instructions: **Goal**  
-The purpose of this workflow is to extract meaningful dynamic information from a pre‑existing protein simulation. Specifically, we will quantify how the structure changes over time using RM... [truncated, see full plan above]
+     • planner_instructions: - The analysis output directory is set to `/home/akp66103/workspace/agenticAI/working_dir/analysis/`.  
+   - All tool calls will reference this directory for reading inputs and writing outputs.
+
+2. **... [truncated, see full plan above]
 
 ⚡ AGENT ACTION (analysis):
    🎬 Action: Recorded PDB Structure Info
@@ -528,16 +722,16 @@ The purpose of this workflow is to extract meaningful dynamic information from a
 }
    📊 summary: Protein: Chain A (255 residues) | Ligands: ATP | Ions: MG (×2) | Needs: missing hydrogens
 
-🧠 LLM INTERACTION (analysis.planning) [2026-03-04 17:45:49]:
+🧠 LLM INTERACTION (analysis.planning) [2026-03-17 12:53:16]:
    📝 Prompt:
    ======================================================================
    You are a molecular dynamics analysis expert executing a detailed plan from the workflow planner.
    
    **Available Data:**
-   - Topology File: working_dir/hpc/md.gro
-   - Trajectory File: working_dir/hpc/md.xtc
-   - Energy File: working_dir/hpc/md.edr
-   - Working Directory: working_dir
+   - Topology File: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro
+   - Trajectory File: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.xtc
+   - Energy File: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.edr
+   - Working Directory: /home/akp66103/workspace/agenticAI/working_dir
    
    **Files Available from HPC:** None registered
    
@@ -552,49 +746,36 @@ The purpose of this workflow is to extract meaningful dynamic information from a
    
    **DETAILED INSTRUCTIONS FROM PLANNER:**
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   **Goal**  
-   The purpose of this workflow is to extract meaningful dynamic information from a pre‑existing protein simulation. Specifically, we will quantify how the structure changes over time using RMSD and per‑residue flexibility via RMSF, and we will examine the energetic behaviour of the trajectory by reporting potential and total energy. All results will be saved to the dedicated analysis directory, plotted in clear, publication‑ready figures, and summarized in a concise report that can be appended to any subsequent documentation.
+   - The analysis output directory is set to `/home/akp66103/workspace/agenticAI/working_dir/analysis/`.  
+      - All tool calls will reference this directory for reading inputs and writing outputs.
    
-   **Analysis**  
-   The analysis will be carried out exclusively with the Python tools available in the Analysis Agent. No external GROMACS binaries or shell commands will be invoked. The chosen tools are:
+   2. **SASA Calculation**  
+      - **Agent**: `calculate_sasa`  
+      - **Arguments**:  
+        - `topology_file` – full path to `md.gro`  
+        - `trajectory_file` – full path to `md.xtc`  
+        - `selection` – “Protein” (default, ensures the whole protein is considered)  
+        - `probe_radius` – 0.14 nm (default, suitable for water)  
+        - `output_csv` – “sasa.csv” (only the filename; the tool will write it into the working directory)  
+        - `working_dir` – analysis directory  
+      - **Outcome**: A CSV file containing two columns: time (in ps) and SASA (in nm²). The tool returns a dictionary summarizing the number of frames processed and the mean SASA value, which the Analysis Agent can record in a log.
    
-   1. **initialize_summary_file** – sets up a structured, versioned summary file that the other tools will populate.  
-   2. **extract_trajectory_metrics** – provides quick checks on frame count, time span and file size, which is useful for validating the simulation output.  
-   3. **calculate_rmsd** – computes the RMSD of the protein backbone (default CA atoms) relative to the first frame, automatically aligning the trajectory to remove rigid body motion.  
-   4. **calculate_rmsf** – calculates per‑residue RMSF after the same alignment, giving a map of flexible regions.  
-   5. **plot_md_multipanel** – assembles the RMSD and RMSF data into a single multi‑panel figure, keeping the panels vertically stacked for easy comparison.  
-   6. **analyze_energy** – extracts the potential and total energy components from the GROMACS energy file, outputting an .xvg data file.  
-   7. **plot_md_data** – turns the energy data into a clean line plot, labeling each energy term.  
-   8. **generate_summary_report** – consumes the summary file and creates a human‑readable report that references the generated plots and key statistics.
+   3. **Plot Generation**  
+      - **Agent**: `plot_sasa`  
+      - **Arguments**:  
+        - `csv_file` – “sasa.csv” (file located in the working directory)  
+        - `output_figure` – “sasa_plot.png” (the agent will write this file in the same directory)  
+        - `time_col` – “time” (default)  
+        - `sasa_col` – “sasa” (default)  
+        - `title` – “SASA vs Time” (default, but can be overridden if desired)  
+        - `working_dir` – analysis directory  
+      - **Outcome**: A PNG image visualizing the SASA trajectory. The plot will feature a time axis in ps, a y‑axis in nm², and appropriate labels, ensuring readability for a manuscript figure.
    
-   These tools collectively cover the entire analysis requirement: metric extraction, data processing, visualisation, and reporting.
+   4. **Result Consolidation**  
+      - The Analysis Agent records the paths of `sasa.csv` and `sasa_plot.png` in a summary dictionary.  
+      - It may optionally invoke `generate_summary_report` to produce a human‑readable text file summarizing the SASA analysis, but this is not mandatory for the core task.
    
-   **Execution Sequence**  
-   1. **Prepare the output structure** – the agent will create a subdirectory named *analysis* under the working directory (`working_dir/analysis`). All data files and figures will be written here to keep the workspace organised.  
-   2. **Initialize the summary infrastructure** – the agent calls **initialize_summary_file** with the working directory as context, which creates an empty summary file ready to be populated by downstream tools.  
-   3. **Capture trajectory basic metrics** – **extract_trajectory_metrics** is invoked with the topology (`working_dir/hpc/md.gro`) and trajectory (`working_dir/hpc/md.xtc`). The resulting metrics (frame count, simulation time, file size) are written to the summary file.  
-   4. **Compute RMSD** – the agent runs **calculate_rmsd** using the same topology and trajectory. Alignment is left to the default (`align_before_rmsd=True`), ensuring that the RMSD reflects conformational changes rather than overall translation or rotation. The output file is written as `analysis/rmsd.dat`.  
-   5. **Compute RMSF** – next, **calculate_rmsf** is called, again employing the default alignment. Its output is stored as `analysis/rmsf.dat`.  
-   6. **Plot RMSD and RMSF together** – **plot_md_multipanel** receives the two data files, is instructed to create a vertical stack of panels, and writes the figure to `analysis/rmsd_rmsf.png`. The agent sets appropriate titles (“RMSD over time” and “Per‑residue RMSF”) and axis labels so that the figure is immediately interpretable.  
-   7. **Analyse energy** – **analyze_energy** is executed on the energy file (`working_dir/hpc/md.edr`) with the terms `["Potential", "Total"]`. The resulting .xvg file is saved as `analysis/energy.xvg`.  
-   8. **Visualise energy** – **plot_md_data** takes the energy file, produces a line plot with distinct colors for potential and total energy, and writes the image to `analysis/energy.png`.  
-   9. **Generate the summary report** – finally, **generate_summary_report** consumes the populated summary file and injects references to the figures, key numerical findings, and any notable observations (e.g., RMSD plateauing, peaks in energy fluctuations). The report is written as `analysis/summary.txt`.  
-   
-   Throughout the sequence, each tool’s output is automatically captured by the Analysis Agent, so the agent only needs to specify the logical flow and file paths; the underlying implementation will resolve locations and execute the tools in the correct order.
-   
-   **Expected Outcomes**  
-   - A clean, dedicated *analysis* directory containing:  
-     - `rmsd.dat` – time‑series RMSD values.  
-     - `rmsf.dat` – per‑residue RMSF values.  
-     - `rmsd_rmsf.png` – a two‑panel figure juxtaposing RMSD and RMSF.  
-     - `energy.xvg` – tabulated potential and total energy over time.  
-     - `energy.png` – a line plot of the energy terms.  
-     - `summary.txt` – a concise, human‑readable report summarising the findings and linking to the figures.  
-   - The RMSD plot should reveal the stabilization of the protein structure after initial equilibration, while the RMSF plot should highlight flexible loops or termini.  
-   - The energy plot should demonstrate the stability of the potential and total energy, or flag any drift or spikes that might indicate simulation artefacts.  
-   - All data files and figures are stored in a reproducible, versioned directory that can be referenced by downstream reporting or publication pipelines.
-   
-   This plan fully satisfies the user’s requirement for trajectory analysis, providing both quantitative data and visual representation, all produced by the Analysis Agent’s dedicated tools without any external command‑line intervention.
+   ---
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    
    **Available Tools:**
@@ -607,12 +788,12 @@ The purpose of this workflow is to extract meaningful dynamic information from a
    before computing RMSD. Set align_before_rmsd=False to disable this.
    
    Args:
-       topology_file: Topology file (.gro, .pdb, .tpr)
-       trajectory_file: Trajectory file (.xtc, .trr, .dcd)
+       topology_file: Topology file (.gro, .pdb, .tpr) - full path
+       trajectory_file: Trajectory file (.xtc, .trr, .dcd) - full path
        selection: Atom selection for RMSD calculation (default: "protein and name CA")
        reference_frame: Reference frame number (default: 0 - first frame)
-       output_file: Output file path for RMSD data (.dat, .csv)
-       working_dir: Working directory for analysis
+       output_file: Output filename only (default: "rmsd.dat") - file saved in working_dir
+       working_dir: Working directory for analysis (files will be written here)
        align_before_rmsd: Whether to align before RMSD calculation (default: True)
    
    Returns:
@@ -642,14 +823,42 @@ The purpose of this workflow is to extract meaningful dynamic information from a
    indicate folding/unfolding events or conformational changes.
    
    Args:
-       topology_file: Topology file (.gro, .pdb, .tpr)
-       trajectory_file: Trajectory file (.xtc, .trr, .dcd)
+       topology_file: Topology file (.gro, .pdb, .tpr) - full path
+       trajectory_file: Trajectory file (.xtc, .trr, .dcd) - full path  
        selection: Atom selection for Rg calculation (default: "protein")
-       output_file: Output file path for Rg data (.dat, .csv)
-       working_dir: Working directory for analysis
-   
+       output_file: Output filename only (default: "rg.dat") - file saved in working_dir
+       working_dir: Working directory for analysis (files will be written here)
    Returns:
        Dict with Rg results and statistics
+   → calculate_sasa: Calculate SASA (Solvent Accessible Surface Area) using GROMACS gmx sasa.
+   
+   SASA measures the surface area of a biomolecule that is accessible to a 
+   solvent (typically water). This is useful for understanding protein folding,
+   binding interfaces, and conformational changes.
+   
+   Args:
+       topology_file: Topology file (.tpr preferred, or .gro with warnings) - full path
+       trajectory_file: Trajectory file (.xtc, .trr) - full path
+       selection: GROMACS selection (default: "Protein"). Can use: "Protein", "Protein-H", 
+                  custom index groups, or combinations like "Protein_LIG" for protein+ligand
+       probe_radius: Probe radius in nm (default: 0.14 nm = 1.4 Å for water)
+       output_csv: Output CSV filename only (default: "sasa.csv") - file saved in working_dir
+       working_dir: Working directory for analysis (files will be written here)
+   
+   Returns:
+       Dict with SASA results and statistics
+   → plot_sasa: Plot SASA time-series from a CSV file (generated by calculate_sasa).
+   
+   Args:
+       csv_file: CSV filename in working_dir (e.g., "sasa.csv")
+       output_figure: Output figure filename only (default: "sasa_plot.png") - saved in working_dir
+       time_col: Column name for time data (default: "time")
+       sasa_col: Column name for SASA data (default: "sasa")
+       title: Plot title (default: "SASA vs Time")
+       working_dir: Working directory for analysis (where CSV is located)
+   
+   Returns:
+       Dict with plot generation results
    → analyze_energy: Analyze energy terms from GROMACS energy file (.edr).
    
    Extracts and analyzes energy components like potential, kinetic energy,
@@ -675,6 +884,42 @@ The purpose of this workflow is to extract meaningful dynamic information from a
    
    Returns:
        Dict with trajectory metrics
+   → analyze_secondary_structure: Analyze protein secondary structure using DSSP algorithm.
+   
+   This tool:
+   - Calculates secondary structure for each residue at each frame
+   - Computes percentage of each secondary structure type over time
+   - Generates heatmap showing residue-by-residue secondary structure evolution
+   - Creates time series plots of secondary structure percentages
+   
+   DSSP Secondary Structure Types:
+   - H: α-helix (alpha helix)
+   - B: β-bridge (isolated beta bridge)
+   - E: β-strand (extended strand, participates in beta ladder)
+   - G: 3-helix (3-10 helix)
+   - I: π-helix (pi helix)
+   - T: Turn (hydrogen bonded turn)
+   - S: Bend (bend)
+   - -: Coil (loops/random coil)
+   
+   Args:
+       topology_file: Topology file (.gro, .pdb, .tpr) - full path
+       trajectory_file: Trajectory file (.xtc, .trr, .dcd) - full path
+       selection: Atom selection for DSSP analysis (default: "protein")
+       output_prefix: Prefix for output files (default: "dssp")
+       create_heatmap: Generate heatmap of secondary structure per residue (default: True)
+       create_time_series: Generate time series plot of SS percentages (default: True)
+       save_raw_data: Save raw DSSP data to file (default: True)
+       working_dir: Working directory for analysis (optional)
+   
+   Returns:
+       Dict with secondary structure analysis results including:
+       - success: bool
+       - n_frames: Number of analyzed frames
+       - n_residues: Number of protein residues
+       - ss_percentages: Average percentage of each SS type
+       - ss_percentages_per_frame: SS percentages for each frame
+       - output_files: Dictionary of output filenames (not full paths)
    → plot_md_data: Plot MD analysis data from one or more data files (single panel).
    
    Creates a single-panel plot for visualizing RMSD, RMSF, Rg, or energy data.
@@ -682,7 +927,7 @@ The purpose of this workflow is to extract meaningful dynamic information from a
    
    Args:
        data_files: List of data file paths to plot (.xvg, .dat, .csv)
-       output_file: Output image file path (.png, .pdf, .svg)
+       output_file: Output image filename only (e.g., "plot.png") - saved in working_dir
        plot_type: Type of plot ("line", "scatter", "bar") - default: "line"
        titles: Plot title (optional)
        xlabel: X-axis label (optional, auto-detected from file if available)
@@ -691,7 +936,7 @@ The purpose of this workflow is to extract meaningful dynamic information from a
        colors: Line/marker colors for each dataset (optional)
        figsize: Figure size as (width, height) in inches - default: (10, 6)
        dpi: Resolution in dots per inch - default: 300
-       working_dir: Working directory for analysis
+       working_dir: Working directory for analysis (files will be written here)
    
    Returns:
        Dict with plotting results
@@ -770,255 +1015,91 @@ The purpose of this workflow is to extract meaningful dynamic information from a
    💭 Response:
    ======================================================================
    {
-     "reasoning": "The planner requires a sequence of analyses and visualisations. Because the Analysis Agent only exposes the tools listed in the toolbox, any step that relies on a non\u2011existent tool (e.g., initialise_summary_file or generate_summary_report) is omitted. All other required analyses are carried out with the available tools, using the working directory \"working_dir\" as the base path and directing output to a dedicated subfolder \"analysis\".",
-     "overview": "1. Create (or assume the existence of) an analysis directory.\n2. Extract trajectory metrics.\n3. Compute RMSD and RMSF with default alignment.\n4. Plot RMSD and RMSF in a vertical multi\u2011panel figure.\n5. Analyse potential and total energy.\n6. Plot the energy terms in a single\u2011panel line plot.",
+     "reasoning": "The planner requires a SASA calculation for the protein followed by a visualisation of the resulting time\u2011series. The only tools that can perform these tasks are `calculate_sasa` and `plot_sasa`. Both tools write directly to the specified working directory, which is `/home/akp66103/workspace/agenticAI/working_dir/analysis/`. No other steps (e.g., RMSD, RMSF) are needed for the core SASA analysis, and no custom or non\u2011existent tools are invoked.",
+     "overview": "1. Run `calculate_sasa` on the trajectory with the protein selection. 2. Generate a PNG plot from the produced CSV with `plot_sasa`. 3. Record the resulting file paths.",
      "steps": [
        {
-         "name": "Extract trajectory metrics",
-         "description": "Collect basic information (frame count, time span, file size) from the trajectory.",
-         "tool_name": "extract_trajectory_metrics",
+         "name": "SASA calculation",
+         "description": "Compute solvent\u2011accessible surface area for the entire protein over the trajectory.",
+         "tool_name": "calculate_sasa",
          "tool_params": {
-           "trajectory_file": "working_dir/hpc/md.xtc",
-           "topology_file": "working_dir/hpc/md.gro",
-           "output_dir": "working_dir/analysis",
-           "working_dir": "working_dir"
+           "topology_file": "/home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro",
+           "trajectory_file": "/home/akp66103/workspace/agenticAI/working_dir/hpc/md.xtc",
+           "selection": "Protein",
+           "probe_radius": 0.14,
+           "output_csv": "sasa.csv",
+           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir/analysis/"
          },
-         "reason": "Required by the planner to validate simulation output and provide context for subsequent analyses."
+         "reason": "Required by the planner to generate the SASA time\u2011series data."
        },
        {
-         "name": "Calculate RMSD",
-         "description": "Compute the backbone RMSD relative to the first frame, automatically aligning the trajectory.",
-         "tool_name": "calculate_rmsd",
+         "name": "SASA plot generation",
+         "description": "Create a PNG image visualising SASA vs. time from the CSV produced above.",
+         "tool_name": "plot_sasa",
          "tool_params": {
-           "topology_file": "working_dir/hpc/md.gro",
-           "trajectory_file": "working_dir/hpc/md.xtc",
-           "selection": "protein and name CA",
-           "reference_frame": 0,
-           "output_file": "working_dir/analysis/rmsd.dat",
-           "working_dir": "working_dir",
-           "align_before_rmsd": true
+           "csv_file": "sasa.csv",
+           "output_figure": "sasa_plot.png",
+           "time_col": "time",
+           "sasa_col": "sasa",
+           "title": "SASA vs Time",
+           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir/analysis/"
          },
-         "reason": "Planner step 4 \u2013 generate RMSD data for stability assessment."
-       },
-       {
-         "name": "Calculate RMSF",
-         "description": "Determine per\u2011residue RMSF after aligning the trajectory.",
-         "tool_name": "calculate_rmsf",
-         "tool_params": {
-           "topology_file": "working_dir/hpc/md.gro",
-           "trajectory_file": "working_dir/hpc/md.xtc",
-           "selection": "protein and name CA",
-           "output_file": "working_dir/analysis/rmsf.dat",
-           "working_dir": "working_dir",
-           "align_trajectory": true,
-           "align_selection": "protein and name CA"
-         },
-         "reason": "Planner step 5 \u2013 produce RMSF data for flexibility mapping."
-       },
-       {
-         "name": "Plot RMSD and RMSF (multi\u2011panel)",
-         "description": "Create a vertical stack of RMSD and RMSF panels with clear titles and axis labels.",
-         "tool_name": "plot_md_multipanel",
-         "tool_params": {
-           "data_files": [
-             "working_dir/analysis/rmsd.dat",
-             "working_dir/analysis/rmsf.dat"
-           ],
-           "output_file": "working_dir/analysis/rmsd_rmsf.png",
-           "layout": "vertical",
-           "titles": [
-             "RMSD over time",
-             "Per\u2011residue RMSF"
-           ],
-           "xlabels": [
-             "Time (ns)",
-             "Residue number"
-           ],
-           "ylabels": [
-             "RMSD (\u00c5)",
-             "RMSF (\u00c5)"
-           ],
-           "plot_types": [
-             "line",
-             "line"
-           ],
-           "figsize": [
-             8,
-             10
-           ],
-           "dpi": 300,
-           "working_dir": "working_dir"
-         },
-         "reason": "Planner step 6 \u2013 assemble the RMSD and RMSF plots into a single figure."
-       },
-       {
-         "name": "Analyse energy terms",
-         "description": "Extract Potential and Total energy from the GROMACS energy file.",
-         "tool_name": "analyze_energy",
-         "tool_params": {
-           "energy_file": "working_dir/hpc/md.edr",
-           "terms": [
-             "Potential",
-             "Total"
-           ],
-           "output_file": "working_dir/analysis/energy.xvg",
-           "working_dir": "working_dir"
-         },
-         "reason": "Planner step 7 \u2013 obtain energy data for stability inspection."
-       },
-       {
-         "name": "Plot energy",
-         "description": "Generate a line plot of the extracted energy terms.",
-         "tool_name": "plot_md_data",
-         "tool_params": {
-           "data_files": [
-             "working_dir/analysis/energy.xvg"
-           ],
-           "output_file": "working_dir/analysis/energy.png",
-           "plot_type": "line",
-           "labels": [
-             "Potential",
-             "Total"
-           ],
-           "xlabel": "Time (ns)",
-           "ylabel": "Energy (kJ/mol)",
-           "colors": [
-             "tab:blue",
-             "tab:orange"
-           ],
-           "figsize": [
-             8,
-             6
-           ],
-           "dpi": 300,
-           "working_dir": "working_dir"
-         },
-         "reason": "Planner step 8 \u2013 produce a publication\u2011ready energy plot."
+         "reason": "Planner mandates a plot of the SASA trajectory for manuscript inclusion."
        }
      ],
      "potential_issues": [
-       "The planner requested tools for initializing a summary file and generating a textual report, which are not available in the current toolbox; these steps have been omitted.",
-       "If the \"analysis\" subdirectory does not already exist, the plotting and data\u2011output tools may fail; the tools usually create missing directories, but this behaviour is not guaranteed."
+       "The analysis directory may not exist, which would cause the tools to fail when writing output files.",
+       "Using a .gro topology instead of a .tpr may produce warnings, but GROMACS accepts it for SASA calculations."
      ],
      "recommendations": [
-       "Create the \"working_dir/analysis\" directory manually before running the plan, or add a preliminary file\u2011system step if the agent supports it.",
-       "After execution, manually verify that all expected output files exist and that the plots display the correct data ranges.",
-       "If additional reporting is required, consider scripting a lightweight text\u2011generation routine outside the provided toolbox."
+       "Ensure `/home/akp66103/workspace/agenticAI/working_dir/analysis/` exists before running the tools (e.g., via `mkdir -p` in the HPC environment).",
+       "Verify the resulting `sasa.csv` and `sasa_plot.png` are present in the analysis directory after execution."
      ]
    }
    ======================================================================
 
 ⚡ AGENT ACTION (analysis):
    🎬 Action: Generated analysis plan
-   📊 steps: 6
-   📊 reasoning: The planner requires a sequence of analyses and visualisations. Because the Analysis Agent only exposes the tools listed in the toolbox, any step that relies on a non‑existent tool (e.g., initialise_s
+   📊 steps: 2
+   📊 reasoning: The planner requires a SASA calculation for the protein followed by a visualisation of the resulting time‑series. The only tools that can perform these tasks are `calculate_sasa` and `plot_sasa`. Both
 
 ⚡ AGENT ACTION (analysis):
-   🎬 Action: Executing step 1/6
-   📊 step: Extract trajectory metrics
-   📊 tool: extract_trajectory_metrics
+   🎬 Action: Executing step 1/2
+   📊 step: SASA calculation
+   📊 tool: calculate_sasa
 
 ⚡ AGENT ACTION (analysis):
-   🎬 Action: Step 1/6 completed
-   📊 step: Extract trajectory metrics
-   📊 tool: extract_trajectory_metrics
+   🎬 Action: Step 1/2 completed
+   📊 step: SASA calculation
+   📊 tool: calculate_sasa
    📊 status: ✅ SUCCESS
 
 ⚡ AGENT ACTION (analysis):
-   🎬 Action: Executing step 2/6
-   📊 step: Calculate RMSD
-   📊 tool: calculate_rmsd
-
-📁 FILE OPERATION (analysis):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd.dat
-   Status: ✅ SUCCESS
+   🎬 Action: Executing step 2/2
+   📊 step: SASA plot generation
+   📊 tool: plot_sasa
 
 ⚡ AGENT ACTION (analysis):
-   🎬 Action: Step 2/6 completed
-   📊 step: Calculate RMSD
-   📊 tool: calculate_rmsd
+   🎬 Action: Step 2/2 completed
+   📊 step: SASA plot generation
+   📊 tool: plot_sasa
    📊 status: ✅ SUCCESS
 
-⚡ AGENT ACTION (analysis):
-   🎬 Action: Executing step 3/6
-   📊 step: Calculate RMSF
-   📊 tool: calculate_rmsf
-
-📁 FILE OPERATION (analysis):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/analysis/rmsf.dat
-   Status: ✅ SUCCESS
-
-⚡ AGENT ACTION (analysis):
-   🎬 Action: Step 3/6 completed
-   📊 step: Calculate RMSF
-   📊 tool: calculate_rmsf
-   📊 status: ✅ SUCCESS
-
-⚡ AGENT ACTION (analysis):
-   🎬 Action: Executing step 4/6
-   📊 step: Plot RMSD and RMSF (multi‑panel)
-   📊 tool: plot_md_multipanel
-
-📁 FILE OPERATION (analysis):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd_rmsf.png
-   Status: ✅ SUCCESS
-
-⚡ AGENT ACTION (analysis):
-   🎬 Action: Step 4/6 completed
-   📊 step: Plot RMSD and RMSF (multi‑panel)
-   📊 tool: plot_md_multipanel
-   📊 status: ✅ SUCCESS
-
-⚡ AGENT ACTION (analysis):
-   🎬 Action: Executing step 5/6
-   📊 step: Analyse energy terms
-   📊 tool: analyze_energy
-
-📁 FILE OPERATION (analysis):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/analysis/energy.xvg
-   Status: ✅ SUCCESS
-
-⚡ AGENT ACTION (analysis):
-   🎬 Action: Step 5/6 completed
-   📊 step: Analyse energy terms
-   📊 tool: analyze_energy
-   📊 status: ✅ SUCCESS
-
-⚡ AGENT ACTION (analysis):
-   🎬 Action: Executing step 6/6
-   📊 step: Plot energy
-   📊 tool: plot_md_data
-
-📁 FILE OPERATION (analysis):
-   Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/analysis/energy.png
-   Status: ✅ SUCCESS
-
-⚡ AGENT ACTION (analysis):
-   🎬 Action: Step 6/6 completed
-   📊 step: Plot energy
-   📊 tool: plot_md_data
-   📊 status: ✅ SUCCESS
-
-🏁 MD TRAJECTORY ANALYSIS AGENT (analysis) ✅ COMPLETED [2026-03-04 17:45:51]:
+🏁 MD TRAJECTORY ANALYSIS AGENT (analysis) ✅ COMPLETED [2026-03-17 12:53:20]:
    📤 Output Summary:
-     • topology: working_dir/hpc/md.gro
+     • topology: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro
 
-🎛️  SUPERVISOR ROUTING [2026-03-04 17:45:51]:
+🎛️  SUPERVISOR ROUTING [2026-03-17 12:53:20]:
    Current State Summary:
-     ✅ raw_pdb: working_dir/3.pdb
+     ✅ raw_pdb: /home/akp66103/workspace/agenticAI/working_dir/3.pdb
      ❌ cleaned_pdb: Not set
      ❌ coordinates: Not set
      ❌ job_id: Not set
-     ✅ analysis_results: {'extract_trajectory_metrics': {'success': True, 'n_frames': 0, 'time_range': (0.0, 0.0), 'file_size_mb': 24.251087188720703, 'trajectory_file': '/home/akp66103/workspace/agenticAI/working_dir/hpc/md.xtc', 'message': 'Trajectory has 0 frames spanning 0.0-0.0 ps'}, 'calculate_rmsd': {'success': True, 'mean_rmsd': 1.5306857223412405, 'std_rmsd': 0.2612115690681243, 'min_rmsd': 3.378352682266599e-07, 'max_rmsd': 2.0506906523164194, 'n_frames': 101, 'selection': 'protein and name CA', 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd.dat', 'message': 'RMSD calculation complete: mean=1.53 Å, std=0.26 Å'}, 'calculate_rmsf': {'success': True, 'mean_rmsf': 0.9286514385552037, 'std_rmsf': 0.3949384955076374, 'min_rmsf': 0.3767928063587787, 'max_rmsf': 2.7110194438924156, 'n_residues': 255, 'most_flexible': [{'residue_id': 22, 'residue_name': 'GLU', 'rmsf': 2.7110194438924156}, {'residue_id': 21, 'residue_name': 'LYS', 'rmsf': 2.444133374154957}, {'residue_id': 23, 'residue_name': 'THR', 'rmsf': 2.2801147459644495}, {'residue_id': 212, 'residue_name': 'LYS', 'rmsf': 2.2267631589288275}, {'residue_id': 24, 'residue_name': 'GLY', 'rmsf': 1.9235134342542703}], 'least_flexible': [{'residue_id': 230, 'residue_name': 'LEU', 'rmsf': 0.3767928063587787}, {'residue_id': 178, 'residue_name': 'ASP', 'rmsf': 0.41084138369168194}, {'residue_id': 180, 'residue_name': 'TRP', 'rmsf': 0.4158673467021137}, {'residue_id': 184, 'residue_name': 'VAL', 'rmsf': 0.42004180101770205}, {'residue_id': 182, 'residue_name': 'LEU', 'rmsf': 0.42590588611346175}], 'selection': 'protein and name CA', 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsf.dat', 'message': 'RMSF calculation complete: mean=0.93 Å, most flexible residue at 22'}, 'plot_rmsd_and_rmsf_(multi‑panel)': {'success': True, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd_rmsf.png', 'n_panels': 2, 'layout': 'vertical', 'message': 'Successfully created 2-panel vertical plot'}, 'analyse_energy_terms': {'success': True, 'n_frames': 101, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/energy.xvg', 'terms': {'Potential': {'mean': -927534.2320544554, 'std': 1044.0988525309683, 'min': -930085.9375, 'max': -925181.5}, 'Kinetic-En.': {'mean': 173132.96813118813, 'std': 665.1984109139098, 'min': 171868.234375, 'max': 174924.96875}, 'Temperature': {'mean': 299.9648486237624, 'std': 1.1525012574502969, 'min': 297.77359, 'max': 303.069611}}, 'message': 'Energy analysis complete. Potential: -927534.23 ± 1044.10, Kinetic-En.: 173132.97 ± 665.20, Temperature: 299.96 ± 1.15'}, 'plot_energy': {'success': True, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/energy.png', 'n_datasets': 1, 'plot_type': 'line', 'message': 'Successfully created line plot with 1 dataset(s)'}}
+     ✅ analysis_results: {'sasa_calculation': {'success': True, 'tool': 'calculate_sasa', 'mean_sasa': 136.6088712871287, 'std_sasa': 2.1142821437625097, 'min_sasa': 131.654, 'max_sasa': 141.946, 'num_frames': 101, 'sasa_values': [131.654, 138.623, 137.493, 137.371, 139.399, 137.857, 139.419, 136.709, 137.039, 136.845, 136.293, 139.235, 137.512, 138.1, 137.998, 137.803, 136.775, 135.965, 135.881, 135.977, 136.489, 138.368, 135.705, 136.637, 136.834, 135.059, 133.74, 136.341, 139.36, 139.867, 135.01, 136.23, 138.647, 136.858, 136.278, 139.742, 137.126, 141.292, 141.11, 139.671, 135.112, 137.255, 141.946, 138.534, 140.093, 135.828, 137.261, 137.002, 136.952, 137.024, 137.024, 135.179, 133.681, 136.072, 133.893, 135.322, 135.512, 136.011, 139.189, 140.224, 132.369, 135.209, 136.679, 136.578, 139.165, 137.263, 140.276, 139.764, 138.042, 135.32, 134.895, 138.503, 134.899, 136.709, 135.089, 133.508, 132.348, 133.615, 138.257, 132.977, 136.487, 132.986, 133.603, 135.614, 137.625, 136.71, 135.666, 135.654, 137.716, 136.078, 137.322, 134.819, 135.576, 132.761, 132.406, 135.602, 134.934, 136.459, 134.547, 135.892, 134.148], 'times': [0.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0, 900.0, 1000.0, 1100.0, 1200.0, 1300.0, 1400.0, 1500.0, 1600.0, 1700.0, 1800.0, 1900.0, 2000.0, 2100.0, 2200.0, 2300.0, 2400.0, 2500.0, 2600.0, 2700.0, 2800.0, 2900.0, 3000.0, 3100.0, 3200.0, 3300.0, 3400.0, 3500.0, 3600.0, 3700.0, 3800.0, 3900.0, 4000.0, 4100.0, 4200.0, 4300.0, 4400.0, 4500.0, 4600.0, 4700.0, 4800.0, 4900.0, 5000.0, 5100.0, 5200.0, 5300.0, 5400.0, 5500.0, 5600.0, 5700.0, 5800.0, 5900.0, 6000.0, 6100.0, 6200.0, 6300.0, 6400.0, 6500.0, 6600.0, 6700.0, 6800.0, 6900.0, 7000.0, 7100.0, 7200.0, 7300.0, 7400.0, 7500.0, 7600.0, 7700.0, 7800.0, 7900.0, 8000.0, 8100.0, 8200.0, 8300.0, 8400.0, 8500.0, 8600.0, 8700.0, 8800.0, 8900.0, 9000.0, 9100.0, 9200.0, 9300.0, 9400.0, 9500.0, 9600.0, 9700.0, 9800.0, 9900.0, 10000.0], 'frames': [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100], 'output_csv': '/home/akp66103/workspace/agenticAI/working_dir/analysis/sasa.csv', 'units': 'nm²', 'message': 'Calculated SASA for 101 frames. Mean: 136.61 nm² | CSV: /home/akp66103/workspace/agenticAI/working_dir/analysis/sasa.csv'}, 'sasa_plot_generation': {'success': True, 'tool': 'plot_sasa', 'output_figure': 'sasa_plot.png', 'message': 'SASA plot saved to sasa_plot.png'}}
    📍 Routing: supervisor → final_report
    💭 Reasoning: All workflow tasks complete
 
-🎯 WORKFLOW COMPLETION [2026-03-04 17:46:19]:
+🎯 WORKFLOW COMPLETION [2026-03-17 12:53:39]:
    Status: ✅ SUCCESS
    📋 Summary:
       Workflow completed with 0 errors and 0 warnings
@@ -1027,6 +1108,6 @@ The purpose of this workflow is to extract meaningful dynamic information from a
    ⚠️  Warnings: 0
 ================================================================================
 ================================================================================
-SESSION 20260304_174437 COMPLETED - 2026-03-04 17:46:19
+SESSION 20260317_125228 COMPLETED - 2026-03-17 12:53:39
 ================================================================================
 

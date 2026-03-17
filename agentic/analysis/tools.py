@@ -11,9 +11,13 @@ Exposes stable, reusable @tool functions from src/analysis/ for:
 
 This module follows the pattern of agentic/hpc/tools.py and agentic/simsetup/tools.py:
 actual tool implementations are in src/analysis/* and imported here.
+
+Additionally, dynamically loads programmer-generated tools from working_dir/programmer/
+to make them available for analysis workflows.
 """
 import os
 import logging
+import inspect
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -24,14 +28,22 @@ from src.analysis.gyration_calculator import calculate_radius_of_gyration
 from src.analysis.energy_analyzer import analyze_energy, extract_trajectory_metrics
 from src.analysis.data_plotter import plot_md_data, plot_md_multipanel, plot_combined_data
 from src.analysis.summary_logger import initialize_summary_file, generate_summary_report
+from src.analysis.dssp_analyzer import analyze_secondary_structure
+from src.analysis.sasa_calculator import calculate_sasa, plot_sasa
+
+# Import dynamic tool loader for programmer-generated tools
+from agentic.utils import get_dynamic_tool_loader
 
 # Export all tools
 __all__ = [
     "calculate_rmsd",
     "calculate_rmsf",
     "calculate_radius_of_gyration",
+    "calculate_sasa",
+    "plot_sasa",
     "analyze_energy",
     "extract_trajectory_metrics",
+    "analyze_secondary_structure",
     "plot_md_data",
     "plot_md_multipanel",
     "plot_combined_data",
@@ -57,8 +69,11 @@ def get_analysis_tools() -> list:
         calculate_rmsd,
         calculate_rmsf,
         calculate_radius_of_gyration,
+        calculate_sasa,
+        plot_sasa,
         analyze_energy,
         extract_trajectory_metrics,
+        analyze_secondary_structure,
         plot_md_data,
         plot_md_multipanel,
         plot_combined_data
@@ -99,6 +114,39 @@ def get_tool_metadata() -> Dict[str, Dict[str, Any]]:
         
         metadata[tool.name] = tool_info
     
+    # Also include programmer-generated tools
+    try:
+        from agentic.utils import get_dynamic_tool_loader
+        
+        # MUST use refresh=True to get newly created tools
+        tool_loader = get_dynamic_tool_loader(refresh=True)
+        programmer_tools_metadata = tool_loader.get_tool_metadata_list()
+        
+        for prog_tool_meta in programmer_tools_metadata:
+            tool_name = prog_tool_meta.get("name", "unknown")
+            
+            # Convert programmer tool metadata to analysis tool metadata format
+            tool_info = {
+                "name": tool_name,
+                "description": prog_tool_meta.get("description", "Programmer-generated tool"),
+                "args": {}
+            }
+            
+            # Convert parameters format
+            params = prog_tool_meta.get("parameters", {})
+            for param_name, param_details in params.items():
+                tool_info["args"][param_name] = {
+                    "type": param_details.get("type", "string"),
+                    "description": param_details.get("description", ""),
+                    "required": param_details.get("required", False),
+                }
+            
+            metadata[tool_name] = tool_info
+            logger.info(f"Included programmer-generated tool in metadata: {tool_name}")
+    
+    except Exception as e:
+        logger.warning(f"Could not load programmer-generated tools in get_tool_metadata: {e}")
+    
     return metadata
 
 
@@ -120,20 +168,28 @@ class AnalysisToolExecutor:
             config: Analysis configuration (output paths, default selections, etc.)
         """
         self.config = config or {}
+        
+        # Core analysis tools
         self.tools = {
             "calculate_rmsd": calculate_rmsd,
             "calculate_rmsf": calculate_rmsf,
             "calculate_radius_of_gyration": calculate_radius_of_gyration,
+            "calculate_sasa": calculate_sasa,
+            "plot_sasa": plot_sasa,
             "analyze_energy": analyze_energy,
             "extract_trajectory_metrics": extract_trajectory_metrics,
+            "analyze_secondary_structure": analyze_secondary_structure,
             "plot_md_data": plot_md_data,
             "plot_md_multipanel": plot_md_multipanel,
             "plot_combined_data": plot_combined_data
         }
         
-        # Setup working directory
+        # Setup working directory BEFORE loading programmer tools
         self.working_dir = self.config.get("working_directory", "./working_dir/analysis")
         os.makedirs(self.working_dir, exist_ok=True)
+        
+        # Load programmer-generated tools dynamically (needs working_dir to be set)
+        self._load_programmer_tools()
         
         # Initialize analysis summary file
         try:
@@ -142,7 +198,96 @@ class AnalysisToolExecutor:
         except Exception as e:
             logger.warning(f"Failed to initialize summary file: {e}")
         
-        logger.info(f"AnalysisToolExecutor initialized with working_dir: {self.working_dir}")
+        logger.info(f"AnalysisToolExecutor initialized with {len(self.tools)} tools (working_dir: {self.working_dir})")
+    
+    def _wrap_tool_for_working_dir(self, tool_func, tool_name: str):
+        """
+        Wrap a programmer-generated tool to execute in the agent's working directory.
+        This ensures all file outputs go to the correct location (e.g., working_dir/analysis).
+        
+        Args:
+            tool_func: The tool function to wrap
+            tool_name: Name of the tool (for logging)
+            
+        Returns:
+            Wrapped function that executes in the agent's working directory
+        """
+        from functools import wraps
+        
+        # Get the actual function if it's a StructuredTool
+        actual_func = tool_func.func if hasattr(tool_func, 'func') else tool_func
+        
+        @wraps(actual_func)
+        def wrapped_tool(**kwargs):
+            """
+            Execute tool in the agent's working directory context.
+            Changes to working_dir before execution and restores original directory after.
+            """
+            import os
+            original_dir = os.getcwd()
+            try:
+                # Change to agent's working directory
+                os.chdir(self.working_dir)
+                logger.debug(f"Executing {tool_name} in directory: {self.working_dir}")
+                
+                # Execute the tool
+                if hasattr(tool_func, 'func'):
+                    result = tool_func.func(**kwargs)
+                elif hasattr(tool_func, 'invoke'):
+                    result = tool_func.invoke(kwargs)
+                else:
+                    result = tool_func(**kwargs)
+                
+                return result
+            finally:
+                # Always restore original directory
+                os.chdir(original_dir)
+        
+        # Preserve StructuredTool attributes if needed
+        if hasattr(tool_func, 'name'):
+            wrapped_tool.name = tool_func.name
+        if hasattr(tool_func, 'description'):
+            wrapped_tool.description = tool_func.description
+        if hasattr(tool_func, 'args_schema'):
+            wrapped_tool.args_schema = tool_func.args_schema
+            
+        return wrapped_tool
+    
+    def _load_programmer_tools(self):
+        """Load dynamically generated tools from programmer agent."""
+        try:
+            tool_loader = get_dynamic_tool_loader(refresh=True)
+            programmer_tools = tool_loader.get_tools_for_agent("analysis")
+            
+            if programmer_tools:
+                logger.info(f"Loading {len(programmer_tools)} programmer-generated tools for analysis agent")
+                for tool_name, tool_func in programmer_tools.items():
+                    # Wrap the tool to execute in the agent's working directory
+                    wrapped_tool = self._wrap_tool_for_working_dir(tool_func, tool_name)
+                    self.tools[tool_name] = wrapped_tool
+                    logger.info(f"  Registered programmer tool: {tool_name} (wrapped for {self.working_dir})")
+            else:
+                logger.debug("No programmer-generated tools found")
+                
+        except Exception as e:
+            logger.warning(f"Failed to load programmer tools: {e}")
+    
+    def reload_programmer_tools(self):
+        """Reload programmer-generated tools (call after programmer creates new tools)."""
+        try:
+            tool_loader = get_dynamic_tool_loader(refresh=True)
+            programmer_tools = tool_loader.get_tools_for_agent("analysis")
+            
+            # Add new tools
+            for tool_name, tool_func in programmer_tools.items():
+                if tool_name not in self.tools:
+                    logger.info(f"Adding new programmer tool: {tool_name}")
+                self.tools[tool_name] = tool_func
+            
+            logger.info(f"Reloaded programmer tools. Total tools: {len(self.tools)}")
+            
+        except Exception as e:
+            logger.error(f"Failed to reload programmer tools: {e}")
     
     def execute(self, tool_name: str, **kwargs) -> Dict[str, Any]:
         """
@@ -164,12 +309,24 @@ class AnalysisToolExecutor:
         try:
             logger.info(f"Executing analysis tool: {tool_name}")
             
-            # Add working directory if not specified
-            if "working_dir" not in kwargs:
-                kwargs["working_dir"] = self.working_dir
-            
             # Execute the tool
             tool_func = self.tools[tool_name]
+            
+            # Add working directory only if the function signature accepts it
+            if "working_dir" not in kwargs:
+                # Get the actual function (unwrap StructuredTool if needed)
+                actual_func = tool_func.func if hasattr(tool_func, 'func') else tool_func
+                
+                # Check if function accepts working_dir parameter
+                try:
+                    sig = inspect.signature(actual_func)
+                    if 'working_dir' in sig.parameters:
+                        kwargs["working_dir"] = self.working_dir
+                        logger.debug(f"Added working_dir parameter for {tool_name}")
+                    else:
+                        logger.debug(f"Tool {tool_name} does not accept working_dir parameter - skipping")
+                except Exception as e:
+                    logger.debug(f"Could not inspect signature for {tool_name}: {e}")
             
             # StructuredTool objects (from @tool decorator) need special handling
             if hasattr(tool_func, 'func'):

@@ -366,6 +366,27 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         if config:
             state.update(config)
 
+        # CRITICAL: Convert working_directory to absolute path to prevent nested directory creation
+        # This ensures that even if agents use os.chdir(), paths remain correct
+        from pathlib import Path
+        working_dir = state.get("working_directory", "working_dir")
+        if working_dir == ".":
+            working_dir = "working_dir"  # Use working_dir instead of current directory
+        if not Path(working_dir).is_absolute():
+            working_dir = str(Path.cwd() / working_dir)
+        state["working_directory"] = working_dir
+        
+        # Initialize agent-specific directories (hardcoded structure)
+        state["preprocess_dir"] = str(Path(working_dir) / "preprocess")
+        state["simsetup_dir"] = str(Path(working_dir) / "simsetup")
+        state["hpc_dir"] = str(Path(working_dir) / "hpc")
+        state["analysis_dir"] = str(Path(working_dir) / "analysis")
+        
+        # Create all agent directories
+        for agent_dir in [state["preprocess_dir"], state["simsetup_dir"], 
+                         state["hpc_dir"], state["analysis_dir"]]:
+            Path(agent_dir).mkdir(parents=True, exist_ok=True)
+        
         # Ensure execution_path is always a list we control
         state["execution_path"] = list(state.get("execution_path", []))
         return state

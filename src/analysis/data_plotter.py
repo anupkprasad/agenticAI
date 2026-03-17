@@ -123,7 +123,7 @@ def plot_md_data(
     
     Args:
         data_files: List of data file paths to plot (.xvg, .dat, .csv)
-        output_file: Output image file path (.png, .pdf, .svg)
+        output_file: Output image filename only (e.g., "plot.png") - saved in working_dir
         plot_type: Type of plot ("line", "scatter", "bar") - default: "line"
         titles: Plot title (optional)
         xlabel: X-axis label (optional, auto-detected from file if available)
@@ -132,7 +132,7 @@ def plot_md_data(
         colors: Line/marker colors for each dataset (optional)
         figsize: Figure size as (width, height) in inches - default: (10, 6)
         dpi: Resolution in dots per inch - default: 300
-        working_dir: Working directory for analysis
+        working_dir: Working directory for analysis (files will be written here)
         
     Returns:
         Dict with plotting results
@@ -152,7 +152,11 @@ def plot_md_data(
             if os.path.isabs(data_file):
                 abs_data_files.append(data_file)
             else:
-                abs_data_files.append(os.path.abspath(data_file))
+                # If working_dir is specified, resolve relative paths from there
+                if working_dir:
+                    abs_data_files.append(os.path.join(working_dir, data_file))
+                else:
+                    abs_data_files.append(os.path.abspath(data_file))
         
         # Validate that all files exist
         for abs_path, rel_path in zip(abs_data_files, data_files):
@@ -229,9 +233,7 @@ def plot_md_data(
         # Tight layout
         plt.tight_layout()
         
-        # Save figure
-        output_path = Path(output_file)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        # Save figure (use filename only, already in working_dir)
         plt.savefig(output_file, dpi=dpi, bbox_inches='tight')
         plt.close()
         
@@ -311,8 +313,12 @@ def plot_md_multipanel(
             if os.path.isabs(data_file):
                 abs_data_files.append(data_file)
             else:
-                # Make it absolute relative to current directory
-                abs_data_files.append(os.path.abspath(data_file))
+                # If working_dir is specified, resolve relative paths from there
+                if working_dir:
+                    abs_data_files.append(os.path.join(working_dir, data_file))
+                else:
+                    # Make it absolute relative to current directory
+                    abs_data_files.append(os.path.abspath(data_file))
         
         # Validate that all files exist (before any chdir)
         for abs_path, rel_path in zip(abs_data_files, data_files):
@@ -424,9 +430,7 @@ def plot_md_multipanel(
         # Adjust spacing
         plt.tight_layout()
         
-        # Save figure
-        output_path = Path(output_file)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        # Save figure (use filename only, already in working_dir)
         plt.savefig(output_file, dpi=dpi, bbox_inches='tight')
         plt.close()
         
@@ -512,7 +516,11 @@ def plot_combined_data(
         if os.path.isabs(data_file):
             abs_data_file = data_file
         else:
-            abs_data_file = os.path.abspath(data_file)
+            # If working_dir is specified, resolve relative paths from there
+            if working_dir:
+                abs_data_file = os.path.join(working_dir, data_file)
+            else:
+                abs_data_file = os.path.abspath(data_file)
         
         if not os.path.exists(abs_data_file):
             return {
@@ -605,9 +613,7 @@ def plot_combined_data(
         # Adjust spacing
         plt.tight_layout()
         
-        # Save figure
-        output_path = Path(output_file)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        # Save figure (use filename only, already in working_dir)
         plt.savefig(output_file, dpi=dpi, bbox_inches='tight')
         plt.close()
         
