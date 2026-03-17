@@ -875,11 +875,10 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                             else:
                                 logger.warning(f"  Could not resolve {param_name}={file_ref}")
                 
-                # Ensure working_dir is set (as absolute path)
-                if "working_dir" not in tool_params:
-                    tool_params["working_dir"] = self.file_manager.agent_dir
-                elif not os.path.isabs(tool_params["working_dir"]):
-                    tool_params["working_dir"] = os.path.abspath(tool_params["working_dir"])
+                # CRITICAL: Always use the analysis agent directory for working_dir
+                # LLMs may suggest workspace root, but tools must run in analysis subdirectory
+                tool_params["working_dir"] = self.file_manager.agent_dir
+                logger.debug(f"  Set working_dir to analysis agent directory: {self.file_manager.agent_dir}")
                 
                 execution_log.append(f"Parameters: {json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in tool_params.items()}, indent=2)}")
                 

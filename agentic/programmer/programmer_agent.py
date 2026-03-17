@@ -534,6 +534,31 @@ For each tool specification above, create a corresponding generation step with t
 - DO include imports, logic, return statements
 - The code will be automatically wrapped in proper function structure
 
+⚠️ **CRITICAL: DO NOT CREATE ORCHESTRATOR TOOLS**
+Tools must be SELF-CONTAINED and implement their own logic. NEVER create tools that:
+- Call other programmer-generated tools (they're in separate files and not importable)
+- Try to invoke functions like `calculate_something()` or `plot_something()` from other tools
+- Attempt to orchestrate multiple operations (that's the WORKFLOW's job)
+
+**BAD EXAMPLE** (orchestrator tool - DON'T DO THIS):
+```python
+# ❌ WRONG: Trying to call other tools
+result = calculate_com_trajectory(trajectory, topology)  # This function doesn't exist!
+plot_com_3d(result)  # This function doesn't exist either!
+```
+
+**GOOD EXAMPLE** (self-contained tool):
+```python
+# ✅ CORRECT: Implement the full logic yourself
+import MDAnalysis as mda
+u = mda.Universe(topology, trajectory)
+com_values = [u.select_atoms("protein").center_of_mass() for ts in u.trajectory]
+# ... rest of implementation
+```
+
+If the planner asks for a "wrapper" or "convenience" tool, implement the FULL logic inline,
+don't try to call other tools. The workflow layer handles tool orchestration.
+
 **Path Resolution for File Parameters:**
 ⚠️ CRITICAL DISTINCTION between INPUT and OUTPUT files:
 
@@ -639,21 +664,56 @@ metadata={{
   "overview": "High-level summary",
   "steps": [
     {{
-      "name": "step name",
-      "description": "what it does",
-      "tool_name": "tool from above list",
-      "tool_params": {{"param": "value"}},
-      "reason": "why needed"
+      "name": "Generate [tool being created]",
+      "description": "Create the [tool_name] tool  using generate_python_tool",
+      "tool_name": "generate_python_tool",  
+      "tool_params": {{
+        "tool_name": "name_of_tool_to_create",
+        "description": "what the new tool does",
+        "parameters": {{}},
+        "implementation": "Python code body"
+      }},
+      "reason": "why this tool is needed"
     }}
   ],
   "estimated_complexity": "low|medium|high"
 }}
 
-**Critical:**
-- ONLY use tool names from the list above
-- DO NOT invent tool names
-- Each step must have a valid tool_name
-- Use the detailed specifications above to populate tool_params accurately
+**CRITICAL - Example of CORRECT vs WRONG:**
+
+❌ **WRONG** (trying to execute the tool being created):
+{{
+  "steps": [
+    {{
+      "tool_name": "compute_center_of_mass",  // DON'T DO THIS!
+      "tool_params": {{"trajectory": "..."}}
+    }}
+  ]
+}}
+
+✅ **CORRECT** (using generation tool to CREATE the tool):
+{{
+  "steps": [
+    {{
+      "tool_name": "generate_python_tool",  // Use THIS!
+      "tool_params": {{
+        "tool_name": "compute_center_of_mass",  // Tool to create
+        "description": "Calculate COM from trajectory",
+        "parameters": {{
+          "trajectory": {{"type": "str", "description": "..."}},
+          "topology": {{"type": "str", "description": "..."}}
+        }},
+        "implementation": "import MDAnalysis\\nu = mda.Universe(...)\\n..."
+      }}
+    }}
+  ]
+}}
+
+**Remember:**
+- tool_name in steps MUST be a CODE GENERATION tool (generate_python_tool, generate_tcl_script, etc.)
+- The name of the tool you're CREATING goes in tool_params["tool_name"]
+- DO NOT use tool specifications as step tool_names
+- Each step creates ONE new tool using a generation tool
 """
     
     def _extract_plan_json(self, content: str) -> Dict[str, Any]:

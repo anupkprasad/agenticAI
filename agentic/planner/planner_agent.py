@@ -106,6 +106,11 @@ class MDPlanner:
         logger.info("PLANNER: Creating execution plan from structured prompt")
         logger.info("=" * 60)
         
+        # CRITICAL: Refresh tools registry to pick up any newly generated programmer tools
+        # Programmer may have created new tools in previous workflow steps
+        self.tools_registry = get_tools_registry(refresh=True)
+        logger.info(f"PLANNER: Refreshed tools registry - now {len(self.tools_registry.tools)} tools available")
+        
         # Use structured prompt if available, otherwise fall back to rephrased/original goal
         structured_prompt = state.get("structured_prompt") or state.get("rephrased_goal") or state.get("user_goal", "")
         pdb_path = state.get("raw_pdb", "")
