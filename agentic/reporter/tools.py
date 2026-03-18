@@ -53,11 +53,38 @@ def read_analysis_summary(
     try:
         entries = []
         with open(summary_path, 'r') as f:
-            for line in f:
+            content = f.read()
+        
+        # Handle multiple formats:
+        # 1. Standard JSONL (one JSON per line)
+        # 2. Pretty-printed JSON blocks separated by "---" delimiters
+        # 3. Single large JSON array
+        
+        if '---' in content or '\n{' in content:
+            # Split by "---" separator or parse as concatenated JSON blocks
+            blocks = [b.strip() for b in content.split('---') if b.strip()]
+            for block in blocks:
+                try:
+                    entry = json.loads(block)
+                    # Skip header/metadata block
+                    if "summary_file_version" not in entry and "analysis_type" in entry:
+                        entries.append(entry)
+                    elif "summary_file_version" in entry:
+                        pass  # header - skip
+                    else:
+                        entries.append(entry)
+                except json.JSONDecodeError:
+                    pass  # skip malformed blocks
+        else:
+            # Standard JSONL: one JSON per line
+            for line in content.splitlines():
                 line = line.strip()
                 if line:
-                    entry = json.loads(line)
-                    entries.append(entry)
+                    try:
+                        entry = json.loads(line)
+                        entries.append(entry)
+                    except json.JSONDecodeError:
+                        pass
         
         # Summarize analysis types
         analysis_types = {}
@@ -505,8 +532,14 @@ def _build_html_report(
     for entry in entries:
         atype = entry.get("analysis_type", "Unknown")
         stats = entry.get("statistics", {})
+        if not isinstance(stats, dict):
+            stats = {}
         files = entry.get("files", {})
+        if not isinstance(files, dict):
+            files = {}
         metadata = entry.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
         timestamp = entry.get("timestamp", "")
         
         html_parts.append(f'<div class="analysis-section">')
