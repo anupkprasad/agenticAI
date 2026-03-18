@@ -37,8 +37,9 @@ def read_analysis_summary(
         Dict with parsed analysis entries and summary statistics
     """
     # Resolve input path
-    from ..utils import resolve_input_path
-    summary_path = resolve_input_path(summary_file, "summary_file", working_dir)
+    summary_path = Path(summary_file)
+    if not summary_path.is_absolute() and working_dir:
+        summary_path = Path(working_dir) / summary_file
     
     if not summary_path.exists():
         logger.error(f"Analysis summary file not found: {summary_path}")
@@ -113,7 +114,7 @@ def search_pubmed(
     """
     try:
         from Bio import Entrez
-        Entrez.email = "md.workflow@example.com"  # Required by NCBI
+        Entrez.email = "anupkprasad121@gmail.com"  # Required by NCBI
         
         # Build search term with date filter
         search_term = query

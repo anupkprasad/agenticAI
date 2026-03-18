@@ -120,7 +120,7 @@ class MDSupervisor:
 
         # Check if we're returning from a field agent - increment step counter
         current_node = state.get("current_node", "")
-        if current_node in ["preprocess", "setup", "hpc", "analysis"]:
+        if current_node in ["preprocess", "setup", "hpc", "analysis", "reporter"]:
             current_step = state.get("current_step", 0)
             logger.info(f"SUPERVISOR: Returned from {current_node}, advancing from step {current_step} to {current_step + 1}")
             state["current_step"] = current_step + 1
@@ -138,25 +138,48 @@ class MDSupervisor:
         required_inputs = state.get("required_inputs", {})
         subtask_type = state.get("subtask_type", "full_task")
         
-        # Check if we need to validate inputs (any task type)
+        # Check if we need to validate inputs.
+        # IMPORTANT: check task-specific "already validated" flags FIRST to
+        # avoid looping back into input_validation after it completes.
         needs_validation = False
-        if not state.get("pdb_analysis") and required_inputs.get("pdb_analysis_required", True):
-            needs_validation = True
-        elif subtask_type == "analysis_only" and not state.get("analysis_validated"):
-            needs_validation = True
+        if subtask_type == "reporter_only":
+            # Reporter only needs its own flag; never requires pdb_analysis
+            if not state.get("reporter_validated"):
+                needs_validation = True
+        elif subtask_type == "analysis_only":
+            if not state.get("analysis_validated"):
+                needs_validation = True
+        else:
+            # Full / PDB-requiring tasks
+            if not state.get("pdb_analysis") and required_inputs.get("pdb_analysis_required", True):
+                needs_validation = True
         
         if needs_validation and state.get("user_goal"):
             logger.info(f"SUPERVISOR: Routing to unified input validation for task type: {subtask_type}")
             state["next_node"] = "input_validation"
             return state
         
-        # Check for missing required inputs
-        if not state.get("raw_pdb") and required_inputs.get("pdb_required", True):
-            state["next_node"] = "input_validation"
-            logger.info("SUPERVISOR: Routing to input validation - missing raw_pdb for this task")
-            return state
+        # Check for missing required inputs (PDB-based tasks only)
+        if subtask_type not in ("reporter_only", "analysis_only"):
+            if not state.get("raw_pdb") and required_inputs.get("pdb_required", True):
+                state["next_node"] = "input_validation"
+                logger.info("SUPERVISOR: Routing to input validation - missing raw_pdb for this task")
+                return state
 
-        # Step 2: Create execution plan if not exists
+        # Step 1.5: For reporter_only, skip planning and go directly to reporter
+        # This must come BEFORE the planning check to avoid routing to planner
+        if subtask_type == "reporter_only" and state.get("reporter_validated"):
+            if not state.get("reporter_output"):
+                logger.info("SUPERVISOR: Reporter-only task - routing directly to reporter agent")
+                state["next_node"] = "reporter"
+                log_supervisor_routing(state, "reporter", "Reporter-only task - direct routing")
+                return state
+            else:
+                logger.info("SUPERVISOR: Reporter already complete, routing to final report")
+                state["next_node"] = "final_report"
+                return state
+
+        # Step 2: Create execution plan if not exists (for all other task types)
         if not state.get("execution_plan") and (state.get("pdb_analysis") or state.get("analysis_validated")):
             logger.info("SUPERVISOR: Validation complete, creating execution plan with planner")
             state["next_node"] = "planner"
@@ -212,6 +235,27 @@ class MDSupervisor:
             }
         )
         
+        # Special handling for reporter_only - minimal validation needed
+        if subtask_type == "reporter_only":
+            logger.info("INPUT_VALIDATION: Reporter-only task - minimal validation")
+            # Reporter just needs the analysis summary file path
+            # Check if working directory is set
+            working_dir = state.get("working_directory", "working_dir")
+            analysis_dir = f"{working_dir}/analysis"
+            
+            # Set reporter-specific info
+            state["reporter_validated"] = True
+            state["analysis_directory"] = analysis_dir
+            state["next_node"] = "supervisor"
+            
+            logger.info(f"INPUT_VALIDATION: Reporter validation complete - analysis directory: {analysis_dir}")
+            log_supervisor_routing(
+                state, "supervisor",
+                f"Reporter-only validation complete, returning to supervisor"
+            )
+            return state
+        
+        # For all other task types, use full validation
         # Call unified validation function
         state = validate_and_enrich_inputs(
             state=state,
@@ -541,6 +585,37 @@ class MDSupervisor:
                 logger.info(f"FIELD_AGENT_ASSIGNMENT: Analysis already complete, advancing to next step")
                 state["current_step"] = current_step_idx + 1
                 return self._assign_field_agent_tasks(state)
+
+        elif "report" in agent_name:
+            # Reporter agent - generates scientific reports
+            reporter_retry_count = state.get("reporter_retry_count", 0)
+            max_retries = 2
+            
+            if reporter_retry_count >= max_retries:
+                error_msg = f"Reporter agent failed {reporter_retry_count} times, skipping to avoid infinite loop"
+                logger.error(f"FIELD_AGENT_ASSIGNMENT: {error_msg}")
+                state["errors"].append(error_msg)
+                state["current_step"] = current_step_idx + 1
+                return self._assign_field_agent_tasks(state)
+            
+            if not state.get("reporter_output"):
+                # Track retry attempts for this specific step
+                if state.get("last_reporter_step") == step_number:
+                    state["reporter_retry_count"] = reporter_retry_count + 1
+                    logger.warning(f"FIELD_AGENT_ASSIGNMENT: Reporter retry #{state['reporter_retry_count']} for step {step_number}")
+                else:
+                    state["reporter_retry_count"] = 0
+                    state["last_reporter_step"] = step_number
+                
+                state["next_node"] = "reporter"
+                state["reporter_plan"] = current_step
+                logger.info(f"FIELD_AGENT_ASSIGNMENT: Routing to reporter for step {step_number}")
+                log_supervisor_routing(state, "reporter", f"Executing Step {step_number}: {step_name}")
+                return state
+            else:
+                logger.info(f"FIELD_AGENT_ASSIGNMENT: Reporter already complete, advancing to next step")
+                state["current_step"] = current_step_idx + 1
+                return self._assign_field_agent_tasks(state)
         
         else:
             # Unknown agent
@@ -580,6 +655,8 @@ class MDSupervisor:
             completed.append("hpc")
         if state.get("analysis_results"):
             completed.append("analysis")
+        if state.get("reporter_output"):
+            completed.append("reporter")
 
         total = len(self.workflow_config.get("default_pipeline", []))
         progress = (len(completed) / (total + 2)) * 100

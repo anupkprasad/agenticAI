@@ -352,8 +352,11 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "file_registry": {},
             "generated_files": {},  # Centralized tracking of important files by agent
             "subtask_type": None,
+            "subtask_type_initialized": None,
             "required_inputs": None,
             "analysis_validated": None,
+            "reporter_validated": None,
+            "analysis_directory": None,
             "trajectory_paths": None,
             "pdb_analysis": None,
             "component_selection": {},  # Initialize as empty dict, not None
@@ -373,7 +376,14 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "hpc_report": None,
             "analysis_action": "full_analysis",
             "analysis_request": None,
-            "conclusions": None
+            "conclusions": None,
+            # Reporter stage
+            "reporter_output": None,
+            "report_type": "comprehensive",
+            "include_literature": True,
+            "literature_keywords": None,
+            "reporter_plan": None,
+            "reporter_instructions": None,
         }
 
         if config:
@@ -397,7 +407,8 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         
         # Create all agent directories
         for agent_dir in [state["preprocess_dir"], state["simsetup_dir"], 
-                         state["hpc_dir"], state["analysis_dir"]]:
+                         state["hpc_dir"], state["analysis_dir"],
+                         str(Path(working_dir) / "reporter")]:
             Path(agent_dir).mkdir(parents=True, exist_ok=True)
         
         # Ensure execution_path is always a list we control

@@ -14,9 +14,12 @@ class MDState(TypedDict):
     human_in_loop: bool
     
     # Subtask-specific workflow
-    subtask_type: Optional[str]    # "analysis_only", "setup_only", "preprocess_only", None
+    subtask_type: Optional[str]    # "analysis_only", "setup_only", "preprocess_only", "reporter_only", None
+    subtask_type_initialized: Optional[bool]  # Whether subtask type has been initialized
     required_inputs: Optional[Dict[str, bool]]  # What inputs this task requires
     analysis_validated: Optional[bool]  # Whether analysis-only inputs have been validated
+    reporter_validated: Optional[bool]  # Whether reporter-only inputs have been validated
+    analysis_directory: Optional[str]   # Path to analysis output directory
     trajectory_paths: Optional[Dict[str, Optional[str]]]  # Trajectory, topology, energy paths for analysis-only
     
     # PDB Analysis (from supervisor validation)
@@ -59,6 +62,14 @@ class MDState(TypedDict):
     analysis_results: Dict[str, Any]
     figures: List[str]
     conclusions: Optional[str]
+
+    # Reporter stage
+    reporter_output: Optional[Dict[str, Any]]  # Output from reporter agent
+    report_type: Optional[str]                 # "comprehensive", "executive", "custom"
+    include_literature: Optional[bool]         # Whether to search PubMed
+    literature_keywords: Optional[List[str]]   # Manual PubMed keywords
+    reporter_plan: Optional[Dict[str, Any]]    # Reporter plan from supervisor
+    reporter_instructions: Optional[str]       # Reporter-specific instructions from planner
     
     # Control flow & Execution tracking
     current_node: Optional[str]        # Track which node we're currently in

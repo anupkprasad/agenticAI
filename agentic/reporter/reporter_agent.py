@@ -75,7 +75,7 @@ class ReporterAgent:
         import traceback
         
         # Extract input
-        execution_plan = state.get("execution_plan", {})
+        execution_plan = state.get("execution_plan") or {}
         has_planner_instructions = execution_plan.get("format") == "natural_language"
         
         input_summary = {
@@ -126,8 +126,8 @@ class ReporterAgent:
             # Update state with results
             self._update_state(state, agent_output)
             
-            # Set next node
-            state["next_node"] = "END"  # Reporter is typically the final step
+            # Set next node - return to supervisor for final routing
+            state["next_node"] = "supervisor"
             
             success = agent_output.success and len(agent_output.errors) == 0
             log_agent_completion("reporter", "Scientific Report Generation", state, success)
@@ -143,7 +143,7 @@ class ReporterAgent:
                 "traceback": tb
             })
             state["errors"].append(f"Reporter error: {str(e)}")
-            state["next_node"] = "END"
+            state["next_node"] = "supervisor"
         
         return state
     
@@ -174,7 +174,7 @@ class ReporterAgent:
         summary_file = f"{analysis_dir}/analysis_summary.jsonl"
         
         # Get planner instructions
-        execution_plan = state.get("execution_plan", {})
+        execution_plan = state.get("execution_plan") or {}
         reporter_instructions = state.get("reporter_instructions")
         
         if not reporter_instructions:

@@ -30,6 +30,13 @@ def detect_task_required_inputs(subtask_type: Optional[str]) -> Dict[str, bool]:
             "trajectory_path_required": True,
             "topology_required": True
         })
+    elif subtask_type == "reporter_only":
+        inputs_needed.update({
+            "pdb_required": False,
+            "pdb_analysis_required": False,
+            "trajectory_path_required": False,
+            "topology_required": False
+        })
     elif subtask_type in ["setup_only", "preprocess_only"]:
         inputs_needed.update({
             "pdb_required": True,

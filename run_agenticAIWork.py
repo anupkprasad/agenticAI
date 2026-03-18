@@ -60,7 +60,7 @@ def main(argv=None):
     parser.add_argument("--goal", required=True, 
                        help="Natural language description of simulation goal")
     parser.add_argument("--subtask", default=None,
-                       choices=["preprocess", "simsetup", "hpcjob", "analysis"],
+                       choices=["preprocess", "simsetup", "hpcjob", "analysis", "reporter"],
                        help="Specific subtask to run. If omitted, runs all subtasks in series")
     parser.add_argument("--use-llm", action="store_true", 
                        help="Use LLM for intelligent planning (recommended)")
@@ -98,7 +98,8 @@ def main(argv=None):
             "preprocess": "preprocess_only",
             "simsetup": "setup_only",
             "hpcjob": "hpc_only",
-            "analysis": "analysis_only"
+            "analysis": "analysis_only",
+            "reporter": "reporter_only"
         }
         config["subtask_type"] = subtask_types[args.subtask]
     
