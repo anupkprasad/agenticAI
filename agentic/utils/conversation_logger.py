@@ -107,9 +107,9 @@ class ConversationLogger:
         errors = current_state.get('errors', [])
         warnings = current_state.get('warnings', [])
         if errors:
-            self.logger.info(f"   ⚠️  Errors: {errors}")
+            self.logger.info("   ⚠️  Errors: %s", errors)  # Don't use f-string - errors may contain {}
         if warnings:
-            self.logger.info(f"   ⚠️  Warnings: {warnings}")
+            self.logger.info("   ⚠️  Warnings: %s", warnings)  # Don't use f-string - warnings may contain {}
         self.logger.info("")
         self._flush()
     

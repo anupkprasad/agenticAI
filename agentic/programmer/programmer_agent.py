@@ -134,6 +134,9 @@ class MDProgrammer:
         Returns:
             Updated state with generated tools
         """
+        import sys  # Import at top to avoid UnboundLocalError with debug prints
+        import traceback
+        
         # Extract programmer instructions from planner
         execution_plan = state.get("execution_plan", {})
         programmer_instructions = state.get("programmer_instructions")
@@ -151,6 +154,9 @@ class MDProgrammer:
         log_agent_start("programmer", "Custom Tool Generation", input_summary)
         
         try:
+            print(f"\n{'='*70}", file=sys.stderr)
+            print(f"DEBUG: programmer_node - Initializing SecureFileManager", file=sys.stderr)
+            
             # Initialize secure file manager
             base_working_dir = state.get("working_directory", "working_dir")
             file_registry = state.get("file_registry", {})
@@ -162,16 +168,33 @@ class MDProgrammer:
             )
             
             logger.info(f"Programmer agent directory: {self.file_manager.agent_dir}")
+            print(f"DEBUG: SecureFileManager initialized: {self.file_manager.agent_dir}", file=sys.stderr)
             
             # Get programmer directory from file manager
             programmer_dir = self.file_manager.agent_dir
+            
+            print(f"DEBUG: Creating ProgrammerToolExecutor", file=sys.stderr)
             
             self.tool_executor = ProgrammerToolExecutor(
                 config={"working_directory": programmer_dir}
             )
             
+            print(f"DEBUG: Calling _prepare_agent_input", file=sys.stderr)
+            
             # Prepare agent input
-            agent_input = self._prepare_agent_input(state, programmer_instructions)
+            try:
+                agent_input = self._prepare_agent_input(state, programmer_instructions)
+                print(f"DEBUG: agent_input created successfully", file=sys.stderr)
+                print(f"DEBUG: agent_input.tool_specifications: {len(agent_input.tool_specifications) if agent_input.tool_specifications else 0} specs", file=sys.stderr)
+            except Exception as prep_error:
+                print(f"!!! DEBUG: _prepare_agent_input FAILED !!!", file=sys.stderr)
+                print(f"Error type: {type(prep_error).__name__}", file=sys.stderr)
+                print(f"Error message: {prep_error}", file=sys.stderr)
+                import traceback
+                print(f"Traceback:\n{traceback.format_exc()}", file=sys.stderr)
+                raise
+            
+            print(f"DEBUG: Calling _run_programmer_workflow", file=sys.stderr)
             
             # Run LLM-guided programming workflow
             agent_output = self._run_programmer_workflow(agent_input, state)
@@ -186,14 +209,12 @@ class MDProgrammer:
             log_agent_completion("programmer", "Custom Tool Generation", state, success)
             
         except Exception as e:
-            import traceback
             tb = traceback.format_exc()
             error_msg = f"Programmer agent failed: {type(e).__name__}: {e}"
             logger.error(error_msg)
             logger.error(f"Traceback: {tb}")
             
             # Log to file for debugging
-            import sys
             print(f"!!! PROGRAMMER EXCEPTION !!!", file=sys.stderr)
             print(f"Type: {type(e).__name__}", file=sys.stderr)
             print(f"Message: {e}", file=sys.stderr)
@@ -317,28 +338,51 @@ class MDProgrammer:
         Returns:
             Agent output with results
         """
+        import sys  # Import at top to avoid UnboundLocalError
+        import traceback
+        
         try:
+            # DEBUG: Log entry point
+            print(f"\n{'='*70}", file=sys.stderr)
+            print(f"DEBUG: _run_programmer_workflow STARTED", file=sys.stderr)
+            print(f"DEBUG: LLM available: {self.llm.available}", file=sys.stderr)
+            print(f"DEBUG: LLM client type: {type(self.llm)}", file=sys.stderr)
+            print(f"{'='*70}\n", file=sys.stderr)
+            
             # Step 1: Create execution plan using LLM
             plan = None
             if self.llm.available:
                 logger.info("Creating programmer execution plan with LLM")
+                print(f"DEBUG: Calling _create_llm_plan...", file=sys.stderr)
                 plan = self._create_llm_plan(agent_input, state)
+                print(f"DEBUG: _create_llm_plan returned: {plan is not None}", file=sys.stderr)
             
             if not plan:
                 logger.info("Using fallback plan generation")
+                print(f"DEBUG: Calling _create_fallback_plan...", file=sys.stderr)
                 plan = self._create_fallback_plan(agent_input)
+                print(f"DEBUG: _create_fallback_plan returned: {plan is not None}", file=sys.stderr)
+            
+            print(f"DEBUG: Plan object: {plan}", file=sys.stderr)
+            print(f"DEBUG: Plan steps count: {len(plan.steps) if plan else 0}", file=sys.stderr)
             
             log_agent_action(
                 agent_name="programmer",
-                action="Generated  programmer plan",
+                action="Generated programmer plan",
                 details={
                     "steps": len(plan.steps),
                     "reasoning": plan.reasoning[:100] if plan.reasoning else "N/A"
                 }
             )
             
+            print(f"DEBUG: Calling _execute_programmer_plan...", file=sys.stderr)
+            
             # Step 2: Execute the plan
             result = self._execute_programmer_plan(agent_input, plan, state)
+            
+            print(f"DEBUG: _execute_programmer_plan returned", file=sys.stderr)
+            print(f"DEBUG: Result success: {result.success}", file=sys.stderr)
+            print(f"DEBUG: Result issues: {result.issues}", file=sys.stderr)
             
             # Step 3: Create final output
             output = ProgrammerAgentOutput(
@@ -376,8 +420,6 @@ class MDProgrammer:
             return output
             
         except Exception as e:
-            import traceback
-            import sys
             tb_str = traceback.format_exc()
             logger.error(f"Programmer workflow failed: {type(e).__name__}: {e}")
             logger.error(f"Traceback: {tb_str}")
@@ -522,17 +564,18 @@ The following software is installed and available for use in generated tools:
 (Note: AVAILABLE_SOFTWARE.md not found - using minimal list)
 """
         
-        return f"""You are a code generation specialist creating custom tools for an MD workflow.
+        # Build prompt using format() to avoid f-string issues with {} in tool specs
+        prompt_template = """You are a code generation specialist creating custom tools for an MD workflow.
 
 **Planner Instructions:**
-{agent_input.planner_instructions}
+{planner_instructions}
 {tool_specs_section}
 {software_section}
 **Context:**
-- Force Field: {agent_input.force_field}
-- MD Engine: {agent_input.md_engine}
-- Working Directory: {agent_input.working_directory}
-- User Goal: {agent_input.user_goal or "Not specified"}
+- Force Field: {force_field}
+- MD Engine: {md_engine}
+- Working Directory: {working_directory}
+- User Goal: {user_goal}
 
 **Available Code Generation Tools:**
 {tools_str}
@@ -552,7 +595,7 @@ For each tool specification above, create a corresponding generation step with t
 - DO NOT include 'def function_name(...):' - this will be auto-generated
 - DO include imports and logic
 - DO NOT include return statements - the template automatically generates proper return with success flag
-- Just perform the work and the template will handle returning results
+- Just perform the work and the template will handle returning results  
 - The code will be automatically wrapped in proper function structure with error handling
 
 **COMPLETE EXAMPLE of implementation code:**
@@ -573,13 +616,13 @@ selection = u.select_atoms("protein")
 com_data = []
 for ts in u.trajectory:
     com = selection.center_of_mass()
-    com_data.append({
+    com_data.append({{
         "frame": ts.frame,
         "time": ts.time,
         "x": com[0],
         "y": com[1],
         "z": com[2]
-    })
+    }})
 
 # Save results
 df = pd.DataFrame(com_data)
@@ -590,18 +633,18 @@ try:
     append_analysis_summary(
         working_dir=os.getcwd(),
         analysis_type="COM_Analysis",
-        statistics={
+        statistics={{
             "n_frames": len(df),
             "mean_x": float(df["x"].mean()),
             "std_x": float(df["x"].std()),
             "min_x": float(df["x"].min()),
             "max_x": float(df["x"].max())
-        },
-        files={"output": output_file},
-        metadata={"selection": "protein"}
+        }},
+        files={{"output": output_file}},
+        metadata={{"selection": "protein"}}
     )
 except Exception as e:
-    logger.warning(f"Summary logging failed: {e}")
+    logger.warning(f"Summary logging failed: {{e}}")
 
 # NO return statement here - template adds it automatically!
 ```
@@ -682,31 +725,31 @@ try:
     append_analysis_summary(
             working_dir=working_dir or os.getcwd(),  # Use provided working_dir
             analysis_type="YourAnalysisType",  # e.g., "Contact_Analysis", "Distance_Matrix"
-            statistics={{
+            statistics={{{{
                 "n_frames": num_frames,
                 "mean_value": mean_val,      # REQUIRED: Calculate mean
                 "std_value": std_val,        # REQUIRED: Calculate std deviation
                 "min_value": min_val,        # REQUIRED: Calculate minimum
                 "max_value": max_val,        # REQUIRED: Calculate maximum
                 # Add other important statistics specific to your analysis
-            }},
-            files={{
+            }}}},
+            files={{{{
                 "topology": topology_file,
                 "trajectory": trajectory_file,
                 "output": output_filename    # Use filename only, not full path
-            }},
-            metadata={{
+            }}}},
+            metadata={{{{
                 "selection": selection_string,
                 # Add important metadata like:
-                # "most_important_region": {{"residue_id": X, "value": Y}},
-                # "top_5_highest": [{{"id": 1, "value": 5.0}}, ...],
+                # "most_important_region": {{{{"residue_id": X, "value": Y}}}},
+                # "top_5_highest": [{{{{"id": 1, "value": 5.0}}}}, ...],
                 # "threshold": cutoff_value,
                 # "interpretation": "Description of what the values mean"
-            }}
+            }}}}
         )
-        logger.info(f"Analysis summary logged for {{analysis_type}}")
+        logger.info(f"Analysis summary logged for {{{{analysis_type}}}}")
     except Exception as e:
-        logger.warning(f"Failed to write to summary file: {{e}}")
+        logger.warning(f"Failed to write to summary file: {{{{e}}}}")
 ```
 
 **What to Log:**
@@ -717,69 +760,69 @@ try:
 
 **Example for Contact Analysis:**
 ```python
-statistics={{
+statistics={{{{
     "n_frames": len(contact_counts),
     "mean_contacts": np.mean(contact_counts),
     "std_contacts": np.std(contact_counts),
     "min_contacts": np.min(contact_counts),
     "max_contacts": np.max(contact_counts)
-}},
-metadata={{
+}}}},
+metadata={{{{
     "cutoff_distance": cutoff,
     "most_frequent_contacts": top_5_contacts  # List of dicts
-}}
+}}}}
 ```
 
 **Output Format (JSON):**
-{{
+{{{{
   "reasoning": "Why these tools are needed",
   "overview": "High-level summary",
   "steps": [
-    {{
+    {{{{
       "name": "Generate [tool being created]",
-      "description": "Create the [tool_name] tool  using generate_python_tool",
+      "description": "Create the [tool_name] tool using generate_python_tool",
       "tool_name": "generate_python_tool",  
-      "tool_params": {{
+      "tool_params": {{{{
         "tool_name": "name_of_tool_to_create",
         "description": "what the new tool does",
         "parameters": {{}},
         "implementation": "Python code body"
-      }},
+      }}}},
       "reason": "why this tool is needed"
-    }}
+    }}}}
   ],
   "estimated_complexity": "low|medium|high"
-}}
+}}}}
 
 **CRITICAL - Example of CORRECT vs WRONG:**
 
 ❌ **WRONG** (trying to execute the tool being created):
-{{
+{{{{
   "steps": [
-    {{
+    {{{{
       "tool_name": "compute_center_of_mass",  // DON'T DO THIS!
-      "tool_params": {{"trajectory": "..."}}
-    }}
+      "tool_params": {{{{"trajectory": "..."}}}}
+    }}}}
   ]
-}}
+}}}}
 
 ✅ **CORRECT** (using generation tool to CREATE the tool):
-{{
+{{{{
   "steps": [
-    {{
+    {{{{
       "tool_name": "generate_python_tool",  // Use THIS!
-      "tool_params": {{
+      "tool_params": {{{{
         "tool_name": "compute_center_of_mass",  // Tool to create
         "description": "Calculate COM from trajectory",
-        "parameters": {{
-          "trajectory": {{"type": "str", "description": "..."}},
-          "topology": {{"type": "str", "description": "..."}}
-        }},
+        "parameters": {{{{
+          "trajectory": {{{{"type": "str", "description": "..."}}}},
+          "topology": {{{{"type": "str", "description": "..."}}}}
+        }}}},
         "implementation": "import MDAnalysis\\nu = mda.Universe(...)\\n..."
-      }}
-    }}
+      }}}}
+    }}}}
   ]
-}}
+}}}}
 
 **Remember:**
 - tool_name in steps MUST be a CODE GENERATION tool (generate_python_tool, generate_tcl_script, etc.)
@@ -787,6 +830,17 @@ metadata={{
 - DO NOT use tool specifications as step tool_names
 - Each step creates ONE new tool using a generation tool
 """
+        
+        return prompt_template.format(
+            planner_instructions=agent_input.planner_instructions,
+            tool_specs_section=tool_specs_section,
+            software_section=software_section,
+            force_field=agent_input.force_field,
+            md_engine=agent_input.md_engine,
+            working_directory=agent_input.working_directory,
+            user_goal=agent_input.user_goal or "Not specified",
+            tools_str=tools_str
+        )
     
     def _extract_plan_json(self, content: str) -> Dict[str, Any]:
         """Extract and parse JSON plan from LLM response"""
