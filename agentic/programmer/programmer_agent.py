@@ -188,8 +188,17 @@ class MDProgrammer:
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
-            logger.error(f"Programmer agent failed: {e}")
+            error_msg = f"Programmer agent failed: {type(e).__name__}: {e}"
+            logger.error(error_msg)
             logger.error(f"Traceback: {tb}")
+            
+            # Log to file for debugging
+            import sys
+            print(f"!!! PROGRAMMER EXCEPTION !!!", file=sys.stderr)
+            print(f"Type: {type(e).__name__}", file=sys.stderr)
+            print(f"Message: {e}", file=sys.stderr)
+            print(f"Traceback:\n{tb}", file=sys.stderr)
+            
             log_error("programmer_agent.programmer_node", e, {
                 "state": str(state), 
                 "traceback": tb
@@ -368,8 +377,18 @@ class MDProgrammer:
             
         except Exception as e:
             import traceback
-            logger.error(f"Programmer workflow failed: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            import sys
+            tb_str = traceback.format_exc()
+            logger.error(f"Programmer workflow failed: {type(e).__name__}: {e}")
+            logger.error(f"Traceback: {tb_str}")
+            
+            # Debug output
+            print(f"\n{'='*70}", file=sys.stderr)
+            print(f"!!! PROGRAMMER WORKFLOW EXCEPTION !!!", file=sys.stderr)
+            print(f"Exception Type: {type(e).__name__}", file=sys.stderr)
+            print(f"Exception Message: {e}", file=sys.stderr)
+            print(f"Full Traceback:\n{tb_str}", file=sys.stderr)
+            print(f"{'='*70}\n", file=sys.stderr)
             
             return ProgrammerAgentOutput(
                 success=False,
@@ -791,10 +810,69 @@ metadata={{
     ) -> ProgrammerPlan:
         """Create fallback plan when LLM is unavailable"""
         
-        # Determine what to generate based on instructions
-        instructions_lower = agent_input.planner_instructions.lower()
-        
         steps = []
+        
+        # PRIORITY: Use tool_specifications from planner if available
+        if agent_input.tool_specifications:
+            logger.info(f"FALLBACK PLAN: Using {len(agent_input.tool_specifications)} tool specifications from planner")
+            for spec in agent_input.tool_specifications:
+                # Extract spec fields (handle both dict and Pydantic models)
+                if isinstance(spec, dict):
+                    tool_name = spec.get("name", "custom_tool")
+                    description = spec.get("description", "Custom tool")
+                    language = spec.get("language", "python")
+                    parameters = spec.get("parameters", {})
+                    dependencies = spec.get("dependencies", [])
+                    purpose = spec.get("purpose", "")
+                else:
+                    # Pydantic model
+                    tool_name = spec.name
+                    description = spec.description
+                    language = spec.language
+                    parameters = spec.parameters
+                    dependencies = getattr(spec, 'dependencies', [])
+                    purpose = getattr(spec, 'purpose', '')
+                
+                # Create step based on tool type
+                if language == "python":
+                    steps.append(ProgrammerStep(
+                        name=f"Generate {tool_name}",
+                        description=description,
+                        tool_name="generate_python_tool",
+                        tool_params={
+                            "tool_name": tool_name,
+                            "description": description,
+                            "parameters": parameters,
+                            "dependencies": dependencies,
+                            "implementation": f"# {purpose}\npass  # Fallback implementation",
+                            "working_directory": agent_input.working_directory
+                        },
+                        reason=f"Generate {tool_name} as specified by planner"
+                    ))
+                elif language == "tcl":
+                    steps.append(ProgrammerStep(
+                        name=f"Generate {tool_name}",
+                        description=description,
+                        tool_name="generate_tcl_script",
+                        tool_params={
+                            "script_name": tool_name,
+                            "description": description,
+                            "parameters": parameters,
+                            "implementation": f"# {purpose}\nputs \"TCL script generated\"",
+                            "working_directory": agent_input.working_directory
+                        },
+                        reason=f"Generate TCL script {tool_name}"
+                    ))
+            
+            return ProgrammerPlan(
+                reasoning="Fallback plan using tool specifications from planner",
+                overview=f"Generate {len(steps)} tools from planner specifications",
+                steps=steps,
+                estimated_complexity="medium"
+            )
+        
+        # FALLBACK: If no tool specs, use keyword detection from instructions
+        instructions_lower = agent_input.planner_instructions.lower()
         
         if "mdp" in instructions_lower or "parameter" in instructions_lower:
             steps.append(ProgrammerStep(
