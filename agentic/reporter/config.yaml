@@ -1,0 +1,241 @@
+# Reporter Agent Configuration
+#
+# Generates scientific reports from analysis summaries with literature context
+
+agent:
+  name: "ReporterAgent"
+  description: "Generates HTML reports from MD analysis data with scientific literature context"
+  capabilities:
+    - "Read and parse analysis_summary.jsonl files"
+    - "Search scientific literature (PubMed, arXiv)"
+    - "Generate comprehensive HTML reports with LLM insights"
+    - "Create executive summaries for quick review"
+    - "Embed analysis visualizations in reports"
+    - "Extract key findings and provide recommendations"
+    - "Contextualize results with published research"
+  
+  # Directory management
+  working_directory: "working_dir/reporter"  # All reporter outputs go here
+  input_from: "working_dir/analysis"  # Get analysis summaries from here
+  
+  # Execution settings
+  max_tool_retries: 2  # Max retries per tool on failure
+  max_total_steps: 10  # Max total reporter steps
+  fail_fast: false  # Continue on failures to complete report
+
+# Report generation defaults
+report:
+  # Default report settings
+  default_type: "comprehensive"  # comprehensive, executive, or custom
+  
+  # HTML template settings
+  template:
+    theme: "scientific"  # scientific, minimal, or professional
+    include_toc: true  # Table of contents
+    include_abstract: true
+    include_methods: true
+    include_results: true
+    include_discussion: true
+    include_references: true
+  
+  # Content settings
+  max_figures_per_section: 5
+  embed_images: true  # Embed as base64 or link to files
+  generate_pdf: false  # Also generate PDF version (requires weasyprint)
+  
+  # LLM interpretation settings
+  llm_analysis:
+    extract_key_findings: true
+    generate_recommendations: true
+    contextualize_with_literature: true
+    max_findings: 10
+    max_recommendations: 5
+
+# Literature search settings
+literature:
+  # PubMed settings
+  pubmed:
+    enabled: true
+    max_results: 10  # Max papers to retrieve per query
+    auto_query_generation: true  # Auto-generate queries from analysis type
+    include_abstracts: true
+    relevance_threshold: 0.5  # Min relevance score (0-1)
+    
+    # Search filters
+    filters:
+      max_age_years: 10  # Only papers from last N years
+      publication_types:
+        - "Journal Article"
+        - "Review"
+      languages:
+        - "eng"
+  
+  # arXiv settings
+  arxiv:
+    enabled: false  # Enable if needed
+    max_results: 5
+    categories:
+      - "q-bio"  # Quantitative biology
+      - "physics.bio-ph"  # Biological physics
+  
+  # Citation format
+  citation_style: "apa"  # apa, mla, chicago, or nature
+
+# Tool-specific settings
+tools:
+  read_analysis_summary:
+    description: "Parse and extract data from analysis_summary.jsonl"
+    defaults:
+      validate_json: true
+      include_metadata: true
+  
+  search_pubmed:
+    description: "Search PubMed for relevant scientific literature"
+    defaults:
+      max_results: 10
+      include_abstracts: true
+      sort_by: "relevance"  # relevance, date, or citations
+  
+  generate_html_report:
+    description: "Generate HTML report from analysis data and literature"
+    defaults:
+      template: "scientific"
+      include_css: true
+      responsive: true
+      syntax_highlighting: true  # For any code snippets
+  
+  extract_key_findings:
+    description: "Use LLM to extract key findings from analysis data"
+    defaults:
+      max_findings: 10
+      include_statistics: true
+      rank_by_importance: true
+  
+  generate_recommendations:
+    description: "Use LLM to generate recommendations based on findings"
+    defaults:
+      max_recommendations: 5
+      include_rationale: true
+      prioritize: true
+
+# Analysis type to PubMed query mapping
+# Used for automatic literature search
+query_templates:
+  RMSD:
+    keywords:
+      - "root mean square deviation"
+      - "protein stability"
+      - "molecular dynamics simulation"
+      - "structural drift"
+    focus: "structural stability analysis"
+  
+  RMSF:
+    keywords:
+      - "root mean square fluctuation"
+      - "residue flexibility"
+      - "protein dynamics"
+      - "flexible regions"
+    focus: "residue-level flexibility analysis"
+  
+  Radius_of_Gyration:
+    keywords:
+      - "radius of gyration"
+      - "protein compactness"
+      - "folding dynamics"
+      - "structural changes"
+    focus: "protein compactness and folding"
+  
+  Energy:
+    keywords:
+      - "potential energy"
+      - "molecular dynamics energy"
+      - "simulation stability"
+      - "thermodynamic analysis"
+    focus: "energetic analysis of simulation"
+  
+  SASA:
+    keywords:
+      - "solvent accessible surface area"
+      - "protein surface"
+      - "hydrophobic core"
+      - "binding interface"
+    focus: "surface exposure analysis"
+  
+  Secondary_Structure:
+    keywords:
+      - "secondary structure"
+      - "DSSP"
+      - "helix content"
+      - "protein folding"
+    focus: "secondary structure dynamics"
+  
+  COM_Analysis:
+    keywords:
+      - "center of mass"
+      - "protein motion"
+      - "translational dynamics"
+      - "spatial distribution"
+    focus: "center of mass trajectory analysis"
+
+# Report structure template
+report_structure:
+  comprehensive:
+    sections:
+      - title: "Abstract"
+        required: true
+        llm_generated: true
+      - title: "Introduction"
+        required: true
+        llm_generated: true
+      - title: "Methods"
+        required: true
+        subsections:
+          - "Simulation Parameters"
+          - "Analysis Techniques"
+          - "Software Tools"
+      - title: "Results"
+        required: true
+        subsections:
+          - "Structural Analysis"
+          - "Dynamic Properties"
+          - "Energetic Analysis"
+      - title: "Discussion"
+        required: true
+        llm_generated: true
+      - title: "Conclusions"
+        required: true
+        llm_generated: true
+      - title: "References"
+        required: true
+  
+  executive:
+    sections:
+      - title: "Summary"
+        required: true
+        llm_generated: true
+      - title: "Key Findings"
+        required: true
+        llm_generated: true
+      - title: "Recommendations"
+        required: true
+        llm_generated: true
+      - title: "Supporting Data"
+        required: false
+
+# HTML template CSS theme
+css_themes:
+  scientific:
+    primary_color: "#2c3e50"
+    secondary_color: "#3498db"
+    background_color: "#ffffff"
+    text_color: "#333333"
+    font_family: "'Helvetica Neue', Helvetica, Arial, sans-serif"
+    code_font: "'Monaco', 'Courier New', monospace"
+  
+  minimal:
+    primary_color: "#000000"
+    secondary_color: "#666666"
+    background_color: "#ffffff"
+    text_color: "#000000"
+    font_family: "'Georgia', serif"
+    code_font: "'Courier New', monospace"

@@ -16,6 +16,7 @@ from .llm import LLMClient
 from .hpc import MDHPCAgent
 from .analysis import MDAnalysisAgent
 from .planner import MDPlanner
+from .reporter import ReporterAgent
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class MDWorkflow:
         self.setup_agent = SimulationSetupAgent(self.llm)
         self.hpc_agent = MDHPCAgent(self.llm)
         self.analysis_agent = MDAnalysisAgent(self.llm)
+        self.reporter_agent = ReporterAgent(self.llm)
         self.checkpoints = HumanCheckpoints()
         
         # Build the graph
@@ -74,6 +76,7 @@ class MDWorkflow:
         workflow.add_node("setup", self._wrap_node("setup", self.setup_agent.setup_node))
         workflow.add_node("hpc", self._wrap_node("hpc", self.hpc_agent.hpc_node))
         workflow.add_node("analysis", self._wrap_node("analysis", self.analysis_agent.analysis_node))
+        workflow.add_node("reporter", self._wrap_node("reporter", self.reporter_agent.reporter_node))
         workflow.add_node("human_preprocess_check", self._wrap_node("human_preprocess_check", self.checkpoints.human_preprocess_check))
         workflow.add_node("human_setup_check", self._wrap_node("human_setup_check", self.checkpoints.human_setup_check))
         workflow.add_node("human_hpc_check", self._wrap_node("human_hpc_check", self.checkpoints.human_hpc_check))
@@ -94,6 +97,7 @@ class MDWorkflow:
                 "setup": "setup",
                 "hpc": "hpc",
                 "analysis": "analysis",
+                "reporter": "reporter",
                 "final_report": "final_report",
                 END: END
             }
@@ -187,6 +191,15 @@ class MDWorkflow:
             }
         )
         
+        # ========== FIELD AGENTS - REPORTER ==========
+        workflow.add_conditional_edges(
+            "reporter",
+            lambda state: state.get("next_node", "supervisor"),
+            {
+                "supervisor": "supervisor"
+            }
+        )
+        
         # ========== FINAL REPORT ==========
         workflow.add_edge("final_report", END)
         
@@ -202,7 +215,7 @@ class MDWorkflow:
         
         valid_nodes = [
             "input_validation", "planner", "preprocess", "setup", 
-            "hpc", "analysis", "final_report"
+            "hpc", "analysis", "reporter", "final_report"
         ]
         
         if next_node in valid_nodes:

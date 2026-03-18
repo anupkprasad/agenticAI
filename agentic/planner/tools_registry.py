@@ -65,6 +65,7 @@ class ToolsRegistry:
             "simsetup",
             "hpc",
             "analysis",
+            "reporter",
             "planner",
             "programmer"
         ]
@@ -399,7 +400,7 @@ class ToolsRegistry:
             agents_to_format = self.tools_by_agent
         
         # Use workflow order instead of alphabetical
-        workflow_order = ["preprocess", "simsetup", "hpc", "analysis", "supervisor"]
+        workflow_order = ["preprocess", "simsetup", "hpc", "analysis", "reporter", "supervisor"]
         
         formatted = []
         

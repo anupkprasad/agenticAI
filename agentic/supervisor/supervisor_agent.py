@@ -286,6 +286,11 @@ class MDSupervisor:
                 "Analysis Agent",
                 "MD Analysis Agent",
                 "Trajectory Analysis Agent"
+            ],
+            "reporter_instructions": [
+                "Reporter Agent",
+                "Report Generation Agent",
+                "Scientific Reporter Agent"
             ]
         }
         
