@@ -1,0 +1,511 @@
+"""HTML report generation functionality"""
+import os
+import logging
+import base64
+from typing import Dict, Any, List, Optional
+from pathlib import Path
+from datetime import datetime
+from langchain.tools import tool
+
+logger = logging.getLogger(__name__)
+
+
+@tool
+def generate_html_report(
+    analysis_data: Dict[str, Any],
+    literature_refs: Optional[List[Dict[str, Any]]] = None,
+    report_type: str = "comprehensive",
+    output_file: str = "report.html",
+    working_dir: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Generate HTML report from analysis data and literature.
+    
+    Creates a professional scientific report with analysis results,
+    visualizations, and literature context.
+    
+    Args:
+        analysis_data: Parsed analysis summary data
+        literature_refs: List of literature references (optional)
+        report_type: Type of report ("comprehensive" or "executive")
+        output_file: Output HTML filename (saved in working_dir)
+        working_dir: Working directory for output
+    
+    Returns:
+        Dict with report generation results
+    """
+    if working_dir is None:
+        working_dir = os.getcwd()
+    
+    output_path = Path(working_dir) / output_file
+    
+    # Ensure output directory exists
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        # Build HTML content
+        html_content = build_html_content(
+            analysis_data=analysis_data,
+            literature_refs=literature_refs or [],
+            report_type=report_type
+        )
+        
+        # Write to file
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        logger.info(f"Generated HTML report: {output_path}")
+        
+        return {
+            "success": True,
+            "report_file": str(output_path),
+            "report_type": report_type,
+            "file_size_kb": output_path.stat().st_size / 1024
+        }
+        
+    except Exception as e:
+        logger.error(f"Error generating HTML report: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+def build_html_content(
+    analysis_data: Dict[str, Any],
+    literature_refs: List[Dict[str, Any]],
+    report_type: str
+) -> str:
+    """Build HTML content for report (not a @tool, internal helper)"""
+    
+    # Extract data
+    entries = analysis_data.get("entries", [])
+    analysis_types = analysis_data.get("analysis_types", {})
+    
+    # Normalize analysis_types to handle both dict and list formats
+    if isinstance(analysis_types, list):
+        # Convert list to dict with counts
+        analysis_types = {atype: 1 for atype in analysis_types}
+    elif not isinstance(analysis_types, dict):
+        analysis_types = {}
+    
+    # Build HTML
+    html_parts = []
+    
+    # HTML header
+    html_parts.append("""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Molecular Dynamics Analysis Report</title>
+    <style>
+        body {
+            font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #f5f7fa 0%, #e3e6eb 100%);
+        }
+        .container {
+            background-color: white;
+            padding: 40px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            border-radius: 12px;
+        }
+        h1 {
+            color: #1e3a8a;
+            border-bottom: 4px solid #3b82f6;
+            padding-bottom: 15px;
+            margin-bottom: 30px;
+            font-size: 32px;
+        }
+        h2 {
+            color: #1e40af;
+            margin-top: 40px;
+            border-bottom: 2px solid #93c5fd;
+            padding-bottom: 10px;
+            font-size: 24px;
+        }
+        h3 {
+            color: #1e40af;
+            font-size: 20px;
+            margin-top: 20px;
+        }
+        .metadata {
+            background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            border-left: 4px solid #3b82f6;
+        }
+        .metadata p {
+            margin: 8px 0;
+        }
+        .analysis-section {
+            margin: 40px 0;
+            padding: 30px;
+            border-radius: 10px;
+            background-color: #f9fafb;
+            border: 1px solid #e5e7eb;
+        }
+        .image-container {
+            text-align: center;
+            margin: 30px 0;
+            padding: 20px;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .analysis-image {
+            max-width: 100%;
+            height: auto;
+            border-radius: 6px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.1);
+        }
+        .image-caption {
+            font-size: 14px;
+            color: #6b7280;
+            margin-top: 10px;
+            font-style: italic;
+        }
+        .key-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin: 25px 0;
+        }
+        .stat-card {
+            background: linear-gradient(135deg, #ffffff 0%, #f3f4f6 100%);
+            padding: 20px;
+            border-radius: 8px;
+            border: 2px solid #e5e7eb;
+            text-align: center;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+        }
+        .stat-value {
+            font-size: 28px;
+            font-weight: bold;
+            color: #3b82f6;
+            margin: 5px 0;
+        }
+        .stat-label {
+            font-size: 12px;
+            color: #6b7280;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+        .highlight-stat {
+            background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+            border-color: #3b82f6;
+        }
+        .highlight-stat .stat-value {
+            color: #1e40af;
+        }
+        .timestamp {
+            color: #9ca3af;
+            font-size: 14px;
+            margin: 10px 0;
+        }
+        .reference {
+            margin: 15px 0;
+            padding: 15px;
+            background-color: #f9fafb;
+            border-left: 4px solid #6b7280;
+            border-radius: 4px;
+        }
+        .reference-title {
+            font-weight: bold;
+            color: #1f2937;
+            margin-bottom: 8px;
+        }
+        .reference-authors {
+            font-style: italic;
+            color: #6b7280;
+            font-size: 14px;
+        }
+        .section-divider {
+            height: 2px;
+            background: linear-gradient(90deg, transparent, #cbd5e1, transparent);
+            margin: 40px 0;
+        }
+        .files-list {
+            background-color: #f3f4f6;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+        }
+        .files-list ul {
+            margin: 10px 0;
+            padding-left: 20px;
+        }
+        .files-list li {
+            margin: 5px 0;
+            color: #4b5563;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+""")
+    
+    # Title and metadata
+    html_parts.append("<h1>🧬 Molecular Dynamics Analysis Report</h1>")
+    html_parts.append(f'<div class="metadata">')
+    html_parts.append(f'<p><strong>📊 Report Type:</strong> {report_type.title()}</p>')
+    html_parts.append(f'<p><strong>📅 Generated:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>')
+    html_parts.append(f'<p><strong>🔬 Total Analyses:</strong> {len(entries)}</p>')
+    html_parts.append(f'<p><strong>📈 Analysis Types:</strong> {", ".join(analysis_types.keys())}</p>')
+    html_parts.append('</div>')
+    
+    # Analysis sections
+    html_parts.append("<h2>📊 Analysis Results</h2>")
+    
+    for entry in entries:
+        atype = entry.get("analysis_type", "Unknown")
+        stats = entry.get("statistics", {})
+        if not isinstance(stats, dict):
+            stats = {}
+        files = entry.get("files", {})
+        if not isinstance(files, dict):
+            files = {}
+        metadata = entry.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        timestamp = entry.get("timestamp", "")
+        
+        html_parts.append(f'<div class="analysis-section">')
+        html_parts.append(f'<h3>{atype}</h3>')
+        html_parts.append(f'<p class="timestamp">⏱️ Performed: {timestamp}</p>')
+        
+        # Find and display images
+        image_files = _find_image_files(files)
+        if image_files:
+            for img_type, img_path in image_files.items():
+                # Try to encode image as base64
+                img_data = _encode_image_base64(img_path)
+                if img_data:
+                    html_parts.append(f'''
+                        <div class="image-container">
+                            <img src="{img_data}" alt="{img_type}" class="analysis-image">
+                            <p class="image-caption">{img_type.replace("_", " ").title()}</p>
+                        </div>
+                    ''')
+                else:
+                    # Fallback to file path if encoding fails
+                    html_parts.append(f'<p><em>Image: {img_path}</em></p>')
+        
+        # Display key statistics in cards
+        if stats:
+            # Identify important statistics
+            key_stats = _extract_key_statistics(stats, atype)
+            
+            if key_stats:
+                html_parts.append('<div class="key-stats">')
+                for stat_name, stat_value, is_highlight in key_stats:
+                    card_class = "stat-card highlight-stat" if is_highlight else "stat-card"
+                    if isinstance(stat_value, float):
+                        formatted_value = f"{stat_value:.3f}"
+                    else:
+                        formatted_value = str(stat_value)
+                    
+                    html_parts.append(f'''
+                        <div class="{card_class}">
+                            <div class="stat-label">{stat_name}</div>
+                            <div class="stat-value">{formatted_value}</div>
+                        </div>
+                    ''')
+                html_parts.append('</div>')
+        
+        # Additional files (non-images) in compact format
+        non_image_files = {k: v for k, v in files.items() if not _is_image_file(k, v)}
+        if non_image_files:
+            html_parts.append('<div class="files-list">')
+            html_parts.append('<p><strong>📁 Data Files:</strong></p>')
+            html_parts.append('<ul>')
+            for file_type, file_path in non_image_files.items():
+                file_name = Path(file_path).name if isinstance(file_path, str) else str(file_path)
+                html_parts.append(f'<li><strong>{file_type}:</strong> {file_name}</li>')
+            html_parts.append('</ul>')
+            html_parts.append('</div>')
+        
+        html_parts.append('</div>')
+        html_parts.append('<div class="section-divider"></div>')
+    
+    # Literature references
+    if literature_refs:
+        html_parts.append("<h2>Scientific Literature</h2>")
+        html_parts.append(f'<p>Found {len(literature_refs)} relevant publications:</p>')
+        
+        for idx, ref in enumerate(literature_refs, 1):
+            html_parts.append(f'<div class="reference">')
+            html_parts.append(f'<div class="reference-title">[{idx}] {ref.get("title", "Unknown")}</div>')
+            
+            authors = ref.get("authors", [])
+            if authors:
+                author_str = ", ".join(authors[:3])
+                if len(authors) > 3:
+                    author_str += " et al."
+                html_parts.append(f'<div class="reference-authors">{author_str}</div>')
+            
+            journal = ref.get("journal", "")
+            year = ref.get("year", "")
+            if journal or year:
+                html_parts.append(f'<p><em>{journal}</em> ({year})</p>')
+            
+            doi = ref.get("doi")
+            if doi:
+                html_parts.append(f'<p>DOI: <a href="https://doi.org/{doi}">{doi}</a></p>')
+            
+            pmid = ref.get("pmid")
+            if pmid:
+                html_parts.append(f'<p>PMID: <a href="https://pubmed.ncbi.nlm.nih.gov/{pmid}/">{pmid}</a></p>')
+            
+            abstract = ref.get("abstract")
+            if abstract and len(abstract) > 100:
+                # Truncate long abstracts
+                abstract_preview = abstract[:300] + "..."
+                html_parts.append(f'<p><strong>Abstract:</strong> {abstract_preview}</p>')
+            
+            html_parts.append('</div>')
+    
+    # Footer
+    html_parts.append("""
+    </div>
+</body>
+</html>
+""")
+    
+    return "\n".join(html_parts)
+
+def _find_image_files(files: Dict[str, Any]) -> Dict[str, str]:
+    """Extract image files from files dictionary"""
+    image_extensions = {'.png', '.jpg', '.jpeg', '.svg', '.gif'}
+    image_files = {}
+    
+    for file_type, file_path in files.items():
+        if isinstance(file_path, str):
+            path_obj = Path(file_path)
+            if path_obj.suffix.lower() in image_extensions:
+                image_files[file_type] = file_path
+    
+    return image_files
+
+
+def _is_image_file(file_type: str, file_path: Any) -> bool:
+    """Check if a file is an image"""
+    if not isinstance(file_path, str):
+        return False
+    
+    image_extensions = {'.png', '.jpg', '.jpeg', '.svg', '.gif'}
+    image_keywords = {'plot', 'heatmap', 'figure', 'image', 'timeseries', '3d'}
+    
+    path_obj = Path(file_path)
+    
+    # Check extension
+    if path_obj.suffix.lower() in image_extensions:
+        return True
+    
+    # Check type name
+    if any(keyword in file_type.lower() for keyword in image_keywords):
+        return True
+    
+    return False
+
+
+def _encode_image_base64(image_path: str) -> Optional[str]:
+    """Encode image file to base64 data URI"""
+    try:
+        path = Path(image_path)
+        if not path.exists():
+            logger.warning(f"Image file not found: {image_path}")
+            return None
+        
+        # Determine MIME type
+        ext = path.suffix.lower()
+        mime_types = {
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif',
+            '.svg': 'image/svg+xml'
+        }
+        mime_type = mime_types.get(ext, 'image/png')
+        
+        # Read and encode
+        with open(path, 'rb') as f:
+            image_data = base64.b64encode(f.read()).decode('utf-8')
+        
+        return f"data:{mime_type};base64,{image_data}"
+        
+    except Exception as e:
+        logger.error(f"Error encoding image {image_path}: {e}")
+        return None
+
+
+def _extract_key_statistics(stats: Dict[str, Any], analysis_type: str) -> List[tuple]:
+    """
+    Extract key statistics to display prominently.
+    
+    Returns:
+        List of tuples: (stat_name, stat_value, is_highlight)
+    """
+    key_stats = []
+    
+    # Define priority statistics for each analysis type
+    priority_stats = {
+        'RMSD': ['mean_rmsd', 'std_rmsd', 'min_rmsd', 'max_rmsd'],
+        'RMSF': ['mean_rmsf', 'std_rmsf', 'min_rmsf', 'max_rmsf'],
+        'Gyration': ['mean_rg', 'std_rg', 'min_rg', 'max_rg'],
+        'RadiusOfGyration': ['mean_rg', 'std_rg', 'min_rg', 'max_rg'],
+        'DSSP': ['avg_helix_percent', 'avg_sheet_percent', 'avg_coil_percent'],
+        'DSSP_SecondaryStructure': ['avg_helix_percent', 'avg_sheet_percent', 'avg_coil_percent'],
+        'Energy': ['Potential_mean', 'Kinetic-En._mean', 'Temperature_mean'],
+        'SASA': ['mean_sasa', 'std_sasa', 'min_sasa', 'max_sasa'],
+    }
+    
+    # Get priority stats for this analysis type
+    priority_list = []
+    for key in priority_stats:
+        if key.lower() in analysis_type.lower() or analysis_type.lower() in key.lower():
+            priority_list = priority_stats[key]
+            break
+    
+    # If no specific priority, show common stats
+    if not priority_list:
+        common_stats = ['mean', 'std', 'min', 'max', 'average', 'avg']
+        priority_list = [k for k in stats.keys() if any(cs in k.lower() for cs in common_stats)]
+    
+    # Extract priority stats first
+    for stat_key in priority_list:
+        if stat_key in stats:
+            value = stats[stat_key]
+            if isinstance(value, (int, float)):
+                # Highlight mean/average values
+                is_highlight = 'mean' in stat_key.lower() or 'avg' in stat_key.lower()
+                display_name = stat_key.replace('_', ' ').title()
+                # Simplify names
+                display_name = display_name.replace('Rmsd', 'RMSD')
+                display_name = display_name.replace('Rmsf', 'RMSF')
+                display_name = display_name.replace('Rg', 'Rg')
+                display_name = display_name.replace('Sasa', 'SASA')
+                key_stats.append((display_name, value, is_highlight))
+    
+    # Add other numeric stats if we don't have enough
+    if len(key_stats) < 4:
+        for stat_key, value in stats.items():
+            if stat_key not in priority_list and isinstance(value, (int, float)):
+                display_name = stat_key.replace('_', ' ').title()
+                key_stats.append((display_name, value, False))
+                if len(key_stats) >= 6:  # Limit to 6 stats per analysis
+                    break
+    
+    return key_stats

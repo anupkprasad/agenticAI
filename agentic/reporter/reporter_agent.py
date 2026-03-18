@@ -236,6 +236,9 @@ class ReporterAgent:
                 }
             )
             
+            # Save the execution plan to file
+            self._save_execution_plan(plan, agent_input)
+            
             # Step 2: Execute the plan
             result = self._execute_reporter_plan(agent_input, plan, state)
             
@@ -349,10 +352,27 @@ Enabled: {literature_enabled}
 
 **Your Task:**
 Create a plan to generate a scientific report by:
-1. Reading the analysis_summary.jsonl file
+1. Reading the analysis_summary.jsonl file (contains analysis results, statistics, and image file paths)
 2. Extracting key findings and statistics
 3. Optionally searching scientific literature for context
-4. Generating an HTML report with insights
+4. Generating an HTML report with embedded visualizations and insights
+
+**HTML REPORT FEATURES:**
+The HTML report automatically includes:
+- **Embedded Images**: Analysis plots (RMSD, RMSF, DSSP heatmaps, etc.) are embedded as base64
+- **Key Statistics Cards**: Important values (mean, std, min, max) displayed prominently beneath images
+- **Modern Layout**: Clean, professional styling with gradients and visual hierarchy
+- **Organized Sections**: Each analysis type in its own section with dividers
+
+The tool reads image file paths from analysis_summary.jsonl and embeds them automatically.
+No need to specify image paths in tool_params - they're extracted from the analysis data.
+
+**IMPORTANT PATH GUIDELINES:**
+- The analysis_summary.jsonl file is typically in the "analysis/" subdirectory
+- For read_analysis_summary: Use "analysis/analysis_summary.jsonl" or just "analysis_summary.jsonl" (tool will search)
+- For generate_html_report: Use simple filename like "report.html" or "kinase_report.html" or "md_analysis_report.html"
+- Do NOT include "working_dir" in tool_params - it will be automatically set to the reporter's output directory
+- All files will be created in the reporter's dedicated directory (working_dir/reporter/)
 
 **Output Format (JSON):**
 {{
@@ -367,6 +387,17 @@ Create a plan to generate a scientific report by:
         "summary_file": "analysis_summary.jsonl"
       }},
       "reason": "Need to load analysis results"
+    }},
+    {{
+      "name": "Generate HTML Report",
+      "description": "Create comprehensive report",
+      "tool_name": "generate_html_report",
+      "tool_params": {{
+        "analysis_data": {{}},
+        "output_file": "report.html",
+        "report_type": "comprehensive"
+      }},
+      "reason": "Produce final deliverable"
     }}
   ],
   "report_focus": ["Key topic 1", "Key topic 2"],
@@ -393,12 +424,30 @@ Create a plan to generate a scientific report by:
     
     def _extract_plan_json(self, content: str) -> Dict[str, Any]:
         """Extract and parse JSON plan from LLM response"""
-        json_match = re.search(r'\{[\s\S]*\}', content)
+        
+        # Remove markdown code fences if present
+        # Handle: ```json\n{...}\n``` or ```\n{...}\n```
+        content_cleaned = re.sub(r'```(?:json)?\s*\n', '', content)
+        content_cleaned = re.sub(r'\n```\s*$', '', content_cleaned)
+        content_cleaned = content_cleaned.strip()
+        
+        # Try to parse the cleaned content directly first
+        try:
+            return json.loads(content_cleaned)
+        except json.JSONDecodeError:
+            pass
+        
+        # Fallback: Try to find JSON object with regex
+        json_match = re.search(r'\{[\s\S]*\}', content_cleaned, re.DOTALL)
         if json_match:
             try:
                 return json.loads(json_match.group())
-            except json.JSONDecodeError:
-                pass
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON parsing failed: {e}")
+                logger.debug(f"Attempted to parse: {json_match.group()[:200]}...")
+        
+        logger.error(f"Could not extract valid JSON from LLM response")
+        logger.debug(f"Response content: {content[:500]}...")
         
         return {
             "reasoning": content,
@@ -458,6 +507,58 @@ Create a plan to generate a scientific report by:
             estimated_complexity="medium"
         )
     
+    def _save_execution_plan(self, plan: ReporterPlan, agent_input: ReporterAgentInput) -> None:
+        """Save execution plan with LLM reasoning to file"""
+        try:
+            plan_file = os.path.join(self.file_manager.agent_dir, "execution_plan.json")
+            
+            plan_data = {
+                "timestamp": str(Path(plan_file).stat().st_mtime if os.path.exists(plan_file) else "N/A"),
+                "reasoning": plan.reasoning,
+                "overview": plan.overview,
+                "report_focus": plan.report_focus,
+                "literature_queries": plan.literature_queries,
+                "estimated_complexity": plan.estimated_complexity,
+                "steps": [
+                    {
+                        "name": step.name,
+                        "description": step.description,
+                        "tool_name": step.tool_name,
+                        "tool_params": step.tool_params,
+                        "reason": step.reason
+                    }
+                    for step in plan.steps
+                ]
+            }
+            
+            with open(plan_file, "w") as f:
+                json.dump(plan_data, f, indent=2)
+            
+            logger.info(f"Saved execution plan to {plan_file}")
+            
+            # Also save a markdown version for readability
+            md_file = os.path.join(self.file_manager.agent_dir, "execution_plan.md")
+            with open(md_file, "w") as f:
+                f.write("# Reporter Execution Plan\n\n")
+                f.write(f"**Generated:** {plan_data['timestamp']}\n\n")
+                f.write(f"## LLM Reasoning\n\n{plan.reasoning}\n\n")
+                f.write(f"## Overview\n\n{plan.overview}\n\n")
+                f.write(f"## Report Focus\n\n")
+                for focus in plan.report_focus:
+                    f.write(f"- {focus}\n")
+                f.write(f"\n## Execution Steps ({len(plan.steps)} steps)\n\n")
+                for i, step in enumerate(plan.steps, 1):
+                    f.write(f"### Step {i}: {step.name}\n\n")
+                    f.write(f"**Tool:** `{step.tool_name}`\n\n")
+                    f.write(f"**Description:** {step.description}\n\n")
+                    f.write(f"**Reason:** {step.reason}\n\n")
+                    f.write(f"**Parameters:**\n```json\n{json.dumps(step.tool_params, indent=2)}\n```\n\n")
+            
+            logger.info(f"Saved execution plan (markdown) to {md_file}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to save execution plan: {e}")
+    
     def _execute_reporter_plan(
         self,
         agent_input: ReporterAgentInput,
@@ -481,6 +582,19 @@ Create a plan to generate a scientific report by:
                 
                 # Special handling for steps that need previous results
                 params = step.tool_params.copy()
+                
+                # Override working_dir based on tool type:
+                # - Output tools (generate_html_report): Use reporter's agent directory
+                # - Input tools (read_analysis_summary): Use base working directory to find analysis files
+                if step.tool_name == "generate_html_report":
+                    # Output tool - use reporter directory  
+                    params["working_dir"] = self.file_manager.agent_dir
+                    logger.debug(f"Set working_dir to {self.file_manager.agent_dir} for output tool {step.tool_name}")
+                elif step.tool_name == "read_analysis_summary":
+                    # Input tool - use base directory to find analysis files
+                    base_dir = Path(self.file_manager.agent_dir).parent
+                    params["working_dir"] = str(base_dir)
+                    logger.debug(f"Set working_dir to {base_dir} for input tool {step.tool_name}")
                 
                 if step.tool_name == "generate_html_report":
                     params["analysis_data"] = analysis_data
@@ -537,11 +651,20 @@ Create a plan to generate a scientific report by:
         
         logger.info(report)
         
+        # Save execution report to files
+        self._save_execution_report(plan, step_results, analysis_data, literature_refs, issues, warnings)
+        
         # Extract report file path
         report_file = None
         for result in step_results:
             if result.get("tool") == "generate_html_report" and result.get("success"):
                 report_file = result.get("result", {}).get("report_file")
+        
+        # Add comprehensive summary file to generated files
+        comprehensive_file = os.path.join(self.file_manager.agent_dir, "comprehensive_summary.json")
+        generated_files = {"html": report_file} if report_file else {}
+        if os.path.exists(comprehensive_file):
+            generated_files["comprehensive_summary"] = comprehensive_file
         
         return ReporterResult(
             success=len(issues) == 0,
@@ -556,9 +679,183 @@ Create a plan to generate a scientific report by:
             issues=issues,
             warnings=warnings,
             report=report,
-            generated_files={"html": report_file} if report_file else {},
+            generated_files=generated_files,
             step_results=step_results
         )
+    
+    def _save_execution_report(
+        self,
+        plan: ReporterPlan,
+        step_results: List[Dict[str, Any]],
+        analysis_data: Dict[str, Any],
+        literature_refs: List[Dict[str, Any]],
+        issues: List[str],
+        warnings: List[str]
+    ) -> None:
+        """Save comprehensive execution report with LLM reasoning and results"""
+        try:
+            import datetime
+            
+            timestamp = datetime.datetime.now().isoformat()
+            
+            # 1. Save comprehensive summary in JSON format
+            comprehensive_data = {
+                "timestamp": timestamp,
+                "llm_plan": {
+                    "reasoning": plan.reasoning,
+                    "overview": plan.overview,
+                    "report_focus": plan.report_focus,
+                    "literature_queries": plan.literature_queries,
+                    "estimated_complexity": plan.estimated_complexity
+                },
+                "execution": {
+                    "total_steps": len(plan.steps),
+                    "completed_steps": sum(1 for r in step_results if r.get("success")),
+                    "failed_steps": sum(1 for r in step_results if not r.get("success")),
+                    "success_rate": f"{sum(1 for r in step_results if r.get('success')) / len(step_results) * 100:.1f}%" if step_results else "0%"
+                },
+                "step_results": step_results,
+                "analysis_data_summary": {
+                    "entries_found": len(analysis_data.get("entries", [])) if isinstance(analysis_data, dict) else 0,
+                    "analysis_types": analysis_data.get("analysis_types", []) if isinstance(analysis_data, dict) else []
+                },
+                "literature_references": len(literature_refs),
+                "issues": issues,
+                "warnings": warnings
+            }
+            
+            json_file = os.path.join(self.file_manager.agent_dir, "comprehensive_summary.json")
+            with open(json_file, "w") as f:
+                json.dump(comprehensive_data, f, indent=2)
+            
+            logger.info(f"Saved comprehensive summary (JSON) to {json_file}")
+            
+            # 2. Save execution report in Markdown format
+            md_file = os.path.join(self.file_manager.agent_dir, "execution_report.md")
+            with open(md_file, "w") as f:
+                f.write(f"# Reporter Execution Report\\n\\n")
+                f.write(f"**Generated:** {timestamp}\\n\\n")
+                f.write(f"---\\n\\n")
+                
+                # LLM Planning Section
+                f.write(f"## LLM Planning\\n\\n")
+                f.write(f"### Reasoning\\n\\n{plan.reasoning}\\n\\n")
+                f.write(f"### Overview\\n\\n{plan.overview}\\n\\n")
+                f.write(f"### Report Focus Areas\\n\\n")
+                for focus in plan.report_focus:
+                    f.write(f"- {focus}\\n")
+                f.write("\\n")
+                
+                if plan.literature_queries:
+                    f.write(f"### Literature Search Queries\\n\\n")
+                    for query in plan.literature_queries:
+                        f.write(f"- {query}\\n")
+                    f.write("\\n")
+                
+                # Execution Summary
+                f.write(f"## Execution Summary\\n\\n")
+                f.write(f"- **Total Steps:** {len(plan.steps)}\\n")
+                f.write(f"- **Completed:** {comprehensive_data['execution']['completed_steps']}\\n")
+                f.write(f"- **Failed:** {comprehensive_data['execution']['failed_steps']}\\n")
+                f.write(f"- **Success Rate:** {comprehensive_data['execution']['success_rate']}\\n\\n")
+                
+                # Step-by-step results
+                f.write(f"## Step-by-Step Execution\\n\\n")
+                for i, result in enumerate(step_results, 1):
+                    status = "\u2705 SUCCESS" if result.get("success") else "\u274c FAILED"
+                    f.write(f"### Step {i}: {result.get('step_name')} [{status}]\\n\\n")
+                    f.write(f"**Tool:** `{result.get('tool')}`\\n\\n")
+                    
+                    if result.get("success"):
+                        tool_result = result.get("result", {})
+                        if isinstance(tool_result, dict):
+                            if "entries" in tool_result:
+                                f.write(f"- Entries found: {len(tool_result['entries'])}\\n")
+                            if "analysis_types" in tool_result:
+                                f.write(f"- Analysis types: {', '.join(tool_result['analysis_types'])}\\n")
+                            if "results" in tool_result:
+                                f.write(f"- Results: {len(tool_result.get('results', []))} items\\n")
+                            if "report_file" in tool_result:
+                                f.write(f"- Report file: `{tool_result['report_file']}`\\n")
+                    else:
+                        f.write(f"**Error:** {result.get('error', 'Unknown error')}\\n")
+                    
+                    f.write("\\n")
+                
+                # Analysis Data Summary
+                if analysis_data:
+                    f.write(f"## Analysis Data Summary\\n\\n")
+                    if isinstance(analysis_data, dict):
+                        f.write(f"- **Entries:** {len(analysis_data.get('entries', []))}\\n")
+                        f.write(f"- **Analysis Types:** {', '.join(analysis_data.get('analysis_types', []))}\\n")
+                        
+                        if "statistics" in analysis_data:
+                            f.write(f"\\n### Statistics\\n\\n")
+                            stats = analysis_data["statistics"]
+                            for key, value in stats.items():
+                                f.write(f"- **{key}:** {value}\\n")
+                    f.write("\\n")
+                
+                # Literature References
+                if literature_refs:
+                    f.write(f"## Literature References ({len(literature_refs)})\\n\\n")
+                    for i, ref in enumerate(literature_refs[:10], 1):  # Show first 10
+                        title = ref.get("title", "Unknown")
+                        authors = ref.get("authors", "Unknown authors")
+                        f.write(f"{i}. **{title}**\\n")
+                        f.write(f"   - Authors: {authors}\\n")
+                        if "journal" in ref:
+                            f.write(f"   - Journal: {ref['journal']}\\n")
+                        f.write("\\n")
+                    
+                    if len(literature_refs) > 10:
+                        f.write(f"*...and {len(literature_refs) - 10} more references*\\n\\n")
+                
+                # Issues and Warnings
+                if issues:
+                    f.write(f"## Issues\\n\\n")
+                    for issue in issues:
+                        f.write(f"- \u274c {issue}\\n")
+                    f.write("\\n")
+                
+                if warnings:
+                    f.write(f"## Warnings\\n\\n")
+                    for warning in warnings:
+                        f.write(f"- \u26a0\ufe0f {warning}\\n")
+                    f.write("\\n")
+                
+                f.write(f"---\\n\\n")
+                f.write(f"*Report generated by Reporter Agent with LLM planning*\\n")
+            
+            logger.info(f"Saved execution report (Markdown) to {md_file}")
+            
+            # 3. Save plain text execution log
+            txt_file = os.path.join(self.file_manager.agent_dir, "execution_log.txt")
+            with open(txt_file, "w") as f:
+                f.write("=" * 80 + "\\n")
+                f.write("REPORTER AGENT EXECUTION LOG\\n")
+                f.write("=" * 80 + "\\n\\n")
+                f.write(f"Timestamp: {timestamp}\\n\\n")
+                
+                f.write("LLM REASONING:\\n")
+                f.write("-" * 80 + "\\n")
+                f.write(plan.reasoning + "\\n\\n")
+                
+                f.write("EXECUTION STEPS:\\n")
+                f.write("-" * 80 + "\\n")
+                for i, result in enumerate(step_results, 1):
+                    status = "OK" if result.get("success") else "FAIL"
+                    f.write(f"[{status}] Step {i}: {result.get('step_name')}\\n")
+                
+                f.write("\\n")
+                f.write("=" * 80 + "\\n")
+                f.write(f"Completed: {comprehensive_data['execution']['completed_steps']}/{len(plan.steps)} steps\\n")
+                f.write("=" * 80 + "\\n")
+            
+            logger.info(f"Saved execution log (TXT) to {txt_file}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to save execution report: {e}", exc_info=True)
     
     def _update_state(self, state: MDState, output: ReporterAgentOutput) -> None:
         """Update workflow state with reporter results"""
@@ -568,16 +865,43 @@ Create a plan to generate a scientific report by:
             "report_path": output.report_path,
             "pdf_path": output.pdf_path,
             "key_findings": output.result.key_findings,
-            "recommendations": output.result.recommendations
+            "recommendations": output.result.recommendations,
+            "generated_files": output.result.generated_files
         }
         
-        # Register generated files
+        # Register all generated files
         if output.report_path:
             self.file_manager.register_external_file(
                 file_path=output.report_path,
                 file_type="html_report",
-                description="Scientific analysis report"
+                description="Scientific analysis report (HTML)"
             )
+        
+        # Register comprehensive summary and execution reports
+        for file_type, file_path in output.result.generated_files.items():
+            if file_type != "html" and os.path.exists(file_path):
+                self.file_manager.register_external_file(
+                    file_path=file_path,
+                    file_type=f"reporter_{file_type}",
+                    description=f"Reporter {file_type.replace('_', ' ').title()}"
+                )
+        
+        # Also register execution plan and report files
+        agent_dir = self.file_manager.agent_dir
+        for filename, description in [
+            ("execution_plan.json", "Execution plan with LLM reasoning (JSON)"),
+            ("execution_plan.md", "Execution plan with LLM reasoning (Markdown)"),
+            ("comprehensive_summary.json", "Comprehensive execution summary (JSON)"),
+            ("execution_report.md", "Detailed execution report (Markdown)"),
+            ("execution_log.txt", "Execution log (Text)")
+        ]:
+            file_path = os.path.join(agent_dir, filename)
+            if os.path.exists(file_path):
+                self.file_manager.register_external_file(
+                    file_path=file_path,
+                    file_type=f"reporter_{filename.replace('.', '_')}",
+                    description=description
+                )
         
         if output.pdf_path:
             self.file_manager.register_external_file(

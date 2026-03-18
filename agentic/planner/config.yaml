@@ -28,6 +28,11 @@ planner:
       full_name: "Analysis Agent"
       description: "Handles trajectory analysis and visualization"
       capabilities: ["rmsd", "rmsf", "gyrate", "dssp", "hbond", "visualization"]
+      
+    - name: "reporter"
+      full_name: "Reporter Agent"
+      description: "Generates comprehensive HTML/markdown reports from analysis results"
+      capabilities: ["generate_report", "summarize_analysis", "create_visualizations", "format_results"]
   
   # Planning behavior
   behavior:
@@ -151,6 +156,16 @@ planner:
           agent: "analysis"
           description: "Analyze simulation results"
           tools: ["gmx rms", "gmx rmsf", "gmx gyrate"]
+          
+    reporter:
+      keywords: ["report", "summarize", "document", "results"]
+      agent: "reporter"  # Reporter Agent
+      default_steps:
+        - name: "Report Generation"
+          agent: "reporter"
+          description: "Generate comprehensive reports from analysis results"
+          tools: ["generate_html_report", "create_summary", "format_plots"]
+      note: "Reporter requires completed analysis results (analysis_summary.jsonl and analysis outputs)"
 
 # Knowledge resources for planning
 knowledge_resources:

@@ -166,21 +166,13 @@ class MDSupervisor:
                 logger.info("SUPERVISOR: Routing to input validation - missing raw_pdb for this task")
                 return state
 
-        # Step 1.5: For reporter_only, skip planning and go directly to reporter
-        # This must come BEFORE the planning check to avoid routing to planner
-        if subtask_type == "reporter_only" and state.get("reporter_validated"):
-            if not state.get("reporter_output"):
-                logger.info("SUPERVISOR: Reporter-only task - routing directly to reporter agent")
-                state["next_node"] = "reporter"
-                log_supervisor_routing(state, "reporter", "Reporter-only task - direct routing")
-                return state
-            else:
-                logger.info("SUPERVISOR: Reporter already complete, routing to final report")
-                state["next_node"] = "final_report"
-                return state
-
-        # Step 2: Create execution plan if not exists (for all other task types)
-        if not state.get("execution_plan") and (state.get("pdb_analysis") or state.get("analysis_validated")):
+        # Step 2: Create execution plan if not exists
+        # Route to planner for all validated tasks (including reporter_only and analysis_only)
+        if not state.get("execution_plan") and (
+            state.get("pdb_analysis") or 
+            state.get("analysis_validated") or 
+            state.get("reporter_validated")
+        ):
             logger.info("SUPERVISOR: Validation complete, creating execution plan with planner")
             state["next_node"] = "planner"
             return state
@@ -235,28 +227,7 @@ class MDSupervisor:
             }
         )
         
-        # Special handling for reporter_only - minimal validation needed
-        if subtask_type == "reporter_only":
-            logger.info("INPUT_VALIDATION: Reporter-only task - minimal validation")
-            # Reporter just needs the analysis summary file path
-            # Check if working directory is set
-            working_dir = state.get("working_directory", "working_dir")
-            analysis_dir = f"{working_dir}/analysis"
-            
-            # Set reporter-specific info
-            state["reporter_validated"] = True
-            state["analysis_directory"] = analysis_dir
-            state["next_node"] = "supervisor"
-            
-            logger.info(f"INPUT_VALIDATION: Reporter validation complete - analysis directory: {analysis_dir}")
-            log_supervisor_routing(
-                state, "supervisor",
-                f"Reporter-only validation complete, returning to supervisor"
-            )
-            return state
-        
-        # For all other task types, use full validation
-        # Call unified validation function
+        # Call unified validation function for all task types
         state = validate_and_enrich_inputs(
             state=state,
             subtask_type=subtask_type,
@@ -269,6 +240,9 @@ class MDSupervisor:
         # Set validation flags based on task type
         if subtask_type == "analysis_only":
             state["analysis_validated"] = True
+        elif subtask_type == "reporter_only":
+            # reporter_validated is set by _validate_reporter_files
+            pass
         else:
             # PDB-based tasks are validated
             pass

@@ -52,6 +52,9 @@ def validate_and_enrich_inputs(
     if subtask_type == "analysis_only":
         # Analysis-only tasks: validate trajectory/topology files
         state = _validate_analysis_files(state, user_goal, working_directory, llm_client, config, logger)
+    elif subtask_type == "reporter_only":
+        # Reporter-only tasks: validate analysis summary files
+        state = _validate_reporter_files(state, user_goal, working_directory, llm_client, config, logger)
     else:
         # PDB-based tasks: additional setup/preprocessing validation
         state = _validate_pdb_based_task(state, user_goal, working_directory, llm_client, config, logger)
@@ -239,6 +242,123 @@ def _validate_pdb_based_task(
     # Log final validation summary
     logger.info(f"  - PDB Analysis: {'✓ Success' if not state.get('warnings') else '⚠ With warnings'}")
     logger.info(f"  - Component Selection: {component_selection}")
+    logger.info(f"  - Working Directory: {working_directory}")
+    logger.info(f"  - Enriched Prompt: {enriched_prompt[:80]}...")
+    
+    return state
+
+
+def _validate_reporter_files(
+    state: Dict[str, Any],
+    user_goal: str,
+    working_directory: str,
+    llm_client,
+    config: Dict[str, Any],
+    logger
+) -> Dict[str, Any]:
+    """Validate analysis summary files for reporter-only tasks."""
+    from agentic.utils import log_agent_action
+    from .prompt_enricher import enrich_prompt_with_context
+    
+    analysis_output_dir = os.path.join(working_directory, "analysis")
+    
+    # Step 1: Validate analysis output directory exists
+    if not os.path.exists(analysis_output_dir):
+        error = f"Analysis output directory not found: {analysis_output_dir}"
+        state["errors"].append(error)
+        logger.error(f"INPUT_VALIDATION: {error}")
+        return state
+    
+    logger.info(f"INPUT_VALIDATION: ✓ Analysis output directory found: {analysis_output_dir}")
+    
+    # Step 2: Validate analysis_summary.jsonl file exists
+    summary_file = os.path.join(analysis_output_dir, "analysis_summary.jsonl")
+    
+    if not os.path.exists(summary_file):
+        warning = f"Analysis summary file not found: {summary_file}"
+        state["warnings"].append(warning)
+        logger.warning(f"INPUT_VALIDATION: {warning}")
+        logger.warning("INPUT_VALIDATION: Reporter will work with available data files")
+    else:
+        logger.info(f"INPUT_VALIDATION: ✓ Analysis summary file found: {summary_file}")
+    
+    # Step 3: Scan available analysis files
+    available_files = []
+    try:
+        for file in os.listdir(analysis_output_dir):
+            file_path = os.path.join(analysis_output_dir, file)
+            if os.path.isfile(file_path):
+                available_files.append(file)
+        logger.info(f"INPUT_VALIDATION: Found {len(available_files)} analysis files")
+        for i, file in enumerate(available_files[:10], 1):  # Show first 10
+            logger.info(f"  {i}. {file}")
+    except Exception as e:
+        warning = f"Failed to list files in {analysis_output_dir}: {e}"
+        state["warnings"].append(warning)
+        logger.warning(f"INPUT_VALIDATION: {warning}")
+    
+    # Step 4: Build file_info dictionary
+    file_info = {
+        "analysis_output_dir": analysis_output_dir,
+        "analysis_summary_file": summary_file if os.path.exists(summary_file) else None,
+        "available_files": available_files,
+        "total_files": len(available_files)
+    }
+    
+    # Step 5: Enrich user prompt with validated information
+    enriched_prompt = enrich_prompt_with_context(
+        user_goal=user_goal,
+        context_type="reporter",
+        context_data={"file_info": file_info},
+        llm_client=llm_client,
+        config=config
+    )
+    state["structured_prompt"] = enriched_prompt
+    state["rephrased_goal"] = enriched_prompt
+    
+    logger.info(f"INPUT_VALIDATION: Enriched reporter prompt created: {enriched_prompt[:150]}...")
+    
+    # Step 6: Set reporter-specific state fields
+    state["analysis_directory"] = analysis_output_dir
+    state["reporter_validated"] = True
+    
+    # Enhance pdb_analysis with reporter-specific file info if it exists
+    if "pdb_analysis" not in state or not state["pdb_analysis"]:
+        # Fallback: create minimal structure if PDB wasn't analyzed
+        logger.warning("INPUT_VALIDATION: No PDB analysis found, creating minimal structure")
+        state["pdb_analysis"] = {
+            "total_atoms": 0,
+            "total_residues": 0,
+            "components_available": {},
+            "human_readable_summary": "N/A"
+        }
+    
+    # Add reporter-specific metadata to existing pdb_analysis
+    state["pdb_analysis"]["subtask_type"] = "reporter_only"
+    state["pdb_analysis"]["working_directory"] = working_directory
+    state["pdb_analysis"]["analysis_output_dir"] = analysis_output_dir
+    state["pdb_analysis"]["analysis_summary_file"] = file_info["analysis_summary_file"]
+    state["pdb_analysis"]["available_analysis_files"] = available_files
+    
+    log_agent_action(
+        agent_name="supervisor.input_validation",
+        action="Reporter-Only Input Validation Complete",
+        details={
+            "subtask_type": "reporter_only",
+            "original_goal": user_goal[:100],
+            "enriched_prompt": enriched_prompt[:300],
+            "analysis_directory": analysis_output_dir,
+            "summary_file": file_info["analysis_summary_file"],
+            "total_files": len(available_files),
+            "working_directory": working_directory
+        }
+    )
+    
+    # Log final validation summary
+    logger.info(f"  - File Validation: {'✓ Success' if not state.get('errors') else '✗ Failed'}")
+    logger.info(f"  - Analysis Directory: {analysis_output_dir}")
+    logger.info(f"  - Summary File: {file_info['analysis_summary_file'] or 'Not found'}")
+    logger.info(f"  - Available Files: {len(available_files)}")
     logger.info(f"  - Working Directory: {working_directory}")
     logger.info(f"  - Enriched Prompt: {enriched_prompt[:80]}...")
     

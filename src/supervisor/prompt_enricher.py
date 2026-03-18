@@ -55,6 +55,30 @@ def rephrase_with_context(
             formatted_prompt = prompt_template.format(user_goal=user_goal, file_summary=file_summary)
             agent_name = "supervisor.analysis_goal_rephrasing"
             
+        elif context_type == "reporter":
+            # For reporter, use a similar template to analysis
+            prompt_template = config.get("input_validation", {}).get("reporter_rephrase_prompt", "")
+            if not prompt_template:
+                # Fallback to a default reporter rephrasing prompt
+                prompt_template = """You are helping to clarify a user's request for generating a scientific report from MD simulation analysis results.
+
+User's original goal:
+{user_goal}
+
+Available analysis data:
+{file_summary}
+
+Rephrase the user's goal to be more specific and structured for the reporter agent. Include:
+1. What specific results/metrics the user wants to see
+2. What questions they want answered
+3. Any specific analysis types mentioned
+
+Keep the rephrased goal focused on report generation tasks."""
+            
+            file_summary = context_data.get("file_summary", "")
+            formatted_prompt = prompt_template.format(user_goal=user_goal, file_summary=file_summary)
+            agent_name = "supervisor.reporter_goal_rephrasing"
+            
         else:
             logger.warning(f"Unknown context type: {context_type}, returning original goal")
             return user_goal
@@ -92,10 +116,11 @@ def enrich_prompt_with_context(
     
     Args:
         user_goal: User's natural language goal
-        context_type: Type of context ("pdb" or "files")
+        context_type: Type of context ("pdb", "files", or "reporter")
         context_data: Context information dict
             - For "pdb": {"pdb_analysis": Dict, "pdb_summary": str}
             - For "files": {"file_info": Dict}
+            - For "reporter": {"file_info": Dict}
         llm_client: LLM client instance
         config: Supervisor configuration
         
@@ -165,6 +190,40 @@ def enrich_prompt_with_context(
         
         # Combine rephrased goal with file information
         enhanced_prompt = f"{rephrased_goal}\n\n**Available Files:**\n{file_summary}"
+        return enhanced_prompt.strip()
+        
+    elif context_type == "reporter":
+        # Build file summary for rephrasing
+        file_info = context_data.get("file_info", {})
+        file_summary_parts = []
+        
+        if file_info.get("analysis_summary_file"):
+            file_summary_parts.append(f"Analysis Summary: {file_info['analysis_summary_file']}")
+        
+        if file_info.get("analysis_output_dir"):
+            file_summary_parts.append(f"Analysis Directory: {file_info['analysis_output_dir']}")
+            
+        if file_info.get("available_files"):
+            total_files = file_info.get("total_files", len(file_info["available_files"]))
+            file_summary_parts.append(f"Total Analysis Files: {total_files}")
+            # Show first few file names as examples
+            example_files = file_info["available_files"][:5]
+            if example_files:
+                file_summary_parts.append(f"Example Files: {', '.join(example_files)}")
+        
+        file_summary = "\n".join(file_summary_parts) if file_summary_parts else "No analysis files found"
+        
+        # Rephrase goal with analysis file context
+        rephrased_goal = rephrase_with_context(
+            user_goal=user_goal,
+            context_type="reporter",
+            context_data={"file_summary": file_summary},
+            llm_client=llm_client,
+            config=config
+        )
+        
+        # Combine rephrased goal with file information
+        enhanced_prompt = f"{rephrased_goal}\n\n**Available Analysis Data:**\n{file_summary}"
         return enhanced_prompt.strip()
         
     else:

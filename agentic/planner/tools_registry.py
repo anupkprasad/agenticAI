@@ -399,6 +399,16 @@ class ToolsRegistry:
         else:
             agents_to_format = self.tools_by_agent
         
+        # Agent descriptions for planner context
+        agent_descriptions = {
+            "preprocess": "Handles PDB structure cleanup, validation, and preparation. Expertise: removing waters/ligands, fixing residues, adding hydrogens, validating structure integrity.",
+            "simsetup": "Handles MD simulation system setup. Expertise: topology generation, force field application, solvation, ion addition, MDP parameter file creation, ligand parameterization.",
+            "hpc": "Handles job submission and execution on HPC clusters. Expertise: creating SLURM scripts, submitting jobs, monitoring execution, retrieving results from compute nodes.",
+            "analysis": "Handles MD trajectory analysis and visualization. Expertise: calculating RMSD/RMSF, structural analysis (secondary structure, hydrogen bonds), energy analysis, creating plots.",
+            "reporter": "Handles scientific report generation from completed analysis results. Expertise: summarizing analysis outputs, creating HTML/markdown reports, embedding plots and tables, formatting scientific documents.",
+            "programmer": "Generates custom Python/TCL/MDP tools based on specifications. Expertise: creating analysis scripts, MD parameter generators, visualization tools, data processing functions."
+        }
+        
         # Use workflow order instead of alphabetical
         workflow_order = ["preprocess", "simsetup", "hpc", "analysis", "reporter", "supervisor"]
         
@@ -415,6 +425,12 @@ class ToolsRegistry:
         
         for agent, tools in sorted_agents:
             formatted.append(f"\n**{agent.upper()} Agent Tools:**")
+            
+            # Add agent expertise description
+            agent_key = agent.lower()
+            if agent_key in agent_descriptions:
+                formatted.append(f"Agent Expertise: {agent_descriptions[agent_key]}")
+                formatted.append("")  # Blank line
             
             for tool in tools:
                 formatted.append(f"\n→ {tool['name']}")

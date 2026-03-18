@@ -198,6 +198,9 @@ class MDPlanner:
         elif subtask_type == "preprocess_only":
             logger.info("PLANNER: Getting preprocessing agent tools for preprocess-only workflow")
             tools_context = self._get_tools_context(agent_name="preprocess")
+        elif subtask_type == "reporter_only":
+            logger.info("PLANNER: Getting reporter agent tools for reporter-only workflow")
+            tools_context = self._get_tools_context(agent_name="reporter")
         else:
             # Full workflow - get all tools
             tools_context = self._get_tools_context()
@@ -316,6 +319,8 @@ class MDPlanner:
                                 current_tools_context = self._get_tools_context(agent_name="simsetup")
                             elif subtask_type == "preprocess_only":
                                 current_tools_context = self._get_tools_context(agent_name="preprocess")
+                            elif subtask_type == "reporter_only":
+                                current_tools_context = self._get_tools_context(agent_name="reporter")
                             else:
                                 current_tools_context = self._get_tools_context()
                             
@@ -757,6 +762,56 @@ PDB File: {pdb_path or 'Not specified'}
 
 Provide a comprehensive natural language plan explaining how the Preprocessing Agent should clean and prepare the structure."""
 
+        elif subtask_type == "reporter_only":
+            working_dir = state.get("working_directory", ".")
+            return f"""Create a detailed natural language execution plan for generating a scientific report.
+
+USER GOAL:
+{structured_prompt}
+
+TASK: Reporter-only - generate comprehensive reports from ALREADY COMPLETED analysis results.
+Only include Reporter Agent. Do NOT include preprocessing, setup, HPC, or analysis agents.
+
+**CRITICAL UNDERSTANDING:**
+This is a REPORTING task, NOT an analysis task. The user wants to:
+- Summarize and document results that have ALREADY been analyzed
+- Create formatted HTML/markdown reports from existing data
+- Generate visualizations and tables from completed analysis outputs
+- Compile findings into a scientific document
+
+Do NOT:
+- Perform new trajectory analysis (RMSD, RMSF, DSSP, etc.)
+- Calculate new metrics or properties
+- Invoke the Analysis Agent
+- Request tools for analysis calculations (rmsd_calculate.py, rmsf_calculate.py, etc.)
+
+DO:
+- Use reporter tools to format and document existing results
+- Create summary reports from analysis_summary.jsonl
+- Generate HTML/markdown documents
+- Embed existing plots and data
+- Compile findings into readable format
+
+File Structure:
+- Working Directory: {working_dir}
+- Analysis Results: {working_dir}/analysis/ (contains completed analysis outputs)
+- Analysis Summary: {working_dir}/analysis/analysis_summary.jsonl (metadata about completed analyses)
+- Report Output: {working_dir}/reports/ (where to save generated reports)
+
+**Available Reporter Agent Tools:**
+{tools_context}
+
+{self._get_tool_creation_instructions(include_new_tools_note)}
+
+**IMPORTANT:**
+If the user's request mentions specific analyses (RMSD, RMSF, secondary structure, etc.), they want those results DOCUMENTED in the report, NOT recalculated. The analysis should already be complete in the analysis directory.
+
+If analysis results are missing, the reporter should note what's missing in the report, not invoke the programmer to create analysis tools.
+
+{nl_format_instructions}
+
+Provide a comprehensive natural language plan explaining how the Reporter Agent should compile and format the scientific report from existing analysis results."""
+
         else:
             components = pdb_analysis.get("components_available", {})
             return f"""Create a detailed natural language execution plan for the complete MD workflow.
@@ -921,6 +976,9 @@ When you indicate missing tools, the Programmer Agent will be automatically invo
         elif subtask_type == "preprocess_only":
             # Preprocess-only workflow - only preprocessing agent
             agent_mentions = {"preprocessing_agent": True}
+        elif subtask_type == "reporter_only":
+            # Reporter-only workflow - only reporter agent
+            agent_mentions = {"reporter_agent": True}
         else:
             # Full workflow - extract which agents are mentioned in the plan
             agent_mentions = {
@@ -1044,6 +1102,29 @@ When you indicate missing tools, the Programmer Agent will be automatically invo
                 f"- Save all results to {working_dir}/analysis/\n\n"
                 f"The agent will use Python-based analysis tools (MDAnalysis, matplotlib) rather than "
                 f"command-line GROMACS tools for better integration and flexibility."
+            )
+        
+        # === REPORTER-ONLY WORKFLOW ===
+        elif subtask_type == "reporter_only":
+            agents_involved.append("reporter_agent")
+            execution_prose.append(
+                f"**Reporter Agent Responsibilities:**\n\n"
+                f"The Reporter Agent will generate a comprehensive scientific report from ALREADY COMPLETED "
+                f"analysis results located in {working_dir}/analysis/.\n\n"
+                f"IMPORTANT: This is a REPORTING task, not an analysis task. The Reporter will:\n"
+                f"- Load existing analysis results from {working_dir}/analysis/\n"
+                f"- Read analysis metadata from analysis_summary.jsonl\n"
+                f"- Compile findings into a formatted HTML or markdown report\n"
+                f"- Embed existing plots and visualizations\n"
+                f"- Create summary tables and statistics from completed analyses\n"
+                f"- Save the final report to {working_dir}/reports/\n\n"
+                f"The Reporter will NOT:\n"
+                f"- Perform new trajectory analyses (RMSD, RMSF, secondary structure, etc.)\n"
+                f"- Calculate new metrics or properties\n"
+                f"- Invoke analysis tools or the Analysis Agent\n\n"
+                f"Tools to use: HTML/markdown generation, plot embedding, data formatting, "
+                f"summary statistics compilation.\n\n"
+                f"Expected output: Comprehensive scientific report documenting completed simulation analyses"
             )
         
         # === FULL OR PARTIAL WORKFLOWS ===

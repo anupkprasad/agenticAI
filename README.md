@@ -199,8 +199,19 @@ python run_agenticAIWork.py \
   --llm-model gpt-oss:20b \
   --no-human-loop
 
+# 5.3. Run analysis-only workflow (trajectory in working_dir/hpc/)
+python run_agenticAIWork.py \
+  --goal "The kinase protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulation production and analysis is already done and data output is stored in working_dir/analysis. Please dont preprocess, do not setup simulation and do simulation analysis. Only use the reporter agent to report comprehensive results, the result summary file is analysis_summary.jsonl in working_dir/analysis/. I want to know what are the flexible region of kinase, what secondory structure most in protien wheater this kinase can do catalysis or not" \
+  --subtask reporter \
+  --working-dir working_dir \
+  --use-llm \
+  --llm-base-url http://127.0.0.1:11434 \
+  --llm-model gpt-oss:20b \
+  --no-human-loop
 
-# 5.3
+
+
+# 5.4
 python run_agenticAIWork.py \
   --goal "The protein availble in the pdb file of working_dir/3.pdb. Please preprocess the pdb file. Please do not setup, submit and analyisis the simulation" \
   --subtask preprocess \
