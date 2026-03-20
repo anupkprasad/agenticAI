@@ -99,8 +99,25 @@ class DynamicToolLoader:
             
             # Find tool functions in module
             tools_found = 0
+            module_file = str(file_path.resolve())
             for name, obj in inspect.getmembers(module):
                 if self._is_tool_function(name, obj):
+                    # Skip functions/tools that were imported from other modules
+                    # (e.g. 'from src.analysis.summary_logger import append_analysis_summary')
+                    try:
+                        if inspect.isfunction(obj):
+                            obj_file = str(Path(inspect.getfile(obj)).resolve())
+                            if obj_file != module_file:
+                                logger.debug(f"  Skipping imported function: {name} (from {obj_file})")
+                                continue
+                        elif hasattr(obj, 'func') and inspect.isfunction(obj.func):
+                            obj_file = str(Path(inspect.getfile(obj.func)).resolve())
+                            if obj_file != module_file:
+                                logger.debug(f"  Skipping imported @tool: {name} (from {obj_file})")
+                                continue
+                    except (TypeError, OSError):
+                        pass  # Built-in or C extension — keep as before
+
                     # Store tool
                     self.loaded_tools[name] = obj
                     

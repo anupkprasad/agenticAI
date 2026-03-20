@@ -879,6 +879,20 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 # LLMs may suggest workspace root, but tools must run in analysis subdirectory
                 tool_params["working_dir"] = self.file_manager.agent_dir
                 logger.debug(f"  Set working_dir to analysis agent directory: {self.file_manager.agent_dir}")
+
+                # Resolve list-type file parameters (e.g. data_files for plot tools).
+                # LLMs often pass wrong absolute paths; normalise to agent_dir/<basename>.
+                list_file_params = ["data_files", "input_files", "file_list"]
+                for lp in list_file_params:
+                    if lp in tool_params and isinstance(tool_params[lp], list):
+                        resolved_list = []
+                        agent_dir = str(self.file_manager.agent_dir)
+                        for fref in tool_params[lp]:
+                            fref = str(fref)
+                            basename = os.path.basename(fref)
+                            resolved_list.append(os.path.join(agent_dir, basename))
+                        logger.debug(f"  Resolved {lp}: {tool_params[lp]} -> {resolved_list}")
+                        tool_params[lp] = resolved_list
                 
                 execution_log.append(f"Parameters: {json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in tool_params.items()}, indent=2)}")
                 

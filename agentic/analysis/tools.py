@@ -339,6 +339,11 @@ class AnalysisToolExecutor:
                 # Direct function call (backward compatibility)
                 result = tool_func(**kwargs)
             
+            # Guard against tools that return None instead of a dict
+            if result is None:
+                logger.warning(f"Tool {tool_name} returned None — missing return statement")
+                result = {"success": False, "error": "Tool returned None (missing return statement)"}
+
             if result.get("success"):
                 logger.info(f"Tool {tool_name} completed successfully")
             else:
