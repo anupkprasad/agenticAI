@@ -55,6 +55,9 @@ def validate_and_enrich_inputs(
     elif subtask_type == "reporter_only":
         # Reporter-only tasks: validate analysis summary files
         state = _validate_reporter_files(state, user_goal, working_directory, llm_client, config, logger)
+    elif subtask_type == "multi_agent":
+        # Multi-agent: validate based on which agents are involved
+        state = _validate_multi_agent_inputs(state, user_goal, working_directory, llm_client, config, logger)
     else:
         # PDB-based tasks: additional setup/preprocessing validation
         state = _validate_pdb_based_task(state, user_goal, working_directory, llm_client, config, logger)
@@ -535,5 +538,71 @@ def _validate_analysis_files(
     logger.info(f"  - Trajectory: {file_info['trajectory_file'] or 'Not found'}")
     logger.info(f"  - Working Directory: {working_directory}")
     logger.info(f"  - Enriched Prompt: {enriched_prompt[:80]}...")
+
+    return state
+
+
+def _validate_multi_agent_inputs(
+    state: Dict[str, Any],
+    user_goal: str,
+    working_directory: str,
+    llm_client,
+    config: Dict[str, Any],
+    logger
+) -> Dict[str, Any]:
+    """
+    Validate inputs for a multi-agent workflow.
+
+    Delegates to each relevant single-agent validator based on agent_list,
+    then marks the state as multi_agent_validated.
+    """
+    from agentic.utils import log_agent_action
+
+    agent_list = state.get("agent_list") or []
+    logger.info(f"INPUT_VALIDATION: Multi-agent validation for agents: {agent_list}")
+
+    _PDB_REQUIRING = {"preprocess", "simsetup", "hpcjob"}
+    _TRAJ_REQUIRING = {"analysis"}
+    _REPORT_REQUIRING = {"reporter"}
+
+    has_pdb_agent = bool(set(agent_list) & _PDB_REQUIRING)
+    has_traj_agent = bool(set(agent_list) & _TRAJ_REQUIRING)
+    has_reporter_agent = bool(set(agent_list) & _REPORT_REQUIRING)
+
+    if has_pdb_agent:
+        # PDB analysis was already done in step 1 of universal validation;
+        # run the full PDB-based setup check as well
+        logger.info("INPUT_VALIDATION: Multi-agent - running PDB-based validation")
+        state = _validate_pdb_based_task(state, user_goal, working_directory, llm_client, config, logger)
+
+    if has_traj_agent:
+        # Validate trajectory / topology files for analysis
+        logger.info("INPUT_VALIDATION: Multi-agent - running trajectory/topology validation")
+        state = _validate_analysis_files(state, user_goal, working_directory, llm_client, config, logger)
+        # Mark analysis as validated so the analysis agent can proceed
+        state["analysis_validated"] = True
+
+    if has_reporter_agent:
+        # Validate analysis summary for reporter
+        logger.info("INPUT_VALIDATION: Multi-agent - running reporter file validation")
+        state = _validate_reporter_files(state, user_goal, working_directory, llm_client, config, logger)
+        # reporter_validated set inside _validate_reporter_files; also set here for safety
+        state["reporter_validated"] = True
+
+    # Mark overall multi-agent validation as done
+    state["multi_agent_validated"] = True
+    logger.info(f"INPUT_VALIDATION: Multi-agent validation complete - agents: {agent_list}")
+
+    log_agent_action(
+        agent_name="supervisor.input_validation-multi_agent",
+        action="Multi-Agent Input Validation Complete",
+        details={
+            "agent_list": agent_list,
+            "has_pdb_agent": has_pdb_agent,
+            "has_traj_agent": has_traj_agent,
+            "has_reporter_agent": has_reporter_agent,
+        }
+    )
+    return state
     
     return state

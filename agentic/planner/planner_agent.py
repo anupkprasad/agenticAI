@@ -87,6 +87,42 @@ class MDPlanner:
     def _get_knowledge_summary(self) -> str:
         """Get knowledge files summary (for logging only, not full content)."""
         return self.knowledge_loader.get_knowledge_files_summary()
+
+    def _get_combined_tools_context(self, agent_list: List[str]) -> str:
+        """
+        Get tools context for a list of agents combined, preserving workflow order.
+
+        CLI agent names are mapped to the registry names used by ToolsRegistry.
+        Falls back to all tools if agent_list is empty.
+
+        Args:
+            agent_list: Ordered list of CLI agent names (e.g. ["analysis", "reporter"])
+
+        Returns:
+            Formatted tools description string covering all listed agents
+        """
+        _cli_to_registry = {
+            "preprocess": "preprocess",
+            "simsetup": "simsetup",
+            "hpcjob": "hpc",
+            "analysis": "analysis",
+            "reporter": "reporter",
+        }
+        if not agent_list:
+            return self._get_tools_context()
+
+        parts = []
+        seen = set()
+        for cli_name in agent_list:
+            registry_name = _cli_to_registry.get(cli_name, cli_name)
+            if registry_name in seen:
+                continue
+            seen.add(registry_name)
+            ctx = self._get_tools_context(agent_name=registry_name)
+            if ctx.strip():
+                parts.append(ctx)
+
+        return "\n".join(parts) if parts else self._get_tools_context()
     
     def _load_config(self) -> Dict[str, Any]:
         """Load planner configuration from YAML."""
@@ -201,6 +237,10 @@ class MDPlanner:
         elif subtask_type == "reporter_only":
             logger.info("PLANNER: Getting reporter agent tools for reporter-only workflow")
             tools_context = self._get_tools_context(agent_name="reporter")
+        elif subtask_type == "multi_agent":
+            agent_list = state.get("agent_list") or []
+            logger.info(f"PLANNER: Getting combined tools for multi-agent workflow: {agent_list}")
+            tools_context = self._get_combined_tools_context(agent_list)
         else:
             # Full workflow - get all tools
             tools_context = self._get_tools_context()
@@ -812,6 +852,44 @@ If analysis results are missing, the reporter should note what's missing in the 
 
 Provide a comprehensive natural language plan explaining how the Reporter Agent should compile and format the scientific report from existing analysis results."""
 
+        elif subtask_type == "multi_agent":
+            working_dir = state.get("working_directory", ".")
+            agent_list = state.get("agent_list") or []
+            _agent_names = {
+                "preprocess": "Preprocessing Agent",
+                "simsetup":   "Simulation Setup Agent",
+                "hpcjob":     "HPC Agent",
+                "analysis":   "Analysis Agent",
+                "reporter":   "Reporter Agent",
+            }
+            agents_str = " → ".join(_agent_names.get(a, a) for a in agent_list)
+            return f"""Create a detailed natural language execution plan for a MULTI-AGENT workflow.
+
+USER GOAL:
+{structured_prompt}
+
+PDB File: {pdb_path or 'Not specified'}
+TASK: Run ONLY these agents in order: {agents_str}
+
+Do NOT add any agents that are not listed above.
+
+Working Directory: {working_dir}
+
+**Available Tools (for the listed agents only):**
+{tools_context}
+
+{self._get_tool_creation_instructions(include_new_tools_note)}
+
+**CRITICAL INSTRUCTIONS:**
+- Your plan MUST cover ONLY the agents listed: {agents_str}
+- Use the EXACT agent name phrases (e.g., "Preprocessing Agent", "Analysis Agent") so routing works
+- Each agent section should describe what it needs as input and what it will produce as output
+- The agents run in order: first agent's outputs become next agent's inputs
+
+{nl_format_instructions}
+
+Provide a comprehensive natural language plan covering each listed agent in sequence."""
+
         else:
             components = pdb_analysis.get("components_available", {})
             return f"""Create a detailed natural language execution plan for the complete MD workflow.
@@ -979,6 +1057,18 @@ When you indicate missing tools, the Programmer Agent will be automatically invo
         elif subtask_type == "reporter_only":
             # Reporter-only workflow - only reporter agent
             agent_mentions = {"reporter_agent": True}
+        elif subtask_type == "multi_agent":
+            # Multi-agent workflow - build agent_mentions from the declared agent_list
+            _cli_to_registry = {
+                "preprocess": "preprocessing_agent",
+                "simsetup": "setup_agent",
+                "hpcjob": "hpc_agent",
+                "analysis": "analysis_agent",
+                "reporter": "reporter_agent",
+            }
+            agent_list = state.get("agent_list") or []
+            agent_mentions = {_cli_to_registry[a]: True for a in agent_list if a in _cli_to_registry}
+            logger.info(f"PLANNER: multi_agent plan steps → {list(agent_mentions.keys())}")
         else:
             # Full workflow - extract which agents are mentioned in the plan
             agent_mentions = {
@@ -1126,6 +1216,50 @@ When you indicate missing tools, the Programmer Agent will be automatically invo
                 f"summary statistics compilation.\n\n"
                 f"Expected output: Comprehensive scientific report documenting completed simulation analyses"
             )
+
+        # === MULTI-AGENT WORKFLOW ===
+        elif subtask_type == "multi_agent":
+            agent_list = state.get("agent_list") or []
+            _cli_agent_descriptions = {
+                "preprocess": (
+                    "preprocessing_agent",
+                    f"**Preprocessing Agent Responsibilities:**\n\n"
+                    f"Clean and prepare the PDB structure: remove waters, fix residues, add hydrogens.\n"
+                    f"Expected output: cleaned .pdb file ready for topology generation."
+                ),
+                "simsetup": (
+                    "setup_agent",
+                    f"**Setup Agent Responsibilities:**\n\n"
+                    f"Generate the complete simulation system using {state.get('force_field', 'amber99sb-ildn')} "
+                    f"force field and {state.get('water_model', 'tip3p')} water model. "
+                    f"Produce topology, solvated coordinates, ions, and MDP files."
+                ),
+                "hpcjob": (
+                    "hpc_agent",
+                    f"**HPC Agent Responsibilities:**\n\n"
+                    f"Submit prepared simulation files to the HPC cluster via SLURM. "
+                    f"Monitor jobs, retrieve trajectory and energy outputs."
+                ),
+                "analysis": (
+                    "analysis_agent",
+                    f"**Analysis Agent Responsibilities:**\n\n"
+                    f"Perform trajectory analysis on simulation data in {working_dir}/hpc/. "
+                    f"Calculate RMSD, RMSF, and other requested metrics. "
+                    f"Save results to {working_dir}/analysis/."
+                ),
+                "reporter": (
+                    "reporter_agent",
+                    f"**Reporter Agent Responsibilities:**\n\n"
+                    f"Compile already-completed analysis results from {working_dir}/analysis/ into "
+                    f"a comprehensive HTML scientific report. Write report to {working_dir}/reporter/. "
+                    f"DO NOT run new analyses."
+                ),
+            }
+            for cli_name in agent_list:
+                if cli_name in _cli_agent_descriptions:
+                    registry_name, prose = _cli_agent_descriptions[cli_name]
+                    agents_involved.append(registry_name)
+                    execution_prose.append(prose)
         
         # === FULL OR PARTIAL WORKFLOWS ===
         else:
