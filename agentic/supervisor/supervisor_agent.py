@@ -141,48 +141,16 @@ class MDSupervisor:
             logger.info(f"SUPERVISOR: Agent progress: {current_agent_idx}/{total_agents} ({required_agents})")
 
         # Step 1: Input validation if needed (unified for all task types)
-        required_inputs = state.get("required_inputs", {})
         subtask_type = state.get("subtask_type", "full_task")
         
-        # Check if we need to validate inputs.
-        # IMPORTANT: check task-specific "already validated" flags FIRST to
-        # avoid looping back into input_validation after it completes.
-        needs_validation = False
-        if subtask_type == "reporter_only":
-            # Reporter only needs its own flag; never requires pdb_analysis
-            if not state.get("reporter_validated"):
-                needs_validation = True
-        elif subtask_type == "analysis_only":
-            if not state.get("analysis_validated"):
-                needs_validation = True
-        elif subtask_type == "multi_agent":
-            if not state.get("multi_agent_validated"):
-                needs_validation = True
-        else:
-            # Full / PDB-requiring tasks
-            if not state.get("pdb_analysis") and required_inputs.get("pdb_analysis_required", True):
-                needs_validation = True
-        
-        if needs_validation and state.get("user_goal"):
+        # Single unified validation check
+        if not state.get("input_validated") and state.get("user_goal"):
             logger.info(f"SUPERVISOR: Routing to unified input validation for task type: {subtask_type}")
             state["next_node"] = "input_validation"
             return state
-        
-        # Check for missing required inputs (PDB-based tasks only)
-        if subtask_type not in ("reporter_only", "analysis_only", "multi_agent"):
-            if not state.get("raw_pdb") and required_inputs.get("pdb_required", True):
-                state["next_node"] = "input_validation"
-                logger.info("SUPERVISOR: Routing to input validation - missing raw_pdb for this task")
-                return state
 
         # Step 2: Unified prompt enrichment (SINGLE enrichment for entire workflow)
-        # This runs ONCE after input validation and before planning
-        validated = (state.get("pdb_analysis") or 
-                    state.get("analysis_validated") or 
-                    state.get("reporter_validated") or
-                    state.get("multi_agent_validated"))
-        
-        if validated and not state.get("enriched_prompt"):
+        if state.get("input_validated") and not state.get("enriched_prompt"):
             logger.info("SUPERVISOR: Input validated, enriching prompt with unified enrichment")
             enriched = enrich_prompt_unified(state, self.llm, self.supervisor_config)
             state["enriched_prompt"] = enriched
@@ -231,10 +199,6 @@ class MDSupervisor:
         """
         from .tools import validate_and_enrich_inputs
         
-        logger.info("=" * 60)
-        logger.info("INPUT_VALIDATION: Starting unified input validation")
-        logger.info("=" * 60)
-        
         subtask_type = state.get("subtask_type", "full_task")
         
         log_agent_action(
@@ -267,30 +231,45 @@ class MDSupervisor:
         """
         Extract agent-specific instructions from the full execution plan.
         
-        This centralizes the extraction logic that was duplicated across all agents.
-        After planner creates the full plan, this method parses it and stores
-        agent-specific sections in state for direct access by each agent.
-        
-        Args:
-            state: Current workflow state with execution_plan containing full_plan
-            
-        Returns:
-            Updated state with agent-specific instruction keys:
-            - preprocessing_instructions
-            - setup_instructions
-            - hpc_instructions
-            - analysis_instructions
+        Prefers the pre-extracted `agent_plans` dict from the planner (deterministic).
+        Falls back to regex extraction from full_plan prose if dict is unavailable.
         """
         import re
         
         execution_plan = state.get("execution_plan", {})
+        agent_plans = execution_plan.get("agent_plans", {})
         full_plan = execution_plan.get("full_plan", "")
         
-        if not full_plan:
-            logger.warning("No full_plan found in execution_plan, skipping agent-specific extraction")
+        if not full_plan and not agent_plans:
+            logger.warning("No full_plan or agent_plans found in execution_plan, skipping extraction")
             return state
         
-        logger.info(f"Extracting agent-specific instructions from {len(full_plan)} char plan")
+        # Map from agent_plans keys to state keys
+        _agent_to_state = {
+            "preprocessing_agent": "preprocessing_instructions",
+            "setup_agent": "setup_instructions",
+            "hpc_agent": "hpc_instructions",
+            "analysis_agent": "analysis_instructions",
+            "reporter_agent": "reporter_instructions",
+        }
+        
+        # Strategy 1: Use pre-extracted agent_plans dict from planner (preferred)
+        if agent_plans:
+            logger.info(f"Using pre-extracted agent_plans from planner: {list(agent_plans.keys())}")
+            for agent_key, instructions in agent_plans.items():
+                state_key = _agent_to_state.get(agent_key)
+                if state_key and instructions:
+                    state[state_key] = instructions
+                    logger.info(f"Set {state_key} from agent_plans ({len(instructions)} chars)")
+            
+            logger.info(
+                f"Agent-specific extraction complete (from agent_plans). Keys set: "
+                f"{[sk for sk in _agent_to_state.values() if state.get(sk)]}"
+            )
+            return state
+        
+        # Strategy 2: Fallback to regex extraction from full_plan prose
+        logger.info(f"No agent_plans dict found, falling back to regex extraction from {len(full_plan)} char plan")
         
         # Define agent mappings: (state_key, agent_names_to_search)
         agent_mappings = {
@@ -327,20 +306,20 @@ class MDSupervisor:
             
             # Try each agent name variant
             for agent_name in agent_names:
-                # Try multiple heading patterns
+                # Try multiple heading patterns (all anchored to line start)
                 patterns = [
+                    # Bold header with colon: **Agent Name:** (at line start)
+                    rf'^\*\*{re.escape(agent_name)}(?:\s*:?\s*\*\*|:\*\*)\s*\n(.*?)(?=^\*\*[A-Z]|\Z)',
                     # Markdown ### heading
-                    rf'###\s*{re.escape(agent_name)}.*?\n(.*?)(?=###|\Z)',
+                    rf'^###\s*{re.escape(agent_name)}.*?\n(.*?)(?=^###|\Z)',
                     # Markdown ## heading  
-                    rf'##\s*{re.escape(agent_name)}.*?\n(.*?)(?=##|\Z)',
-                    # Bold heading
-                    rf'\*\*{re.escape(agent_name)}\*\*.*?\n(.*?)(?=\*\*[A-Z]|\Z)',
-                    # Section number patterns
-                    rf'\d+\..*?{re.escape(agent_name)}.*?\n(.*?)(?=\d+\.|\Z)',
+                    rf'^##\s*{re.escape(agent_name)}.*?\n(.*?)(?=^##|\Z)',
+                    # Numbered section: 1. **Agent Name** (at line start)
+                    rf'^\d+\.\s*\*\*{re.escape(agent_name)}\*\*.*?\n(.*?)(?=^\d+\.\s*\*\*|^\*\*[A-Z]|\Z)',
                 ]
                 
                 for pattern in patterns:
-                    match = re.search(pattern, full_plan, re.DOTALL | re.IGNORECASE)
+                    match = re.search(pattern, full_plan, re.DOTALL | re.IGNORECASE | re.MULTILINE)
                     if match:
                         instructions = match.group(1).strip()
                         if len(instructions) > 50:  # Ensure substantial content

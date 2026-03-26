@@ -43,6 +43,9 @@ def parse_data_file(file_path: str) -> Tuple[List[List[float]], List[str]]:
     data_columns = []
     column_names = []
     
+    # Detect delimiter from file extension
+    is_csv = file_path.lower().endswith('.csv')
+    
     with open(file_path, 'r') as f:
         for line in f:
             line = line.strip()
@@ -73,9 +76,14 @@ def parse_data_file(file_path: str) -> Tuple[List[List[float]], List[str]]:
                     column_names = [p.strip() for p in parts]
                 continue
             
+            # Split based on delimiter
+            if is_csv:
+                parts = [p.strip() for p in line.split(',')]
+            else:
+                parts = line.split()
+            
             # Parse data
             try:
-                parts = line.split()
                 values = [float(p) for p in parts]
                 
                 # Initialize columns on first data row
@@ -88,6 +96,9 @@ def parse_data_file(file_path: str) -> Tuple[List[List[float]], List[str]]:
                         data_columns[i].append(val)
                         
             except ValueError:
+                # For CSV, first non-parseable line is likely the header row
+                if is_csv and not column_names and not data_columns:
+                    column_names = parts
                 continue
     
     # Set default column names if not found

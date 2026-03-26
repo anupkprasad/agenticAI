@@ -18,12 +18,13 @@ class MDState(TypedDict):
     subtask_type_initialized: Optional[bool]  # Whether subtask type has been initialized
     agent_list: Optional[List[str]]           # Ordered list of agents for multi-agent workflow
     required_inputs: Optional[Dict[str, bool]]  # What inputs this task requires
-    analysis_validated: Optional[bool]  # Whether analysis-only inputs have been validated
-    reporter_validated: Optional[bool]  # Whether reporter-only inputs have been validated
-    multi_agent_validated: Optional[bool]  # Whether multi-agent inputs have been validated
+    input_validated: Optional[bool]             # Whether unified input validation has completed
     analysis_directory: Optional[str]   # Path to analysis output directory
     trajectory_paths: Optional[Dict[str, Optional[str]]]  # Trajectory, topology, energy paths for analysis-only
     
+    # System info (extracted during input validation)
+    system_info: Optional[Dict[str, Any]]   # Molecular system metadata: components, atom counts, frames, etc.
+
     # PDB Analysis (from supervisor validation)
     pdb_analysis: Optional[Dict[str, Any]]  # Output from PDB analyzer
     component_selection: Optional[Dict[str, Any]]  # User-specified component selection

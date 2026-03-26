@@ -222,8 +222,8 @@ class ReporterAgent:
                 logger.info("Creating reporter execution plan with LLM")
                 plan = self._create_llm_plan(agent_input, state)
             
-            if not plan:
-                logger.info("Using fallback plan generation")
+            if not plan or not plan.steps:
+                logger.info("Using fallback plan generation (LLM plan empty or failed)")
                 plan = self._create_fallback_plan(agent_input)
             
             log_agent_action(
@@ -298,6 +298,10 @@ class ReporterAgent:
             
             # Parse JSON response
             plan_dict = self._extract_plan_json(response)
+            
+            if plan_dict is None:
+                logger.warning("Failed to parse LLM response into plan JSON")
+                return None
             
             # Build ReporterPlan from response
             return ReporterPlan(
@@ -422,39 +426,74 @@ No need to specify image paths in tool_params - they're extracted from the analy
             tools_str=tools_str
         )
     
-    def _extract_plan_json(self, content: str) -> Dict[str, Any]:
-        """Extract and parse JSON plan from LLM response"""
+    def _extract_plan_json(self, content: str) -> Optional[Dict[str, Any]]:
+        """Extract and parse JSON plan from LLM response.
         
-        # Remove markdown code fences if present
-        # Handle: ```json\n{...}\n``` or ```\n{...}\n```
-        content_cleaned = re.sub(r'```(?:json)?\s*\n', '', content)
-        content_cleaned = re.sub(r'\n```\s*$', '', content_cleaned)
+        Returns parsed dict with 'steps' key, or None if parsing fails.
+        """
+        
+        def _clean_json_text(text: str) -> str:
+            """Strip JS-style comments and trailing commas that LLMs sometimes add."""
+            # Remove single-line // comments (but not inside strings)
+            cleaned = re.sub(r'(?<=[,\}\]\s])\s*//[^\n]*', '', text)
+            # Remove trailing commas before } or ]
+            cleaned = re.sub(r',(\s*[}\]])', r'\1', cleaned)
+            return cleaned
+        
+        def _try_parse(text: str) -> Optional[Dict[str, Any]]:
+            """Try to parse JSON, with and without comment stripping."""
+            for candidate in [text, _clean_json_text(text)]:
+                try:
+                    result = json.loads(candidate)
+                    if isinstance(result, dict) and "steps" in result:
+                        return result
+                except json.JSONDecodeError:
+                    continue
+            return None
+        
+        # Strategy 1: Strip outer markdown fences and parse directly
+        content_cleaned = re.sub(r'^\s*```(?:json)?\s*\n', '', content)
+        content_cleaned = re.sub(r'\n\s*```\s*$', '', content_cleaned)
         content_cleaned = content_cleaned.strip()
         
-        # Try to parse the cleaned content directly first
-        try:
-            return json.loads(content_cleaned)
-        except json.JSONDecodeError:
-            pass
+        result = _try_parse(content_cleaned)
+        if result:
+            return result
         
-        # Fallback: Try to find JSON object with regex
+        # Strategy 2: The LLM sometimes wraps valid JSON inside a markdown
+        # code block WITHIN the response text. Extract the ```json...``` block.
+        fenced_match = re.search(r'```(?:json)?\s*\n(\{[\s\S]*?\})\s*\n```', content)
+        if fenced_match:
+            result = _try_parse(fenced_match.group(1))
+            if result:
+                return result
+        
+        # Strategy 3: Find the outermost JSON object via regex
         json_match = re.search(r'\{[\s\S]*\}', content_cleaned, re.DOTALL)
         if json_match:
-            try:
-                return json.loads(json_match.group())
-            except json.JSONDecodeError as e:
-                logger.warning(f"JSON parsing failed: {e}")
-                logger.debug(f"Attempted to parse: {json_match.group()[:200]}...")
+            result = _try_parse(json_match.group())
+            if result:
+                return result
         
-        logger.error(f"Could not extract valid JSON from LLM response")
+        # Strategy 4: Balanced-brace extraction around "steps" key
+        inner_match = re.search(r'\{[^{}]*"steps"\s*:\s*\[', content)
+        if inner_match:
+            start = inner_match.start()
+            depth = 0
+            for i in range(start, len(content)):
+                if content[i] == '{':
+                    depth += 1
+                elif content[i] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        result = _try_parse(content[start:i+1])
+                        if result:
+                            return result
+                        break
+        
+        logger.error("Could not extract valid JSON plan from LLM response")
         logger.debug(f"Response content: {content[:500]}...")
-        
-        return {
-            "reasoning": content,
-            "overview": "Fallback plan",
-            "steps": [],
-            "estimated_complexity": "medium"
-        }
+        return None
     
     def _create_fallback_plan(self, agent_input: ReporterAgentInput) -> ReporterPlan:
         """Create fallback plan when LLM is unavailable"""

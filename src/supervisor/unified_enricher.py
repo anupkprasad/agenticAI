@@ -97,7 +97,32 @@ def enrich_prompt_unified(
 """
             context_parts.append(files_context)
     
-    # 3. Task type context
+    # 3. System info context (from input validation - molecular composition)
+    system_info = state.get("system_info")
+    if system_info and system_info.get("success"):
+        sys_context = f"""
+**Molecular System Information:**
+- {system_info.get('summary', 'No summary available')}
+- Total Atoms: {system_info.get('total_atoms', 'Unknown')}
+- Total Residues: {system_info.get('total_residues', 'Unknown')}"""
+        # Add component details
+        components = system_info.get("components", {})
+        if components:
+            comp_lines = []
+            for comp_name, comp_data in components.items():
+                if isinstance(comp_data, dict):
+                    count = comp_data.get('count', comp_data.get('n_residues', comp_data.get('n_molecules', '')))
+                    comp_lines.append(f"  - {comp_name}: {count}")
+            if comp_lines:
+                sys_context += "\n- Components:\n" + "\n".join(comp_lines)
+        # Add trajectory info if available
+        traj_info = system_info.get("trajectory")
+        if traj_info:
+            sys_context += f"""\n- Trajectory: {traj_info.get('n_frames', 'Unknown')} frames, {traj_info.get('total_time_ns', 'Unknown')} ns"""
+        sys_context += "\n"
+        context_parts.append(sys_context)
+
+    # 4. Task type context
     task_context = f"""
 **Task Type:** {subtask_type}
 **Working Directory:** {working_dir}

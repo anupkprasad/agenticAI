@@ -474,22 +474,63 @@ class MDPlanner:
         
         return False, ""
     
+    def _get_existing_tool_names(self, state: MDState) -> set:
+        """
+        Collect names of all tools already available to the relevant agents.
+        
+        Returns:
+            Set of existing tool names (lowercase for comparison)
+        """
+        existing = set()
+        
+        # Determine which agents are involved
+        agent_list = state.get("agent_list") or []
+        subtask_type = state.get("subtask_type", "")
+        
+        if not agent_list:
+            # Infer from subtask_type
+            type_to_agent = {
+                "analysis_only": ["analysis"],
+                "setup_only": ["simsetup"],
+                "preprocess_only": ["preprocess"],
+                "reporter_only": ["reporter"],
+            }
+            agent_list = type_to_agent.get(subtask_type, [])
+        
+        # Collect tool names from all relevant agents
+        for agent_name in agent_list:
+            tools = self.tools_registry.get_tools_for_agent(agent_name)
+            for tool in tools:
+                existing.add(tool["name"].lower())
+        
+        # Also include all tools across registry as a safety net
+        for tool_key, tool_meta in self.tools_registry.tools.items():
+            existing.add(tool_meta["name"].lower())
+        
+        return existing
+
     def _generate_tool_specifications(self, tool_needs: str, state: MDState) -> List[Dict[str, Any]]:
         """
         Generate detailed tool specifications via LLM for programmer.
+        Only generates specs for tools NOT already available in the agent tool registry.
         
         Args:
             tool_needs: Description of what tools are needed
             state: Current workflow state
             
         Returns:
-            List of tool specifications
+            List of tool specifications (filtered to exclude existing tools)
         """
         if not self.llm.available:
             logger.warning("PLANNER: LLM unavailable for tool specification generation")
             return []
         
         logger.info("PLANNER: Generating tool specifications via LLM...")
+        
+        # Collect existing tool names to prevent redundant specs
+        existing_tool_names = self._get_existing_tool_names(state)
+        existing_tools_list = ", ".join(sorted(existing_tool_names)) if existing_tool_names else "None"
+        logger.info(f"PLANNER: Existing tools ({len(existing_tool_names)}): {existing_tools_list}")
         
         spec_prompt = f"""You are a molecular dynamics workflow expert tasked with specifying custom tools that need to be created.
 
@@ -503,8 +544,17 @@ The planner has identified that existing tools are insufficient. Here's what's n
 - Force Field: {state.get('force_field', 'amber99sb-ildn')}
 - MD Engine: {state.get('md_engine', 'gromacs')}
 
+**ALREADY AVAILABLE TOOLS (DO NOT CREATE SPECS FOR THESE):**
+{existing_tools_list}
+
+**CRITICAL RULE:**
+- ONLY create specifications for tools that are genuinely MISSING
+- Do NOT create specs for any tool listed above as already available
+- If a tool like calculate_rmsd, calculate_rmsf, plot_md_data etc. already exists, do NOT include it
+- Only spec the specific missing functionality described in the CONTEXT above
+
 **YOUR TASK:**
-Create detailed specifications for the tools/scripts that need to be generated. For each tool, specify:
+Create detailed specifications ONLY for the missing tools/scripts. For each tool, specify:
 
 1. **name**: A descriptive function/script name (snake_case)
 2. **description**: Brief one-line description of what the tool does
@@ -536,8 +586,9 @@ Create detailed specifications for the tools/scripts that need to be generated. 
 ```
 
 **IMPORTANT:** The "examples" field should be a single string (not an array). Use \\n for multiple lines if needed.
+**IMPORTANT:** Return an EMPTY array [] if all needed tools already exist.
 
-Generate tool specifications now:"""
+Generate tool specifications now (ONLY for missing tools):"""
         
         try:
             response = self.llm.prompt(spec_prompt, temperature=0.1, max_tokens=1500)
@@ -556,8 +607,22 @@ Generate tool specifications now:"""
             json_match = re.search(r'\[[\s\S]*\]', response)
             if json_match:
                 specs = json.loads(json_match.group())
-                logger.info(f"PLANNER: Generated {len(specs)} tool specifications")
-                return specs
+                logger.info(f"PLANNER: LLM generated {len(specs)} tool specifications")
+                
+                # Post-filter: remove any specs that match existing tool names
+                filtered_specs = []
+                for spec in specs:
+                    spec_name = spec.get("name", "").lower()
+                    if spec_name in existing_tool_names:
+                        logger.info(f"PLANNER: Filtered out redundant tool spec '{spec.get('name')}' - already exists")
+                    else:
+                        filtered_specs.append(spec)
+                
+                if len(filtered_specs) < len(specs):
+                    logger.info(f"PLANNER: Filtered {len(specs) - len(filtered_specs)} redundant specs, "
+                              f"keeping {len(filtered_specs)} genuinely missing tools")
+                
+                return filtered_specs
             else:
                 logger.warning("PLANNER: Could not parse tool specifications from LLM response")
                 return []
@@ -889,6 +954,19 @@ Provide a comprehensive natural language plan explaining how the Reporter Agent 
                 "reporter":   "Reporter Agent",
             }
             agents_str = " → ".join(_agent_names.get(a, a) for a in agent_list)
+            
+            # Build example structure showing required agent section headers
+            example_sections = []
+            for a in agent_list:
+                agent_display = _agent_names.get(a, a)
+                example_sections.append(
+                    f"**{agent_display}:**\n"
+                    f"The {agent_display} will ... [detailed instructions for this agent including "
+                    f"which tools to use, what inputs it needs, what outputs it produces, "
+                    f"and step-by-step execution details] ..."
+                )
+            example_structure = "\n\n".join(example_sections)
+            
             return f"""Create a detailed natural language execution plan for a MULTI-AGENT workflow.
 
 USER GOAL:
@@ -914,7 +992,27 @@ Working Directory: {working_dir}
 
 {nl_format_instructions}
 
-Provide a comprehensive natural language plan covering each listed agent in sequence."""
+**REQUIRED PLAN STRUCTURE:**
+
+You MUST organize your plan into agent-specific sections. Each section MUST use an
+exact agent name header with ** markers. ALL detailed instructions for an agent
+(tools to use, parameters, input/output files, execution order) MUST go under that
+agent's section header. Do NOT scatter an agent's instructions across multiple sections.
+
+**Goal:**
+[Brief summary of what the workflow will accomplish]
+
+{example_structure}
+
+**Expected Outcomes:**
+[Final deliverables]
+
+CRITICAL: Use the section headers EXACTLY as shown above with ** markers
+(e.g., {', '.join(f'"**{_agent_names.get(a, a)}:**"' for a in agent_list)}).
+This allows each agent to extract ONLY its relevant instructions.
+Put ALL detailed steps, tool references, and execution logic under the correct agent header.
+
+Provide a comprehensive natural language plan following this structure."""
 
         else:
             components = pdb_analysis.get("components_available", {})
@@ -1152,11 +1250,98 @@ When you indicate missing tools, the Programmer Agent will be automatically invo
             "format": "natural_language",
             "full_plan": response,
             "agent_sequence": [s["agent"] for s in steps],
+            "agent_plans": self._extract_agent_plans(response, [s["agent"] for s in steps]),
             "steps": steps
         }
         
         logger.info(f"PLANNER: Detected {len(steps)} agents in execution sequence: {plan['agent_sequence']}")
+        agent_plans_summary = {k: len(v) for k, v in plan["agent_plans"].items()}
+        logger.info(f"PLANNER: Extracted agent plans (chars): {agent_plans_summary}")
         return plan
+    
+    def _extract_agent_plans(self, full_plan: str, agent_sequence: list) -> Dict[str, str]:
+        """
+        Extract agent-specific instruction sections from the full natural language plan.
+        
+        Uses the agent section headers (e.g., **Analysis Agent:**) that the LLM prompt
+        requires. Each agent gets the prose between its header and the next header.
+        
+        Args:
+            full_plan: Complete natural language plan text from LLM
+            agent_sequence: List of agent registry names (e.g., ["analysis_agent", "reporter_agent"])
+            
+        Returns:
+            Dict mapping agent registry names to their instruction sections.
+            Falls back to full_plan for any agent whose section can't be extracted.
+        """
+        import re
+        
+        # Map registry names to display names used in plan headers
+        _registry_to_display = {
+            "preprocessing_agent": ["Preprocessing Agent", "PDB Preprocessing Agent", "Preprocess Agent"],
+            "setup_agent": ["Simulation Setup Agent", "SimSetup Agent", "Setup Agent"],
+            "hpc_agent": ["HPC Agent", "HPC Submission Agent", "Job Submission Agent"],
+            "analysis_agent": ["Analysis Agent", "MD Analysis Agent", "Trajectory Analysis Agent"],
+            "reporter_agent": ["Reporter Agent", "Report Generation Agent", "Scientific Reporter Agent"],
+        }
+        
+        agent_plans = {}
+        
+        # Minimum chars for a meaningful agent section (avoids grabbing brief summaries)
+        min_chars = max(200, len(full_plan) // 10)
+        
+        for agent_key in agent_sequence:
+            display_names = _registry_to_display.get(agent_key, [agent_key])
+            extracted = None
+            
+            for display_name in display_names:
+                # Strategy 1: Bold header with colon at line start — **Agent Name:** ...
+                # Capture until next line-start bold header (e.g., **Reporter Agent:** or **Expected Outcomes:**)
+                pattern = (
+                    rf'^\*\*{re.escape(display_name)}(?:\s*:?\s*\*\*|:\*\*)\s*\n'
+                    rf'(.*?)'
+                    rf'(?=^\*\*[A-Z]|\Z)'
+                )
+                match = re.search(pattern, full_plan, re.DOTALL | re.IGNORECASE | re.MULTILINE)
+                if match:
+                    text = match.group(1).strip()
+                    if len(text) > 50:
+                        extracted = text
+                        logger.info(
+                            f"PLANNER: Extracted {len(text)} chars for {agent_key} "
+                            f"(strategy 1: bold header '{display_name}')"
+                        )
+                        break
+                
+                # Strategy 2: Numbered section at line start — 1. **Agent Name** ...
+                # Use higher threshold to avoid grabbing brief summary bullets
+                pattern2 = (
+                    rf'^\d+\.\s*\*\*{re.escape(display_name)}\*\*.*?\n'
+                    rf'(.*?)'
+                    rf'(?=^\d+\.\s*\*\*|^\*\*[A-Z]|\Z)'
+                )
+                match = re.search(pattern2, full_plan, re.DOTALL | re.IGNORECASE | re.MULTILINE)
+                if match:
+                    text = match.group(1).strip()
+                    if len(text) > min_chars:
+                        extracted = text
+                        logger.info(
+                            f"PLANNER: Extracted {len(text)} chars for {agent_key} "
+                            f"(strategy 2: numbered section '{display_name}')"
+                        )
+                        break
+            
+            if extracted:
+                agent_plans[agent_key] = extracted
+            else:
+                # Fallback: give this agent the entire plan
+                logger.warning(
+                    f"PLANNER: Could not extract section for {agent_key}, "
+                    f"will provide full plan as fallback"
+                )
+                agent_plans[agent_key] = full_plan
+        
+        return agent_plans
     
     def _create_fallback_plan(
         self,
@@ -1405,6 +1590,7 @@ When you indicate missing tools, the Programmer Agent will be automatically invo
             "format": "natural_language",
             "full_plan": full_plan_text,
             "agent_sequence": agents_involved,
+            "agent_plans": self._extract_agent_plans(full_plan_text, agents_involved),
             "steps": steps,
             "method": "fallback",
             "subtask_type": subtask_type

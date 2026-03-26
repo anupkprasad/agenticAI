@@ -312,12 +312,11 @@ class MDProgrammer:
             working_directory=state.get("working_directory", "working_dir"),
             planner_instructions=instructions or "Generate required tools",
             tool_specifications=tool_specs_from_state,
-            user_goal=state.get("user_goal"),
+            user_goal=None,  # Intentionally omitted to prevent LLM hallucination
             context={
                 "force_field": state.get("force_field", "amber99sb-ildn"),
                 "water_model": state.get("water_model", "tip3p"),
                 "md_engine": state.get("md_engine", "gromacs"),
-                "execution_plan": state.get("execution_plan", {})
             },
             force_field=state.get("force_field", "amber99sb-ildn"),
             md_engine=state.get("md_engine", "gromacs")
@@ -471,6 +470,34 @@ class MDProgrammer:
             # Parse JSON response
             plan_dict = self._extract_plan_json(response)
             
+            # Build allowed tool names set from planner specifications
+            allowed_tool_names = set()
+            if agent_input.tool_specifications:
+                for spec in agent_input.tool_specifications:
+                    name = spec.get("name", "") if isinstance(spec, dict) else getattr(spec, "name", "")
+                    if name:
+                        allowed_tool_names.add(name.lower())
+            
+            # Filter steps to only those creating specified tools
+            raw_steps = plan_dict.get("steps", [])
+            if allowed_tool_names:
+                filtered_steps = []
+                for step in raw_steps:
+                    created_name = step.get("tool_params", {}).get("tool_name", "").lower()
+                    if created_name in allowed_tool_names:
+                        filtered_steps.append(step)
+                    else:
+                        logger.warning(
+                            f"PROGRAMMER: Filtered out LLM-proposed tool '{created_name}' "
+                            f"- not in planner specs: {allowed_tool_names}"
+                        )
+                if len(filtered_steps) < len(raw_steps):
+                    logger.info(
+                        f"PROGRAMMER: Filtered {len(raw_steps) - len(filtered_steps)} "
+                        f"extra steps, keeping {len(filtered_steps)} specified tools"
+                    )
+                raw_steps = filtered_steps
+            
             # Build ProgrammerPlan from response
             return ProgrammerPlan(
                 reasoning=plan_dict.get("reasoning", "LLM-generated plan"),
@@ -483,7 +510,7 @@ class MDProgrammer:
                         tool_params=step.get("tool_params", {}),
                         reason=step.get("reason", "")
                     )
-                    for step in plan_dict.get("steps", [])
+                    for step in raw_steps
                 ],
                 estimated_complexity=plan_dict.get("estimated_complexity", "medium")
             )
@@ -575,13 +602,13 @@ The following software is installed and available for use in generated tools:
 - Force Field: {force_field}
 - MD Engine: {md_engine}
 - Working Directory: {working_directory}
-- User Goal: {user_goal}
 
 **Available Code Generation Tools:**
 {tools_str}
 
 **Your Task:**
-Create a plan to generate the required tools/scripts. Use ONLY the tools listed above.
+Create EXACTLY ONE generation step per tool specification above. Do NOT add extra tools.
+Use ONLY the code generation tools listed above.
 For each tool specification above, create a corresponding generation step with tool_params that include:
 - tool_name: Name from specification
 - description: From specification
@@ -838,7 +865,6 @@ metadata={{{{
             force_field=agent_input.force_field,
             md_engine=agent_input.md_engine,
             working_directory=agent_input.working_directory,
-            user_goal=agent_input.user_goal or "Not specified",
             tools_str=tools_str
         )
     
