@@ -79,6 +79,9 @@ class MDState(TypedDict):
     human_feedback: Optional[str]
     working_directory: Optional[str]   # Root working directory (e.g., ./working_dir)
     
+    # Enriched / rephrased prompt (set once after input validation)
+    enriched_prompt: Optional[str]     # Unified enriched goal used by planner and agents
+
     # Agent-specific output directories (hardcoded structure)
     preprocess_dir: Optional[str]      # working_dir/preprocess/
     simsetup_dir: Optional[str]        # working_dir/simsetup/
@@ -89,6 +92,29 @@ class MDState(TypedDict):
     execution_plan: Optional[Dict[str, Any]]  # Detailed execution plan from planner
     plan_executed: bool                # Whether execution plan has been created
     rephrased_goal: Optional[str]      # LLM-rephrased user goal
+
+    # Agent-specific instruction sections (extracted from full execution plan)
+    preprocessing_instructions: Optional[str]
+    setup_instructions: Optional[str]
+    hpc_instructions: Optional[str]
+    analysis_instructions: Optional[str]
+
+    # Agent retry counters (used by _assign_field_agent_tasks)
+    current_agent_idx: Optional[int]
+    preprocess_retry_count: Optional[int]
+    setup_retry_count: Optional[int]
+    hpc_retry_count: Optional[int]
+    analysis_retry_count: Optional[int]
+    reporter_retry_count: Optional[int]
+
+    # Intermediate validation artifacts
+    pdb_summary: Optional[str]              # Human-readable PDB summary (for enrichment)
+    file_info: Optional[Dict[str, Any]]     # Trajectory/topology file info (analysis tasks)
+    reporter_file_info: Optional[Dict[str, Any]]  # Analysis output file info (reporter tasks)
+
+    # Final report
+    final_report: Optional[str]        # LLM-generated or fallback workflow completion report
+    workflow_status: Optional[str]     # "completed", "failed"
     
     # Error & Warning tracking
     errors: List[str]                  # List of errors encountered during workflow

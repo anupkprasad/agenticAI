@@ -9,6 +9,13 @@ from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# Maps CLI agent names (from --subtask flag) to internal FULL_ORDER names.
+# Used when building the execution order for multi_agent workflows.
+_CLI_TO_INTERNAL_AGENT = {
+    "preprocess": "preprocessing",
+    "hpcjob": "hpc",
+}
+
 
 def enrich_prompt_unified(
     state: Dict[str, Any],
@@ -193,10 +200,12 @@ def get_agent_execution_order(subtask_type: str, state: Dict[str, Any]) -> list:
         return ["preprocessing"]
     
     elif subtask_type == "multi_agent":
-        # Use agent_list from state, but enforce order
+        # Use agent_list from state, but enforce order.
+        # Normalize CLI names ("preprocess" → "preprocessing", "hpcjob" → "hpc")
+        # so they match the internal FULL_ORDER names.
         agent_list = state.get("agent_list", [])
-        # Filter FULL_ORDER to only include agents in agent_list
-        return [agent for agent in FULL_ORDER if agent in agent_list]
+        normalized = [_CLI_TO_INTERNAL_AGENT.get(a, a) for a in agent_list]
+        return [agent for agent in FULL_ORDER if agent in normalized]
     
     else:
         # Full task - all agents in order
