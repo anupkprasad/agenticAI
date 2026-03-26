@@ -256,19 +256,6 @@ class MDSupervisor:
             logger=logger
         )
         
-        # Set validation flags based on task type
-        if subtask_type == "analysis_only":
-            state["analysis_validated"] = True
-        elif subtask_type == "reporter_only":
-            # reporter_validated is set by _validate_reporter_files
-            pass
-        elif subtask_type == "multi_agent":
-            # multi_agent_validated (and per-agent flags) set by _validate_multi_agent_inputs
-            pass
-        else:
-            # PDB-based tasks are validated
-            pass
-        
         log_supervisor_routing(
             state, "supervisor",
             f"Input validation complete for {subtask_type}, returning to supervisor for planning"
@@ -384,16 +371,6 @@ class MDSupervisor:
         )
         
         return state
-
-    def _validate_analysis_inputs(self, state: MDState) -> MDState:
-        """
-        DEPRECATED: Use input_validation_node() instead.
-        
-        This method is preserved for backward compatibility but now redirects
-        to the unified validate_and_enrich_inputs() function via input_validation_node().
-        """
-        logger.warning("_validate_analysis_inputs is deprecated. Use input_validation_node() instead.")
-        return self.input_validation_node(state)
 
     def _assign_field_agent_tasks(self, state: MDState) -> MDState:
         """

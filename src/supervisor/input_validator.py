@@ -579,5 +579,3 @@ def _validate_multi_agent_inputs(
         }
     )
     return state
-    
-    return state

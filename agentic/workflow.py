@@ -348,9 +348,10 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "execution_plan": None,
             "plan_executed": False,
             "rephrased_goal": None,
+            "enriched_prompt": None,
             "current_node": None,
             "file_registry": {},
-            "generated_files": {},  # Centralized tracking of important files by agent
+            "generated_files": {},
             "subtask_type": None,
             "subtask_type_initialized": None,
             "agent_list": None,
@@ -361,12 +362,11 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "analysis_directory": None,
             "trajectory_paths": None,
             "pdb_analysis": None,
-            "component_selection": {},  # Initialize as empty dict, not None
+            "component_selection": {},
             "structured_prompt": None,
             "raw_pdb": None,
             "cleaned_pdb": None,
             "preprocessing_report": None,
-            "preprocess_directory": None,
             "topology": None,
             "coordinates": None,
             "setup_report": None,
@@ -375,10 +375,28 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "job_id": None,
             "job_status": None,
             "trajectory_path": None,
+            "energy_file": None,
             "hpc_report": None,
             "analysis_action": "full_analysis",
             "analysis_request": None,
             "conclusions": None,
+            # Agent-specific instruction sections (extracted from the full execution
+            # plan by supervisor._extract_agent_specific_plans after planner returns)
+            "preprocessing_instructions": None,
+            "setup_instructions": None,
+            "hpc_instructions": None,
+            "analysis_instructions": None,
+            # Agent execution tracking
+            "current_agent_idx": 0,
+            "preprocess_retry_count": 0,
+            "setup_retry_count": 0,
+            "hpc_retry_count": 0,
+            "analysis_retry_count": 0,
+            "reporter_retry_count": 0,
+            # Intermediate validation artifacts
+            "pdb_summary": None,
+            "file_info": None,
+            "reporter_file_info": None,
             # Reporter stage
             "reporter_output": None,
             "report_type": "comprehensive",
@@ -386,6 +404,9 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "literature_keywords": None,
             "reporter_plan": None,
             "reporter_instructions": None,
+            # Final report
+            "final_report": None,
+            "workflow_status": None,
         }
 
         if config:
