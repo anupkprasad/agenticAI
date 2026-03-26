@@ -191,8 +191,19 @@ python run_agenticAIWork.py \
 
 # 5.2. Run analysis-only workflow (trajectory in working_dir/hpc/)
 python run_agenticAIWork.py \
-  --goal "The protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulation production is already done and data output is stored in working_dir/hpc. Please dont preprocess, do not setup simulation and do not job submit the simulation. Only use the analysis agent to analyze and plot the center of mass of protein in 3D plot of simulation trajectory. The trajectory file is md.xtc and topology file is md.gro" \
+  --goal "The protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulation production is already done and data output is stored in working_dir/hpc. Please dont preprocess, do not setup simulation and do not job submit the simulation. Only use the analysis agent to analyze and plot the center of mass of protein in 3D plot of simulation trajectory. The trajectory file is md.xtc and topology file is md.gro after analyis please use the reporter agent to make simulaiton report" \
   --subtask analysis \
+  --working-dir working_dir \
+  --use-llm \
+  --llm-base-url http://127.0.0.1:11434 \
+  --llm-model gpt-oss:20b \
+  --no-human-loop
+
+# 5.2b. Run analysis + reporter together (multi-agent pipeline)
+# Multiple agents are run in order: analysis first, then reporter
+python run_agenticAIWork.py \
+  --goal "The simulation of initial structure 3.pdb is already done. Simulation trajectory is in working_dir/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM of protein only. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is kinase, please give the dynamics based on analysis result in report" \
+  --subtask analysis reporter \
   --working-dir working_dir \
   --use-llm \
   --llm-base-url http://127.0.0.1:11434 \

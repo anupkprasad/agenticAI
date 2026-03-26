@@ -59,9 +59,12 @@ def main(argv=None):
     )
     parser.add_argument("--goal", required=True, 
                        help="Natural language description of simulation goal")
-    parser.add_argument("--subtask", default=None,
+    parser.add_argument("--subtask", default=None, nargs='+',
                        choices=["preprocess", "simsetup", "hpcjob", "analysis", "reporter"],
-                       help="Specific subtask to run. If omitted, runs all subtasks in series")
+                       metavar="AGENT",
+                       help=("One or more field agents to run, e.g. --subtask analysis reporter. "
+                             "Valid values: preprocess simsetup hpcjob analysis reporter. "
+                             "Omit to run the full pipeline."))
     parser.add_argument("--use-llm", action="store_true", 
                        help="Use LLM for intelligent planning (recommended)")
     parser.add_argument("--llm-model", default="gpt-oss:20b",
@@ -94,14 +97,20 @@ def main(argv=None):
     
     # Pass subtask type directly in config
     if args.subtask:
-        subtask_types = {
+        single_agent_map = {
             "preprocess": "preprocess_only",
             "simsetup": "setup_only",
             "hpcjob": "hpc_only",
             "analysis": "analysis_only",
             "reporter": "reporter_only"
         }
-        config["subtask_type"] = subtask_types[args.subtask]
+        if len(args.subtask) == 1:
+            # Single agent: use existing specific subtask_type
+            config["subtask_type"] = single_agent_map[args.subtask[0]]
+        else:
+            # Multiple agents: multi_agent mode with ordered agent list
+            config["subtask_type"] = "multi_agent"
+            config["agent_list"] = args.subtask
     
     goal = args.goal
     
@@ -121,7 +130,8 @@ def main(argv=None):
     print(f"\nStarting MD workflow for: {goal}", flush=True)
     print(f"Configuration: {config}", flush=True)
     if args.subtask:
-        print(f"Subtask Mode: {args.subtask.upper()}", flush=True)
+        agents_label = ", ".join(a.upper() for a in args.subtask)
+        print(f"Subtask Mode: {agents_label}", flush=True)
     
     if config["human_in_loop"]:
         print("\n⚠️  HUMAN-IN-THE-LOOP MODE: You will be prompted at checkpoints", flush=True)

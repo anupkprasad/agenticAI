@@ -239,7 +239,37 @@ def plot_md_data(
         
         logger.info(f"Plot saved to {output_file}")
         
+        # Update analysis summary with plot file info
         if working_dir:
+            try:
+                from .summary_logger import update_analysis_summary_with_files
+                
+                # Infer analysis type from data file names or output file name
+                analysis_type = None
+                output_lower = output_file.lower()
+                data_lower = data_files[0].lower() if data_files else ""
+                
+                if "rmsd" in output_lower or "rmsd" in data_lower:
+                    analysis_type = "RMSD"
+                elif "rmsf" in output_lower or "rmsf" in data_lower:
+                    analysis_type = "RMSF"
+                elif "rg" in output_lower or "gyration" in output_lower or "rg" in data_lower:
+                    analysis_type = "Radius_of_Gyration"
+                elif "energy" in output_lower or "energy" in data_lower:
+                    analysis_type = "Energy"
+                elif "sasa" in output_lower or "sasa" in data_lower:
+                    analysis_type = "SASA"
+                
+                if analysis_type:
+                    update_analysis_summary_with_files(
+                        working_dir=working_dir,
+                        analysis_type=analysis_type,
+                        additional_files={"plot": output_file}
+                    )
+                    logger.info(f"Updated {analysis_type} summary with plot: {output_file}")
+            except Exception as e:
+                logger.warning(f"Failed to update summary with plot info: {e}")
+            
             os.chdir(original_dir)
         
         return {
@@ -436,6 +466,36 @@ def plot_md_multipanel(
         
         logger.info(f"Multi-panel plot saved to {output_file}")
         
+        # Update analysis summary with plot file (try to infer type from data files)
+        if working_dir:
+            try:
+                from .summary_logger import update_analysis_summary_with_files
+                
+                # Try to infer analysis type from first data file
+                analysis_type = None
+                if data_files:
+                    first_file_lower = data_files[0].lower()
+                    if "rmsd" in first_file_lower:
+                        analysis_type = "RMSD"
+                    elif "rmsf" in first_file_lower:
+                        analysis_type = "RMSF"
+                    elif "rg" in first_file_lower or "gyration" in first_file_lower:
+                        analysis_type = "Radius_of_Gyration"
+                    elif "energy" in first_file_lower:
+                        analysis_type = "Energy"
+                    elif "sasa" in first_file_lower:
+                        analysis_type = "SASA"
+                
+                if analysis_type:
+                    update_analysis_summary_with_files(
+                        working_dir=working_dir,
+                        analysis_type=analysis_type,
+                        additional_files={"multipanel_plot": output_file}
+                    )
+                    logger.info(f"Updated {analysis_type} summary with multipanel plot: {output_file}")
+            except Exception as e:
+                logger.warning(f"Could not update analysis summary with plot: {e}")
+        
         if working_dir:
             os.chdir(original_dir)
         
@@ -618,6 +678,36 @@ def plot_combined_data(
         plt.close()
         
         logger.info(f"Combined plot saved to {output_file}")
+        
+        # Update analysis summary with plot file (try to infer type from data file)
+        if working_dir:
+            try:
+                from .summary_logger import update_analysis_summary_with_files
+                
+                # Try to infer analysis type from data file
+                analysis_type = None
+                if data_file:
+                    file_lower = data_file.lower()
+                    if "rmsd" in file_lower:
+                        analysis_type = "RMSD"
+                    elif "rmsf" in file_lower:
+                        analysis_type = "RMSF"
+                    elif "rg" in file_lower or "gyration" in file_lower:
+                        analysis_type = "Radius_of_Gyration"
+                    elif "energy" in file_lower:
+                        analysis_type = "Energy"
+                    elif "sasa" in file_lower:
+                        analysis_type = "SASA"
+                
+                if analysis_type:
+                    update_analysis_summary_with_files(
+                        working_dir=working_dir,
+                        analysis_type=analysis_type,
+                        additional_files={"combined_plot": output_file}
+                    )
+                    logger.info(f"Updated {analysis_type} summary with combined plot: {output_file}")
+            except Exception as e:
+                logger.warning(f"Could not update analysis summary with plot: {e}")
         
         if working_dir:
             os.chdir(original_dir)

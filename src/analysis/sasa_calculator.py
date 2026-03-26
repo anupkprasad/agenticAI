@@ -408,6 +408,20 @@ def plot_sasa(
         
         logger.info(f"SASA plot saved to: {output_filename}")
         
+        # Update analysis summary with plot file
+        if working_dir:
+            try:
+                from .summary_logger import update_analysis_summary_with_files
+                
+                update_analysis_summary_with_files(
+                    working_dir=working_dir,
+                    analysis_type="SASA",
+                    additional_files={"plot": output_filename}
+                )
+                logger.info(f"Updated SASA summary with plot: {output_filename}")
+            except Exception as e:
+                logger.warning(f"Could not update analysis summary with plot: {e}")
+        
         # Restore original directory
         if original_dir:
             os.chdir(original_dir)

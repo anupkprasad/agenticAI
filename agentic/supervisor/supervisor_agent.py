@@ -3,10 +3,10 @@ Clean and Simple LLM-Powered MD Workflow Supervisor
 
 Responsibilities:
 1. Analyze PDB structure and validate components
-2. Preprocess and rephrase user prompts into structured form
+2. Enrich user prompt ONCE with all context (Single LLM call for entire workflow)  
 3. Validate input feasibility (PDB files, parameters, user intent)
 4. Collaborate with planner to create execution plans
-5. Route tasks to field agents based on approved plans
+5. Route tasks to field agents in STRICT ORDER: preprocessing → simsetup → hpc → analysis → reporter
 """
 
 import logging
@@ -22,13 +22,14 @@ from ..planner import MDPlanner
 from .tools import (
     parse_component_selection,
     validate_feasibility,
-    enrich_user_prompt,
-    enrich_analysis_prompt,
     detect_task_required_inputs
 )
 
 # Import PDB analyzer
 from src.utils.pdb_analyzer import analyze_pdb
+
+# Import unified enrichment
+from src.supervisor.unified_enricher import enrich_prompt_unified, get_agent_execution_order
 
 logger = logging.getLogger(__name__)
 
@@ -90,14 +91,15 @@ class MDSupervisor:
 
     def supervisor_node(self, state: MDState) -> MDState:
         """
-        Main supervisor routing logic with support for subtask-specific workflows.
+        Main supervisor routing logic with unified enrichment and strict agent ordering.
 
         Pipeline:
         1. Detect Subtask Type → If analysis-only, setup-only, etc., route accordingly
         2. Input Validation → PDB analysis and feasibility check (skipped for analysis-only)
-        3. Create Execution Plan → Collaborate with planner
-        4. Execute Steps One-by-One → Route to field agents iteratively
-        5. Generate Final Report → Summarize results
+        3. Unified Enrichment → SINGLE LLM call to enrich prompt with all context
+        4. Create Execution Plan → Collaborate with planner using enriched prompt
+        5. Execute Agents → Route to field agents in STRICT ORDER (preprocess → simsetup → hpc → analysis → reporter)
+        6. Generate Final Report → Summarize results
         """
         # Lazy-load planner on first use
         if self.planner is None:
@@ -112,27 +114,31 @@ class MDSupervisor:
             subtask_type = state.get("subtask_type")
             if subtask_type:
                 logger.info(f"SUPERVISOR: Subtask type: {subtask_type}")
+                if subtask_type == "multi_agent":
+                    logger.info(f"SUPERVISOR: Agent list: {state.get('agent_list', [])}")
             
             # Store required inputs for this subtask
-            required_inputs = detect_task_required_inputs(subtask_type)
+            required_inputs = detect_task_required_inputs(subtask_type, state.get("agent_list"))
             state["required_inputs"] = required_inputs
             state["subtask_type_initialized"] = True
 
-        # Check if we're returning from a field agent - increment step counter
+        # Check if we're returning from a field agent - increment agent counter
         current_node = state.get("current_node", "")
         if current_node in ["preprocess", "setup", "hpc", "analysis", "reporter"]:
-            current_step = state.get("current_step", 0)
-            logger.info(f"SUPERVISOR: Returned from {current_node}, advancing from step {current_step} to {current_step + 1}")
-            state["current_step"] = current_step + 1
+            current_agent_idx = state.get("current_agent_idx", 0)
+            logger.info(f"SUPERVISOR: Returned from {current_node}, advancing from agent {current_agent_idx} to {current_agent_idx + 1}")
+            state["current_agent_idx"] = current_agent_idx + 1
 
-        # Debug: Check execution plan state
+        # Debug: Check workflow state
         has_plan = bool(state.get("execution_plan"))
         logger.info(f"SUPERVISOR: execution_plan exists: {has_plan}")
         if has_plan:
-            plan = state.get("execution_plan", {})
-            current_step_num = state.get("current_step", 0)
-            total_steps = len(plan.get('steps', []))
-            logger.info(f"SUPERVISOR: Plan progress: Step {current_step_num}/{total_steps}")
+            current_agent_idx = state.get("current_agent_idx", 0)
+            subtask_type = state.get("subtask_type", "full_task")
+            from src.supervisor.unified_enricher import get_agent_execution_order
+            required_agents = get_agent_execution_order(subtask_type, state)
+            total_agents = len(required_agents)
+            logger.info(f"SUPERVISOR: Agent progress: {current_agent_idx}/{total_agents} ({required_agents})")
 
         # Step 1: Input validation if needed (unified for all task types)
         required_inputs = state.get("required_inputs", {})
@@ -149,6 +155,9 @@ class MDSupervisor:
         elif subtask_type == "analysis_only":
             if not state.get("analysis_validated"):
                 needs_validation = True
+        elif subtask_type == "multi_agent":
+            if not state.get("multi_agent_validated"):
+                needs_validation = True
         else:
             # Full / PDB-requiring tasks
             if not state.get("pdb_analysis") and required_inputs.get("pdb_analysis_required", True):
@@ -160,36 +169,46 @@ class MDSupervisor:
             return state
         
         # Check for missing required inputs (PDB-based tasks only)
-        if subtask_type not in ("reporter_only", "analysis_only"):
+        if subtask_type not in ("reporter_only", "analysis_only", "multi_agent"):
             if not state.get("raw_pdb") and required_inputs.get("pdb_required", True):
                 state["next_node"] = "input_validation"
                 logger.info("SUPERVISOR: Routing to input validation - missing raw_pdb for this task")
                 return state
 
-        # Step 2: Create execution plan if not exists
-        # Route to planner for all validated tasks (including reporter_only and analysis_only)
-        if not state.get("execution_plan") and (
-            state.get("pdb_analysis") or 
-            state.get("analysis_validated") or 
-            state.get("reporter_validated")
-        ):
-            logger.info("SUPERVISOR: Validation complete, creating execution plan with planner")
+        # Step 2: Unified prompt enrichment (SINGLE enrichment for entire workflow)
+        # This runs ONCE after input validation and before planning
+        validated = (state.get("pdb_analysis") or 
+                    state.get("analysis_validated") or 
+                    state.get("reporter_validated") or
+                    state.get("multi_agent_validated"))
+        
+        if validated and not state.get("enriched_prompt"):
+            logger.info("SUPERVISOR: Input validated, enriching prompt with unified enrichment")
+            enriched = enrich_prompt_unified(state, self.llm, self.supervisor_config)
+            state["enriched_prompt"] = enriched
+            state["rephrased_goal"] = enriched  # Keep for backward compatibility
+            logger.info(f"SUPERVISOR: Unified enrichment complete ({len(enriched)} chars)")
+        
+        # Step 3: Create execution plan if not exists
+        # Route to planner for all validated tasks (including reporter_only, analysis_only, multi_agent)
+        if not state.get("execution_plan") and state.get("enriched_prompt"):
+            logger.info("SUPERVISOR: Enriched prompt ready, creating execution plan with planner")
             state["next_node"] = "planner"
             return state
         
-        # Step 2.5: Extract agent-specific plans after planner returns
+        # Step 3.5: Extract agent-specific plans after planner returns
         # This ensures each agent receives only its relevant instructions
         if state.get("execution_plan") and not state.get("preprocessing_instructions"):
             logger.info("SUPERVISOR: Extracting agent-specific plans from full execution plan")
             state = self._extract_agent_specific_plans(state)
 
-        # Step 3: Assign field agent tasks based on plan
+        # Step 4: Assign field agent tasks using STRICT ORDERING
         plan = state.get("execution_plan", {})
-        if plan.get("steps") and not state.get("plan_executed"):
-            logger.info("SUPERVISOR: Execution plan ready, assigning field agent tasks")
+        if plan and not state.get("plan_executed"):
+            logger.info("SUPERVISOR: Execution plan ready, assigning field agent tasks with strict ordering")
             return self._assign_field_agent_tasks(state)
 
-        # Step 4: Handle errors and complete
+        # Step 5: Handle errors and complete
         if state.get("errors"):
             logger.error(
                 f"SUPERVISOR: Workflow has {len(state['errors'])} errors. "
@@ -198,7 +217,7 @@ class MDSupervisor:
             state["next_node"] = "final_report"
             return state
 
-        # Step 5: All tasks complete
+        # Step 6: All tasks complete
         logger.info("SUPERVISOR: All workflow tasks completed")
         state["next_node"] = "final_report"
         return state
@@ -242,6 +261,9 @@ class MDSupervisor:
             state["analysis_validated"] = True
         elif subtask_type == "reporter_only":
             # reporter_validated is set by _validate_reporter_files
+            pass
+        elif subtask_type == "multi_agent":
+            # multi_agent_validated (and per-agent flags) set by _validate_multi_agent_inputs
             pass
         else:
             # PDB-based tasks are validated
@@ -375,225 +397,155 @@ class MDSupervisor:
 
     def _assign_field_agent_tasks(self, state: MDState) -> MDState:
         """
-        Route to appropriate field agents based on approved plan.
+        Route to appropriate field agents using STRICT EXECUTION ORDER.
         
-        Executes plan steps one-by-one in order, respecting dependencies.
+        Order is ALWAYS: preprocessing → simsetup → hpc → analysis → reporter
+        Agents are skipped based on:
+        - Task type (e.g., analysis_only skips preprocessing/simsetup/hpc)
+        - User exclusions (e.g., "no hpc")
+        - Already completed work (e.g., cleaned_pdb exists)
+        
+        This enforces predictable, sequential execution regardless of plan.
         """
-        logger.info("FIELD_AGENT_ASSIGNMENT: Assigning tasks from approved plan")
-
-        plan = state.get("execution_plan", {})
-        steps = plan.get("steps", [])
-        current_step_idx = state.get("current_step", 0)
+        logger.info("FIELD_AGENT_ASSIGNMENT: Using strict agent execution order")
         
-        if current_step_idx >= len(steps):
-            # All steps complete
-            logger.info("FIELD_AGENT_ASSIGNMENT: All plan steps completed")
+        # Get the required agents in strict order for this task
+        subtask_type = state.get("subtask_type", "full_task")
+        required_agents = get_agent_execution_order(subtask_type, state)
+        
+        logger.info(f"FIELD_AGENT_ASSIGNMENT: Required agents for {subtask_type}: {required_agents}")
+        
+        # Get progress - which agent are we on?
+        current_agent_idx = state.get("current_agent_idx", 0)
+        
+        if current_agent_idx >= len(required_agents):
+            # All agents complete
+            logger.info("FIELD_AGENT_ASSIGNMENT: All required agents completed")
             state["plan_executed"] = True
             state["next_node"] = "final_report"
             log_supervisor_routing(state, "final_report", "All workflow tasks complete")
             return state
         
-        # Get current step to execute
-        current_step = steps[current_step_idx]
-        step_name = current_step.get("name", "Unnamed")
-        step_number = current_step.get("step_number", current_step_idx + 1)
-        agent_name = current_step.get("agent", "").lower()
+        # Get the current agent to execute
+        current_agent = required_agents[current_agent_idx]
+        logger.info(f"FIELD_AGENT_ASSIGNMENT: Executing agent {current_agent_idx + 1}/{len(required_agents)}: {current_agent}")
         
-        logger.info(f"FIELD_AGENT_ASSIGNMENT: Executing Step {step_number}: {step_name} (agent: {agent_name})")
+        # Execute based on agent type with completion checks
+        if current_agent == "preprocessing":
+            if state.get("cleaned_pdb"):
+                logger.info("FIELD_AGENT_ASSIGNMENT: Preprocessing already complete, moving to next agent")
+                state["current_agent_idx"] = current_agent_idx + 1
+                return self._assign_field_agent_tasks(state)
+            
+            # Check retry limit
+            retry_count = state.get("preprocess_retry_count", 0)
+            if retry_count >= 3:
+                state["errors"].append("Preprocessing failed after 3 retries")
+                state["current_agent_idx"] = current_agent_idx + 1
+                return self._assign_field_agent_tasks(state)
+            
+            state["next_node"] = "preprocess"
+            state["preprocess_retry_count"] = retry_count + 1
+            logger.info("FIELD_AGENT_ASSIGNMENT: Routing to preprocessing")
+            log_supervisor_routing(state, "preprocess", "Executing preprocessing agent")
+            return state
         
-        # Check dependencies
-        dependencies = current_step.get("dependencies", [])
-        for dep_step_num in dependencies:
-            dep_step_idx = dep_step_num - 1
-            if dep_step_idx >= current_step_idx:
-                error_msg = f"Step {step_number} dependency error: Step {dep_step_num} not yet executed"
-                logger.error(f"FIELD_AGENT_ASSIGNMENT: {error_msg}")
-                state["errors"].append(error_msg)
-                state["next_node"] = "final_report"
-                return state
+        elif current_agent == "simsetup":
+            if state.get("coordinates"):
+                logger.info("FIELD_AGENT_ASSIGNMENT: SimSetup already complete, moving to next agent")
+                state["current_agent_idx"] = current_agent_idx + 1
+                return self._assign_field_agent_tasks(state)
+            
+            # Check retry limit
+            retry_count = state.get("setup_retry_count", 0)
+            if retry_count >= 3:
+                state["errors"].append("SimSetup failed after 3 retries")
+                state["current_agent_idx"] = current_agent_idx + 1
+                return self._assign_field_agent_tasks(state)
+            
+            state["next_node"] = "setup"
+            state["setup_retry_count"] = retry_count + 1
+            logger.info("FIELD_AGENT_ASSIGNMENT: Routing to simsetup")
+            log_supervisor_routing(state, "setup", "Executing simsetup agent")
+            return state
         
-        # Route to appropriate agent based on agent name
-        if "preprocessing" in agent_name or "preprocess" in agent_name:
-            # Check for repeated failures to prevent infinite loops
-            preprocess_retry_count = state.get("preprocess_retry_count", 0)
-            max_retries = 3
-            
-            if preprocess_retry_count >= max_retries:
-                error_msg = f"Preprocessing agent failed {preprocess_retry_count} times, skipping to avoid infinite loop"
-                logger.error(f"FIELD_AGENT_ASSIGNMENT: {error_msg}")
-                state["errors"].append(error_msg)
-                state["current_step"] = current_step_idx + 1
-                return self._assign_field_agent_tasks(state)
-            
-            if not state.get("cleaned_pdb"):
-                # Track retry attempts for this specific step
-                if state.get("last_preprocess_step") == step_number:
-                    state["preprocess_retry_count"] = preprocess_retry_count + 1
-                    logger.warning(f"FIELD_AGENT_ASSIGNMENT: Preprocessing retry #{state['preprocess_retry_count']} for step {step_number}")
-                else:
-                    state["preprocess_retry_count"] = 0
-                    state["last_preprocess_step"] = step_number
-                
-                state["next_node"] = "preprocess"
-                state["preprocessing_plan"] = current_step
-                logger.info(f"FIELD_AGENT_ASSIGNMENT: Routing to preprocessing for step {step_number}")
-                log_supervisor_routing(state, "preprocess", f"Executing Step {step_number}: {step_name}")
-                return state
-            else:
-                logger.info(f"FIELD_AGENT_ASSIGNMENT: Preprocessing already complete, advancing to next step")
-                state["current_step"] = current_step_idx + 1
-                return self._assign_field_agent_tasks(state)
-
-        elif "setup" in agent_name or "simsetup" in agent_name:
-            # Check for repeated failures to prevent infinite loops
-            setup_retry_count = state.get("setup_retry_count", 0)
-            max_retries = 3
-            
-            if setup_retry_count >= max_retries:
-                error_msg = f"Setup agent failed {setup_retry_count} times, skipping to avoid infinite loop"
-                logger.error(f"FIELD_AGENT_ASSIGNMENT: {error_msg}")
-                state["errors"].append(error_msg)
-                state["current_step"] = current_step_idx + 1
-                return self._assign_field_agent_tasks(state)
-            
-            if not state.get("coordinates"):
-                # Track retry attempts for this specific step
-                if state.get("last_setup_step") == step_number:
-                    state["setup_retry_count"] = setup_retry_count + 1
-                    logger.warning(f"FIELD_AGENT_ASSIGNMENT: Setup retry #{state['setup_retry_count']} for step {step_number}")
-                else:
-                    state["setup_retry_count"] = 0
-                    state["last_setup_step"] = step_number
-                
-                state["next_node"] = "setup"
-                state["setup_plan"] = current_step
-                logger.info(f"FIELD_AGENT_ASSIGNMENT: Routing to setup for step {step_number}")
-                log_supervisor_routing(state, "setup", f"Executing Step {step_number}: {step_name}")
-                return state
-            else:
-                logger.info(f"FIELD_AGENT_ASSIGNMENT: Setup already complete, advancing to next step")
-                state["current_step"] = current_step_idx + 1
-                return self._assign_field_agent_tasks(state)
-
-        elif "hpc" in agent_name or "simulation" in agent_name:
-            # Check if user explicitly excluded HPC
+        elif current_agent == "hpc":
+            # Check for user exclusion
             user_goal = state.get("user_goal", "").lower()
             rephrased_goal = state.get("rephrased_goal", "").lower()
             combined_goals = f"{user_goal} {rephrased_goal}"
             
             user_excluded_hpc = any(phrase in combined_goals for phrase in [
-                "no hpc", "skip hpc", "do not submit", "don't submit", "do not use hpc",
-                "no job submission", "no simulation", "setup only", "without hpc",
-                "do not do hpc", "don't do hpc", "not do hpc", "no hpc job",
-                "skip job submission", "skip simulation", "local only", "locally only"
+                "no hpc", "skip hpc", "do not submit", "don't submit", "setup only", 
+                "without hpc", "no simulation", "local only"
             ])
             
             if user_excluded_hpc:
-                logger.info(f"FIELD_AGENT_ASSIGNMENT: User explicitly excluded HPC - skipping step {step_number}")
-                logger.info(f"FIELD_AGENT_ASSIGNMENT: Detection in: '{combined_goals[:200]}'")
-                state["warnings"].append(f"Skipping HPC step as per user request: {step_name}")
-                state["current_step"] = current_step_idx + 1
+                logger.info("FIELD_AGENT_ASSIGNMENT: User excluded HPC, skipping")
+                state["warnings"].append("HPC execution skipped per user request")
+                state["current_agent_idx"] = current_agent_idx + 1
                 return self._assign_field_agent_tasks(state)
             
-            # Check for failures - NO RETRIES, fail once and move on
-            hpc_retry_count = state.get("hpc_retry_count", 0)
-            
-            if hpc_retry_count >= 1:
-                error_msg = f"HPC agent failed, stopping (no retries)"
-                logger.error(f"FIELD_AGENT_ASSIGNMENT: {error_msg}")
-                state["errors"].append(error_msg)
-                state["warnings"].append("HPC execution skipped due to failure - simulation not submitted")
-                # Mark step as attempted and move on
-                state["current_step"] = current_step_idx + 1
+            if state.get("job_id"):
+                logger.info("FIELD_AGENT_ASSIGNMENT: HPC already complete, moving to next agent")
+                state["current_agent_idx"] = current_agent_idx + 1
                 return self._assign_field_agent_tasks(state)
             
-            if not state.get("job_id"):
-                # Check if we've already tried this step (no retries allowed)
-                if state.get("last_hpc_step") == step_number:
-                    state["hpc_retry_count"] = hpc_retry_count + 1
-                    logger.error(f"FIELD_AGENT_ASSIGNMENT: HPC already attempted for step {step_number}, no retry allowed")
-                    state["errors"].append("HPC agent already attempted, stopping to avoid retries")
-                    state["current_step"] = current_step_idx + 1
-                    return self._assign_field_agent_tasks(state)
-                else:
-                    state["hpc_retry_count"] = 0
-                    state["last_hpc_step"] = step_number
-                
-                state["next_node"] = "hpc"
-                state["hpc_plan"] = current_step
-                logger.info(f"FIELD_AGENT_ASSIGNMENT: Routing to HPC for step {step_number} (first attempt only)")
-                log_supervisor_routing(state, "hpc", f"Executing Step {step_number}: {step_name}")
-                return state
-            else:
-                logger.info(f"FIELD_AGENT_ASSIGNMENT: HPC already complete, advancing to next step")
-                state["current_step"] = current_step_idx + 1
-                return self._assign_field_agent_tasks(state)
-
-        elif "analysis" in agent_name:
-            # Check for repeated failures to prevent infinite loops
-            analysis_retry_count = state.get("analysis_retry_count", 0)
-            max_retries = 3
-            
-            if analysis_retry_count >= max_retries:
-                error_msg = f"Analysis agent failed {analysis_retry_count} times, skipping to avoid infinite loop"
-                logger.error(f"FIELD_AGENT_ASSIGNMENT: {error_msg}")
-                state["errors"].append(error_msg)
-                state["current_step"] = current_step_idx + 1
+            # HPC gets only 1 attempt (no retries)
+            retry_count = state.get("hpc_retry_count", 0)
+            if retry_count >= 1:
+                state["errors"].append("HPC execution failed (no retries)")
+                state["warnings"].append("HPC simulation not submitted due to failure")
+                state["current_agent_idx"] = current_agent_idx + 1
                 return self._assign_field_agent_tasks(state)
             
-            if not state.get("analysis_results"):
-                # Track retry attempts for this specific step
-                if state.get("last_analysis_step") == step_number:
-                    state["analysis_retry_count"] = analysis_retry_count + 1
-                    logger.warning(f"FIELD_AGENT_ASSIGNMENT: Analysis retry #{state['analysis_retry_count']} for step {step_number}")
-                else:
-                    state["analysis_retry_count"] = 0
-                    state["last_analysis_step"] = step_number
-                
-                state["next_node"] = "analysis"
-                state["analysis_plan"] = current_step
-                logger.info(f"FIELD_AGENT_ASSIGNMENT: Routing to analysis for step {step_number}")
-                log_supervisor_routing(state, "analysis", f"Executing Step {step_number}: {step_name}")
-                return state
-            else:
-                logger.info(f"FIELD_AGENT_ASSIGNMENT: Analysis already complete, advancing to next step")
-                state["current_step"] = current_step_idx + 1
-                return self._assign_field_agent_tasks(state)
-
-        elif "report" in agent_name:
-            # Reporter agent - generates scientific reports
-            reporter_retry_count = state.get("reporter_retry_count", 0)
-            max_retries = 2
-            
-            if reporter_retry_count >= max_retries:
-                error_msg = f"Reporter agent failed {reporter_retry_count} times, skipping to avoid infinite loop"
-                logger.error(f"FIELD_AGENT_ASSIGNMENT: {error_msg}")
-                state["errors"].append(error_msg)
-                state["current_step"] = current_step_idx + 1
+            state["next_node"] = "hpc"
+            state["hpc_retry_count"] = retry_count + 1
+            logger.info("FIELD_AGENT_ASSIGNMENT: Routing to HPC (attempt 1/1)")
+            log_supervisor_routing(state, "hpc", "Executing HPC agent")
+            return state
+        
+        elif current_agent == "analysis":
+            if state.get("analysis_results"):
+                logger.info("FIELD_AGENT_ASSIGNMENT: Analysis already complete, moving to next agent")
+                state["current_agent_idx"] = current_agent_idx + 1
                 return self._assign_field_agent_tasks(state)
             
-            if not state.get("reporter_output"):
-                # Track retry attempts for this specific step
-                if state.get("last_reporter_step") == step_number:
-                    state["reporter_retry_count"] = reporter_retry_count + 1
-                    logger.warning(f"FIELD_AGENT_ASSIGNMENT: Reporter retry #{state['reporter_retry_count']} for step {step_number}")
-                else:
-                    state["reporter_retry_count"] = 0
-                    state["last_reporter_step"] = step_number
-                
-                state["next_node"] = "reporter"
-                state["reporter_plan"] = current_step
-                logger.info(f"FIELD_AGENT_ASSIGNMENT: Routing to reporter for step {step_number}")
-                log_supervisor_routing(state, "reporter", f"Executing Step {step_number}: {step_name}")
-                return state
-            else:
-                logger.info(f"FIELD_AGENT_ASSIGNMENT: Reporter already complete, advancing to next step")
-                state["current_step"] = current_step_idx + 1
+            # Check retry limit
+            retry_count = state.get("analysis_retry_count", 0)
+            if retry_count >= 3:
+                state["errors"].append("Analysis failed after 3 retries")
+                state["current_agent_idx"] = current_agent_idx + 1
                 return self._assign_field_agent_tasks(state)
+            
+            state["next_node"] = "analysis"
+            state["analysis_retry_count"] = retry_count + 1
+            logger.info("FIELD_AGENT_ASSIGNMENT: Routing to analysis")
+            log_supervisor_routing(state, "analysis", "Executing analysis agent")
+            return state
+        
+        elif current_agent == "reporter":
+            if state.get("reporter_output"):
+                logger.info("FIELD_AGENT_ASSIGNMENT: Reporter already complete, moving to next agent")
+                state["current_agent_idx"] = current_agent_idx + 1
+                return self._assign_field_agent_tasks(state)
+            
+            # Check retry limit
+            retry_count = state.get("reporter_retry_count", 0)
+            if retry_count >= 2:
+                state["errors"].append("Reporter failed after 2 retries")
+                state["current_agent_idx"] = current_agent_idx + 1
+                return self._assign_field_agent_tasks(state)
+            
+            state["next_node"] = "reporter"
+            state["reporter_retry_count"] = retry_count + 1
+            logger.info("FIELD_AGENT_ASSIGNMENT: Routing to reporter")
+            log_supervisor_routing(state, "reporter", "Executing reporter agent")
+            return state
         
         else:
-            # Unknown agent
-            error_msg = f"Unknown agent '{agent_name}' for step {step_number}"
+            # Unknown agent (shouldn't happen with get_agent_execution_order)
+            error_msg = f"Unknown agent '{current_agent}' in execution order"
             logger.error(f"FIELD_AGENT_ASSIGNMENT: {error_msg}")
             state["errors"].append(error_msg)
             state["next_node"] = "final_report"

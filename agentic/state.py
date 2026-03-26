@@ -14,11 +14,13 @@ class MDState(TypedDict):
     human_in_loop: bool
     
     # Subtask-specific workflow
-    subtask_type: Optional[str]    # "analysis_only", "setup_only", "preprocess_only", "reporter_only", None
+    subtask_type: Optional[str]    # "analysis_only", "setup_only", "preprocess_only", "reporter_only", "multi_agent", None
     subtask_type_initialized: Optional[bool]  # Whether subtask type has been initialized
+    agent_list: Optional[List[str]]           # Ordered list of agents for multi-agent workflow
     required_inputs: Optional[Dict[str, bool]]  # What inputs this task requires
     analysis_validated: Optional[bool]  # Whether analysis-only inputs have been validated
     reporter_validated: Optional[bool]  # Whether reporter-only inputs have been validated
+    multi_agent_validated: Optional[bool]  # Whether multi-agent inputs have been validated
     analysis_directory: Optional[str]   # Path to analysis output directory
     trajectory_paths: Optional[Dict[str, Optional[str]]]  # Trajectory, topology, energy paths for analysis-only
     

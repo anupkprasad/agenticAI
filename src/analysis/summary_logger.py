@@ -192,6 +192,63 @@ def read_summary_file(working_dir: str) -> list:
         return []
 
 
+def update_analysis_summary_with_files(
+    working_dir: str,
+    analysis_type: str,
+    additional_files: Dict[str, str]
+) -> None:
+    """
+    Update an existing analysis summary entry by adding plot files or other outputs.
+    
+    This is useful when plots are generated separately from the calculators.
+    Updates the most recent entry of the specified analysis_type.
+    
+    Args:
+        working_dir: Working directory for analysis
+        analysis_type: Type of analysis to update (e.g., "RMSD", "RMSF", "Rg")
+        additional_files: Dictionary of additional files to add (e.g., {"plot": "rmsd_plot.png"})
+    """
+    summary_path = Path(working_dir) / SUMMARY_FILENAME
+    
+    if not summary_path.exists():
+        logger.warning(f"Summary file not found: {summary_path}")
+        return
+    
+    try:
+        # Read all entries
+        entries = read_summary_file(working_dir)
+        
+        # Find the most recent entry of this analysis type
+        updated = False
+        for entry in reversed(entries):  # Start from most recent
+            if entry.get("analysis_type") == analysis_type:
+                # Update the files dict
+                if "files" not in entry:
+                    entry["files"] = {}
+                entry["files"].update(additional_files)
+                updated = True
+                logger.info(f"Updated {analysis_type} entry with files: {list(additional_files.keys())}")
+                break
+        
+        if not updated:
+            logger.warning(f"No {analysis_type} entry found to update")
+            return
+        
+        # Rewrite the entire summary file
+        with open(summary_path, 'w') as f:
+            for entry in entries:
+                if entry.get("summary_file_version"):  # Header entry
+                    f.write(json.dumps(entry, indent=2) + "\n")
+                else:
+                    f.write("---\n")
+                    f.write(json.dumps(entry, indent=2) + "\n")
+        
+        logger.info(f"Successfully updated summary file: {summary_path}")
+        
+    except Exception as e:
+        logger.error(f"Failed to update summary file: {e}")
+
+
 def get_latest_analysis(working_dir: str, analysis_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Get the most recent analysis entry from the summary file.

@@ -181,6 +181,35 @@ supervisor:
       Rephrased: "Calculate Solvent Accessible Surface Area (SASA) specifically for 
       residues 45-67 in the protein binding site. Generate time-series plot showing 
       SASA changes during simulation."
+    
+    # Unified enrichment prompt - runs ONCE after input validation
+    unified_enrichment_prompt: |
+      You are helping to clarify and enrich a user's goal for MD simulation workflow.
+      
+      **User's Original Goal:**
+      {user_goal}
+      
+      {context}
+      
+      **Your Task:**
+      Rephrase the user's goal to be more specific, structured, and actionable for the MD workflow agents.
+      Include:
+      1. What needs to be done (preprocessing, setup, simulation, analysis, reporting)
+      2. Which components/residues to focus on (if applicable)
+      3. What specific outputs or results are expected
+      4. Any constraints or special requirements
+      
+      **Critical Guidelines:**
+      - Preserve the user's exact intent - don't add or remove steps
+      - If user says "only preprocessing" or "just analysis", keep that constraint
+      - If user specifies components (protein, ligand, ions), preserve exactly as stated
+      - If user excludes something (no HPC, no simulation), make that explicit
+      - Be concise (3-6 sentences maximum)
+      - Use clear, actionable language
+      
+      **Output Format:**
+      Provide a clear, comprehensive rephrased goal that captures the user's intent with full context.
+      No additional commentary or suggestions.
 
   # Planner collaboration configuration
   planner:

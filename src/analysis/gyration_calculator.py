@@ -134,7 +134,7 @@ def calculate_radius_of_gyration(
                         files={
                             "topology": topology_file,
                             "trajectory": trajectory_file,
-                            "output": output_file
+                            "data": output_file
                         },
                         metadata={
                             "selection": selection

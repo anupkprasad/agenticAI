@@ -135,26 +135,39 @@ def generate_python_tool(
             code_parts.append("@tool")
         
         # Build parameter list
-        param_list = []
+        # Separate required and optional parameters to ensure correct ordering
+        required_params = []
+        optional_params = []
+        
         for param_name, param_spec in parameters.items():
             param_type = param_spec.get("type", "Any")
             if "default" in param_spec:
-                param_list.append(f"{param_name}: {param_type} = {repr(param_spec['default'])}")
+                optional_params.append(f"{param_name}: {param_type} = {repr(param_spec['default'])}")
             else:
-                param_list.append(f"{param_name}: {param_type}")
+                required_params.append(f"{param_name}: {param_type}")
         
+        # Combine: required first, then optional, then working_dir
+        param_list = required_params + optional_params
         param_list.append("working_dir: Optional[str] = None")
         params_str = ", ".join(param_list)
         code_parts.append(f"def {tool_name}({params_str}) -> Dict[str, Any]:")
         
-        # Docstring
+        # Docstring  
         code_parts.append('    """')
         code_parts.append(f"    {description}")
         code_parts.append("    ")
         code_parts.append("    Args:")
+        
+        # Document parameters in the same order (required first, then optional)
         for param_name, param_spec in parameters.items():
-            param_desc = param_spec.get("description", "No description")
-            code_parts.append(f"        {param_name}: {param_desc}")
+            if "default" not in param_spec:  # Required params first
+                param_desc = param_spec.get("description", "No description")
+                code_parts.append(f"        {param_name}: {param_desc}")
+        for param_name, param_spec in parameters.items():
+            if "default" in param_spec:  # Optional params second
+                param_desc = param_spec.get("description", "No description")
+                code_parts.append(f"        {param_name}: {param_desc}")
+        
         code_parts.append("        working_dir: Working directory for analysis (optional)")
         code_parts.append("    ")
         code_parts.append("    Returns:")
@@ -166,7 +179,7 @@ def generate_python_tool(
         code_parts.append("        original_dir = None")
         code_parts.append("        if working_dir:")
         code_parts.append("            os.makedirs(working_dir, exist_ok=True)")
-        code_parts.append("            originaldir = os.getcwd()")
+        code_parts.append("            original_dir = os.getcwd()")
         code_parts.append("            os.chdir(working_dir)")
         code_parts.append("        ")
         # Indent implementation

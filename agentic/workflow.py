@@ -353,9 +353,11 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "generated_files": {},  # Centralized tracking of important files by agent
             "subtask_type": None,
             "subtask_type_initialized": None,
+            "agent_list": None,
             "required_inputs": None,
             "analysis_validated": None,
             "reporter_validated": None,
+            "multi_agent_validated": None,
             "analysis_directory": None,
             "trajectory_paths": None,
             "pdb_analysis": None,

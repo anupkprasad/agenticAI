@@ -180,10 +180,11 @@ def _validate_pdb_based_task(
     """Additional validation for PDB-based tasks (setup/preprocess/full).
     
     Assumes PDB has already been analyzed by _analyze_pdb_if_available.
+    
+    NOTE: This function does VALIDATION ONLY. Enrichment happens in supervisor via unified_enricher.
     """
     from agentic.utils import log_agent_action
     from .component_parser import parse_component_selection, validate_feasibility, build_human_summary
-    from .prompt_enricher import enrich_prompt_with_context
     
     # Get PDB analysis from state (set by _analyze_pdb_if_available)
     analysis = state.get("pdb_analysis")
@@ -214,31 +215,20 @@ def _validate_pdb_based_task(
         state["warnings"].append(warning)
         logger.warning(f"INPUT_VALIDATION: {warning}")
 
-    # Step 3: Enrich user prompt with validated information
+    # Step 3: Store PDB summary for enrichment (done by supervisor)
     pdb_summary = build_human_summary(analysis)
-    enriched_prompt = enrich_prompt_with_context(
-        user_goal=user_goal,
-        context_type="pdb",
-        context_data={
-            "pdb_analysis": analysis,
-            "pdb_summary": pdb_summary
-        },
-        llm_client=llm_client,
-        config=config
-    )
-    state["structured_prompt"] = enriched_prompt
-    state["rephrased_goal"] = enriched_prompt
+    state["pdb_summary"] = pdb_summary
     
-    logger.info(f"INPUT_VALIDATION: Enriched prompt created: {enriched_prompt[:150]}...")
+    logger.info(f"INPUT_VALIDATION: PDB validation complete")
     
     log_agent_action(
         agent_name="supervisor.input_validation",
-        action="Input Validation Complete",
+        action="PDB Input Validation Complete",
         details={
             "original_goal": user_goal[:100],
-            "enriched_prompt": enriched_prompt[:300],
             "pdb_file": pdb_path,
-            "working_directory": working_directory
+            "working_directory": working_directory,
+            "component_selection": component_selection
         }
     )
 
@@ -246,7 +236,6 @@ def _validate_pdb_based_task(
     logger.info(f"  - PDB Analysis: {'✓ Success' if not state.get('warnings') else '⚠ With warnings'}")
     logger.info(f"  - Component Selection: {component_selection}")
     logger.info(f"  - Working Directory: {working_directory}")
-    logger.info(f"  - Enriched Prompt: {enriched_prompt[:80]}...")
     
     return state
 
@@ -259,9 +248,11 @@ def _validate_reporter_files(
     config: Dict[str, Any],
     logger
 ) -> Dict[str, Any]:
-    """Validate analysis summary files for reporter-only tasks."""
+    """Validate analysis summary files for reporter-only tasks.
+    
+    NOTE: This function does VALIDATION ONLY. Enrichment happens in supervisor via unified_enricher.
+    """
     from agentic.utils import log_agent_action
-    from .prompt_enricher import enrich_prompt_with_context
     
     analysis_output_dir = os.path.join(working_directory, "analysis")
     
@@ -308,18 +299,10 @@ def _validate_reporter_files(
         "total_files": len(available_files)
     }
     
-    # Step 5: Enrich user prompt with validated information
-    enriched_prompt = enrich_prompt_with_context(
-        user_goal=user_goal,
-        context_type="reporter",
-        context_data={"file_info": file_info},
-        llm_client=llm_client,
-        config=config
-    )
-    state["structured_prompt"] = enriched_prompt
-    state["rephrased_goal"] = enriched_prompt
+    # Step 5: Store file_info for enrichment (done by supervisor)
+    state["reporter_file_info"] = file_info
     
-    logger.info(f"INPUT_VALIDATION: Enriched reporter prompt created: {enriched_prompt[:150]}...")
+    logger.info(f"INPUT_VALIDATION: Reporter file validation complete")
     
     # Step 6: Set reporter-specific state fields
     state["analysis_directory"] = analysis_output_dir
@@ -348,8 +331,7 @@ def _validate_reporter_files(
         action="Reporter-Only Input Validation Complete",
         details={
             "subtask_type": "reporter_only",
-            "original_goal": user_goal[:100],
-            "enriched_prompt": enriched_prompt[:300],
+            "user_goal": user_goal[:200],
             "analysis_directory": analysis_output_dir,
             "summary_file": file_info["analysis_summary_file"],
             "total_files": len(available_files),
@@ -363,7 +345,7 @@ def _validate_reporter_files(
     logger.info(f"  - Summary File: {file_info['analysis_summary_file'] or 'Not found'}")
     logger.info(f"  - Available Files: {len(available_files)}")
     logger.info(f"  - Working Directory: {working_directory}")
-    logger.info(f"  - Enriched Prompt: {enriched_prompt[:80]}...")
+    logger.info(f"  - User Goal: {user_goal[:80]}...")
     
     return state
 
@@ -376,10 +358,12 @@ def _validate_analysis_files(
     config: Dict[str, Any],
     logger
 ) -> Dict[str, Any]:
-    """Validate trajectory/topology files for analysis-only tasks."""
+    """Validate trajectory/topology files for analysis-only tasks.
+    
+    NOTE: This function does VALIDATION ONLY. Enrichment happens in supervisor via unified_enricher.
+    """
     from agentic.utils import log_agent_action
     from .file_extractor import extract_file_names_from_goal
-    from .prompt_enricher import enrich_prompt_with_context
     
     hpc_output_dir = os.path.join(working_directory, "hpc")
     analysis_output_dir = os.path.join(working_directory, "analysis")
@@ -472,18 +456,10 @@ def _validate_analysis_files(
         state["warnings"].append(warning)
         logger.warning(f"INPUT_VALIDATION: {warning}")
     
-    # Step 4: Enrich user prompt with validated information
-    enriched_prompt = enrich_prompt_with_context(
-        user_goal=user_goal,
-        context_type="files",
-        context_data={"file_info": file_info},
-        llm_client=llm_client,
-        config=config
-    )
-    state["structured_prompt"] = enriched_prompt
-    state["rephrased_goal"] = enriched_prompt
+    # Step 4: Store file_info for enrichment (done by supervisor)
+    state["file_info"] = file_info
     
-    logger.info(f"INPUT_VALIDATION: Enriched analysis prompt created: {enriched_prompt[:150]}...")
+    logger.info(f"INPUT_VALIDATION: Analysis file validation complete")
     
     # Step 5: Enhance pdb_analysis with analysis-specific file info
     # Note: pdb_analysis should already exist from _analyze_pdb_if_available
@@ -522,8 +498,7 @@ def _validate_analysis_files(
         action="Analysis-Only Input Validation Complete",
         details={
             "subtask_type": "analysis-only",
-            "original_goal": user_goal[:100],
-            "enriched_prompt": enriched_prompt[:300],
+            "user_goal": user_goal[:200],
             "topology_file": file_info["topology_file"],
             "trajectory_file": file_info["trajectory_file"],
             "energy_file": file_info["energy_file"],
@@ -537,7 +512,7 @@ def _validate_analysis_files(
     logger.info(f"  - Topology: {file_info['topology_file'] or 'Not found'}")
     logger.info(f"  - Trajectory: {file_info['trajectory_file'] or 'Not found'}")
     logger.info(f"  - Working Directory: {working_directory}")
-    logger.info(f"  - Enriched Prompt: {enriched_prompt[:80]}...")
+    logger.info(f"  - User Goal: {user_goal[:80]}...")
 
     return state
 

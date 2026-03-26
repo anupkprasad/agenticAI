@@ -138,7 +138,7 @@ def calculate_rmsd(
                         files={
                             "topology": topology_file,
                             "trajectory": trajectory_file,
-                            "output": output_filename if output_file else None
+                            "data": output_filename if output_file else None
                         },
                         metadata={
                             "selection": selection,

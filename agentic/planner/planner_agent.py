@@ -108,21 +108,35 @@ class MDPlanner:
             "analysis": "analysis",
             "reporter": "reporter",
         }
+        
+        logger.info(f"PLANNER: _get_combined_tools_context called with agent_list={agent_list}")
+        
         if not agent_list:
+            logger.warning("PLANNER: agent_list is empty, returning all tools")
             return self._get_tools_context()
 
         parts = []
         seen = set()
         for cli_name in agent_list:
             registry_name = _cli_to_registry.get(cli_name, cli_name)
+            logger.info(f"PLANNER: Getting tools for agent '{cli_name}' (registry_name='{registry_name}')")
             if registry_name in seen:
+                logger.debug(f"PLANNER: Skipping duplicate agent '{registry_name}'")
                 continue
             seen.add(registry_name)
             ctx = self._get_tools_context(agent_name=registry_name)
             if ctx.strip():
+                logger.info(f"PLANNER: Added tools context for '{registry_name}' ({len(ctx)} chars)")
                 parts.append(ctx)
+            else:
+                logger.warning(f"PLANNER: No tools found for agent '{registry_name}'")
 
-        return "\n".join(parts) if parts else self._get_tools_context()
+        if not parts:
+            logger.error(f"PLANNER: No tools found for any agent in {agent_list}, falling back to ALL tools")
+            return self._get_tools_context()
+        
+        logger.info(f"PLANNER: Returning combined tools context for {len(parts)} agents")
+        return "\n".join(parts)
     
     def _load_config(self) -> Dict[str, Any]:
         """Load planner configuration from YAML."""
@@ -148,7 +162,8 @@ class MDPlanner:
         logger.info(f"PLANNER: Refreshed tools registry - now {len(self.tools_registry.tools)} tools available")
         
         # Use structured prompt if available, otherwise fall back to rephrased/original goal
-        structured_prompt = state.get("structured_prompt") or state.get("rephrased_goal") or state.get("user_goal", "")
+        # Use unified enriched prompt (set by supervisor after validation)
+        structured_prompt = state.get("enriched_prompt") or state.get("rephrased_goal") or state.get("user_goal", "")
         pdb_path = state.get("raw_pdb", "")
         pdb_analysis = state.get("pdb_analysis", {})
         component_selection = state.get("component_selection", {})
@@ -240,7 +255,12 @@ class MDPlanner:
         elif subtask_type == "multi_agent":
             agent_list = state.get("agent_list") or []
             logger.info(f"PLANNER: Getting combined tools for multi-agent workflow: {agent_list}")
+            logger.info(f"PLANNER: DEBUG - subtask_type={subtask_type}, agent_list from state={agent_list}")
             tools_context = self._get_combined_tools_context(agent_list)
+            logger.info(f"PLANNER: DEBUG - tools_context length: {len(tools_context)} chars")
+            # Log first few lines to see what agents are included
+            tools_lines = tools_context.split('\n')[:10]
+            logger.info(f"PLANNER: DEBUG - First 10 lines of tools_context:\n" + "\n".join(tools_lines))
         else:
             # Full workflow - get all tools
             tools_context = self._get_tools_context()
@@ -361,7 +381,13 @@ class MDPlanner:
                                 current_tools_context = self._get_tools_context(agent_name="preprocess")
                             elif subtask_type == "reporter_only":
                                 current_tools_context = self._get_tools_context(agent_name="reporter")
+                            elif subtask_type == "multi_agent":
+                                # Get combined tools context for multi-agent workflow
+                                agent_list = state.get("agent_list") or []
+                                logger.info(f"PLANNER: Rebuilding tools context for multi-agent workflow: {agent_list}")
+                                current_tools_context = self._get_combined_tools_context(agent_list)
                             else:
+                                # Full workflow - get all tools
                                 current_tools_context = self._get_tools_context()
                             
                             # Rebuild prompt with updated tools
