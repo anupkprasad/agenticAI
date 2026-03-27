@@ -16,13 +16,15 @@ def generate_html_report(
     literature_refs: Optional[List[Dict[str, Any]]] = None,
     report_type: str = "comprehensive",
     output_file: str = "report.html",
-    working_dir: Optional[str] = None
+    working_dir: Optional[str] = None,
+    system_info: Optional[Dict[str, Any]] = None,
+    final_impression: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Generate HTML report from analysis data and literature.
     
     Creates a professional scientific report with analysis results,
-    visualizations, and literature context.
+    visualizations, literature context, and final impressions.
     
     Args:
         analysis_data: Parsed analysis summary data
@@ -30,6 +32,8 @@ def generate_html_report(
         report_type: Type of report ("comprehensive" or "executive")
         output_file: Output HTML filename (saved in working_dir)
         working_dir: Working directory for output
+        system_info: Molecular system metadata from input validation (optional)
+        final_impression: LLM-generated final impression correlating analysis with literature (optional)
     
     Returns:
         Dict with report generation results
@@ -47,7 +51,9 @@ def generate_html_report(
         html_content = build_html_content(
             analysis_data=analysis_data,
             literature_refs=literature_refs or [],
-            report_type=report_type
+            report_type=report_type,
+            system_info=system_info,
+            final_impression=final_impression
         )
         
         # Write to file
@@ -74,7 +80,9 @@ def generate_html_report(
 def build_html_content(
     analysis_data: Dict[str, Any],
     literature_refs: List[Dict[str, Any]],
-    report_type: str
+    report_type: str,
+    system_info: Optional[Dict[str, Any]] = None,
+    final_impression: Optional[str] = None
 ) -> str:
     """Build HTML content for report (not a @tool, internal helper)"""
     
@@ -99,7 +107,7 @@ def build_html_content(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Molecular Dynamics Analysis Report</title>
+    <title>Molecular Dynamics Report</title>
     <style>
         body {
             font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -144,6 +152,61 @@ def build_html_content(
         }
         .metadata p {
             margin: 8px 0;
+            font-size: 15px;
+        }
+        .system-info {
+            margin: 30px 0;
+            padding: 25px;
+            border-radius: 10px;
+            background-color: #f0fdf4;
+            border: 1px solid #bbf7d0;
+            border-left: 4px solid #22c55e;
+        }
+        .system-info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .system-info-card {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #d1fae5;
+            text-align: center;
+        }
+        .system-info-card .info-label {
+            font-size: 12px;
+            color: #6b7280;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+        .system-info-card .info-value {
+            font-size: 22px;
+            font-weight: bold;
+            color: #166534;
+            margin: 5px 0;
+        }
+        .component-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }
+        .component-table th, .component-table td {
+            padding: 10px 15px;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        .component-table th {
+            background-color: #f0fdf4;
+            color: #166534;
+            font-weight: 600;
+            font-size: 13px;
+            text-transform: uppercase;
+        }
+        .component-table td {
+            color: #374151;
         }
         .analysis-section {
             margin: 40px 0;
@@ -191,13 +254,13 @@ def build_html_content(
             box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
         }
         .stat-value {
-            font-size: 28px;
+            font-size: 22px;
             font-weight: bold;
             color: #3b82f6;
             margin: 5px 0;
         }
         .stat-label {
-            font-size: 12px;
+            font-size: 14px;
             color: #6b7280;
             text-transform: uppercase;
             letter-spacing: 0.5px;
@@ -251,6 +314,26 @@ def build_html_content(
             margin: 5px 0;
             color: #4b5563;
         }
+        .final-impression {
+            margin: 40px 0;
+            padding: 30px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #fefce8 0%, #fef9c3 100%);
+            border: 1px solid #fde68a;
+            border-left: 4px solid #f59e0b;
+        }
+        .final-impression p {
+            margin: 10px 0;
+            line-height: 1.8;
+            font-size: 16px;
+        }
+        .final-impression .ref-citations {
+            font-size: 14px;
+            color: #92400e;
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid #fde68a;
+        }
     </style>
 </head>
 <body>
@@ -258,13 +341,109 @@ def build_html_content(
 """)
     
     # Title and metadata
-    html_parts.append("<h1>🧬 Molecular Dynamics Analysis Report</h1>")
+    html_parts.append("<h1>🧬 Molecular Dynamics Report</h1>")
     html_parts.append(f'<div class="metadata">')
     html_parts.append(f'<p><strong>📊 Report Type:</strong> {report_type.title()}</p>')
     html_parts.append(f'<p><strong>📅 Generated:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>')
     html_parts.append(f'<p><strong>🔬 Total Analyses:</strong> {len(entries)}</p>')
     html_parts.append(f'<p><strong>📈 Analysis Types:</strong> {", ".join(analysis_types.keys())}</p>')
     html_parts.append('</div>')
+    
+    # Section 1: System Information (from input validation)
+    if system_info and system_info.get("success"):
+        html_parts.append("<h2>🔬 System Information</h2>")
+        html_parts.append('<div class="system-info">')
+        
+        # Summary line
+        summary = system_info.get("summary", "")
+        if summary:
+            html_parts.append(f'<p><strong>{summary}</strong></p>')
+        
+        # Key metrics grid
+        html_parts.append('<div class="system-info-grid">')
+        html_parts.append(f'''
+            <div class="system-info-card">
+                <div class="info-label">Total Atoms</div>
+                <div class="info-value">{system_info.get("total_atoms", "N/A"):,}</div>
+            </div>
+        ''')
+        html_parts.append(f'''
+            <div class="system-info-card">
+                <div class="info-label">Total Residues</div>
+                <div class="info-value">{system_info.get("total_residues", "N/A"):,}</div>
+            </div>
+        ''')
+        
+        # Trajectory info if available
+        traj_info = system_info.get("trajectory", {})
+        if traj_info:
+            if traj_info.get("n_frames"):
+                html_parts.append(f'''
+                    <div class="system-info-card">
+                        <div class="info-label">Frames</div>
+                        <div class="info-value">{traj_info["n_frames"]:,}</div>
+                    </div>
+                ''')
+            if traj_info.get("total_time_ns"):
+                html_parts.append(f'''
+                    <div class="system-info-card">
+                        <div class="info-label">Simulation Time</div>
+                        <div class="info-value">{traj_info["total_time_ns"]} ns</div>
+                    </div>
+                ''')
+            if traj_info.get("dt_ps"):
+                html_parts.append(f'''
+                    <div class="system-info-card">
+                        <div class="info-label">Timestep</div>
+                        <div class="info-value">{traj_info["dt_ps"]} ps</div>
+                    </div>
+                ''')
+        
+        html_parts.append('</div>')  # close system-info-grid
+        
+        # Components table
+        components = system_info.get("components", {})
+        if components:
+            html_parts.append('<h3>System Components</h3>')
+            html_parts.append('<table class="component-table">')
+            html_parts.append('<thead><tr><th>Component</th><th>Present</th><th>Atoms</th><th>Details</th></tr></thead>')
+            html_parts.append('<tbody>')
+            
+            # Protein
+            prot = components.get("protein", {})
+            if prot.get("present"):
+                chains = ", ".join(prot.get("chains", [])) if prot.get("chains") else "—"
+                html_parts.append(f'<tr><td>🧬 Protein</td><td>Yes</td><td>{prot.get("atom_count", 0):,}</td><td>{prot.get("residue_count", 0)} residues, Chains: {chains}</td></tr>')
+            else:
+                html_parts.append('<tr><td>🧬 Protein</td><td>No</td><td>—</td><td>—</td></tr>')
+            
+            # Water
+            wat = components.get("water", {})
+            if wat.get("present"):
+                html_parts.append(f'<tr><td>💧 Water</td><td>Yes</td><td>{wat.get("atom_count", 0):,}</td><td>{wat.get("residue_count", 0)} molecules</td></tr>')
+            else:
+                html_parts.append('<tr><td>💧 Water</td><td>No</td><td>—</td><td>—</td></tr>')
+            
+            # Ions
+            ion = components.get("ions", {})
+            if ion.get("present"):
+                ion_detail = ", ".join(f"{k}: {v}" for k, v in ion.get("types", {}).items())
+                html_parts.append(f'<tr><td>⚡ Ions</td><td>Yes</td><td>{ion.get("atom_count", 0):,}</td><td>{ion_detail}</td></tr>')
+            else:
+                html_parts.append('<tr><td>⚡ Ions</td><td>No</td><td>—</td><td>—</td></tr>')
+            
+            # Ligand
+            lig = components.get("ligand", {})
+            if lig.get("present"):
+                lig_names = ", ".join(lig.get("residue_names", []))
+                html_parts.append(f'<tr><td>💊 Ligand</td><td>Yes</td><td>{lig.get("atom_count", 0):,}</td><td>{lig_names}</td></tr>')
+            else:
+                html_parts.append('<tr><td>💊 Ligand</td><td>No</td><td>—</td><td>—</td></tr>')
+            
+            html_parts.append('</tbody></table>')
+        
+        html_parts.append('</div>')  # close system-info
+        html_parts.append('<div class="section-divider"></div>')
     
     # Analysis sections
     html_parts.append("<h2>📊 Analysis Results</h2>")
@@ -342,10 +521,11 @@ def build_html_content(
     
     # Literature references
     if literature_refs:
-        html_parts.append("<h2>Scientific Literature</h2>")
-        html_parts.append(f'<p>Found {len(literature_refs)} relevant publications:</p>')
+        display_refs = literature_refs[:10]  # Max 10 references
+        html_parts.append("<h2>📚 Literature</h2>")
+        html_parts.append(f'<p>Found {len(literature_refs)} relevant publications (showing top {len(display_refs)}):</p>')
         
-        for idx, ref in enumerate(literature_refs, 1):
+        for idx, ref in enumerate(display_refs, 1):
             html_parts.append(f'<div class="reference">')
             html_parts.append(f'<div class="reference-title">[{idx}] {ref.get("title", "Unknown")}</div>')
             
@@ -376,6 +556,61 @@ def build_html_content(
                 html_parts.append(f'<p><strong>Abstract:</strong> {abstract_preview}</p>')
             
             html_parts.append('</div>')
+    
+    # Final Impression section
+    if final_impression:
+        html_parts.append('<div class="section-divider"></div>')
+        html_parts.append("<h2>🎯 Final Impression</h2>")
+        html_parts.append('<div class="final-impression">')
+        # Convert markdown-like paragraphs to HTML
+        for paragraph in final_impression.split('\n\n'):
+            paragraph = paragraph.strip()
+            if paragraph:
+                html_parts.append(f'<p>{paragraph}</p>')
+        
+        # Add cited references at the bottom of final impression
+        if literature_refs:
+            # Find which references are cited in the text (e.g., [1], [2])
+            import re as _re
+            cited_nums = set()
+            for m in _re.finditer(r'\[(\d+)\]', final_impression):
+                cited_nums.add(int(m.group(1)))
+            
+            # Show all refs if none explicitly cited, otherwise show cited ones
+            refs_to_show = []
+            if cited_nums:
+                for num in sorted(cited_nums):
+                    if 1 <= num <= len(literature_refs):
+                        refs_to_show.append((num, literature_refs[num - 1]))
+            else:
+                # No explicit citations — show all literature refs used
+                refs_to_show = [(i, ref) for i, ref in enumerate(literature_refs[:10], 1)]
+            
+            if refs_to_show:
+                html_parts.append('<div class="ref-citations">')
+                html_parts.append('<p><strong>References cited:</strong></p>')
+                for num, ref in refs_to_show:
+                    title = ref.get("title", "Unknown")
+                    authors = ref.get("authors", [])
+                    author_str = ", ".join(authors[:3])
+                    if len(authors) > 3:
+                        author_str += " et al."
+                    year = ref.get("year", "")
+                    journal = ref.get("journal", "")
+                    pmid = ref.get("pmid", "")
+                    cite_parts = [f"[{num}] {author_str}"]
+                    if title:
+                        cite_parts.append(f'"{title}"')
+                    if journal:
+                        cite_parts.append(f"<em>{journal}</em>")
+                    if year:
+                        cite_parts.append(f"({year})")
+                    if pmid:
+                        cite_parts.append(f'PMID: <a href="https://pubmed.ncbi.nlm.nih.gov/{pmid}/">{pmid}</a>')
+                    html_parts.append(f'<p>{" ".join(cite_parts)}</p>')
+                html_parts.append('</div>')
+        
+        html_parts.append('</div>')
     
     # Footer
     html_parts.append("""

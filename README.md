@@ -202,7 +202,7 @@ python run_agenticAIWork.py \
 # 5.2b. Run analysis + reporter together (multi-agent pipeline)
 # Multiple agents are run in order: analysis first, then reporter
 python run_agenticAIWork.py \
-  --goal "The simulation of initial structure 3.pdb is already done. Simulation trajectory is in working_dir/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM of protein only and plot those data. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is kinase, please give the dynamics based on analysis result in report" \
+  --goal "The simulation of initial structure 3.pdb is already done. Simulation trajectory is in working_dir/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM for protein only and plot those data. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is psedukinase, please give the dynamics based comments on analysis result in report" \
   --subtask analysis reporter \
   --working-dir working_dir \
   --use-llm \

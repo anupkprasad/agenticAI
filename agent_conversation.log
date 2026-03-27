@@ -1,10 +1,10 @@
 ================================================================================
-NEW MD WORKFLOW SESSION STARTED - 2026-03-26 17:51:58
-Session ID: 20260326_175158
+NEW MD WORKFLOW SESSION STARTED - 2026-03-27 12:08:46
+Session ID: 20260327_120846
 ================================================================================
 
-🎯 USER PROMPT [2026-03-26 17:51:58]:
-   Goal: The simulation of initial structure 3.pdb is already done. Simulation trajectory is in working_dir/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM of protein only and plot those data. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is kinase, please give the dynamics based on analysis result in report
+🎯 USER PROMPT [2026-03-27 12:08:46]:
+   Goal: The simulation of initial structure 3.pdb is already done. Simulation trajectory is in working_dir/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM for protein only and plot those data. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is psedukinase, please give the dynamics based comments on analysis result in report
    Configuration: {
     "force_field": "amber99sb-ildn",
     "water_model": "tip3p",
@@ -19,7 +19,7 @@ Session ID: 20260326_175158
 
 ⚡ AGENT ACTION (supervisor.input_validation):
    🎬 Action: Starting Unified Input Validation (multi_agent)
-   📊 user_goal: The simulation of initial structure 3.pdb is already done. Simulation trajectory is in working_dir/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM of protein only and plot those data.
+   📊 user_goal: The simulation of initial structure 3.pdb is already done. Simulation trajectory is in working_dir/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM for protein only and plot those data
    📊 task_type: multi_agent
 
 ⚡ AGENT ACTION (supervisor.input_validation):
@@ -97,7 +97,7 @@ Session ID: 20260326_175158
    📊 n_frames: 101
    📊 total_time_ns: 10.0
 
-🎛️  SUPERVISOR ROUTING [2026-03-26 17:51:59]:
+🎛️  SUPERVISOR ROUTING [2026-03-27 12:08:47]:
    Current State Summary:
      ❌ raw_pdb: Not set
      ❌ cleaned_pdb: Not set
@@ -107,13 +107,13 @@ Session ID: 20260326_175158
    📍 Routing: input_validation → supervisor
    💭 Reasoning: Input validation complete for multi_agent, returning to supervisor for planning
 
-🧠 LLM INTERACTION (supervisor.unified_enrichment) [2026-03-26 17:52:04]:
+🧠 LLM INTERACTION (supervisor.unified_enrichment) [2026-03-27 12:08:53]:
    📝 Prompt:
    ======================================================================
    You are helping to clarify and enrich a user's goal for MD simulation workflow.
    
    **User's Original Goal:**
-   The simulation of initial structure 3.pdb is already done. Simulation trajectory is in working_dir/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM of protein only and plot those data. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is kinase, please give the dynamics based on analysis result in report
+   The simulation of initial structure 3.pdb is already done. Simulation trajectory is in working_dir/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM for protein only and plot those data. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is psedukinase, please give the dynamics based comments on analysis result in report
    
    
    **Molecular System Information:**
@@ -153,16 +153,22 @@ Session ID: 20260326_175158
    ======================================================================
    💭 Response:
    ======================================================================
-   Perform analysis on the trajectory located at `/home/akp66103/workspace/agenticAI/working_dir/hpc/` that contains 101 frames over 10 ns. Calculate RMSD, RMSF, and center‑of‑mass (COM) for the protein portion only (255 residues, 68300 atoms total, excluding water and ions). Generate plots for each metric and produce a scientific report that interprets the dynamics of the kinase based on these results. No additional preprocessing, simulation, or HPC steps are required. The report should be created by the reporter agent and summarize the observed protein motion and stability.
+   Analyze the trajectory located in `working_dir/hpc/` (101 frames, 10 ns) to compute RMSD, RMSF, and center‑of‑mass (COM) for the protein component (255 residues) only, excluding ions, water, and any ligand.  
+   Generate time‑series plots for each metric and tabulate the numerical values.  
+   Use the resulting data to produce a scientific report via the reporter agent, providing dynamic‑behavior commentary on psedukinase.  
+   Ensure no new simulations or HPC tasks are launched during this workflow.
    ======================================================================
 
-🧠 LLM INTERACTION (planner.execution_planning) [2026-03-26 17:52:21]:
+🧠 LLM INTERACTION (planner.execution_planning) [2026-03-27 12:09:26]:
    📝 Prompt:
    ======================================================================
    Create a detailed natural language execution plan for a MULTI-AGENT workflow.
    
    USER GOAL:
-   Perform analysis on the trajectory located at `/home/akp66103/workspace/agenticAI/working_dir/hpc/` that contains 101 frames over 10 ns. Calculate RMSD, RMSF, and center‑of‑mass (COM) for the protein portion only (255 residues, 68300 atoms total, excluding water and ions). Generate plots for each metric and produce a scientific report that interprets the dynamics of the kinase based on these results. No additional preprocessing, simulation, or HPC steps are required. The report should be created by the reporter agent and summarize the observed protein motion and stability.
+   Analyze the trajectory located in `working_dir/hpc/` (101 frames, 10 ns) to compute RMSD, RMSF, and center‑of‑mass (COM) for the protein component (255 residues) only, excluding ions, water, and any ligand.  
+   Generate time‑series plots for each metric and tabulate the numerical values.  
+   Use the resulting data to produce a scientific report via the reporter agent, providing dynamic‑behavior commentary on psedukinase.  
+   Ensure no new simulations or HPC tasks are launched during this workflow.
    
    PDB File: Not specified
    TASK: Run ONLY these agents in order: Analysis Agent → Reporter Agent
@@ -285,6 +291,12 @@ Session ID: 20260326_175158
    
    Returns:
        Dict with RMSD results and statistics
+   
+   Output file format (tab-separated, # comment header):
+       # Time(ns)	RMSD(Angstrom)
+       0.0000	0.0000
+       0.1000	0.9425
+       ...
      Parameters:
        • topology_file (required): No description
        • trajectory_file (required): No description
@@ -314,6 +326,12 @@ Session ID: 20260326_175158
    
    Returns:
        Dict with RMSF results and statistics
+   
+   Output file format (tab-separated, # comment header):
+       # Residue	RMSF(Angstrom)
+       1	0.5432
+       2	0.6781
+       ...
      Parameters:
        • topology_file (required): No description
        • trajectory_file (required): No description
@@ -391,6 +409,49 @@ Session ID: 20260326_175158
      Parameters:
        • working_dir (required): Working directory for analysis
    
+   → plot_3d
+     Create a 3D plot for geometric or spatial data (x, y, z).
+   
+   Automatically detects columns named x, y, z (case-insensitive) when
+   column indices are not provided.  Useful for center-of-mass trajectories,
+   spatial distributions, or any 3-variable dataset.
+   
+   Args:
+       data_files: List of data file paths to plot (.csv, .dat, .xvg)
+       output_file: Output image filename only (e.g., "com_3d.png") - saved in working_dir
+       x_col: Column index for x-axis data (auto-detected if None)
+       y_col: Column index for y-axis data (auto-detected if None)
+       z_col: Column index for z-axis data (auto-detected if None)
+       plot_type: "scatter" or "line" - default: "scatter"
+       titles: Plot title (optional)
+       xlabel: X-axis label (optional, auto-detected from column name)
+       ylabel: Y-axis label (optional, auto-detected from column name)
+       zlabel: Z-axis label (optional, auto-detected from column name)
+       labels: Legend labels for each data file (optional)
+       colors: Colors for each dataset (optional)
+       figsize: Figure size as (width, height) in inches - default: (10, 8)
+       dpi: Resolution in dots per inch - default: 300
+       working_dir: Working directory for analysis (files will be written here)
+   
+   Returns:
+       Dict with plotting results
+     Parameters:
+       • data_files (required): No description
+       • output_file (required): No description
+       • x_col (optional): No description
+       • y_col (optional): No description
+       • z_col (optional): No description
+       • plot_type (optional): No description
+       • titles (optional): No description
+       • xlabel (optional): No description
+       • ylabel (optional): No description
+       • zlabel (optional): No description
+       • labels (optional): No description
+       • colors (optional): No description
+       • figsize (optional): No description
+       • dpi (optional): No description
+       • working_dir (optional): No description
+   
    → plot_combined_data
      Create combined plots from a single data file with multiple columns.
    
@@ -427,11 +488,12 @@ Session ID: 20260326_175158
        • dpi (optional): No description
        • working_dir (optional): No description
    
-   → plot_md_data
-     Plot MD analysis data from one or more data files (single panel).
+   → plot_data
+     Plot analysis data from one or more data files (single 2D panel).
    
-   Creates a single-panel plot for visualizing RMSD, RMSF, Rg, or energy data.
-   Supports overlay of multiple datasets on the same axes.
+   Creates a single-panel 2D plot for visualizing RMSD, RMSF, Rg, energy, or
+   other time-series / per-residue data.  Supports overlay of multiple datasets
+   on the same axes.
    
    Args:
        data_files: List of data file paths to plot (.xvg, .dat, .csv)
@@ -461,11 +523,80 @@ Session ID: 20260326_175158
        • dpi (optional): No description
        • working_dir (optional): No description
    
-   → plot_md_multipanel
-     Create multi-panel plots for comparing multiple MD analyses.
+   → plot_data
+     Plot analysis data from one or more data files (single 2D panel).
+   
+   Creates a single-panel 2D plot for visualizing RMSD, RMSF, Rg, energy, or
+   other time-series / per-residue data.  Supports overlay of multiple datasets
+   on the same axes.
+   
+   Args:
+       data_files: List of data file paths to plot (.xvg, .dat, .csv)
+       output_file: Output image filename only (e.g., "plot.png") - saved in working_dir
+       plot_type: Type of plot ("line", "scatter", "bar") - default: "line"
+       titles: Plot title (optional)
+       xlabel: X-axis label (optional, auto-detected from file if available)
+       ylabel: Y-axis label (optional, auto-detected from file if available)
+       labels: Legend labels for each data file (optional)
+       colors: Line/marker colors for each dataset (optional)
+       figsize: Figure size as (width, height) in inches - default: (10, 6)
+       dpi: Resolution in dots per inch - default: 300
+       working_dir: Working directory for analysis (files will be written here)
+   
+   Returns:
+       Dict with plotting results
+     Parameters:
+       • data_files (required): No description
+       • output_file (required): No description
+       • plot_type (optional): No description
+       • titles (optional): No description
+       • xlabel (optional): No description
+       • ylabel (optional): No description
+       • labels (optional): No description
+       • colors (optional): No description
+       • figsize (optional): No description
+       • dpi (optional): No description
+       • working_dir (optional): No description
+   
+   → plot_multipanel
+     Create multi-panel plots for comparing multiple analyses.
    
    Creates a figure with multiple subplots, one for each data file.
-   Useful for comparing RMSD, RMSF, Rg, and energy in a single figure.
+   Useful for comparing RMSD, RMSF, Rg, energy, or any 2D data side-by-side.
+   
+   Args:
+       data_files: List of data file paths, one per panel (.xvg, .dat, .csv)
+       output_file: Output image file path (.png, .pdf, .svg)
+       layout: Subplot layout ("vertical", "horizontal", "grid") - default: "vertical"
+       titles: List of subplot titles (optional)
+       xlabels: List of x-axis labels for each subplot (optional)
+       ylabels: List of y-axis labels for each subplot (optional)
+       plot_types: List of plot types for each panel (optional, default: "line")
+       colors: List of colors for each panel (optional)
+       figsize: Figure size as (width, height) in inches (auto-sized if None)
+       dpi: Resolution in dots per inch - default: 300
+       working_dir: Working directory for analysis
+   
+   Returns:
+       Dict with plotting results
+     Parameters:
+       • data_files (required): No description
+       • output_file (required): No description
+       • layout (optional): No description
+       • titles (optional): No description
+       • xlabels (optional): No description
+       • ylabels (optional): No description
+       • plot_types (optional): No description
+       • colors (optional): No description
+       • figsize (optional): No description
+       • dpi (optional): No description
+       • working_dir (optional): No description
+   
+   → plot_multipanel
+     Create multi-panel plots for comparing multiple analyses.
+   
+   Creates a figure with multiple subplots, one for each data file.
+   Useful for comparing RMSD, RMSF, Rg, energy, or any 2D data side-by-side.
    
    Args:
        data_files: List of data file paths, one per panel (.xvg, .dat, .csv)
@@ -535,7 +666,7 @@ Session ID: 20260326_175158
      Generate HTML report from analysis data and literature.
    
    Creates a professional scientific report with analysis results,
-   visualizations, and literature context.
+   visualizations, literature context, and final impressions.
    
    Args:
        analysis_data: Parsed analysis summary data
@@ -543,6 +674,8 @@ Session ID: 20260326_175158
        report_type: Type of report ("comprehensive" or "executive")
        output_file: Output HTML filename (saved in working_dir)
        working_dir: Working directory for output
+       system_info: Molecular system metadata from input validation (optional)
+       final_impression: LLM-generated final impression correlating analysis with literature (optional)
    
    Returns:
        Dict with report generation results
@@ -552,6 +685,8 @@ Session ID: 20260326_175158
        • report_type (optional): No description
        • output_file (optional): No description
        • working_dir (optional): No description
+       • system_info (optional): No description
+       • final_impression (optional): No description
    
    → generate_literature_queries
      Generate PubMed search queries based on analysis types.
@@ -706,90 +841,62 @@ Session ID: 20260326_175158
    ======================================================================
    💭 Response:
    ======================================================================
-   **Goal:**  
-   Produce a comprehensive scientific report that presents the dynamical behavior of a kinase protein by calculating and visualizing the root‑mean‑square deviation (RMSD), root‑mean‑square fluctuation (RMSF), and center‑of‑mass (COM) trajectories for the protein portion of a 10 ns MD trajectory containing 101 frames. The analysis will be confined to the 255 protein residues (68 300 atoms) and will exclude water and ions. All calculations should be performed using the provided trajectory and topology files located in `/home/akp66103/workspace/agenticAI/working_dir/hpc/`. The final deliverable will be an HTML report that includes quantitative results, plots, and an interpretive discussion of protein stability and flexibility.
-   
-   ---
+   **Goal:**
+   The workflow will compute the protein‑centric root‑mean‑square deviation (RMSD), root‑mean‑square fluctuation (RMSF), and center‑of‑mass (COM) trajectories from a 101‑nanosecond simulation of a 255‑residue protein, generate clear time‑series visualisations, tabulate the key numerical statistics, and assemble everything into a comprehensive HTML scientific report that contextualises the findings with relevant literature on psedukinase.
    
    **Analysis Agent:**
+   The Analysis Agent will orchestrate all data extraction and visualisation steps required to meet the user’s goal. It will operate entirely in the supplied local working directory, ensuring that no external high‑performance computing resources are invoked.
    
-   The Analysis Agent is responsible for extracting the required metrics from the trajectory, generating the necessary data files, and preparing a summary that the Reporter Agent can consume.
+   First, the agent will locate the trajectory and topology files inside the *hpc* sub‑folder.  The trajectory is assumed to be a GROMACS .xtc file (for example *trajectory.xtc*), and the corresponding topology a .tpr file (*topol.tpr*).  Full absolute paths will be supplied to each tool.
    
-   1. **Input acquisition**  
-      - The agent must first locate the trajectory and topology files in the working directory.  
-      - Standard naming conventions will be assumed: the trajectory may be `trajectory.xtc` (or `trajectory.trr`) and the topology may be `topology.tpr`, `topology.gro`, or `topology.pdb`.  
-      - The agent should verify that the trajectory contains 101 frames and that the protein residue count matches 255 residues.
+   The agent will then invoke the GROMACS‑based tools that are available.  For the protein component alone the default selection strings “protein” or “protein and name CA” automatically exclude ions, water, and any ligands, so no additional preprocessing is required.
    
-   2. **RMSD calculation**  
-      - Use `calculate_rmsd` with `selection="protein and name CA"` to compute the per‑frame RMSD relative to the first frame.  
-      - Set `align_before_rmsd=True` to remove global rotation/translation.  
-      - Output the RMSD data to `rmsd.dat` in the working directory.  
-      - Capture key statistics (mean, standard deviation, maximum RMSD) in the analysis summary.
+   1. **RMSD calculation** – the *calculate_rmsd* tool will be called with the topology and trajectory paths, the default selection “protein and name CA”, reference frame 0, and the output filename *rmsd.dat*.  The tool writes a two‑column file (time, RMSD) into the working directory.
    
-   3. **RMSF calculation**  
-      - Employ `calculate_rmsf` with the same selection as RMSD.  
-      - Ensure `align_trajectory=True` and `align_selection="protein and name CA"` for consistency.  
-      - Output RMSF per‑residue values to `rmsf.dat`.  
-      - Record the average RMSF, the most flexible residues, and any notable peaks in the summary.
+   2. **RMSF calculation** – the *calculate_rmsf* tool will run with the same topology and trajectory, the selection “protein”, and the output filename *rmsf.dat*.  The produced file contains a per‑residue RMSF value.  The agent will also compute simple descriptive statistics (minimum, maximum, mean, standard deviation) for the overall RMSF distribution by reading the file into memory and performing the calculations in a short Python snippet.
    
-   4. **Center‑of‑Mass calculation**  
-      - **Missing tool for center‑of‑mass calculation. Need to create custom tool for calculating COM of the protein residues per frame and saving to a CSV file.**  
-      - Once available, invoke the new tool with `selection="protein"` to generate a `com.dat` file containing frame number, time, and COM coordinates (x, y, z).  
-      - Extract statistics such as COM drift and mean displacement.
+   3. **Center‑of‑Mass calculation** – no built‑in tool exists for computing a protein‑only COM time‑series.  The Analysis Agent will therefore request the creation of a custom tool with the exact name *calculate_center_of_mass*.  This tool should accept a topology file, a trajectory file, an atom selection string (“protein”), and an output filename, and it should generate a three‑column file (time, x, y, z) that records the instantaneous COM of the selected atoms at every stored frame.  Once this tool is available, the agent will invoke it, directing the output to *com.dat*.
    
-   5. **Plot generation**  
-      - Use `plot_md_data` to create a line plot of RMSD over time, saved as `rmsd.png`.  
-      - Use `plot_md_data` again to plot RMSF per residue, saved as `rmsf.png`.  
-      - For COM, use `plot_md_data` to plot each Cartesian component (x, y, z) versus time, saving the figure as `com.png`.  
-      - All plots should include appropriate titles, axis labels, and legends.
+   4. **Plot generation** – visualisations are required for each metric.  
+      * The *plot_data* tool will create a PNG plot of the RMSD time‑series from *rmsd.dat*, naming the figure *rmsd.png*.  
+      * For RMSF, a per‑residue bar chart will be produced by *plot_data* using the same *rmsf.dat* file; the plot will be saved as *rmsf.png*.  
+      * The COM trajectory will be displayed in three dimensions with the *plot_3d* tool, which will read *com.dat* and generate *com_3d.png* by treating the second, third, and fourth columns as the x, y, z coordinates.
    
-   6. **Summary file creation**  
-      - Call `initialize_summary_file` to generate `analysis_summary.jsonl` in the working directory.  
-      - Append a JSON entry for each metric (RMSD, RMSF, COM) that includes file names, statistics, and any additional metadata.  
-      - Ensure that the file is ready for the Reporter Agent to parse.
+   5. **Summary tabulation** – the agent will compile a tabular summary of each metric.  It will read the numeric values from *rmsd.dat* and *rmsf.dat* (the latter aggregated over all residues) to calculate the minimum, maximum, mean, and standard deviation.  These statistics, along with the file paths for the data and figures, will be written line‑by‑line to a JSON‑lines file called *analysis_summary.jsonl* in the working directory.  This file will have one JSON object per metric, containing keys such as *metric*, *file*, *plot*, *mean*, *std*, etc., which the Reporter Agent can consume.
    
-   7. **Completion**  
-      - The Analysis Agent signals that all required data files and the summary file are complete, and the workflow passes control to the Reporter Agent.
-   
-   ---
+   The Analysis Agent will therefore produce the following artifacts: *rmsd.dat*, *rmsf.dat*, *com.dat*, *rmsd.png*, *rmsf.png*, *com_3d.png*, and *analysis_summary.jsonl*.  No external computational resources beyond the local GROMACS tools will be requested, satisfying the user’s instruction to avoid launching HPC jobs.
    
    **Reporter Agent:**
+   The Reporter Agent will take the output produced by the Analysis Agent and assemble it into a polished, literature‑aware HTML report.
    
-   The Reporter Agent will consume the analysis summary and generate a polished HTML report.
+   1. **Input parsing** – the agent will read the *analysis_summary.jsonl* file using the *read_analysis_summary* tool.  This will give it a dictionary of metric entries and any overall statistics already computed by the Analysis Agent.
    
-   1. **Input consumption**  
-      - Read `analysis_summary.jsonl` using `read_analysis_summary`.  
-      - Parse the entries for RMSD, RMSF, and COM, extracting statistics and file references.
+   2. **Literature search** – to provide context for psedukinase dynamics, the agent will first generate PubMed queries for the analyses performed.  It will call *generate_literature_queries*, supplying the list ["RMSD", "RMSF", "COM"] and the original user goal.  The returned queries will be fed to *search_pubmed*, retrieving up to, say, ten recent papers for each query and including abstracts.  These results will be compiled into a list of literature references.
    
-   2. **Literature context**  
-      - Construct a list of analysis types (`["RMSD", "RMSF", "COM"]`).  
-      - Use `generate_literature_queries` to formulate PubMed queries relevant to kinase dynamics, RMSD interpretation, and COM drift analysis.  
-      - Execute `search_pubmed` for each query (limiting to the last five years) and collect the top 3–5 articles per topic.  
-      - Extract titles, authors, and abstracts to include as citations in the report.
+   3. **Report generation** – the agent will then invoke *generate_html_report*, supplying:  
+      * The parsed analysis data (the dictionary from *read_analysis_summary*).  
+      * The list of literature references returned from *search_pubmed*.  
+      * The report type “comprehensive”.  
+      * An output filename *psedukinase_report.html* placed in the working directory.  
+      * The working directory path for output storage.  
+      * Optionally, system metadata (number of residues, simulation time) could be passed via the *system_info* parameter, but the core of the report will embed the three figures (*rmsd.png*, *rmsf.png*, *com_3d.png*) and a table of the key statistics.
    
-   3. **Report assembly**  
-      - Invoke `generate_html_report` with the parsed analysis data and the curated literature references.  
-      - Set `report_type="comprehensive"` to include full methodological detail, plots, tables, and a discussion section.  
-      - Specify `output_file="kinase_dynamics_report.html"` to be written in the working directory.
-   
-   4. **Post‑processing**  
-      - Verify that the HTML report includes embedded images (`rmsd.png`, `rmsf.png`, `com.png`) and tables of statistics.  
-      - Ensure that the report contains an interpretive narrative that correlates the RMSD plateau (indicating stability), RMSF hot‑spots (flexible loops or activation loops), and COM drift (overall protein mobility).
-   
-   5. **Completion**  
-      - The Reporter Agent finalizes the report and returns a confirmation that `kinase_dynamics_report.html` is ready for the user.
-   
-   ---
+   The resulting HTML file will present a narrative that connects the observed dynamical behaviours (overall stability, residue‑level flexibility, COM drift) to known psedukinase characteristics in the literature, complete with embedded visualisations and a concise summary table.
    
    **Expected Outcomes:**
+   At the conclusion of this two‑agent workflow the user will receive:
    
-   - A set of data files: `rmsd.dat`, `rmsf.dat`, `com.dat`, each with per‑frame or per‑residue values.  
-   - Three high‑resolution plots: RMSD vs. time, RMSF per residue, COM components vs. time.  
-   - An `analysis_summary.jsonl` containing statistical summaries for each metric.  
-   - A professional HTML report named `kinase_dynamics_report.html` that summarizes the trajectory analysis, presents the plots, lists key statistics, and contextualizes the findings with recent literature on kinase dynamics.
+   * A data file *rmsd.dat* with the protein RMSD time‑series.  
+   * A visualisation *rmsd.png* showing RMSD versus time.  
+   * A data file *rmsf.dat* with per‑residue RMSF values.  
+   * A visualisation *rmsf.png* displaying the RMSF distribution across the 255 residues.  
+   * A data file *com.dat* containing the protein centre‑of‑mass trajectory (time, x, y, z).  
+   * A visualisation *com_3d.png* illustrating the 3‑D COM path.  
+   * A JSON‑lines summary file *analysis_summary.jsonl* summarising each metric and its statistics.  
+   * A comprehensive HTML report *psedukinase_report.html* that weaves together the analysis, literature context, plots, and a final scientific impression.
    ======================================================================
 
-🧠 LLM INTERACTION (planner.tool_specification) [2026-03-26 17:52:28]:
+🧠 LLM INTERACTION (planner.tool_specification) [2026-03-27 12:09:34]:
    📝 Prompt:
    ======================================================================
    You are a molecular dynamics workflow expert tasked with specifying custom tools that need to be created.
@@ -797,16 +904,15 @@ Session ID: 20260326_175158
    **CONTEXT:**
    The planner has identified that existing tools are insufficient. Here's what's needed:
    
-   **Center‑of‑Mass calculation**  
-      - **Missing tool for center‑of‑mass calculation
+   This tool should accept a topology file, a trajectory file, an atom selection string (“protein”), and an output filename, and it should generate a three‑column file (time, x, y, z) that records the instantaneous COM of the selected atoms at every stored frame
    
    **WORKFLOW CONTEXT:**
-   - User Goal: The simulation of initial structure 3.pdb is already done. Simulation trajectory is in working_dir/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM of protein only and plot those data. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is kinase, please give the dynamics based on analysis result in report
+   - User Goal: The simulation of initial structure 3.pdb is already done. Simulation trajectory is in working_dir/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM for protein only and plot those data. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is psedukinase, please give the dynamics based comments on analysis result in report
    - Force Field: amber99sb-ildn
    - MD Engine: gromacs
    
    **ALREADY AVAILABLE TOOLS (DO NOT CREATE SPECS FOR THESE):**
-   add_hydrogens, add_ions, analyze_energy, analyze_pdb, analyze_secondary_structure, build_human_summary, build_simulation_box, build_simulation_system, build_topology, calculate_radius_of_gyration, calculate_rmsd, calculate_rmsf, calculate_sasa, check_job_status, convert_amber_to_gromacs, convert_pdb_to_gro, copy_simulation_files, create_slurm_script, detect_task_required_inputs, download_results, edit_topology_file, estimate_simulation_time, extract_file_names_from_goal, extract_trajectory_metrics, generate_html_report, generate_ligand_parameters, generate_literature_queries, generate_mdp_file, generate_mdp_files, generate_python_tool, generate_summary_report, generate_tcl_script, generate_tpr_file, get_dynamic_tool_loader, get_programmer_tools, get_reporter_tools, initialize_summary_file, map_ligand_atom_names, merge_gro_files, parse_component_selection, plot_combined_data, plot_md_data, plot_md_multipanel, plot_sasa, read_analysis_summary, run_complete_analysis, search_pubmed, separate_complex_components, solvate_system, split_complex_pdb_to_gro, submit_job, validate_and_enrich_inputs, validate_feasibility, validate_python_code, validate_structure, validate_tcl_code, wraps
+   add_hydrogens, add_ions, analyze_energy, analyze_pdb, analyze_secondary_structure, build_human_summary, build_simulation_box, build_simulation_system, build_topology, calculate_radius_of_gyration, calculate_rmsd, calculate_rmsf, calculate_sasa, check_job_status, convert_amber_to_gromacs, convert_pdb_to_gro, copy_simulation_files, create_slurm_script, detect_task_required_inputs, download_results, edit_topology_file, estimate_simulation_time, extract_file_names_from_goal, extract_trajectory_metrics, generate_html_report, generate_ligand_parameters, generate_literature_queries, generate_mdp_file, generate_mdp_files, generate_python_tool, generate_summary_report, generate_tcl_script, generate_tpr_file, get_dynamic_tool_loader, get_programmer_tools, get_reporter_tools, initialize_summary_file, map_ligand_atom_names, merge_gro_files, parse_component_selection, plot_3d, plot_combined_data, plot_data, plot_multipanel, plot_sasa, read_analysis_summary, run_complete_analysis, search_pubmed, separate_complex_components, solvate_system, split_complex_pdb_to_gro, submit_job, validate_and_enrich_inputs, validate_feasibility, validate_python_code, validate_structure, validate_tcl_code, wraps
    
    **CRITICAL RULE:**
    - ONLY create specifications for tools that are genuinely MISSING
@@ -855,27 +961,27 @@ Session ID: 20260326_175158
    ======================================================================
    [
      {
-       "name": "calculate_com",
-       "description": "Compute the center\u2011of\u2011mass trajectory of a specified atom group",
+       "name": "generate_com_trajectory",
+       "description": "Compute the instantaneous center of mass of a selected group over a trajectory and output a time\u2011series file.",
        "language": "python",
-       "purpose": "The tool extracts the coordinates of a user\u2011defined atom selection (e.g., protein residues) from a GROMACS trajectory and calculates the center\u2011of\u2011mass (COM) for each frame. The resulting COM coordinates over time are written to a CSV file, facilitating downstream plotting and dynamic analysis of protein motion.",
+       "purpose": "This tool parses a GROMACS topology and trajectory, selects atoms matching an arbitrary MDAnalysis selection string (e.g., \"protein\"), computes the center of mass for each stored frame, and writes the results to a CSV file with columns: time, x, y, z. It is useful for downstream RMSD, RMSF, or COM monitoring analyses and plotting.",
        "parameters": {
-         "trajectory": {
-           "type": "str",
-           "description": "Path to the GROMACS trajectory file (e.g., .xtc or .trr)."
-         },
          "topology": {
            "type": "str",
-           "description": "Path to the GROMACS topology or coordinate file (e.g., .tpr, .gro, or .pdb)."
+           "description": "Path to the topology file (.tpr, .gro, .top, etc.)."
          },
-         "atom_selection": {
+         "trajectory": {
            "type": "str",
-           "description": "MDAnalysis selection string defining the atoms to be used for the COM (default selects all protein atoms).",
-           "default": "\"protein\""
+           "description": "Path to the trajectory file (.xtc, .trr, .dcd)."
+         },
+         "selection": {
+           "type": "str",
+           "description": "MDAnalysis selection string identifying the atoms to compute the COM for (e.g., \"protein\").",
+           "default": "protein"
          },
          "output_file": {
            "type": "str",
-           "description": "File path for the CSV output containing frame index, time, and COM coordinates."
+           "description": "Path where the CSV output will be written."
          }
        },
        "return_type": "Dict[str, Any]",
@@ -884,7 +990,7 @@ Session ID: 20260326_175158
          "numpy",
          "pandas"
        ],
-       "examples": "com_result = calculate_com(\n    trajectory='working_dir/hpc/trajectory.xtc',\n    topology='working_dir/hpc/topol.tpr',\n    atom_selection='protein',\n    output_file='working_dir/hpc/com_protein.csv'\n)\n# com_result will include the path to the CSV and the number of frames processed."
+       "examples": "output = generate_com_trajectory(\n    topology='working_dir/hpc/topol.tpr',\n    trajectory='working_dir/hpc/trajectory.xtc',\n    selection='protein',\n    output_file='working_dir/hpc/com_output.csv'\n)\nprint(output['output_file'])  # prints the path to the created CSV"
      }
    ]
    ======================================================================
@@ -893,52 +999,52 @@ Session ID: 20260326_175158
    🎬 Action: Invoking Programmer Agent
    📊 tool_count: 1
    📊 tools: [
-      "calculate_com"
+      "generate_com_trajectory"
 ]
    📊 bypass_supervisor: True
 
-🤖 CUSTOM TOOL GENERATION AGENT (programmer) STARTING [2026-03-26 17:52:28]:
+🤖 CUSTOM TOOL GENERATION AGENT (programmer) STARTING [2026-03-27 12:09:34]:
    Input Data Summary:
-     • planner_instructions: **Tool: calculate_com (python)**
-Description: Compute the center‑of‑mass trajectory of a specified atom group
-Purpose: The tool extracts the coordinates of a user‑defined atom selection (e.g., protein... [truncated, see full plan above]
+     • planner_instructions: **Tool: generate_com_trajectory (python)**
+Description: Compute the instantaneous center of mass of a selected group over a trajectory and output a time‑series file.
+Purpose: This tool parses a GROMAC... [truncated, see full plan above]
 
-🧠 LLM INTERACTION (programmer.planning) [2026-03-26 17:52:54]:
+🧠 LLM INTERACTION (programmer.planning) [2026-03-27 12:09:51]:
    📝 Prompt:
    ======================================================================
    You are a code generation specialist creating custom tools for an MD workflow.
    
    **Planner Instructions:**
-   **Tool: calculate_com (python)**
-   Description: Compute the center‑of‑mass trajectory of a specified atom group
-   Purpose: The tool extracts the coordinates of a user‑defined atom selection (e.g., protein residues) from a GROMACS trajectory and calculates the center‑of‑mass (COM) for each frame. The resulting COM coordinates over time are written to a CSV file, facilitating downstream plotting and dynamic analysis of protein motion.
-   Parameters: trajectory, topology, atom_selection, output_file
+   **Tool: generate_com_trajectory (python)**
+   Description: Compute the instantaneous center of mass of a selected group over a trajectory and output a time‑series file.
+   Purpose: This tool parses a GROMACS topology and trajectory, selects atoms matching an arbitrary MDAnalysis selection string (e.g., "protein"), computes the center of mass for each stored frame, and writes the results to a CSV file with columns: time, x, y, z. It is useful for downstream RMSD, RMSF, or COM monitoring analyses and plotting.
+   Parameters: topology, trajectory, selection, output_file
    
    
    **Detailed Tool Specifications from Planner:**
    ```json
    [
      {
-       "name": "calculate_com",
-       "description": "Compute the center\u2011of\u2011mass trajectory of a specified atom group",
+       "name": "generate_com_trajectory",
+       "description": "Compute the instantaneous center of mass of a selected group over a trajectory and output a time\u2011series file.",
        "language": "python",
        "parameters": {
-         "trajectory": {
-           "type": "str",
-           "description": "Path to the GROMACS trajectory file (e.g., .xtc or .trr)."
-         },
          "topology": {
            "type": "str",
-           "description": "Path to the GROMACS topology or coordinate file (e.g., .tpr, .gro, or .pdb)."
+           "description": "Path to the topology file (.tpr, .gro, .top, etc.)."
          },
-         "atom_selection": {
+         "trajectory": {
            "type": "str",
-           "description": "MDAnalysis selection string defining the atoms to be used for the COM (default selects all protein atoms).",
-           "default": "\"protein\""
+           "description": "Path to the trajectory file (.xtc, .trr, .dcd)."
+         },
+         "selection": {
+           "type": "str",
+           "description": "MDAnalysis selection string identifying the atoms to compute the COM for (e.g., \"protein\").",
+           "default": "protein"
          },
          "output_file": {
            "type": "str",
-           "description": "File path for the CSV output containing frame index, time, and COM coordinates."
+           "description": "Path where the CSV output will be written."
          }
        },
        "return_type": "Dict[str, Any]",
@@ -947,8 +1053,8 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
          "numpy",
          "pandas"
        ],
-       "purpose": "The tool extracts the coordinates of a user\u2011defined atom selection (e.g., protein residues) from a GROMACS trajectory and calculates the center\u2011of\u2011mass (COM) for each frame. The resulting COM coordinates over time are written to a CSV file, facilitating downstream plotting and dynamic analysis of protein motion.",
-       "examples": "com_result = calculate_com(\n    trajectory='working_dir/hpc/trajectory.xtc',\n    topology='working_dir/hpc/topol.tpr',\n    atom_selection='protein',\n    output_file='working_dir/hpc/com_protein.csv'\n)\n# com_result will include the path to the CSV and the number of frames processed."
+       "purpose": "This tool parses a GROMACS topology and trajectory, selects atoms matching an arbitrary MDAnalysis selection string (e.g., \"protein\"), computes the center of mass for each stored frame, and writes the results to a CSV file with columns: time, x, y, z. It is useful for downstream RMSD, RMSF, or COM monitoring analyses and plotting.",
+       "examples": "output = generate_com_trajectory(\n    topology='working_dir/hpc/topol.tpr',\n    trajectory='working_dir/hpc/trajectory.xtc',\n    selection='protein',\n    output_file='working_dir/hpc/com_output.csv'\n)\nprint(output['output_file'])  # prints the path to the created CSV"
      }
    ]
    ```
@@ -1093,7 +1199,15 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
    
    # Save results
    df = pd.DataFrame(com_data)
-   df.to_csv(output_file, index=False)
+   df.to_csv(output_file, index=False, header=True)
+   
+   # IMPORTANT: If writing non-CSV output files (.dat, .txt), always add a
+   # '#'-prefixed header line so downstream plotters can parse column names.
+   # Example:
+   #   with open(output_file, 'w') as f:
+   #       f.write("# Time(ns)\tValue\n")
+   #       for row in data:
+   #           f.write(f"{row[0]:.4f}\t{row[1]:.4f}\n")
    
    # Log statistics (no return after this!)
    try:
@@ -1300,44 +1414,43 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
    💭 Response:
    ======================================================================
    {
-     "reasoning": "The workflow requires a dedicated tool to compute the center\u2011of\u2011mass trajectory for a specified atom group from GROMACS trajectories, enabling downstream analysis and visualization.",
-     "overview": "Implement a self\u2011contained Python tool that loads a GROMACS trajectory and topology with MDAnalysis, selects the specified atoms, computes the COM per frame, writes the results to a CSV, and logs a detailed analysis summary.",
+     "reasoning": "We need a self\u2011contained Python tool that can be called by the workflow to compute the instantaneous center of mass for any MDAnalysis selection over a trajectory and save the results to a CSV. The tool must resolve input paths, perform the analysis, write the output, and log a summary for downstream consumption.",
+     "overview": "Generate a Python tool `generate_com_trajectory` that loads a GROMACS topology and trajectory, selects atoms based on an MDAnalysis string, computes the COM for each frame, outputs a CSV with columns `time, x, y, z`, and records key statistics in `analysis_summary.jsonl`.",
      "steps": [
        {
-         "name": "Generate calculate_com",
-         "description": "Create the calculate_com tool using generate_python_tool",
+         "name": "Generate generate_com_trajectory",
+         "description": "Create the `generate_com_trajectory` tool using `generate_python_tool`",
          "tool_name": "generate_python_tool",
          "tool_params": {
-           "tool_name": "calculate_com",
-           "description": "Compute the center\u2011of\u2011mass trajectory of a specified atom group",
+           "tool_name": "generate_com_trajectory",
+           "description": "Compute the instantaneous center of mass of a selected group over a trajectory and output a time\u2011series CSV file.",
            "parameters": {
-             "trajectory": {
-               "type": "str",
-               "description": "Path to the GROMACS trajectory file (e.g., .xtc or .trr)."
-             },
              "topology": {
                "type": "str",
-               "description": "Path to the GROMACS topology or coordinate file (e.g., .tpr, .gro, or .pdb)."
+               "description": "Path to the topology file (.tpr, .gro, .top, etc.)."
              },
-             "atom_selection": {
+             "trajectory": {
                "type": "str",
-               "description": "MDAnalysis selection string defining the atoms to be used for the COM (default selects all protein atoms).",
-               "default": "\"protein\""
+               "description": "Path to the trajectory file (.xtc, .trr, .dcd)."
+             },
+             "selection": {
+               "type": "str",
+               "description": "MDAnalysis selection string identifying the atoms to compute the COM for (e.g., \"protein\").",
+               "default": "protein"
              },
              "output_file": {
                "type": "str",
-               "description": "File path for the CSV output containing frame index, time, and COM coordinates."
+               "description": "Path where the CSV output will be written."
              }
            },
-           "implementation": "import MDAnalysis as mda\nimport pandas as pd\nimport numpy as np\nimport os\nimport logging\nfrom src.analysis.summary_logger import append_analysis_summary\n\nlogger = logging.getLogger(__name__)\n\n# Resolve input paths\ntraj_path = _resolve_input_path(trajectory, \"trajectory\")\ntopo_path = _resolve_input_path(topology, \"topology\")\n\n# Load universe\nu = mda.Universe(str(topo_path), str(traj_path))\n\n# Atom selection\nselection = u.select_atoms(atom_selection)\nselection_string = atom_selection\n\n# Prepare list for COM data\ncom_data = []\nfor ts in u.trajectory:\n    com = selection.center_of_mass()\n    com_data.append({\"frame\": ts.frame, \"time\": ts.time,\n                     \"x\": com[0], \"y\": com[1], \"z\": com[2]})\n\n# Convert to DataFrame\ndf = pd.DataFrame(com_data)\n\n# Write CSV\ndf.to_csv(output_file, index=False)\n\n# Compute statistics\nn_frames = len(df)\nmean_x = float(df[\"x\"].mean())\nstd_x = float(df[\"x\"].std())\nmin_x = float(df[\"x\"].min())\nmax_x = float(df[\"x\"].max())\n\n# Log analysis summary\ntry:\n    append_analysis_summary(\n        working_dir=os.getcwd(),\n        analysis_type=\"Center_of_Mass_Analysis\",\n        statistics={\n            \"n_frames\": n_frames,\n            \"mean_x\": mean_x,\n            \"std_x\": std_x,\n            \"min_x\": min_x,\n            \"max_x\": max_x\n        },\n        files={\n            \"topology\": topology,\n            \"trajectory\": trajectory,\n            \"output\": output_file\n        },\n        metadata={\n            \"selection\": selection_string\n        }\n    )\n    logger.info(\"Center of mass analysis summary logged.\")\nexcept Exception as e:\n    logger.warning(f\"Failed to log analysis summary: {e}\")",
+           "implementation": "import MDAnalysis as mda\nimport pandas as pd\nimport numpy as np\nimport os\nimport logging\nfrom src.analysis.summary_logger import append_analysis_summary\n\n# Resolve input paths\ntraj_path = _resolve_input_path(trajectory, \"trajectory\")\ntopo_path = _resolve_input_path(topology, \"topology\")\n\n# Logger setup (assumed available)\nlogger = logging.getLogger(__name__)\n\n# Load universe and selection\nu = mda.Universe(str(topo_path), str(traj_path))\nsel = u.select_atoms(selection)\n\n# Compute COM for each frame\ncom_records = []\nfor ts in u.trajectory:\n    com = sel.center_of_mass()\n    com_records.append({\n        \"time\": ts.time,\n        \"x\": com[0],\n        \"y\": com[1],\n        \"z\": com[2]\n    })\n\n# Save to CSV\ndf = pd.DataFrame(com_records)\ndf.to_csv(output_file, index=False)\n\n# Prepare statistics for logging\nn_frames = len(df)\nstats = {\n    \"n_frames\": n_frames,\n    \"mean_x\": float(df[\"x\"].mean()), \"std_x\": float(df[\"x\"].std()),\n    \"min_x\": float(df[\"x\"].min()), \"max_x\": float(df[\"x\"].max()),\n    \"mean_y\": float(df[\"y\"].mean()), \"std_y\": float(df[\"y\"].std()),\n    \"min_y\": float(df[\"y\"].min()), \"max_y\": float(df[\"y\"].max()),\n    \"mean_z\": float(df[\"z\"].mean()), \"std_z\": float(df[\"z\"].std()),\n    \"min_z\": float(df[\"z\"].min()), \"max_z\": float(df[\"z\"].max())\n}\n\n# Log analysis summary (required for analysis tools)\ntry:\n    append_analysis_summary(\n        working_dir=working_dir or os.getcwd(),\n        analysis_type=\"COM_Analysis\",\n        statistics=stats,\n        files={\n            \"topology\": str(topo_path),\n            \"trajectory\": str(traj_path),\n            \"output\": output_file\n        },\n        metadata={\"selection\": selection}\n    )\n    logger.info(\"COM analysis summary logged.\")\nexcept Exception as e:\n    logger.warning(f\"Failed to write analysis summary: {e}\")",
            "add_langchain_decorator": true,
            "dependencies": [
              "MDAnalysis",
              "numpy",
              "pandas"
            ]
-         },
-         "reason": "A dedicated COM calculation tool encapsulates the logic for trajectory processing, COM computation, and result logging, enabling reuse and consistency across workflows."
+         }
        }
      ],
      "estimated_complexity": "low"
@@ -1347,7 +1460,7 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
 ⚡ AGENT ACTION (programmer):
    🎬 Action: Generated programmer plan
    📊 steps: 1
-   📊 reasoning: The workflow requires a dedicated tool to compute the center‑of‑mass trajectory for a specified atom
+   📊 reasoning: We need a self‑contained Python tool that can be called by the workflow to compute the instantaneous
 
 ⚡ AGENT ACTION (programmer):
    🎬 Action: Executing programmer plan
@@ -1356,37 +1469,40 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
 
 ⚡ AGENT ACTION (programmer):
    🎬 Action: Executing step 1/1
-   📊 step: Generate calculate_com
+   📊 step: Generate generate_com_trajectory
    📊 tool: generate_python_tool
 
 ⚡ AGENT ACTION (programmer):
    🎬 Action: Step 1/1 completed
-   📊 step: Generate calculate_com
+   📊 step: Generate generate_com_trajectory
    📊 status: ✅ SUCCESS
 
 📁 FILE OPERATION (programmer):
    Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/programmer/calculate_com.py
+   File: /home/akp66103/workspace/agenticAI/working_dir/programmer/generate_com_trajectory.py
    Status: ✅ SUCCESS
 
-🏁 CUSTOM TOOL GENERATION AGENT (programmer) ✅ COMPLETED [2026-03-26 17:52:54]:
+🏁 CUSTOM TOOL GENERATION AGENT (programmer) ✅ COMPLETED [2026-03-27 12:09:51]:
    📤 Output Summary:
      • topology: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro
 
 ⚡ AGENT ACTION (planner):
    🎬 Action: Programmer Completed
    📊 tools_created: [
-      "calculate_com"
+      "generate_com_trajectory"
 ]
    📊 status: ✅ SUCCESS
 
-🧠 LLM INTERACTION (planner.execution_planning) [2026-03-26 17:53:15]:
+🧠 LLM INTERACTION (planner.execution_planning) [2026-03-27 12:10:17]:
    📝 Prompt:
    ======================================================================
    Create a detailed natural language execution plan for a MULTI-AGENT workflow.
    
    USER GOAL:
-   Perform analysis on the trajectory located at `/home/akp66103/workspace/agenticAI/working_dir/hpc/` that contains 101 frames over 10 ns. Calculate RMSD, RMSF, and center‑of‑mass (COM) for the protein portion only (255 residues, 68300 atoms total, excluding water and ions). Generate plots for each metric and produce a scientific report that interprets the dynamics of the kinase based on these results. No additional preprocessing, simulation, or HPC steps are required. The report should be created by the reporter agent and summarize the observed protein motion and stability.
+   Analyze the trajectory located in `working_dir/hpc/` (101 frames, 10 ns) to compute RMSD, RMSF, and center‑of‑mass (COM) for the protein component (255 residues) only, excluding ions, water, and any ligand.  
+   Generate time‑series plots for each metric and tabulate the numerical values.  
+   Use the resulting data to produce a scientific report via the reporter agent, providing dynamic‑behavior commentary on psedukinase.  
+   Ensure no new simulations or HPC tasks are launched during this workflow.
    
    PDB File: Not specified
    TASK: Run ONLY these agents in order: Analysis Agent → Reporter Agent
@@ -1509,6 +1625,12 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
    
    Returns:
        Dict with RMSD results and statistics
+   
+   Output file format (tab-separated, # comment header):
+       # Time(ns)	RMSD(Angstrom)
+       0.0000	0.0000
+       0.1000	0.9425
+       ...
      Parameters:
        • topology_file (required): No description
        • trajectory_file (required): No description
@@ -1538,6 +1660,12 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
    
    Returns:
        Dict with RMSF results and statistics
+   
+   Output file format (tab-separated, # comment header):
+       # Residue	RMSF(Angstrom)
+       1	0.5432
+       2	0.6781
+       ...
      Parameters:
        • topology_file (required): No description
        • trajectory_file (required): No description
@@ -1615,6 +1743,49 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
      Parameters:
        • working_dir (required): Working directory for analysis
    
+   → plot_3d
+     Create a 3D plot for geometric or spatial data (x, y, z).
+   
+   Automatically detects columns named x, y, z (case-insensitive) when
+   column indices are not provided.  Useful for center-of-mass trajectories,
+   spatial distributions, or any 3-variable dataset.
+   
+   Args:
+       data_files: List of data file paths to plot (.csv, .dat, .xvg)
+       output_file: Output image filename only (e.g., "com_3d.png") - saved in working_dir
+       x_col: Column index for x-axis data (auto-detected if None)
+       y_col: Column index for y-axis data (auto-detected if None)
+       z_col: Column index for z-axis data (auto-detected if None)
+       plot_type: "scatter" or "line" - default: "scatter"
+       titles: Plot title (optional)
+       xlabel: X-axis label (optional, auto-detected from column name)
+       ylabel: Y-axis label (optional, auto-detected from column name)
+       zlabel: Z-axis label (optional, auto-detected from column name)
+       labels: Legend labels for each data file (optional)
+       colors: Colors for each dataset (optional)
+       figsize: Figure size as (width, height) in inches - default: (10, 8)
+       dpi: Resolution in dots per inch - default: 300
+       working_dir: Working directory for analysis (files will be written here)
+   
+   Returns:
+       Dict with plotting results
+     Parameters:
+       • data_files (required): No description
+       • output_file (required): No description
+       • x_col (optional): No description
+       • y_col (optional): No description
+       • z_col (optional): No description
+       • plot_type (optional): No description
+       • titles (optional): No description
+       • xlabel (optional): No description
+       • ylabel (optional): No description
+       • zlabel (optional): No description
+       • labels (optional): No description
+       • colors (optional): No description
+       • figsize (optional): No description
+       • dpi (optional): No description
+       • working_dir (optional): No description
+   
    → plot_combined_data
      Create combined plots from a single data file with multiple columns.
    
@@ -1651,11 +1822,12 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
        • dpi (optional): No description
        • working_dir (optional): No description
    
-   → plot_md_data
-     Plot MD analysis data from one or more data files (single panel).
+   → plot_data
+     Plot analysis data from one or more data files (single 2D panel).
    
-   Creates a single-panel plot for visualizing RMSD, RMSF, Rg, or energy data.
-   Supports overlay of multiple datasets on the same axes.
+   Creates a single-panel 2D plot for visualizing RMSD, RMSF, Rg, energy, or
+   other time-series / per-residue data.  Supports overlay of multiple datasets
+   on the same axes.
    
    Args:
        data_files: List of data file paths to plot (.xvg, .dat, .csv)
@@ -1685,11 +1857,80 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
        • dpi (optional): No description
        • working_dir (optional): No description
    
-   → plot_md_multipanel
-     Create multi-panel plots for comparing multiple MD analyses.
+   → plot_data
+     Plot analysis data from one or more data files (single 2D panel).
+   
+   Creates a single-panel 2D plot for visualizing RMSD, RMSF, Rg, energy, or
+   other time-series / per-residue data.  Supports overlay of multiple datasets
+   on the same axes.
+   
+   Args:
+       data_files: List of data file paths to plot (.xvg, .dat, .csv)
+       output_file: Output image filename only (e.g., "plot.png") - saved in working_dir
+       plot_type: Type of plot ("line", "scatter", "bar") - default: "line"
+       titles: Plot title (optional)
+       xlabel: X-axis label (optional, auto-detected from file if available)
+       ylabel: Y-axis label (optional, auto-detected from file if available)
+       labels: Legend labels for each data file (optional)
+       colors: Line/marker colors for each dataset (optional)
+       figsize: Figure size as (width, height) in inches - default: (10, 6)
+       dpi: Resolution in dots per inch - default: 300
+       working_dir: Working directory for analysis (files will be written here)
+   
+   Returns:
+       Dict with plotting results
+     Parameters:
+       • data_files (required): No description
+       • output_file (required): No description
+       • plot_type (optional): No description
+       • titles (optional): No description
+       • xlabel (optional): No description
+       • ylabel (optional): No description
+       • labels (optional): No description
+       • colors (optional): No description
+       • figsize (optional): No description
+       • dpi (optional): No description
+       • working_dir (optional): No description
+   
+   → plot_multipanel
+     Create multi-panel plots for comparing multiple analyses.
    
    Creates a figure with multiple subplots, one for each data file.
-   Useful for comparing RMSD, RMSF, Rg, and energy in a single figure.
+   Useful for comparing RMSD, RMSF, Rg, energy, or any 2D data side-by-side.
+   
+   Args:
+       data_files: List of data file paths, one per panel (.xvg, .dat, .csv)
+       output_file: Output image file path (.png, .pdf, .svg)
+       layout: Subplot layout ("vertical", "horizontal", "grid") - default: "vertical"
+       titles: List of subplot titles (optional)
+       xlabels: List of x-axis labels for each subplot (optional)
+       ylabels: List of y-axis labels for each subplot (optional)
+       plot_types: List of plot types for each panel (optional, default: "line")
+       colors: List of colors for each panel (optional)
+       figsize: Figure size as (width, height) in inches (auto-sized if None)
+       dpi: Resolution in dots per inch - default: 300
+       working_dir: Working directory for analysis
+   
+   Returns:
+       Dict with plotting results
+     Parameters:
+       • data_files (required): No description
+       • output_file (required): No description
+       • layout (optional): No description
+       • titles (optional): No description
+       • xlabels (optional): No description
+       • ylabels (optional): No description
+       • plot_types (optional): No description
+       • colors (optional): No description
+       • figsize (optional): No description
+       • dpi (optional): No description
+       • working_dir (optional): No description
+   
+   → plot_multipanel
+     Create multi-panel plots for comparing multiple analyses.
+   
+   Creates a figure with multiple subplots, one for each data file.
+   Useful for comparing RMSD, RMSF, Rg, energy, or any 2D data side-by-side.
    
    Args:
        data_files: List of data file paths, one per panel (.xvg, .dat, .csv)
@@ -1751,23 +1992,23 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
        • working_dir (optional): Working directory for outputs
        • analyses (optional): List of analyses to perform
    
-   → calculate_com
-     Compute the center‑of‑mass trajectory of a specified atom group
+   → generate_com_trajectory
+     Compute the instantaneous center of mass of a selected group over a trajectory and output a time‑series CSV file.
    
    Args:
-       trajectory: Path to the GROMACS trajectory file (e.g., .xtc or .trr).
-       topology: Path to the GROMACS topology or coordinate file (e.g., .tpr, .gro, or .pdb).
-       output_file: File path for the CSV output containing frame index, time, and COM coordinates.
-       atom_selection: MDAnalysis selection string defining the atoms to be used for the COM (default selects all protein atoms).
+       topology: Path to the topology file (.tpr, .gro, .top, etc.).
+       trajectory: Path to the trajectory file (.xtc, .trr, .dcd).
+       output_file: Path where the CSV output will be written.
+       selection: MDAnalysis selection string identifying the atoms to compute the COM for (e.g., "protein").
        working_dir: Working directory for analysis (optional)
    
    Returns:
        Dict with execution results
      Parameters:
-       • trajectory (required): 
        • topology (required): 
+       • trajectory (required): 
        • output_file (required): 
-       • atom_selection (optional): 
+       • selection (optional): 
        • working_dir (optional): 
    
    **REPORTER Agent Tools:**
@@ -1778,7 +2019,7 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
      Generate HTML report from analysis data and literature.
    
    Creates a professional scientific report with analysis results,
-   visualizations, and literature context.
+   visualizations, literature context, and final impressions.
    
    Args:
        analysis_data: Parsed analysis summary data
@@ -1786,6 +2027,8 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
        report_type: Type of report ("comprehensive" or "executive")
        output_file: Output HTML filename (saved in working_dir)
        working_dir: Working directory for output
+       system_info: Molecular system metadata from input validation (optional)
+       final_impression: LLM-generated final impression correlating analysis with literature (optional)
    
    Returns:
        Dict with report generation results
@@ -1795,6 +2038,8 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
        • report_type (optional): No description
        • output_file (optional): No description
        • working_dir (optional): No description
+       • system_info (optional): No description
+       • final_impression (optional): No description
    
    → generate_literature_queries
      Generate PubMed search queries based on analysis types.
@@ -1921,39 +2166,113 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
    ======================================================================
    💭 Response:
    ======================================================================
-   **Goal:**
-   The workflow will analyze a 10‑nanosecond molecular‑dynamics trajectory of a kinase protein, compute key structural descriptors (RMSD, RMSF, center‑of‑mass trajectory) for the protein portion only, generate visualizations for each metric, and produce a comprehensive HTML scientific report that interprets the dynamical behavior of the protein.
+   **Goal:**  
+   The workflow will analyze a 10‑nanosecond molecular dynamics trajectory of the protein psedukinase, computing per‑atom RMSD, per‑residue RMSF, and the instantaneous center‑of‑mass trajectory for the 255‑residue protein while ignoring all solvent, ions, and ligands. It will then generate time‑series plots for each metric, tabulate the numerical results, and produce a concise scientific report that contextualizes the dynamic behavior of psedukinase with relevant literature.
    
    ---
    
-   **Analysis Agent:**
-   The Analysis Agent will conduct all quantitative analysis and visual data generation. It will begin by establishing a clean summary file in the working directory so that subsequent steps can reference a single, consistent source of results. The agent will then locate the trajectory and topology files that reside in the `hpc` subdirectory. Using the `extract_trajectory_metrics` tool it will confirm the number of frames, the simulation time span, and the file sizes, ensuring the trajectory is valid before any calculations are performed.
+   **Analysis Agent:**  
+   The Analysis Agent is responsible for performing all quantitative calculations on the trajectory and preparing the data for the Reporter Agent.  
+   1. **Input Acquisition**  
+      - It first locates the trajectory and topology files in the working directory `/home/akp66103/workspace/agenticAI/working_dir/hpc/`.  
+      - Expected filenames are `topol.tpr` (or an equivalent topology file) and `traj.xtc`.  
+      - If the files have different names, the agent should search the directory for files ending in `.tpr`, `.gro`, or `.top` for the topology, and `.xtc`, `.trr`, or `.dcd` for the trajectory.  
    
-   Next, the agent will calculate the root‑mean‑square deviation of the protein’s alpha‑carbon atoms with respect to the first frame by invoking the `calculate_rmsd` tool. The topology file (e.g., `topol.tpr` or `topol.gro`) and the trajectory file (e.g., `traj.xtc`) will be supplied, the selection string set to `"protein and name CA"`, and the output directed to `rmsd.dat` within the working directory. The same procedure will be repeated for the root‑mean‑square fluctuation calculation, again using the CA selection and emitting a file named `rmsf.dat`.
+   2. **RMSD Calculation**  
+      - Using `calculate_rmsd`, the agent computes the RMSD of the protein’s alpha‑carbon atoms relative to the first frame.  
+      - Parameters:  
+        - `topology_file` points to the located topology file.  
+        - `trajectory_file` points to the trajectory.  
+        - `selection` is left at its default `protein and name CA` to ensure only protein atoms are considered.  
+        - `reference_frame` remains 0, and `output_file` is set to `rmsd.dat` within the same working directory.  
+      - The resulting `.dat` file contains a time‑series of RMSD values.  
    
-   The center‑of‑mass (COM) of all protein atoms will be determined with `calculate_com`. This tool will be called with a selection of `"protein"`, producing a CSV file `com.csv` that lists, for each frame, the frame index, simulation time, and the x, y, and z components of the COM.
+   3. **RMSF Calculation**  
+      - The agent calls `calculate_rmsf` with the same topology and trajectory, using the default selection `protein and name CA`.  
+      - `output_file` is set to `rmsf.dat`.  
+      - The produced file lists per‑residue RMSF values, which will later be plotted and tabulated.  
    
-   After the numeric data have been generated, the agent will produce visual plots. For RMSD and RMSF, the `plot_md_data` tool will be used to create single‑panel line plots (`rmsd.png` and `rmsf.png`) that read directly from the `.dat` files. For the COM trajectory, the agent will call `plot_combined_data`, supplying the `com.csv` file and indicating that columns 1–3 correspond to the three spatial components. The resulting `com.png` will display the temporal evolution of the COM in three subplots, sharing a common x‑axis for time.
+   4. **Center‑of‑Mass Trajectory**  
+      - The agent executes `generate_com_trajectory`, selecting the entire protein (`selection="protein"`).  
+      - `output_file` is specified as `com.csv`.  
+      - The CSV will contain three columns (time, x, y, z) for the COM coordinates.  
    
-   All file paths, calculation parameters, and summary statistics will be consolidated into a JSON Lines file named `analysis_summary.jsonl`. The `generate_summary_report` tool will format these entries into a concise, machine‑readable record that captures each metric’s mean, standard deviation, and any noteworthy observations. This summary file is the sole output of the Analysis Agent and will serve as the primary input for the Reporter Agent.
+   5. **Plot Generation**  
+      - `plot_data` is invoked twice: once for `rmsd.dat` producing `rmsd_plot.png`, and once for `rmsf.dat` producing `rmsf_plot.png`.  
+      - The RMSF plot will be a line plot of RMSF versus residue number.  
+      - For the COM trajectory, `plot_3d` is called with `com.csv`, generating `com_3d.png` that visualizes the 3‑D motion of the protein’s center of mass over time.  
+      - A composite multipanel figure is also created with `plot_multipanel`, combining the three plots into a single image `analysis_plots.png` for quick visual reference.  
+   
+   6. **Summary File Creation**  
+      - `initialize_summary_file` is used to create `analysis_summary.jsonl` in the working directory, ensuring a proper header.  
+      - The agent then appends three JSON‑like entries (one per metric) to the file: each entry records the metric name, the output file path, basic statistics (mean, standard deviation), and a brief comment.  
+      - For RMSD and RMSF, the agent reads the generated `.dat` files, calculates mean and standard deviation using standard Python libraries, and includes these values in the summary.  
+      - For the COM trajectory, the agent computes the total displacement (maximum distance between consecutive COM points) and includes this statistic.  
+   
+   7. **Output**  
+      - The Analysis Agent produces the following artifacts in `/home/akp66103/workspace/agenticAI/working_dir/hpc/`:  
+        - `rmsd.dat`, `rmsd_plot.png`  
+        - `rmsf.dat`, `rmsf_plot.png`  
+        - `com.csv`, `com_3d.png`  
+        - `analysis_plots.png`  
+        - `analysis_summary.jsonl`  
+      - These artifacts are then passed as input to the Reporter Agent.
    
    ---
    
-   **Reporter Agent:**
-   The Reporter Agent will transform the raw analysis output into a polished, interpretable scientific report. It begins by ingesting the `analysis_summary.jsonl` file with the `read_analysis_summary` tool, parsing the results into a structured dictionary that includes the RMSD, RMSF, COM statistics, and the locations of the corresponding plot images.
+   **Reporter Agent:**  
+   The Reporter Agent takes the results of the Analysis Agent and composes a comprehensive HTML report that includes plots, tables, and contextual literature commentary.  
+   1. **Reading the Summary**  
+      - It calls `read_analysis_summary` with `summary_file="analysis_summary.jsonl"` to ingest all numeric statistics and file references.  
+      - The returned data structure contains entries for RMSD, RMSF, and COM, including mean, standard deviation, and displacement metrics.  
    
-   Recognizing that contextual literature enhances the scientific narrative, the agent will construct PubMed search queries tailored to each analysis type by invoking `generate_literature_queries`. It will provide the list `["RMSD", "RMSF", "COM"]` and the original user goal to ensure relevance. For each generated query, the agent will call `search_pubmed`, requesting up to ten abstracts and limiting the search to the last five years to capture the most recent methodological insights.
+   2. **Literature Contextualization**  
+      - The agent determines which analysis types were performed – RMSD and RMSF – and passes this list to `generate_literature_queries`.  
+      - It also provides the original user goal (“Analyze the trajectory located in `working_dir/hpc/` to compute RMSD, RMSF, and COM for the protein component...”) to refine the queries.  
+      - The queries returned are then sent to `search_pubmed`, requesting up to five recent articles (max_results=5) that discuss RMSD/RMSF dynamics in protein systems.  
+      - Abstracts are included by setting `include_abstracts=True`.  
+      - The search results are stored in a list of citation objects that will be embedded in the report.  
    
-   With the analysis data and curated references in hand, the Reporter Agent will produce an HTML document using `generate_html_report`. It will feed the parsed analysis summary, a concise list of literature references, and request a “comprehensive” report style. The output will be named `kinase_dynamics_report.html` and written to the working directory. This report will embed the previously created `rmsd.png`, `rmsf.png`, and `com.png` visualizations, present tabulated summary statistics, and discuss the observed stability, flexibility, and overall dynamical behavior of the kinase, linking the computational observations to the most pertinent literature.
+   3. **System Metadata**  
+      - The Reporter Agent constructs a `system_info` dictionary containing:  
+        - The protein name “psedukinase”.  
+        - Residue count 255.  
+        - Simulation length 10 ns and 101 frames.  
+        - Paths to `topol.tpr` and `traj.xtc`.  
+        - The selection string used for COM (`protein`).  
+   
+   4. **Final Impression Generation**  
+      - Using the numerical data and literature references, the agent synthesizes a final impression paragraph.  
+      - This paragraph comments on the stability of psedukinase (e.g., “The RMSD plateaus after ~3 ns, indicating equilibration”), notes any significant flexibility observed in specific residues (derived from RMSF peaks), and relates the COM trajectory’s displacement to potential functional motions.  
+   
+   5. **Report Assembly**  
+      - With all data gathered, the agent invokes `generate_html_report`.  
+      - Parameters:  
+        - `analysis_data` is the parsed summary from step 1.  
+        - `literature_refs` is the list of PubMed article metadata retrieved in step 2.  
+        - `report_type` is set to `"executive"` for a concise yet thorough narrative.  
+        - `output_file="psedukinase_dynamics_report.html"` ensures the final file is written to the working directory.  
+        - `system_info` passes the metadata dictionary constructed earlier.  
+        - `final_impression` includes the paragraph crafted in step 4.  
+   
+   6. **Output**  
+      - The Reporter Agent delivers a single HTML file, `psedukinase_dynamics_report.html`, placed in `/home/akp66103/workspace/agenticAI/working_dir/hpc/`.  
+      - This report contains:  
+        - A title page summarizing the objectives and methods.  
+        - Embedded plots (`analysis_plots.png`, `rmsd_plot.png`, `rmsf_plot.png`, `com_3d.png`).  
+        - Tables that list mean and standard deviation for RMSD and RMSF, and displacement for COM.  
+        - A literature section featuring brief annotations of the PubMed hits.  
+        - A concluding commentary that interprets the dynamic behavior of psedukinase in light of the gathered data and recent studies.
    
    ---
    
-   **Expected Outcomes:**
-   1. `analysis_summary.jsonl` – a machine‑readable record of all calculated metrics and file locations.  
-   2. Three PNG visualizations: `rmsd.png`, `rmsf.png`, and `com.png`.  
-   3. `kinase_dynamics_report.html` – a complete scientific report that interprets the kinase dynamics, incorporates the plots, and references recent peer‑reviewed literature.  
+   **Expected Outcomes:**  
+   The final deliverables of the workflow will be:  
+   - A set of quantitative data files (`rmsd.dat`, `rmsf.dat`, `com.csv`) and high‑quality visualizations (`rmsd_plot.png`, `rmsf_plot.png`, `com_3d.png`, `analysis_plots.png`).  
+   - A machine‑readable summary (`analysis_summary.jsonl`) that records all key statistics.  
+   - An HTML scientific report (`psedukinase_dynamics_report.html`) that presents the results in a clear, publication‑ready format, supplemented by recent literature references and a narrative discussion of psedukinase’s dynamic behavior.  
    
-   These deliverables collectively satisfy the user’s request for trajectory analysis, metric computation, and a thorough interpretive report.
+   All tasks are performed locally within the specified working directory, respecting the instruction to avoid any additional HPC job submissions.
    ======================================================================
 
 ⚡ AGENT ACTION (planner):
@@ -1965,16 +2284,15 @@ Purpose: The tool extracts the coordinates of a user‑defined atom selection (e
       "reporter_agent"
 ]
    📊 total_agents: 2
-   📊 plan_preview: **Goal:**
-The workflow will analyze a 10‑nanosecond molecular‑dynamics trajectory of a kinase protein, compute key structural descriptors (RMSD, RMSF, center‑of‑mass trajectory) for the protein portion only, generate visualizations for each metric, and produce a comprehensive HTML scientific report that interprets the dynamical behavior of the protein.
+   📊 plan_preview: **Goal:**  
+The workflow will analyze a 10‑nanosecond molecular dynamics trajectory of the protein psedukinase, computing per‑atom RMSD, per‑residue RMSF, and the instantaneous center‑of‑mass trajectory for the 255‑residue protein while ignoring all solvent, ions, and ligands. It will then generate time‑series plots for each metric, tabulate the numerical results, and produce a concise scientific report that contextualizes the dynamic behavior of psedukinase with relevant literature.
 
 ---
 
-**Analysis Agent:**
-The Analysis Agent will conduct all quantitative analysis and visual data generation. It will begin by establishing a c...
+**Ana...
    📊 method: llm_generated
 
-🎛️  SUPERVISOR ROUTING [2026-03-26 17:53:15]:
+🎛️  SUPERVISOR ROUTING [2026-03-27 12:10:17]:
    Current State Summary:
      ❌ raw_pdb: Not set
      ❌ cleaned_pdb: Not set
@@ -1984,7 +2302,7 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
    📍 Routing: planner → supervisor
    💭 Reasoning: Planner: Created natural language plan with 2 agents. Returning to supervisor.
 
-🎛️  SUPERVISOR ROUTING [2026-03-26 17:53:15]:
+🎛️  SUPERVISOR ROUTING [2026-03-27 12:10:17]:
    Current State Summary:
      ❌ raw_pdb: Not set
      ❌ cleaned_pdb: Not set
@@ -1994,11 +2312,13 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
    📍 Routing: supervisor → analysis
    💭 Reasoning: Executing analysis agent
 
-🤖 MD TRAJECTORY ANALYSIS WITH LLM PLANNING AGENT (analysis) STARTING [2026-03-26 17:53:15]:
+🤖 MD TRAJECTORY ANALYSIS WITH LLM PLANNING AGENT (analysis) STARTING [2026-03-27 12:10:17]:
    Input Data Summary:
-     • planner_instructions: The Analysis Agent will conduct all quantitative analysis and visual data generation. It will begin by establishing a clean summary file in the working directory so that subsequent steps can reference... [truncated, see full plan above]
+     • planner_instructions: The Analysis Agent is responsible for performing all quantitative calculations on the trajectory and preparing the data for the Reporter Agent.  
+1. **Input Acquisition**  
+   - It first locates the t... [truncated, see full plan above]
 
-🧠 LLM INTERACTION (analysis.planning) [2026-03-26 17:53:37]:
+🧠 LLM INTERACTION (analysis.planning) [2026-03-27 12:10:38]:
    📝 Prompt:
    ======================================================================
    You are a molecular dynamics analysis expert executing a detailed plan from the workflow planner.
@@ -2015,15 +2335,51 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
    
    **DETAILED INSTRUCTIONS FROM PLANNER:**
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   The Analysis Agent will conduct all quantitative analysis and visual data generation. It will begin by establishing a clean summary file in the working directory so that subsequent steps can reference a single, consistent source of results. The agent will then locate the trajectory and topology files that reside in the `hpc` subdirectory. Using the `extract_trajectory_metrics` tool it will confirm the number of frames, the simulation time span, and the file sizes, ensuring the trajectory is valid before any calculations are performed.
+   The Analysis Agent is responsible for performing all quantitative calculations on the trajectory and preparing the data for the Reporter Agent.  
+   1. **Input Acquisition**  
+      - It first locates the trajectory and topology files in the working directory `/home/akp66103/workspace/agenticAI/working_dir/hpc/`.  
+      - Expected filenames are `topol.tpr` (or an equivalent topology file) and `traj.xtc`.  
+      - If the files have different names, the agent should search the directory for files ending in `.tpr`, `.gro`, or `.top` for the topology, and `.xtc`, `.trr`, or `.dcd` for the trajectory.  
    
-   Next, the agent will calculate the root‑mean‑square deviation of the protein’s alpha‑carbon atoms with respect to the first frame by invoking the `calculate_rmsd` tool. The topology file (e.g., `topol.tpr` or `topol.gro`) and the trajectory file (e.g., `traj.xtc`) will be supplied, the selection string set to `"protein and name CA"`, and the output directed to `rmsd.dat` within the working directory. The same procedure will be repeated for the root‑mean‑square fluctuation calculation, again using the CA selection and emitting a file named `rmsf.dat`.
+   2. **RMSD Calculation**  
+      - Using `calculate_rmsd`, the agent computes the RMSD of the protein’s alpha‑carbon atoms relative to the first frame.  
+      - Parameters:  
+        - `topology_file` points to the located topology file.  
+        - `trajectory_file` points to the trajectory.  
+        - `selection` is left at its default `protein and name CA` to ensure only protein atoms are considered.  
+        - `reference_frame` remains 0, and `output_file` is set to `rmsd.dat` within the same working directory.  
+      - The resulting `.dat` file contains a time‑series of RMSD values.  
    
-   The center‑of‑mass (COM) of all protein atoms will be determined with `calculate_com`. This tool will be called with a selection of `"protein"`, producing a CSV file `com.csv` that lists, for each frame, the frame index, simulation time, and the x, y, and z components of the COM.
+   3. **RMSF Calculation**  
+      - The agent calls `calculate_rmsf` with the same topology and trajectory, using the default selection `protein and name CA`.  
+      - `output_file` is set to `rmsf.dat`.  
+      - The produced file lists per‑residue RMSF values, which will later be plotted and tabulated.  
    
-   After the numeric data have been generated, the agent will produce visual plots. For RMSD and RMSF, the `plot_md_data` tool will be used to create single‑panel line plots (`rmsd.png` and `rmsf.png`) that read directly from the `.dat` files. For the COM trajectory, the agent will call `plot_combined_data`, supplying the `com.csv` file and indicating that columns 1–3 correspond to the three spatial components. The resulting `com.png` will display the temporal evolution of the COM in three subplots, sharing a common x‑axis for time.
+   4. **Center‑of‑Mass Trajectory**  
+      - The agent executes `generate_com_trajectory`, selecting the entire protein (`selection="protein"`).  
+      - `output_file` is specified as `com.csv`.  
+      - The CSV will contain three columns (time, x, y, z) for the COM coordinates.  
    
-   All file paths, calculation parameters, and summary statistics will be consolidated into a JSON Lines file named `analysis_summary.jsonl`. The `generate_summary_report` tool will format these entries into a concise, machine‑readable record that captures each metric’s mean, standard deviation, and any noteworthy observations. This summary file is the sole output of the Analysis Agent and will serve as the primary input for the Reporter Agent.
+   5. **Plot Generation**  
+      - `plot_data` is invoked twice: once for `rmsd.dat` producing `rmsd_plot.png`, and once for `rmsf.dat` producing `rmsf_plot.png`.  
+      - The RMSF plot will be a line plot of RMSF versus residue number.  
+      - For the COM trajectory, `plot_3d` is called with `com.csv`, generating `com_3d.png` that visualizes the 3‑D motion of the protein’s center of mass over time.  
+      - A composite multipanel figure is also created with `plot_multipanel`, combining the three plots into a single image `analysis_plots.png` for quick visual reference.  
+   
+   6. **Summary File Creation**  
+      - `initialize_summary_file` is used to create `analysis_summary.jsonl` in the working directory, ensuring a proper header.  
+      - The agent then appends three JSON‑like entries (one per metric) to the file: each entry records the metric name, the output file path, basic statistics (mean, standard deviation), and a brief comment.  
+      - For RMSD and RMSF, the agent reads the generated `.dat` files, calculates mean and standard deviation using standard Python libraries, and includes these values in the summary.  
+      - For the COM trajectory, the agent computes the total displacement (maximum distance between consecutive COM points) and includes this statistic.  
+   
+   7. **Output**  
+      - The Analysis Agent produces the following artifacts in `/home/akp66103/workspace/agenticAI/working_dir/hpc/`:  
+        - `rmsd.dat`, `rmsd_plot.png`  
+        - `rmsf.dat`, `rmsf_plot.png`  
+        - `com.csv`, `com_3d.png`  
+        - `analysis_plots.png`  
+        - `analysis_summary.jsonl`  
+      - These artifacts are then passed as input to the Reporter Agent.
    
    ---
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2048,6 +2404,12 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
    
    Returns:
        Dict with RMSD results and statistics
+   
+   Output file format (tab-separated, # comment header):
+       # Time(ns)	RMSD(Angstrom)
+       0.0000	0.0000
+       0.1000	0.9425
+       ...
    → calculate_rmsf: Calculate RMSF (Root Mean Square Fluctuation) for a trajectory.
    
    RMSF measures per-residue flexibility. Higher RMSF indicates more flexible regions.
@@ -2067,6 +2429,12 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
    
    Returns:
        Dict with RMSF results and statistics
+   
+   Output file format (tab-separated, # comment header):
+       # Residue	RMSF(Angstrom)
+       1	0.5432
+       2	0.6781
+       ...
    → calculate_radius_of_gyration: Calculate radius of gyration (Rg) for a trajectory.
    
    Rg measures the compactness of a protein structure. Changes in Rg
@@ -2170,10 +2538,11 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
        - ss_percentages: Average percentage of each SS type
        - ss_percentages_per_frame: SS percentages for each frame
        - output_files: Dictionary of output filenames (not full paths)
-   → plot_md_data: Plot MD analysis data from one or more data files (single panel).
+   → plot_data: Plot analysis data from one or more data files (single 2D panel).
    
-   Creates a single-panel plot for visualizing RMSD, RMSF, Rg, or energy data.
-   Supports overlay of multiple datasets on the same axes.
+   Creates a single-panel 2D plot for visualizing RMSD, RMSF, Rg, energy, or
+   other time-series / per-residue data.  Supports overlay of multiple datasets
+   on the same axes.
    
    Args:
        data_files: List of data file paths to plot (.xvg, .dat, .csv)
@@ -2190,10 +2559,10 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
    
    Returns:
        Dict with plotting results
-   → plot_md_multipanel: Create multi-panel plots for comparing multiple MD analyses.
+   → plot_multipanel: Create multi-panel plots for comparing multiple analyses.
    
    Creates a figure with multiple subplots, one for each data file.
-   Useful for comparing RMSD, RMSF, Rg, and energy in a single figure.
+   Useful for comparing RMSD, RMSF, Rg, energy, or any 2D data side-by-side.
    
    Args:
        data_files: List of data file paths, one per panel (.xvg, .dat, .csv)
@@ -2231,13 +2600,13 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
    
    Returns:
        Dict with plotting results
-   → calculate_com: Compute the center‑of‑mass trajectory of a specified atom group
+   → generate_com_trajectory: Compute the instantaneous center of mass of a selected group over a trajectory and output a time‑series CSV file.
    
    Args:
-       trajectory: Path to the GROMACS trajectory file (e.g., .xtc or .trr).
-       topology: Path to the GROMACS topology or coordinate file (e.g., .tpr, .gro, or .pdb).
-       output_file: File path for the CSV output containing frame index, time, and COM coordinates.
-       atom_selection: MDAnalysis selection string defining the atoms to be used for the COM (default selects all protein atoms).
+       topology: Path to the topology file (.tpr, .gro, .top, etc.).
+       trajectory: Path to the trajectory file (.xtc, .trr, .dcd).
+       output_file: Path where the CSV output will be written.
+       selection: MDAnalysis selection string identifying the atoms to compute the COM for (e.g., "protein").
        working_dir: Working directory for analysis (optional)
    
    Returns:
@@ -2276,24 +2645,19 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
    💭 Response:
    ======================================================================
    {
-     "reasoning": "The plan follows the planner's workflow: extract trajectory metrics, compute RMSD, RMSF, COM, plot the results, and consolidate outputs. The summary report step is omitted because no tool is available for generating a JSON Lines file, so the agent will rely on the output files produced by the other tools.",
-     "overview": "1. Validate trajectory and topology. 2. Compute RMSD, RMSF, and COM trajectories. 3. Generate plots for each analysis. 4. (Optional) Create a summary report \u2013 omitted due to missing tool.",
+     "reasoning": "The planner specifies a clear sequence of calculations and visualisations. We have direct access to the topology and trajectory files, so the first step is simply to locate them. For each requested analysis we use the exact tool that implements the computation: RMSD, RMSF, and centre\u2011of\u2011mass trajectory. After the calculations we generate the required plots with the available plotting tools: `plot_data` for the one\u2011panel RMSD and RMSF plots, and `plot_multipanel` to combine them into a single figure. The 3\u2011D COM trajectory plot requested by the planner cannot be produced with the supplied toolset, so that step is omitted. Finally, the summary file creation is omitted because no tool in the list can write a JSONL file directly. All steps are ordered so that each subsequent tool receives the output files produced by the previous step.",
+     "overview": "1) Locate topology/trajectory files. 2) Compute RMSD and RMSF. 3) Generate COM trajectory CSV. 4) Plot RMSD, RMSF, and create a multipanel figure. 5) (Omitted) 3\u2011D COM plot and summary file creation due to missing tools.",
      "steps": [
        {
-         "name": "Extract trajectory metrics",
-         "description": "Obtain number of frames, time range, and file size for the trajectory to verify validity.",
-         "tool_name": "extract_trajectory_metrics",
-         "tool_params": {
-           "trajectory_file": "/home/akp66103/workspace/agenticAI/working_dir/hpc/md.xtc",
-           "topology_file": "/home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro",
-           "output_dir": "/home/akp66103/workspace/agenticAI/working_dir",
-           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir"
-         },
-         "reason": "Ensure the trajectory is valid before proceeding."
+         "name": "Locate topology and trajectory files",
+         "description": "Identify the topology (.gro) and trajectory (.xtc) files in the working directory.",
+         "tool_name": "none",
+         "tool_params": {},
+         "reason": "Files are already known and present at /home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro and md.xtc."
        },
        {
          "name": "Calculate RMSD",
-         "description": "Compute RMSD of protein CA atoms relative to the first frame, saving the time series to rmsd.dat.",
+         "description": "Compute RMSD for the protein CA atoms over the trajectory.",
          "tool_name": "calculate_rmsd",
          "tool_params": {
            "topology_file": "/home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro",
@@ -2301,106 +2665,133 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
            "selection": "protein and name CA",
            "reference_frame": 0,
            "output_file": "rmsd.dat",
-           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir",
-           "align_before_rmsd": false
+           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir/hpc",
+           "align_before_rmsd": true
          },
-         "reason": "Quantify structural deviation over time."
+         "reason": "Planner instruction 2."
        },
        {
          "name": "Calculate RMSF",
-         "description": "Compute per-residue RMSF for CA atoms, saving the results to rmsf.dat.",
+         "description": "Compute per\u2011residue RMSF for the protein CA atoms.",
          "tool_name": "calculate_rmsf",
          "tool_params": {
            "topology_file": "/home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro",
            "trajectory_file": "/home/akp66103/workspace/agenticAI/working_dir/hpc/md.xtc",
            "selection": "protein and name CA",
            "output_file": "rmsf.dat",
-           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir",
+           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir/hpc",
            "align_trajectory": true,
            "align_selection": "protein and name CA"
          },
-         "reason": "Identify flexible regions of the protein."
+         "reason": "Planner instruction 3."
        },
        {
-         "name": "Calculate COM trajectory",
-         "description": "Determine the center\u2011of\u2011mass of all protein atoms over time, outputting to com.csv.",
-         "tool_name": "calculate_com",
+         "name": "Generate COM trajectory",
+         "description": "Compute the instantaneous centre of mass of the whole protein over time.",
+         "tool_name": "generate_com_trajectory",
          "tool_params": {
-           "trajectory": "/home/akp66103/workspace/agenticAI/working_dir/hpc/md.xtc",
            "topology": "/home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro",
+           "trajectory": "/home/akp66103/workspace/agenticAI/working_dir/hpc/md.xtc",
            "output_file": "com.csv",
-           "atom_selection": "protein",
-           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir"
+           "selection": "protein",
+           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir/hpc"
          },
-         "reason": "Track overall positional drift of the protein."
+         "reason": "Planner instruction 4."
        },
        {
          "name": "Plot RMSD",
-         "description": "Generate a line plot of RMSD over simulation time.",
-         "tool_name": "plot_md_data",
+         "description": "Create a line plot of RMSD vs. time.",
+         "tool_name": "plot_data",
          "tool_params": {
            "data_files": [
-             "rmsd.dat"
+             "/home/akp66103/workspace/agenticAI/working_dir/hpc/rmsd.dat"
            ],
-           "output_file": "rmsd.png",
+           "output_file": "rmsd_plot.png",
            "plot_type": "line",
-           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir"
+           "xlabel": "Time (ns)",
+           "ylabel": "RMSD (\u00c5)",
+           "titles": [
+             "RMSD over time"
+           ],
+           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir/hpc",
+           "dpi": 300
          },
-         "reason": "Provide a visual representation of structural stability."
+         "reason": "Planner instruction 5 \u2013 first plot."
        },
        {
          "name": "Plot RMSF",
-         "description": "Generate a line plot of RMSF per residue over simulation time.",
-         "tool_name": "plot_md_data",
+         "description": "Create a line plot of RMSF vs. residue number.",
+         "tool_name": "plot_data",
          "tool_params": {
            "data_files": [
-             "rmsf.dat"
+             "/home/akp66103/workspace/agenticAI/working_dir/hpc/rmsf.dat"
            ],
-           "output_file": "rmsf.png",
+           "output_file": "rmsf_plot.png",
            "plot_type": "line",
-           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir"
+           "xlabel": "Residue number",
+           "ylabel": "RMSF (\u00c5)",
+           "titles": [
+             "RMSF per residue"
+           ],
+           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir/hpc",
+           "dpi": 300
          },
-         "reason": "Visualize flexibility across residues."
+         "reason": "Planner instruction 5 \u2013 second plot."
        },
        {
-         "name": "Plot COM trajectory",
-         "description": "Create a combined plot of the x, y, z components of the protein COM over time.",
-         "tool_name": "plot_combined_data",
+         "name": "Create multipanel analysis plot",
+         "description": "Combine RMSD, RMSF, and COM plots into a single figure.",
+         "tool_name": "plot_multipanel",
          "tool_params": {
            "data_files": [
-             "com.csv"
+             "/home/akp66103/workspace/agenticAI/working_dir/hpc/rmsd.dat",
+             "/home/akp66103/workspace/agenticAI/working_dir/hpc/rmsf.dat",
+             "/home/akp66103/workspace/agenticAI/working_dir/hpc/com.csv"
            ],
-           "output_file": "com.png",
-           "data_columns": [
-             2,
-             3,
-             4
-           ],
-           "subplot_arrangement": null,
-           "shared_xaxis": true,
+           "output_file": "analysis_plots.png",
+           "layout": "vertical",
            "titles": [
-             "COM X",
-             "COM Y",
-             "COM Z"
+             "RMSD vs Time",
+             "RMSF vs Residue",
+             "COM Trajectory"
            ],
-           "xlabel": "Time (ns)",
+           "xlabels": [
+             "Time (ns)",
+             "Residue",
+             "Time (ns)"
+           ],
            "ylabels": [
-             "X (nm)",
-             "Y (nm)",
-             "Z (nm)"
+             "RMSD (\u00c5)",
+             "RMSF (\u00c5)",
+             "COM (\u00c5)"
            ],
-           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir"
+           "plot_types": [
+             "line",
+             "line",
+             "scatter"
+           ],
+           "colors": [
+             "blue",
+             "red",
+             "green"
+           ],
+           "figsize": [
+             12,
+             18
+           ],
+           "dpi": 300,
+           "working_dir": "/home/akp66103/workspace/agenticAI/working_dir/hpc"
          },
-         "reason": "Show the temporal evolution of the protein's center\u2011of\u2011mass."
+         "reason": "Planner instruction 5 \u2013 composite figure."
        }
      ],
      "potential_issues": [
-       "No tool available for generating the final analysis_summary.jsonl file, so that step will be omitted.",
-       "The `plot_combined_data` tool assumes the COM CSV format includes frame index, time, x, y, z; any deviation could cause plotting errors."
+       "The requested 3\u2011D COM trajectory plot (plot_3d) is not available in the supplied toolset, so that step must be omitted.",
+       "Creating the `analysis_summary.jsonl` file cannot be performed because no tool in the list can write arbitrary JSONL files; this step is omitted."
      ],
      "recommendations": [
-       "If a summary report is required, consider scripting a lightweight post\u2011processing step outside of the provided tools or using a generic file\u2011write tool (not listed) to create the JSON Lines file.",
-       "Validate the format of com.csv (frame index, time, x, y, z) before invoking `plot_combined_data` to avoid index mismatches."
+       "If a 3\u2011D visualisation of the COM trajectory is essential, consider using an external plotting library (e.g., matplotlib in 3\u2011D mode) after extracting the CSV data.",
+       "To generate the summary JSONL, add a custom script or use a simple file\u2011writing tool not listed here."
      ]
    }
    ======================================================================
@@ -2408,18 +2799,12 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
 ⚡ AGENT ACTION (analysis):
    🎬 Action: Generated analysis plan
    📊 steps: 7
-   📊 reasoning: The plan follows the planner's workflow: extract trajectory metrics, compute RMSD, RMSF, COM, plot the results, and consolidate outputs. The summary report step is omitted because no tool is available
+   📊 reasoning: The planner specifies a clear sequence of calculations and visualisations. We have direct access to the topology and trajectory files, so the first step is simply to locate them. For each requested an
 
 ⚡ AGENT ACTION (analysis):
-   🎬 Action: Executing step 1/7
-   📊 step: Extract trajectory metrics
-   📊 tool: extract_trajectory_metrics
-
-⚡ AGENT ACTION (analysis):
-   🎬 Action: Step 1/7 completed
-   📊 step: Extract trajectory metrics
-   📊 tool: extract_trajectory_metrics
-   📊 status: ✅ SUCCESS
+   🎬 Action: Step 1/7 skipped
+   📊 step: Locate topology and trajectory files
+   📊 reason: Invalid tool name: none
 
 ⚡ AGENT ACTION (analysis):
    🎬 Action: Executing step 2/7
@@ -2455,92 +2840,137 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
 
 ⚡ AGENT ACTION (analysis):
    🎬 Action: Executing step 4/7
-   📊 step: Calculate COM trajectory
-   📊 tool: calculate_com
+   📊 step: Generate COM trajectory
+   📊 tool: generate_com_trajectory
 
 ⚡ AGENT ACTION (analysis):
    🎬 Action: Step 4/7 completed
-   📊 step: Calculate COM trajectory
-   📊 tool: calculate_com
+   📊 step: Generate COM trajectory
+   📊 tool: generate_com_trajectory
    📊 status: ✅ SUCCESS
 
 ⚡ AGENT ACTION (analysis):
    🎬 Action: Executing step 5/7
    📊 step: Plot RMSD
-   📊 tool: plot_md_data
+   📊 tool: plot_data
 
 📁 FILE OPERATION (analysis):
    Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd.png
+   File: /home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd_plot.png
    Status: ✅ SUCCESS
 
 ⚡ AGENT ACTION (analysis):
    🎬 Action: Step 5/7 completed
    📊 step: Plot RMSD
-   📊 tool: plot_md_data
+   📊 tool: plot_data
    📊 status: ✅ SUCCESS
 
 ⚡ AGENT ACTION (analysis):
    🎬 Action: Executing step 6/7
    📊 step: Plot RMSF
-   📊 tool: plot_md_data
+   📊 tool: plot_data
 
 📁 FILE OPERATION (analysis):
    Operation: create
-   File: /home/akp66103/workspace/agenticAI/working_dir/analysis/rmsf.png
+   File: /home/akp66103/workspace/agenticAI/working_dir/analysis/rmsf_plot.png
    Status: ✅ SUCCESS
 
 ⚡ AGENT ACTION (analysis):
    🎬 Action: Step 6/7 completed
    📊 step: Plot RMSF
-   📊 tool: plot_md_data
+   📊 tool: plot_data
    📊 status: ✅ SUCCESS
 
 ⚡ AGENT ACTION (analysis):
    🎬 Action: Executing step 7/7
-   📊 step: Plot COM trajectory
-   📊 tool: plot_combined_data
+   📊 step: Create multipanel analysis plot
+   📊 tool: plot_multipanel
+
+📁 FILE OPERATION (analysis):
+   Operation: create
+   File: /home/akp66103/workspace/agenticAI/working_dir/analysis/analysis_plots.png
+   Status: ✅ SUCCESS
 
 ⚡ AGENT ACTION (analysis):
-   🎬 Action: Step 7/7 failed
-   📊 step: Plot COM trajectory
-   📊 tool: plot_combined_data
-   📊 status: ❌ FAILED
-   📊 error: Insufficient data columns in file
+   🎬 Action: Step 7/7 completed
+   📊 step: Create multipanel analysis plot
+   📊 tool: plot_multipanel
+   📊 status: ✅ SUCCESS
 
-🏁 MD TRAJECTORY ANALYSIS AGENT (analysis) ❌ FAILED [2026-03-26 17:53:41]:
+🏁 MD TRAJECTORY ANALYSIS AGENT (analysis) ✅ COMPLETED [2026-03-27 12:10:42]:
    📤 Output Summary:
      • topology: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro
 
-🎛️  SUPERVISOR ROUTING [2026-03-26 17:53:41]:
+🎛️  SUPERVISOR ROUTING [2026-03-27 12:10:42]:
    Current State Summary:
      ❌ raw_pdb: Not set
      ❌ cleaned_pdb: Not set
      ❌ coordinates: Not set
      ❌ job_id: Not set
-     ✅ analysis_results: {'extract_trajectory_metrics': {'success': True, 'n_frames': 0, 'time_range': (0.0, 0.0), 'file_size_mb': 24.251087188720703, 'trajectory_file': '/home/akp66103/workspace/agenticAI/working_dir/hpc/md.xtc', 'message': 'Trajectory has 0 frames spanning 0.0-0.0 ps'}, 'calculate_rmsd': {'success': True, 'mean_rmsd': 1.5306857223412405, 'std_rmsd': 0.2612115690681243, 'min_rmsd': 3.378352682266599e-07, 'max_rmsd': 2.0506906523164194, 'n_frames': 101, 'selection': 'protein and name CA', 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd.dat', 'message': 'RMSD calculation complete: mean=1.53 Å, std=0.26 Å'}, 'calculate_rmsf': {'success': True, 'mean_rmsf': 0.9286514385552037, 'std_rmsf': 0.3949384955076374, 'min_rmsf': 0.3767928063587787, 'max_rmsf': 2.7110194438924156, 'n_residues': 255, 'most_flexible': [{'residue_id': 22, 'residue_name': 'GLU', 'rmsf': 2.7110194438924156}, {'residue_id': 21, 'residue_name': 'LYS', 'rmsf': 2.444133374154957}, {'residue_id': 23, 'residue_name': 'THR', 'rmsf': 2.2801147459644495}, {'residue_id': 212, 'residue_name': 'LYS', 'rmsf': 2.2267631589288275}, {'residue_id': 24, 'residue_name': 'GLY', 'rmsf': 1.9235134342542703}], 'least_flexible': [{'residue_id': 230, 'residue_name': 'LEU', 'rmsf': 0.3767928063587787}, {'residue_id': 178, 'residue_name': 'ASP', 'rmsf': 0.41084138369168194}, {'residue_id': 180, 'residue_name': 'TRP', 'rmsf': 0.4158673467021137}, {'residue_id': 184, 'residue_name': 'VAL', 'rmsf': 0.42004180101770205}, {'residue_id': 182, 'residue_name': 'LEU', 'rmsf': 0.42590588611346175}], 'selection': 'protein and name CA', 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsf.dat', 'message': 'RMSF calculation complete: mean=0.93 Å, most flexible residue at 22'}, 'calculate_com_trajectory': {'success': True, 'tool': 'calculate_com'}, 'plot_rmsd': {'success': True, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd.png', 'n_datasets': 1, 'plot_type': 'line', 'message': 'Successfully created line plot with 1 dataset(s)'}, 'plot_rmsf': {'success': True, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsf.png', 'n_datasets': 1, 'plot_type': 'line', 'message': 'Successfully created line plot with 1 dataset(s)'}}
+     ✅ analysis_results: {'calculate_rmsd': {'success': True, 'mean_rmsd': 1.5306857223412405, 'std_rmsd': 0.2612115690681243, 'min_rmsd': 3.378352682266599e-07, 'max_rmsd': 2.0506906523164194, 'n_frames': 101, 'selection': 'protein and name CA', 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd.dat', 'message': 'RMSD calculation complete: mean=1.53 Å, std=0.26 Å'}, 'calculate_rmsf': {'success': True, 'mean_rmsf': 0.9286514385552037, 'std_rmsf': 0.3949384955076374, 'min_rmsf': 0.3767928063587787, 'max_rmsf': 2.7110194438924156, 'n_residues': 255, 'most_flexible': [{'residue_id': 22, 'residue_name': 'GLU', 'rmsf': 2.7110194438924156}, {'residue_id': 21, 'residue_name': 'LYS', 'rmsf': 2.444133374154957}, {'residue_id': 23, 'residue_name': 'THR', 'rmsf': 2.2801147459644495}, {'residue_id': 212, 'residue_name': 'LYS', 'rmsf': 2.2267631589288275}, {'residue_id': 24, 'residue_name': 'GLY', 'rmsf': 1.9235134342542703}], 'least_flexible': [{'residue_id': 230, 'residue_name': 'LEU', 'rmsf': 0.3767928063587787}, {'residue_id': 178, 'residue_name': 'ASP', 'rmsf': 0.41084138369168194}, {'residue_id': 180, 'residue_name': 'TRP', 'rmsf': 0.4158673467021137}, {'residue_id': 184, 'residue_name': 'VAL', 'rmsf': 0.42004180101770205}, {'residue_id': 182, 'residue_name': 'LEU', 'rmsf': 0.42590588611346175}], 'selection': 'protein and name CA', 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsf.dat', 'message': 'RMSF calculation complete: mean=0.93 Å, most flexible residue at 22'}, 'generate_com_trajectory': {'success': True, 'tool': 'generate_com_trajectory'}, 'plot_rmsd': {'success': True, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd_plot.png', 'n_datasets': 1, 'plot_type': 'line', 'message': 'Successfully created line plot with 1 dataset(s)'}, 'plot_rmsf': {'success': True, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsf_plot.png', 'n_datasets': 1, 'plot_type': 'line', 'message': 'Successfully created line plot with 1 dataset(s)'}, 'create_multipanel_analysis_plot': {'success': True, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/analysis_plots.png', 'n_panels': 3, 'layout': 'vertical', 'message': 'Successfully created 3-panel vertical plot'}}
    📍 Routing: supervisor → reporter
    💭 Reasoning: Executing reporter agent
-   ⚠️  Errors: ['Analysis failed: ================================================================================\nMD TRAJECTORY ANALYSIS REPORT\n================================================================================\n\nPlan Overview: 1. Validate trajectory and topology. 2. Compute RMSD, RMSF, and COM trajectories. 3. Generate plots for each analysis. 4. (Optional) Create a summary report – omitted due to missing tool.\nTotal Steps: 7\nCompleted: 6\nIssues: 1\nWarnings: 0\n\n================================================================================\nRESULTS SUMMARY\n================================================================================\n\nEXTRACT_TRAJECTORY_METRICS:\n  Trajectory has 0 frames spanning 0.0-0.0 ps\n\nCALCULATE_RMSD:\n  RMSD calculation complete: mean=1.53 Å, std=0.26 Å\n  Mean RMSD: 1.53 Å\n\nCALCULATE_RMSF:\n  RMSF calculation complete: mean=0.93 Å, most flexible residue at 22\n  Mean RMSF: 0.93 Å\n\nCALCULATE_COM_TRAJECTORY:\n\nPLOT_RMSD:\n  Successfully created line plot with 1 dataset(s)\n\nPLOT_RMSF:\n  Successfully created line plot with 1 dataset(s)\n\n================================================================================\nISSUES ENCOUNTERED\n================================================================================\n  • Plot COM trajectory: Insufficient data columns in file\n\n================================================================================']
 
-🤖 SCIENTIFIC REPORT GENERATION AGENT (reporter) STARTING [2026-03-26 17:53:41]:
+🤖 SCIENTIFIC REPORT GENERATION AGENT (reporter) STARTING [2026-03-27 12:10:42]:
    Input Data Summary:
-     • planner_instructions: The Reporter Agent will transform the raw analysis output into a polished, interpretable scientific report. It begins by ingesting the `analysis_summary.jsonl` file with the `read_analysis_summary` to... [truncated, see full plan above]
+     • planner_instructions: The Reporter Agent takes the results of the Analysis Agent and composes a comprehensive HTML report that includes plots, tables, and contextual literature commentary.  
+1. **Reading the Summary**  
+  ... [truncated, see full plan above]
 
-🧠 LLM INTERACTION (reporter.planning) [2026-03-26 17:53:54]:
+🧠 LLM INTERACTION (reporter.planning) [2026-03-27 12:10:52]:
    📝 Prompt:
    ======================================================================
    You are a scientific report generator creating reports from MD trajectory analysis.
    
    **User Goal:**
-   The simulation of initial structure 3.pdb is already done. Simulation trajectory is in working_dir/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM of protein only and plot those data. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is kinase, please give the dynamics based on analysis result in report
+   Analyze the trajectory located in `working_dir/hpc/` (101 frames, 10 ns) to compute RMSD, RMSF, and center‑of‑mass (COM) for the protein component (255 residues) only, excluding ions, water, and any ligand.  
+   Generate time‑series plots for each metric and tabulate the numerical values.  
+   Use the resulting data to produce a scientific report via the reporter agent, providing dynamic‑behavior commentary on psedukinase.  
+   Ensure no new simulations or HPC tasks are launched during this workflow.
    
    **Planner Instructions:**
-   The Reporter Agent will transform the raw analysis output into a polished, interpretable scientific report. It begins by ingesting the `analysis_summary.jsonl` file with the `read_analysis_summary` tool, parsing the results into a structured dictionary that includes the RMSD, RMSF, COM statistics, and the locations of the corresponding plot images.
+   The Reporter Agent takes the results of the Analysis Agent and composes a comprehensive HTML report that includes plots, tables, and contextual literature commentary.  
+   1. **Reading the Summary**  
+      - It calls `read_analysis_summary` with `summary_file="analysis_summary.jsonl"` to ingest all numeric statistics and file references.  
+      - The returned data structure contains entries for RMSD, RMSF, and COM, including mean, standard deviation, and displacement metrics.  
    
-   Recognizing that contextual literature enhances the scientific narrative, the agent will construct PubMed search queries tailored to each analysis type by invoking `generate_literature_queries`. It will provide the list `["RMSD", "RMSF", "COM"]` and the original user goal to ensure relevance. For each generated query, the agent will call `search_pubmed`, requesting up to ten abstracts and limiting the search to the last five years to capture the most recent methodological insights.
+   2. **Literature Contextualization**  
+      - The agent determines which analysis types were performed – RMSD and RMSF – and passes this list to `generate_literature_queries`.  
+      - It also provides the original user goal (“Analyze the trajectory located in `working_dir/hpc/` to compute RMSD, RMSF, and COM for the protein component...”) to refine the queries.  
+      - The queries returned are then sent to `search_pubmed`, requesting up to five recent articles (max_results=5) that discuss RMSD/RMSF dynamics in protein systems.  
+      - Abstracts are included by setting `include_abstracts=True`.  
+      - The search results are stored in a list of citation objects that will be embedded in the report.  
    
-   With the analysis data and curated references in hand, the Reporter Agent will produce an HTML document using `generate_html_report`. It will feed the parsed analysis summary, a concise list of literature references, and request a “comprehensive” report style. The output will be named `kinase_dynamics_report.html` and written to the working directory. This report will embed the previously created `rmsd.png`, `rmsf.png`, and `com.png` visualizations, present tabulated summary statistics, and discuss the observed stability, flexibility, and overall dynamical behavior of the kinase, linking the computational observations to the most pertinent literature.
+   3. **System Metadata**  
+      - The Reporter Agent constructs a `system_info` dictionary containing:  
+        - The protein name “psedukinase”.  
+        - Residue count 255.  
+        - Simulation length 10 ns and 101 frames.  
+        - Paths to `topol.tpr` and `traj.xtc`.  
+        - The selection string used for COM (`protein`).  
+   
+   4. **Final Impression Generation**  
+      - Using the numerical data and literature references, the agent synthesizes a final impression paragraph.  
+      - This paragraph comments on the stability of psedukinase (e.g., “The RMSD plateaus after ~3 ns, indicating equilibration”), notes any significant flexibility observed in specific residues (derived from RMSF peaks), and relates the COM trajectory’s displacement to potential functional motions.  
+   
+   5. **Report Assembly**  
+      - With all data gathered, the agent invokes `generate_html_report`.  
+      - Parameters:  
+        - `analysis_data` is the parsed summary from step 1.  
+        - `literature_refs` is the list of PubMed article metadata retrieved in step 2.  
+        - `report_type` is set to `"executive"` for a concise yet thorough narrative.  
+        - `output_file="psedukinase_dynamics_report.html"` ensures the final file is written to the working directory.  
+        - `system_info` passes the metadata dictionary constructed earlier.  
+        - `final_impression` includes the paragraph crafted in step 4.  
+   
+   6. **Output**  
+      - The Reporter Agent delivers a single HTML file, `psedukinase_dynamics_report.html`, placed in `/home/akp66103/workspace/agenticAI/working_dir/hpc/`.  
+      - This report contains:  
+        - A title page summarizing the objectives and methods.  
+        - Embedded plots (`analysis_plots.png`, `rmsd_plot.png`, `rmsf_plot.png`, `com_3d.png`).  
+        - Tables that list mean and standard deviation for RMSD and RMSF, and displacement for COM.  
+        - A literature section featuring brief annotations of the PubMed hits.  
+        - A concluding commentary that interprets the dynamic behavior of psedukinase in light of the gathered data and recent studies.
    
    ---
    
@@ -2593,7 +3023,7 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
    → generate_html_report: Generate HTML report from analysis data and literature.
    
    Creates a professional scientific report with analysis results,
-   visualizations, and literature context.
+   visualizations, literature context, and final impressions.
    
    Args:
        analysis_data: Parsed analysis summary data
@@ -2601,6 +3031,8 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
        report_type: Type of report ("comprehensive" or "executive")
        output_file: Output HTML filename (saved in working_dir)
        working_dir: Working directory for output
+       system_info: Molecular system metadata from input validation (optional)
+       final_impression: LLM-generated final impression correlating analysis with literature (optional)
    
    Returns:
        Dict with report generation results
@@ -2663,90 +3095,71 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
    💭 Response:
    ======================================================================
    {
-     "reasoning": "The goal is to produce a professional, data\u2011driven report that integrates the trajectory analysis outputs with current literature.  The plan therefore follows a straightforward pipeline: ingest the analysis summary (which contains numerical statistics and image paths), automatically generate targeted PubMed queries for each metric, retrieve recent abstracts to contextualise the results, and finally assemble everything into a comprehensive HTML document with embedded visualisations.",
-     "overview": "1\ufe0f\u20e3 Parse `analysis_summary.jsonl` to obtain RMSD, RMSF, COM statistics and plot locations. 2\ufe0f\u20e3 Auto\u2011generate PubMed queries for \"RMSD\", \"RMSF\" and \"COM\" in the context of kinase dynamics. 3\ufe0f\u20e3 Retrieve up to ten recent abstracts (\u2264\u202f5\u202fyears) for each query. 4\ufe0f\u20e3 Build a modern HTML report embedding the plots, key statistics, and literature references.",
+     "reasoning": "The user requested a comprehensive HTML report that includes the RMSD, RMSF, and COM analysis for psedukinase, with embedded visualizations, key statistics, literature context, and a final impression paragraph. The report must be generated from the existing `analysis_summary.jsonl` file and must not trigger any new simulations. The workflow therefore follows these logical steps: (1) generate PubMed search queries for the analysis types, (2) fetch recent literature results, (3) read the analysis summary, and (4) assemble the report using the retrieved data and images. This sequence ensures all required metadata is available before report generation and keeps the process deterministic and reproducible.",
+     "overview": "The plan orchestrates a four‑step pipeline that reads the analysis results, pulls up‑to‑date literature on RMSD/RMSF dynamics, and compiles a fully‑embedded HTML report titled *psedukinase_dynamics_report.html*.",
      "steps": [
        {
+         "name": "Generate PubMed Search Queries",
+         "description": "Create tailored search queries for the analysis types performed (RMSD and RMSF).",
+         "tool_name": "generate_literature_queries",
+         "tool_params": {
+           "analysis_types": ["RMSD", "RMSF"],
+           "user_goal": "Analyze the trajectory located in `working_dir/hpc/` to compute RMSD, RMSF, and COM for the protein component (255 residues) only, excluding ions, water, and any ligand."
+         },
+         "reason": "Prepare queries that will retrieve relevant recent literature."
+       },
+       {
+         "name": "Search PubMed",
+         "description": "Query PubMed for each generated query and retrieve up to five recent articles with abstracts.",
+         "tool_name": "search_pubmed",
+         "tool_params": {
+           "query": "", 
+           "max_results": 5,
+           "include_abstracts": true,
+           "max_age_years": 5
+         },
+         "reason": "Obtain contemporary context for RMSD/RMSF dynamics in protein systems."
+       },
+       {
          "name": "Read Analysis Summary",
-         "description": "Load the trajectory analysis results and plot paths.",
+         "description": "Parse the analysis results, statistics, and image file references from the JSONL file.",
          "tool_name": "read_analysis_summary",
          "tool_params": {
            "summary_file": "analysis_summary.jsonl"
          },
-         "reason": "We need the raw data and image locations before any further processing."
-       },
-       {
-         "name": "Generate PubMed Queries",
-         "description": "Create optimized search strings for each analysis type.",
-         "tool_name": "generate_literature_queries",
-         "tool_params": {
-           "analysis_types": [
-             "RMSD",
-             "RMSF",
-             "COM"
-           ],
-           "user_goal": "Analyse protein dynamics (RMSD, RMSF, COM) of a kinase and link findings to recent literature."
-         },
-         "reason": "Targeted queries increase relevance of the retrieved abstracts."
-       },
-       {
-         "name": "Search PubMed \u2013 RMSD",
-         "description": "Retrieve recent literature on RMSD in kinase dynamics.",
-         "tool_name": "search_pubmed",
-         "tool_params": {
-           "query": "${generated_queries.RMSD}",
-           "max_results": 10,
-           "include_abstracts": true,
-           "max_age_years": 5
-         },
-         "reason": "Obtain contextual background for the RMSD findings."
-       },
-       {
-         "name": "Search PubMed \u2013 RMSF",
-         "description": "Retrieve recent literature on RMSF in kinase dynamics.",
-         "tool_name": "search_pubmed",
-         "tool_params": {
-           "query": "${generated_queries.RMSF}",
-           "max_results": 10,
-           "include_abstracts": true,
-           "max_age_years": 5
-         },
-         "reason": "Provide a framework to interpret residue\u2011level flexibility."
-       },
-       {
-         "name": "Search PubMed \u2013 COM",
-         "description": "Retrieve recent literature on COM calculations in protein simulations.",
-         "tool_name": "search_pubmed",
-         "tool_params": {
-           "query": "${generated_queries.COM}",
-           "max_results": 10,
-           "include_abstracts": true,
-           "max_age_years": 5
-         },
-         "reason": "Link COM stability results to methodological advances."
+         "reason": "Load all numeric metrics and figure paths that will be embedded in the report."
        },
        {
          "name": "Generate HTML Report",
-         "description": "Create a comprehensive HTML document embedding plots, statistics and literature.",
+         "description": "Create a comprehensive, styled HTML document with embedded plots, key statistics, literature annotations, and a concluding impression paragraph.",
          "tool_name": "generate_html_report",
          "tool_params": {
-           "analysis_data": "${analysis_summary}",
-           "literature_refs": "${combined_pubmed_results}",
+           "analysis_data": {},   // will be filled by the output of read_analysis_summary
+           "literature_refs": [], // will be filled by the output of search_pubmed
            "report_type": "comprehensive",
-           "output_file": "kinase_dynamics_report.html"
+           "output_file": "psedukinase_dynamics_report.html",
+           "system_info": {
+             "protein_name": "psedukinase",
+             "residue_count": 255,
+             "simulation_length_ns": 10,
+             "frame_count": 101,
+             "topology_path": "topol.tpr",
+             "trajectory_path": "traj.xtc",
+             "com_selection": "protein"
+           },
+           "final_impression": "" // optional; can be auto‑generated within the tool
          },
-         "reason": "Produce the final deliverable that the user can view in a browser."
+         "reason": "Produce the final deliverable containing all requested content."
        }
      ],
      "report_focus": [
-       "Protein RMSD dynamics over the simulation trajectory",
-       "Residue\u2011level flexibility revealed by RMSF",
-       "Center\u2011of\u2011mass (COM) stability and overall protein displacement"
+       "Dynamic stability of psedukinase as reflected in RMSD",
+       "Residue‑level flexibility profile from RMSF",
+       "Center‑of‑mass displacement and potential functional motions"
      ],
      "literature_queries": [
-       "RMSD protein dynamics kinase",
-       "RMSF residue flexibility kinase",
-       "COM center of mass protein simulation"
+       "psedukinase RMSD dynamics",
+       "protein RMSF analysis recent studies"
      ],
      "estimated_complexity": "medium"
    }
@@ -2754,38 +3167,95 @@ The Analysis Agent will conduct all quantitative analysis and visual data genera
 
 ⚡ AGENT ACTION (reporter):
    🎬 Action: Generated reporter plan
-   📊 steps: 6
+   📊 steps: 4
    📊 report_focus: [
-      "Protein RMSD dynamics over the simulation trajectory",
-      "Residue\u2011level flexibility revealed by RMSF",
-      "Center\u2011of\u2011mass (COM) stability and overall protein displacement"
+      "Dynamic stability of psedukinase as reflected in RMSD",
+      "Residue\u2011level flexibility profile from RMSF",
+      "Center\u2011of\u2011mass displacement and potential functional motions"
 ]
-   📊 literature_queries: 3
+   📊 literature_queries: 2
 
-🏁 SCIENTIFIC REPORT GENERATION AGENT (reporter) ✅ COMPLETED [2026-03-26 17:53:56]:
+⚡ AGENT ACTION (reporter):
+   🎬 Action: Executing step 1/4
+   📊 step: Generate PubMed Search Queries
+   📊 tool: generate_literature_queries
+
+⚡ AGENT ACTION (reporter):
+   🎬 Action: Step 1/4 completed
+   📊 step: Generate PubMed Search Queries
+   📊 tool: generate_literature_queries
+   📊 status: ✅ SUCCESS
+
+⚡ AGENT ACTION (reporter):
+   🎬 Action: Executing step 2/4
+   📊 step: Search PubMed
+   📊 tool: search_pubmed
+
+⚡ AGENT ACTION (reporter):
+   🎬 Action: Step 2/4 completed
+   📊 step: Search PubMed
+   📊 tool: search_pubmed
+   📊 status: ✅ SUCCESS
+
+⚡ AGENT ACTION (reporter):
+   🎬 Action: Executing step 3/4
+   📊 step: Read Analysis Summary
+   📊 tool: read_analysis_summary
+
+⚡ AGENT ACTION (reporter):
+   🎬 Action: Step 3/4 completed
+   📊 step: Read Analysis Summary
+   📊 tool: read_analysis_summary
+   📊 status: ✅ SUCCESS
+
+⚡ AGENT ACTION (reporter):
+   🎬 Action: Executing step 4/4
+   📊 step: Generate HTML Report
+   📊 tool: generate_html_report
+
+🧠 LLM INTERACTION (reporter.final_impression) [2026-03-27 12:11:00]:
+   📝 Prompt:
+   ======================================================================
+   You are a computational biophysics expert. Based on the analysis results and literature below, write a concise Final Impression section for a scientific MD simulation report.
+   
+   **User Goal:** Analyze the trajectory located in `working_dir/hpc/` (101 frames, 10 ns) to compute RMSD, RMSF, and center‑of‑mass (COM) for the protein component (255 residues) only, excluding ions, water, and any ligand.  
+   Generate time‑series plots for each metric and tabulate the numerical values.  
+   Use the resulting da...
+   ======================================================================
+   💭 Response:
+   ======================================================================
+   The trajectory of psedukinase displays a typical pattern of structural stability for a globular protein of 255 residues.  The root‑mean‑square deviation (RMSD) averages 1.53 Å over the 10 ns simulation, with a modest standard deviation of 0.26 Å and a maximum of 2.05 Å.  Such values are well within the range reported for well‑folded enzymes in the literature, where stable systems generally exhibit RMSDs below 2 Å after initial equilibration [1].  The absence of any pronounced drift or abrupt jum...
+   ======================================================================
+
+⚡ AGENT ACTION (reporter):
+   🎬 Action: Step 4/4 completed
+   📊 step: Generate HTML Report
+   📊 tool: generate_html_report
+   📊 status: ✅ SUCCESS
+
+🏁 SCIENTIFIC REPORT GENERATION AGENT (reporter) ✅ COMPLETED [2026-03-27 12:11:01]:
    📤 Output Summary:
      • topology: /home/akp66103/workspace/agenticAI/working_dir/hpc/md.gro
 
-🎛️  SUPERVISOR ROUTING [2026-03-26 17:53:56]:
+🎛️  SUPERVISOR ROUTING [2026-03-27 12:11:01]:
    Current State Summary:
      ❌ raw_pdb: Not set
      ❌ cleaned_pdb: Not set
      ❌ coordinates: Not set
      ❌ job_id: Not set
-     ✅ analysis_results: {'extract_trajectory_metrics': {'success': True, 'n_frames': 0, 'time_range': (0.0, 0.0), 'file_size_mb': 24.251087188720703, 'trajectory_file': '/home/akp66103/workspace/agenticAI/working_dir/hpc/md.xtc', 'message': 'Trajectory has 0 frames spanning 0.0-0.0 ps'}, 'calculate_rmsd': {'success': True, 'mean_rmsd': 1.5306857223412405, 'std_rmsd': 0.2612115690681243, 'min_rmsd': 3.378352682266599e-07, 'max_rmsd': 2.0506906523164194, 'n_frames': 101, 'selection': 'protein and name CA', 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd.dat', 'message': 'RMSD calculation complete: mean=1.53 Å, std=0.26 Å'}, 'calculate_rmsf': {'success': True, 'mean_rmsf': 0.9286514385552037, 'std_rmsf': 0.3949384955076374, 'min_rmsf': 0.3767928063587787, 'max_rmsf': 2.7110194438924156, 'n_residues': 255, 'most_flexible': [{'residue_id': 22, 'residue_name': 'GLU', 'rmsf': 2.7110194438924156}, {'residue_id': 21, 'residue_name': 'LYS', 'rmsf': 2.444133374154957}, {'residue_id': 23, 'residue_name': 'THR', 'rmsf': 2.2801147459644495}, {'residue_id': 212, 'residue_name': 'LYS', 'rmsf': 2.2267631589288275}, {'residue_id': 24, 'residue_name': 'GLY', 'rmsf': 1.9235134342542703}], 'least_flexible': [{'residue_id': 230, 'residue_name': 'LEU', 'rmsf': 0.3767928063587787}, {'residue_id': 178, 'residue_name': 'ASP', 'rmsf': 0.41084138369168194}, {'residue_id': 180, 'residue_name': 'TRP', 'rmsf': 0.4158673467021137}, {'residue_id': 184, 'residue_name': 'VAL', 'rmsf': 0.42004180101770205}, {'residue_id': 182, 'residue_name': 'LEU', 'rmsf': 0.42590588611346175}], 'selection': 'protein and name CA', 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsf.dat', 'message': 'RMSF calculation complete: mean=0.93 Å, most flexible residue at 22'}, 'calculate_com_trajectory': {'success': True, 'tool': 'calculate_com'}, 'plot_rmsd': {'success': True, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd.png', 'n_datasets': 1, 'plot_type': 'line', 'message': 'Successfully created line plot with 1 dataset(s)'}, 'plot_rmsf': {'success': True, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsf.png', 'n_datasets': 1, 'plot_type': 'line', 'message': 'Successfully created line plot with 1 dataset(s)'}}
+     ✅ analysis_results: {'calculate_rmsd': {'success': True, 'mean_rmsd': 1.5306857223412405, 'std_rmsd': 0.2612115690681243, 'min_rmsd': 3.378352682266599e-07, 'max_rmsd': 2.0506906523164194, 'n_frames': 101, 'selection': 'protein and name CA', 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd.dat', 'message': 'RMSD calculation complete: mean=1.53 Å, std=0.26 Å'}, 'calculate_rmsf': {'success': True, 'mean_rmsf': 0.9286514385552037, 'std_rmsf': 0.3949384955076374, 'min_rmsf': 0.3767928063587787, 'max_rmsf': 2.7110194438924156, 'n_residues': 255, 'most_flexible': [{'residue_id': 22, 'residue_name': 'GLU', 'rmsf': 2.7110194438924156}, {'residue_id': 21, 'residue_name': 'LYS', 'rmsf': 2.444133374154957}, {'residue_id': 23, 'residue_name': 'THR', 'rmsf': 2.2801147459644495}, {'residue_id': 212, 'residue_name': 'LYS', 'rmsf': 2.2267631589288275}, {'residue_id': 24, 'residue_name': 'GLY', 'rmsf': 1.9235134342542703}], 'least_flexible': [{'residue_id': 230, 'residue_name': 'LEU', 'rmsf': 0.3767928063587787}, {'residue_id': 178, 'residue_name': 'ASP', 'rmsf': 0.41084138369168194}, {'residue_id': 180, 'residue_name': 'TRP', 'rmsf': 0.4158673467021137}, {'residue_id': 184, 'residue_name': 'VAL', 'rmsf': 0.42004180101770205}, {'residue_id': 182, 'residue_name': 'LEU', 'rmsf': 0.42590588611346175}], 'selection': 'protein and name CA', 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsf.dat', 'message': 'RMSF calculation complete: mean=0.93 Å, most flexible residue at 22'}, 'generate_com_trajectory': {'success': True, 'tool': 'generate_com_trajectory'}, 'plot_rmsd': {'success': True, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsd_plot.png', 'n_datasets': 1, 'plot_type': 'line', 'message': 'Successfully created line plot with 1 dataset(s)'}, 'plot_rmsf': {'success': True, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/rmsf_plot.png', 'n_datasets': 1, 'plot_type': 'line', 'message': 'Successfully created line plot with 1 dataset(s)'}, 'create_multipanel_analysis_plot': {'success': True, 'output_file': '/home/akp66103/workspace/agenticAI/working_dir/analysis/analysis_plots.png', 'n_panels': 3, 'layout': 'vertical', 'message': 'Successfully created 3-panel vertical plot'}}
    📍 Routing: supervisor → final_report
    💭 Reasoning: All workflow tasks complete
-   ⚠️  Errors: ['Analysis failed: ================================================================================\nMD TRAJECTORY ANALYSIS REPORT\n================================================================================\n\nPlan Overview: 1. Validate trajectory and topology. 2. Compute RMSD, RMSF, and COM trajectories. 3. Generate plots for each analysis. 4. (Optional) Create a summary report – omitted due to missing tool.\nTotal Steps: 7\nCompleted: 6\nIssues: 1\nWarnings: 0\n\n================================================================================\nRESULTS SUMMARY\n================================================================================\n\nEXTRACT_TRAJECTORY_METRICS:\n  Trajectory has 0 frames spanning 0.0-0.0 ps\n\nCALCULATE_RMSD:\n  RMSD calculation complete: mean=1.53 Å, std=0.26 Å\n  Mean RMSD: 1.53 Å\n\nCALCULATE_RMSF:\n  RMSF calculation complete: mean=0.93 Å, most flexible residue at 22\n  Mean RMSF: 0.93 Å\n\nCALCULATE_COM_TRAJECTORY:\n\nPLOT_RMSD:\n  Successfully created line plot with 1 dataset(s)\n\nPLOT_RMSF:\n  Successfully created line plot with 1 dataset(s)\n\n================================================================================\nISSUES ENCOUNTERED\n================================================================================\n  • Plot COM trajectory: Insufficient data columns in file\n\n================================================================================']
 
-🎯 WORKFLOW COMPLETION [2026-03-26 17:54:10]:
-   Status: ❌ FAILED
+🎯 WORKFLOW COMPLETION [2026-03-27 12:11:09]:
+   Status: ✅ SUCCESS
    📋 Summary:
-      Workflow completed with 1 errors and 0 warnings
+      Workflow completed with 0 errors and 0 warnings
    📁 Files Created: topology
-   ⚠️  Errors: 1
+   ⚠️  Errors: 0
    ⚠️  Warnings: 0
 ================================================================================
 ================================================================================
-SESSION 20260326_175158 COMPLETED - 2026-03-26 17:54:10
+SESSION 20260327_120846 COMPLETED - 2026-03-27 12:11:09
 ================================================================================
 

@@ -58,6 +58,12 @@ def calculate_rmsd(
         
     Returns:
         Dict with RMSD results and statistics
+    
+    Output file format (tab-separated, # comment header):
+        # Time(ns)\tRMSD(Angstrom)
+        0.0000\t0.0000
+        0.1000\t0.9425
+        ...
     """
     try:
         # Setup working directory

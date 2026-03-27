@@ -191,7 +191,7 @@ class ReporterAgent:
         return ReporterAgentInput(
             working_directory=working_dir,
             analysis_summary_file=summary_file,
-            user_goal=state.get("user_goal"),
+            user_goal=state.get("enriched_prompt") or state.get("user_goal"),
             report_type=report_type,
             planner_instructions=reporter_instructions,
             literature_search=state.get("include_literature", True),
@@ -426,6 +426,150 @@ No need to specify image paths in tool_params - they're extracted from the analy
             tools_str=tools_str
         )
     
+    def _ensure_literature_search(
+        self,
+        analysis_data: Dict[str, Any],
+        state: MDState
+    ) -> List[Dict[str, Any]]:
+        """Guaranteed literature search when plan-based searches failed or were skipped."""
+        literature_refs = []
+        try:
+            from src.reporter.literature_search import generate_literature_queries, search_pubmed
+            
+            # Get analysis types from data
+            analysis_types = []
+            if isinstance(analysis_data, dict):
+                at = analysis_data.get("analysis_types", {})
+                if isinstance(at, dict):
+                    analysis_types = list(at.keys())
+                elif isinstance(at, list):
+                    analysis_types = at
+            
+            if not analysis_types:
+                analysis_types = ["RMSD", "RMSF"]
+            
+            user_goal = state.get("enriched_prompt") or state.get("user_goal", "MD simulation analysis")
+            
+            # Generate queries
+            query_result = generate_literature_queries.invoke({
+                "analysis_types": analysis_types,
+                "user_goal": user_goal
+            })
+            
+            queries = {}
+            if isinstance(query_result, dict) and query_result.get("success"):
+                queries = query_result.get("queries", {})
+            
+            # Search PubMed with each query (max 10 total refs)
+            for atype, query_text in queries.items():
+                if len(literature_refs) >= 10:
+                    break
+                if not query_text:
+                    continue
+                remaining = 10 - len(literature_refs)
+                result = search_pubmed.invoke({
+                    "query": query_text,
+                    "max_results": min(5, remaining),
+                    "include_abstracts": True,
+                    "max_age_years": 10
+                })
+                if isinstance(result, dict) and result.get("success"):
+                    literature_refs.extend(result.get("results", []))
+            
+            logger.info(f"Fallback literature search found {len(literature_refs)} references")
+            
+        except Exception as e:
+            logger.warning(f"Fallback literature search failed: {e}")
+        
+        return literature_refs[:10]
+    
+    def _generate_final_impression(
+        self,
+        analysis_data: Dict[str, Any],
+        literature_refs: List[Dict[str, Any]],
+        state: MDState
+    ) -> Optional[str]:
+        """Generate LLM-based final impression correlating analysis results with literature."""
+        
+        if not self.llm.available:
+            logger.info("LLM unavailable; skipping final impression generation")
+            return None
+        
+        # Build analysis summary for LLM
+        entries = analysis_data.get("entries", []) if isinstance(analysis_data, dict) else []
+        if not entries:
+            logger.info("No analysis entries; skipping final impression")
+            return None
+        
+        analysis_summary_parts = []
+        for entry in entries:
+            atype = entry.get("analysis_type", "Unknown")
+            stats = entry.get("statistics", {})
+            if isinstance(stats, dict) and stats:
+                stat_lines = ", ".join(f"{k}: {v}" for k, v in stats.items() if isinstance(v, (int, float)))
+                analysis_summary_parts.append(f"- {atype}: {stat_lines}")
+            else:
+                analysis_summary_parts.append(f"- {atype}: (no statistics)")
+        analysis_text = "\n".join(analysis_summary_parts)
+        
+        # Build literature summary for LLM
+        lit_text = "No literature references available."
+        if literature_refs:
+            lit_parts = []
+            for i, ref in enumerate(literature_refs[:10], 1):
+                title = ref.get("title", "Unknown")
+                abstract = ref.get("abstract", "")
+                abstract_snippet = abstract[:300] if abstract else "No abstract"
+                lit_parts.append(f"[{i}] {title}\n    {abstract_snippet}")
+            lit_text = "\n".join(lit_parts)
+        
+        user_goal = state.get("enriched_prompt") or state.get("user_goal", "MD simulation analysis")
+        
+        prompt = f"""You are a computational biophysics expert. Based on the analysis results and literature below, write a concise Final Impression section for a scientific MD simulation report.
+
+**User Goal:** {user_goal}
+
+**Analysis Results:**
+{analysis_text}
+
+**Literature References:**
+{lit_text}
+
+**Instructions:**
+- Correlate the analysis results with findings from the literature
+- Highlight key observations: Is the protein stable? Are there notable flexible regions?
+- Put the results in context of what is known from published work
+- Provide actionable insights or conclusions relevant to the user's question
+- Keep it concise: 2-4 paragraphs, no bullet points
+- Write in scientific prose, suitable for a report
+- Cite relevant literature using bracket notation like [1], [2], [3] corresponding to the reference numbers above
+- Do NOT include section headers or titles — just the text content"""
+
+        try:
+            response = self.llm.prompt(prompt)
+            
+            log_llm_interaction(
+                agent_name="reporter.final_impression",
+                prompt=prompt[:500] + "...",
+                response=response[:500] + "..." if len(response) > 500 else response,
+                is_mock=not self.llm.available
+            )
+            
+            # Clean up response: remove markdown headers if LLM adds them
+            cleaned = response.strip()
+            cleaned = re.sub(r'^#{1,3}\s+.*\n?', '', cleaned, flags=re.MULTILINE).strip()
+            
+            if len(cleaned) < 50:
+                logger.warning("Final impression too short, skipping")
+                return None
+            
+            logger.info(f"Generated final impression ({len(cleaned)} chars)")
+            return cleaned
+            
+        except Exception as e:
+            logger.warning(f"Failed to generate final impression: {e}")
+            return None
+    
     def _extract_plan_json(self, content: str) -> Optional[Dict[str, Any]]:
         """Extract and parse JSON plan from LLM response.
         
@@ -614,10 +758,15 @@ No need to specify image paths in tool_params - they're extracted from the analy
         # Shared data between steps
         analysis_data = {}
         literature_refs = []
+        generated_queries = {}  # From generate_literature_queries tool
         
-        for step in plan.steps:
+        total_steps = len(plan.steps)
+        for i, step in enumerate(plan.steps):
             try:
-                logger.info(f"Executing step: {step.name}")
+                log_agent_action("reporter", f"Executing step {i+1}/{total_steps}", {
+                    "step": step.name,
+                    "tool": step.tool_name
+                })
                 
                 # Special handling for steps that need previous results
                 params = step.tool_params.copy()
@@ -638,6 +787,32 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 if step.tool_name == "generate_html_report":
                     params["analysis_data"] = analysis_data
                     params["literature_refs"] = literature_refs
+                    # Pass system info from state
+                    params["system_info"] = state.get("system_info")
+                    # Generate final impression using LLM
+                    params["final_impression"] = self._generate_final_impression(
+                        analysis_data, literature_refs, state
+                    )
+                
+                # Fix empty/placeholder search_pubmed queries: use generated queries as fallback
+                if step.tool_name == "search_pubmed":
+                    query_val = params.get("query", "")
+                    is_placeholder = (
+                        not query_val
+                        or (query_val.startswith("<") and query_val.endswith(">"))
+                        or query_val.startswith("<query")
+                    )
+                    if is_placeholder:
+                        # Pick first unused generated query
+                        for qtype, qtext in generated_queries.items():
+                            if qtext:
+                                params["query"] = qtext
+                                generated_queries[qtype] = ""  # mark used
+                                logger.info(f"Substituted placeholder PubMed query with: {qtext[:80]}")
+                                break
+                    # Always include abstracts for literature section
+                    params["include_abstracts"] = True
+                    params.setdefault("max_results", 10)
                 
                 # Execute tool
                 result = self.tool_executor.execute_tool(step.tool_name, params)
@@ -648,6 +823,9 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 elif step.tool_name == "search_pubmed":
                     if result.get("success"):
                         literature_refs.extend(result.get("results", []))
+                elif step.tool_name == "generate_literature_queries":
+                    if result.get("success"):
+                        generated_queries = result.get("queries", {})
                 
                 step_results.append({
                     "step_name": step.name,
@@ -658,6 +836,12 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 
                 completed += 1
                 
+                log_agent_action("reporter", f"Step {i+1}/{total_steps} completed", {
+                    "step": step.name,
+                    "tool": step.tool_name,
+                    "status": "✅ SUCCESS"
+                })
+                
             except Exception as e:
                 logger.error(f"Step {step.name} failed: {e}", exc_info=True)
                 issues.append(f"{step.name}: {str(e)}")
@@ -667,6 +851,17 @@ No need to specify image paths in tool_params - they're extracted from the analy
                     "success": False,
                     "error": str(e)
                 })
+                
+                log_agent_action("reporter", f"Step {i+1}/{total_steps} failed", {
+                    "step": step.name,
+                    "tool": step.tool_name,
+                    "status": "❌ FAILED",
+                    "error": str(e)
+                })
+        
+        # Guarantee literature search: if no refs collected, run searches now
+        if not literature_refs and analysis_data:
+            literature_refs = self._ensure_literature_search(analysis_data, state)
         
         # Build report
         report_lines = ["=" * 80, "REPORTER EXECUTION REPORT", "=" * 80, ""]

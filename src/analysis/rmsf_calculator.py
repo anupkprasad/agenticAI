@@ -58,6 +58,12 @@ def calculate_rmsf(
         
     Returns:
         Dict with RMSF results and statistics
+    
+    Output file format (tab-separated, # comment header):
+        # Residue\tRMSF(Angstrom)
+        1\t0.5432
+        2\t0.6781
+        ...
     """
     try:
         # Setup working directory

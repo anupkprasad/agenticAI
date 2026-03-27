@@ -653,7 +653,15 @@ for ts in u.trajectory:
 
 # Save results
 df = pd.DataFrame(com_data)
-df.to_csv(output_file, index=False)
+df.to_csv(output_file, index=False, header=True)
+
+# IMPORTANT: If writing non-CSV output files (.dat, .txt), always add a
+# '#'-prefixed header line so downstream plotters can parse column names.
+# Example:
+#   with open(output_file, 'w') as f:
+#       f.write("# Time(ns)\\tValue\\n")
+#       for row in data:
+#           f.write(f"{{row[0]:.4f}}\\t{{row[1]:.4f}}\\n")
 
 # Log statistics (no return after this!)
 try:

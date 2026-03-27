@@ -17,7 +17,7 @@ import os
 import json
 import logging
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -114,6 +114,9 @@ def append_analysis_summary(
     statistics = _round_floats(statistics or {}, decimals=3)
     metadata = _round_floats(metadata or {}, decimals=3)
     
+    # Ensure Path objects in files dict are converted to strings for JSON serialization
+    safe_files = {k: str(v) for k, v in (files or {}).items()}
+    
     # Format timestamp in readable format: "2026-03-03, Time 23:56:00"
     now = datetime.utcnow()
     formatted_timestamp = f"{now.strftime('%Y-%m-%d')}, Time {now.strftime('%H:%M:%S')}"
@@ -123,7 +126,7 @@ def append_analysis_summary(
         "timestamp": formatted_timestamp,
         "analysis_type": analysis_type,
         "statistics": statistics,
-        "files": files or {},
+        "files": safe_files,
         "metadata": metadata
     }
     
@@ -247,6 +250,49 @@ def update_analysis_summary_with_files(
         
     except Exception as e:
         logger.error(f"Failed to update summary file: {e}")
+
+
+def infer_analysis_type_from_files(working_dir: str, data_files: List[str]) -> Optional[str]:
+    """
+    Infer the analysis_type by matching data file paths against existing summary entries.
+    
+    Searches all summary entries and returns the analysis_type of the entry
+    whose 'files' dict contains one of the given data_files (by basename match).
+    
+    Args:
+        working_dir: Working directory containing analysis_summary.jsonl
+        data_files: List of data file paths/names used in the plot
+        
+    Returns:
+        Matching analysis_type string, or None if no match
+    """
+    if not data_files:
+        return None
+    
+    entries = read_summary_file(working_dir)
+    if not entries:
+        return None
+    
+    # Normalize input filenames to basenames for comparison
+    input_basenames = set()
+    for f in data_files:
+        if isinstance(f, str) and f:
+            input_basenames.add(Path(f).name.lower())
+    
+    if not input_basenames:
+        return None
+    
+    # Search entries in reverse (most recent first) for a file match
+    for entry in reversed(entries):
+        entry_files = entry.get("files", {})
+        if not isinstance(entry_files, dict):
+            continue
+        for file_path in entry_files.values():
+            if isinstance(file_path, str):
+                if Path(file_path).name.lower() in input_basenames:
+                    return entry.get("analysis_type")
+    
+    return None
 
 
 def get_latest_analysis(working_dir: str, analysis_type: Optional[str] = None) -> Optional[Dict[str, Any]]:

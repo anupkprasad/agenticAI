@@ -1,8 +1,9 @@
 """
-MD Data Plotter - Visualization tool for MD analysis data
+Data Plotter - Visualization tools for scientific data analysis
 
-Creates publication-quality plots for RMSD, RMSF, Rg, Energy, and other MD metrics.
-Supports single-panel and multi-panel (subplot) layouts.
+Creates publication-quality 2D and 3D plots for RMSD, RMSF, Rg, Energy, COM,
+and other metrics.  Supports single-panel, multi-panel (subplot), combined-column,
+and 3D scatter/trajectory layouts.
 """
 import os
 import logging
@@ -28,6 +29,41 @@ try:
     HAS_NUMPY = True
 except ImportError:
     HAS_NUMPY = False
+
+
+# Hardcoded analysis type inference map
+_ANALYSIS_TYPE_MAP = {
+    "rmsd": "RMSD",
+    "rmsf": "RMSF",
+    "rg": "Radius_of_Gyration",
+    "gyration": "Radius_of_Gyration",
+    "energy": "Energy",
+    "sasa": "SASA",
+    "dssp": "DSSP_SecondaryStructure",
+    "com": "COM_Analysis",
+}
+
+
+def _infer_analysis_type(output_file: str, data_files: List[str], working_dir: Optional[str] = None) -> Optional[str]:
+    """Infer analysis type from file names, falling back to summary file lookup."""
+    # Strategy 1: keyword matching against file names
+    candidates = [output_file.lower()] + [f.lower() for f in data_files if f]
+    for name in candidates:
+        for keyword, atype in _ANALYSIS_TYPE_MAP.items():
+            if keyword in name:
+                return atype
+
+    # Strategy 2: match data files against existing summary entries
+    if working_dir:
+        try:
+            from .summary_logger import infer_analysis_type_from_files
+            result = infer_analysis_type_from_files(working_dir, data_files)
+            if result:
+                return result
+        except Exception:
+            pass
+
+    return None
 
 
 def parse_data_file(file_path: str) -> Tuple[List[List[float]], List[str]]:
@@ -96,8 +132,8 @@ def parse_data_file(file_path: str) -> Tuple[List[List[float]], List[str]]:
                         data_columns[i].append(val)
                         
             except ValueError:
-                # For CSV, first non-parseable line is likely the header row
-                if is_csv and not column_names and not data_columns:
+                # First non-parseable line is likely the header row
+                if not column_names and not data_columns:
                     column_names = parts
                 continue
     
@@ -113,7 +149,7 @@ def parse_data_file(file_path: str) -> Tuple[List[List[float]], List[str]]:
 
 
 @tool
-def plot_md_data(
+def plot_data(
     data_files: List[str],
     output_file: str,
     plot_type: str = "line",
@@ -127,10 +163,11 @@ def plot_md_data(
     working_dir: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Plot MD analysis data from one or more data files (single panel).
+    Plot analysis data from one or more data files (single 2D panel).
     
-    Creates a single-panel plot for visualizing RMSD, RMSF, Rg, or energy data.
-    Supports overlay of multiple datasets on the same axes.
+    Creates a single-panel 2D plot for visualizing RMSD, RMSF, Rg, energy, or
+    other time-series / per-residue data.  Supports overlay of multiple datasets
+    on the same axes.
     
     Args:
         data_files: List of data file paths to plot (.xvg, .dat, .csv)
@@ -165,7 +202,7 @@ def plot_md_data(
             else:
                 # If working_dir is specified, resolve relative paths from there
                 if working_dir:
-                    abs_data_files.append(os.path.join(working_dir, data_file))
+                    abs_data_files.append(os.path.abspath(os.path.join(working_dir, data_file)))
                 else:
                     abs_data_files.append(os.path.abspath(data_file))
         
@@ -181,6 +218,32 @@ def plot_md_data(
         if working_dir:
             os.makedirs(working_dir, exist_ok=True)
             os.chdir(working_dir)
+        
+        # -------------------------------------------------------------------
+        # Auto-detect geometric (x, y, z) data → delegate to plot_3d
+        # -------------------------------------------------------------------
+        first_cols, first_names = parse_data_file(abs_data_files[0])
+        detected_xyz = _detect_xyz_columns(first_names, first_cols)
+        if detected_xyz is not None:
+            logger.info("Detected geometric (x,y,z) columns – switching to 3D plot")
+            if working_dir:
+                os.chdir(original_dir)
+            return plot_3d.invoke({
+                "data_files": data_files,
+                "output_file": output_file,
+                "x_col": detected_xyz["x"],
+                "y_col": detected_xyz["y"],
+                "z_col": detected_xyz["z"],
+                "plot_type": "scatter" if plot_type == "scatter" else "line",
+                "titles": titles,
+                "xlabel": xlabel,
+                "ylabel": ylabel,
+                "labels": labels,
+                "colors": colors,
+                "figsize": figsize,
+                "dpi": dpi,
+                "working_dir": working_dir,
+            })
         
         # Create figure
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
@@ -255,21 +318,7 @@ def plot_md_data(
             try:
                 from .summary_logger import update_analysis_summary_with_files
                 
-                # Infer analysis type from data file names or output file name
-                analysis_type = None
-                output_lower = output_file.lower()
-                data_lower = data_files[0].lower() if data_files else ""
-                
-                if "rmsd" in output_lower or "rmsd" in data_lower:
-                    analysis_type = "RMSD"
-                elif "rmsf" in output_lower or "rmsf" in data_lower:
-                    analysis_type = "RMSF"
-                elif "rg" in output_lower or "gyration" in output_lower or "rg" in data_lower:
-                    analysis_type = "Radius_of_Gyration"
-                elif "energy" in output_lower or "energy" in data_lower:
-                    analysis_type = "Energy"
-                elif "sasa" in output_lower or "sasa" in data_lower:
-                    analysis_type = "SASA"
+                analysis_type = _infer_analysis_type(output_file, data_files, working_dir)
                 
                 if analysis_type:
                     update_analysis_summary_with_files(
@@ -302,7 +351,7 @@ def plot_md_data(
 
 
 @tool
-def plot_md_multipanel(
+def plot_multipanel(
     data_files: List[str],
     output_file: str,
     layout: str = "vertical",
@@ -316,10 +365,10 @@ def plot_md_multipanel(
     working_dir: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Create multi-panel plots for comparing multiple MD analyses.
+    Create multi-panel plots for comparing multiple analyses.
     
     Creates a figure with multiple subplots, one for each data file.
-    Useful for comparing RMSD, RMSF, Rg, and energy in a single figure.
+    Useful for comparing RMSD, RMSF, Rg, energy, or any 2D data side-by-side.
     
     Args:
         data_files: List of data file paths, one per panel (.xvg, .dat, .csv)
@@ -356,9 +405,8 @@ def plot_md_multipanel(
             else:
                 # If working_dir is specified, resolve relative paths from there
                 if working_dir:
-                    abs_data_files.append(os.path.join(working_dir, data_file))
+                    abs_data_files.append(os.path.abspath(os.path.join(working_dir, data_file)))
                 else:
-                    # Make it absolute relative to current directory
                     abs_data_files.append(os.path.abspath(data_file))
         
         # Validate that all files exist (before any chdir)
@@ -482,20 +530,7 @@ def plot_md_multipanel(
             try:
                 from .summary_logger import update_analysis_summary_with_files
                 
-                # Try to infer analysis type from first data file
-                analysis_type = None
-                if data_files:
-                    first_file_lower = data_files[0].lower()
-                    if "rmsd" in first_file_lower:
-                        analysis_type = "RMSD"
-                    elif "rmsf" in first_file_lower:
-                        analysis_type = "RMSF"
-                    elif "rg" in first_file_lower or "gyration" in first_file_lower:
-                        analysis_type = "Radius_of_Gyration"
-                    elif "energy" in first_file_lower:
-                        analysis_type = "Energy"
-                    elif "sasa" in first_file_lower:
-                        analysis_type = "SASA"
+                analysis_type = _infer_analysis_type(output_file, data_files, working_dir)
                 
                 if analysis_type:
                     update_analysis_summary_with_files(
@@ -589,7 +624,7 @@ def plot_combined_data(
         else:
             # If working_dir is specified, resolve relative paths from there
             if working_dir:
-                abs_data_file = os.path.join(working_dir, data_file)
+                abs_data_file = os.path.abspath(os.path.join(working_dir, data_file))
             else:
                 abs_data_file = os.path.abspath(data_file)
         
@@ -695,20 +730,8 @@ def plot_combined_data(
             try:
                 from .summary_logger import update_analysis_summary_with_files
                 
-                # Try to infer analysis type from data file
-                analysis_type = None
-                if data_file:
-                    file_lower = data_file.lower()
-                    if "rmsd" in file_lower:
-                        analysis_type = "RMSD"
-                    elif "rmsf" in file_lower:
-                        analysis_type = "RMSF"
-                    elif "rg" in file_lower or "gyration" in file_lower:
-                        analysis_type = "Radius_of_Gyration"
-                    elif "energy" in file_lower:
-                        analysis_type = "Energy"
-                    elif "sasa" in file_lower:
-                        analysis_type = "SASA"
+                input_files = [data_file] if data_file else data_files
+                analysis_type = _infer_analysis_type(output_file, input_files, working_dir)
                 
                 if analysis_type:
                     update_analysis_summary_with_files(
@@ -738,3 +761,216 @@ def plot_combined_data(
             "success": False,
             "error": f"Combined plotting failed: {str(e)}"
         }
+
+
+# ---------------------------------------------------------------------------
+# Geometric column detection helpers
+# ---------------------------------------------------------------------------
+
+_GEOMETRIC_PATTERNS = {
+    "x": {"x", "x_coord", "com_x", "pos_x"},
+    "y": {"y", "y_coord", "com_y", "pos_y"},
+    "z": {"z", "z_coord", "com_z", "pos_z"},
+}
+
+
+def _detect_xyz_columns(
+    column_names: List[str], data_columns: List[List[float]]
+) -> Optional[Dict[str, int]]:
+    """Return {'x': idx, 'y': idx, 'z': idx} if three geometric columns are found."""
+    name_lower = [n.lower().strip() for n in column_names]
+    result: Dict[str, int] = {}
+    for axis, patterns in _GEOMETRIC_PATTERNS.items():
+        for i, name in enumerate(name_lower):
+            if name in patterns:
+                result[axis] = i
+                break
+    if len(result) == 3 and all(result[a] < len(data_columns) for a in "xyz"):
+        return result
+    return None
+
+
+@tool
+def plot_3d(
+    data_files: List[str],
+    output_file: str,
+    x_col: Optional[int] = None,
+    y_col: Optional[int] = None,
+    z_col: Optional[int] = None,
+    plot_type: str = "scatter",
+    titles: Optional[List[str]] = None,
+    xlabel: Optional[str] = None,
+    ylabel: Optional[str] = None,
+    zlabel: Optional[str] = None,
+    labels: Optional[List[str]] = None,
+    colors: Optional[List[str]] = None,
+    figsize: Tuple[int, int] = (10, 8),
+    dpi: int = 300,
+    working_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Create a 3D plot for geometric or spatial data (x, y, z).
+
+    Automatically detects columns named x, y, z (case-insensitive) when
+    column indices are not provided.  Useful for center-of-mass trajectories,
+    spatial distributions, or any 3-variable dataset.
+
+    Args:
+        data_files: List of data file paths to plot (.csv, .dat, .xvg)
+        output_file: Output image filename only (e.g., "com_3d.png") - saved in working_dir
+        x_col: Column index for x-axis data (auto-detected if None)
+        y_col: Column index for y-axis data (auto-detected if None)
+        z_col: Column index for z-axis data (auto-detected if None)
+        plot_type: "scatter" or "line" - default: "scatter"
+        titles: Plot title (optional)
+        xlabel: X-axis label (optional, auto-detected from column name)
+        ylabel: Y-axis label (optional, auto-detected from column name)
+        zlabel: Z-axis label (optional, auto-detected from column name)
+        labels: Legend labels for each data file (optional)
+        colors: Colors for each dataset (optional)
+        figsize: Figure size as (width, height) in inches - default: (10, 8)
+        dpi: Resolution in dots per inch - default: 300
+        working_dir: Working directory for analysis (files will be written here)
+
+    Returns:
+        Dict with plotting results
+    """
+    try:
+        if not HAS_MATPLOTLIB:
+            return {"success": False, "error": "matplotlib not available"}
+
+        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+        abs_data_files = []
+        original_dir = os.getcwd()
+
+        for data_file in data_files:
+            if os.path.isabs(data_file):
+                abs_data_files.append(data_file)
+            elif working_dir:
+                abs_data_files.append(os.path.abspath(os.path.join(working_dir, data_file)))
+            else:
+                abs_data_files.append(os.path.abspath(data_file))
+
+        for abs_path, rel_path in zip(abs_data_files, data_files):
+            if not os.path.exists(abs_path):
+                return {"success": False, "error": f"Data file not found: {rel_path}"}
+
+        if working_dir:
+            os.makedirs(working_dir, exist_ok=True)
+            os.chdir(working_dir)
+
+        fig = plt.figure(figsize=figsize, dpi=dpi)
+        ax = fig.add_subplot(111, projection="3d")
+
+        if colors is None:
+            colors = [f"C{i}" for i in range(len(data_files))]
+
+        for idx, (abs_file, rel_file) in enumerate(zip(abs_data_files, data_files)):
+            data_cols, col_names = parse_data_file(abs_file)
+
+            # Resolve column indices -------------------------------------------
+            xi, yi, zi = x_col, y_col, z_col
+
+            if xi is None or yi is None or zi is None:
+                detected = _detect_xyz_columns(col_names, data_cols)
+                if detected:
+                    xi = xi if xi is not None else detected["x"]
+                    yi = yi if yi is not None else detected["y"]
+                    zi = zi if zi is not None else detected["z"]
+                else:
+                    # Fallback: last 3 columns (skip frame/time if present)
+                    n = len(data_cols)
+                    if n >= 3:
+                        xi, yi, zi = n - 3, n - 2, n - 1
+                    else:
+                        if working_dir:
+                            os.chdir(original_dir)
+                        return {
+                            "success": False,
+                            "error": f"Need at least 3 data columns for 3D plot, found {n} in {rel_file}",
+                        }
+
+            if max(xi, yi, zi) >= len(data_cols):
+                if working_dir:
+                    os.chdir(original_dir)
+                return {
+                    "success": False,
+                    "error": f"Column index out of range in {rel_file} (has {len(data_cols)} columns)",
+                }
+
+            x_data = data_cols[xi]
+            y_data = data_cols[yi]
+            z_data = data_cols[zi]
+
+            label = labels[idx] if labels and idx < len(labels) else Path(rel_file).stem
+            color = colors[idx] if idx < len(colors) else None
+
+            if plot_type == "line":
+                ax.plot(x_data, y_data, z_data, label=label, color=color, linewidth=2)
+            else:
+                ax.scatter(x_data, y_data, z_data, label=label, color=color, alpha=0.6, s=20)
+
+            # Auto-detect axis labels from first file
+            if idx == 0:
+                if not xlabel and xi < len(col_names):
+                    xlabel = col_names[xi]
+                if not ylabel and yi < len(col_names):
+                    ylabel = col_names[yi]
+                if not zlabel and zi < len(col_names):
+                    zlabel = col_names[zi]
+
+        if xlabel:
+            ax.set_xlabel(xlabel, fontsize=12, fontweight="bold")
+        if ylabel:
+            ax.set_ylabel(ylabel, fontsize=12, fontweight="bold")
+        if zlabel:
+            ax.set_zlabel(zlabel, fontsize=12, fontweight="bold")
+
+        if titles and len(titles) > 0:
+            ax.set_title(titles[0], fontsize=14, fontweight="bold")
+
+        if len(data_files) > 1:
+            ax.legend(frameon=True, shadow=True, fontsize=10)
+
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=dpi, bbox_inches="tight")
+        plt.close()
+
+        logger.info(f"3D plot saved to {output_file}")
+
+        if working_dir:
+            try:
+                from .summary_logger import update_analysis_summary_with_files
+
+                analysis_type = _infer_analysis_type(output_file, data_files, working_dir)
+                if analysis_type:
+                    update_analysis_summary_with_files(
+                        working_dir=working_dir,
+                        analysis_type=analysis_type,
+                        additional_files={"plot_3d": output_file},
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to update summary with 3D plot info: {e}")
+            os.chdir(original_dir)
+
+        return {
+            "success": True,
+            "output_file": output_file,
+            "n_datasets": len(data_files),
+            "plot_type": f"3d_{plot_type}",
+            "message": f"Successfully created 3D {plot_type} plot with {len(data_files)} dataset(s)",
+        }
+
+    except Exception as e:
+        logger.exception(f"3D plotting failed: {e}")
+        if working_dir and "original_dir" in locals():
+            os.chdir(original_dir)
+        return {"success": False, "error": f"3D plotting failed: {str(e)}"}
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible aliases (old names → new names)
+# ---------------------------------------------------------------------------
+plot_md_data = plot_data
+plot_md_multipanel = plot_multipanel

@@ -26,7 +26,10 @@ from src.analysis.rmsd_calculator import calculate_rmsd
 from src.analysis.rmsf_calculator import calculate_rmsf
 from src.analysis.gyration_calculator import calculate_radius_of_gyration
 from src.analysis.energy_analyzer import analyze_energy, extract_trajectory_metrics
-from src.analysis.data_plotter import plot_md_data, plot_md_multipanel, plot_combined_data
+from src.analysis.data_plotter import (
+    plot_data, plot_multipanel, plot_combined_data, plot_3d,
+    plot_md_data, plot_md_multipanel,  # backward-compat aliases
+)
 from src.analysis.summary_logger import initialize_summary_file, generate_summary_report
 from src.analysis.dssp_analyzer import analyze_secondary_structure
 from src.analysis.sasa_calculator import calculate_sasa, plot_sasa
@@ -44,9 +47,12 @@ __all__ = [
     "analyze_energy",
     "extract_trajectory_metrics",
     "analyze_secondary_structure",
+    "plot_data",
+    "plot_multipanel",
+    "plot_combined_data",
+    "plot_3d",
     "plot_md_data",
     "plot_md_multipanel",
-    "plot_combined_data",
     "AnalysisToolExecutor",
     "get_analysis_tools",
     "get_tool_metadata",
@@ -179,9 +185,13 @@ class AnalysisToolExecutor:
             "analyze_energy": analyze_energy,
             "extract_trajectory_metrics": extract_trajectory_metrics,
             "analyze_secondary_structure": analyze_secondary_structure,
+            "plot_data": plot_data,
+            "plot_multipanel": plot_multipanel,
+            "plot_combined_data": plot_combined_data,
+            "plot_3d": plot_3d,
+            # backward-compat aliases
             "plot_md_data": plot_md_data,
-            "plot_md_multipanel": plot_md_multipanel,
-            "plot_combined_data": plot_combined_data
+            "plot_md_multipanel": plot_md_multipanel
         }
         
         # Setup working directory BEFORE loading programmer tools
@@ -305,6 +315,39 @@ class AnalysisToolExecutor:
                 "success": False,
                 "error": f"Unknown tool: {tool_name}. Available: {list(self.tools.keys())}"
             }
+        
+        # Normalise common LLM parameter-name mistakes before calling the tool
+        _PARAM_ALIASES = {
+            "title": "titles",
+            "ylabel": "ylabels",  # multipanel expects plural
+            "xlabel": "xlabels",  # multipanel expects plural
+            "plot_type": "plot_types",  # multipanel expects plural
+            "color": "colors",
+            "label": "labels",
+        }
+        tool_func_raw = self.tools[tool_name]
+        actual_fn = tool_func_raw.func if hasattr(tool_func_raw, 'func') else tool_func_raw
+        try:
+            valid_params = set(inspect.signature(actual_fn).parameters.keys())
+        except Exception:
+            valid_params = None
+        
+        if valid_params is not None:
+            aliases_applied = {}
+            for alias, canonical in _PARAM_ALIASES.items():
+                if alias in kwargs and alias not in valid_params and canonical in valid_params:
+                    val = kwargs.pop(alias)
+                    # Wrap scalar in list for list-typed parameters
+                    if canonical not in kwargs:
+                        kwargs[canonical] = [val] if isinstance(val, str) else val
+                    aliases_applied[alias] = canonical
+            # Also strip completely unknown kwargs so they don't cause TypeErrors
+            unknown = [k for k in kwargs if k not in valid_params]
+            for k in unknown:
+                logger.warning(f"Dropping unknown parameter '{k}' for tool {tool_name}")
+                kwargs.pop(k)
+            if aliases_applied:
+                logger.info(f"Aliased parameters for {tool_name}: {aliases_applied}")
         
         try:
             logger.info(f"Executing analysis tool: {tool_name}")
