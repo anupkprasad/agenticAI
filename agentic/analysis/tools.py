@@ -324,6 +324,9 @@ class AnalysisToolExecutor:
             "plot_type": "plot_types",  # multipanel expects plural
             "color": "colors",
             "label": "labels",
+            "data_file": "data_files",   # LLM often sends singular
+            "csv_file": "data_files",    # LLM may use csv_file instead
+            "input_file": "data_files",  # another common LLM alias
         }
         tool_func_raw = self.tools[tool_name]
         actual_fn = tool_func_raw.func if hasattr(tool_func_raw, 'func') else tool_func_raw

@@ -8,7 +8,10 @@ from typing import Dict, Any, List, Optional
 
 # Import modular @tool functions from src/reporter/
 from src.reporter.summary_reader import read_analysis_summary
-from src.reporter.literature_search import search_pubmed, generate_literature_queries
+from src.reporter.literature_search import (
+    search_pubmed, generate_literature_queries,
+    search_biorxiv, search_uniprot,
+)
 from src.reporter.html_generator import generate_html_report
 
 # Export tool functions for direct access
@@ -16,6 +19,8 @@ __all__ = [
     "ReporterToolExecutor",
     "read_analysis_summary",
     "search_pubmed",
+    "search_biorxiv",
+    "search_uniprot",
     "generate_literature_queries",
     "generate_html_report",
     "get_reporter_tools",
@@ -35,6 +40,8 @@ def get_reporter_tools() -> list:
     return [
         read_analysis_summary,
         search_pubmed,
+        search_biorxiv,
+        search_uniprot,
         generate_literature_queries,
         generate_html_report,
     ]
@@ -91,6 +98,8 @@ class ReporterToolExecutor:
         tools_map = {
             "read_analysis_summary": read_analysis_summary,
             "search_pubmed": search_pubmed,
+            "search_biorxiv": search_biorxiv,
+            "search_uniprot": search_uniprot,
             "generate_literature_queries": generate_literature_queries,
             "generate_html_report": generate_html_report
         }

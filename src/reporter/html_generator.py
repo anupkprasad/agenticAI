@@ -18,7 +18,9 @@ def generate_html_report(
     output_file: str = "report.html",
     working_dir: Optional[str] = None,
     system_info: Optional[Dict[str, Any]] = None,
-    final_impression: Optional[str] = None
+    final_impression: Optional[str] = None,
+    pdb_data: Optional[str] = None,
+    enriched_prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Generate HTML report from analysis data and literature.
@@ -34,6 +36,8 @@ def generate_html_report(
         working_dir: Working directory for output
         system_info: Molecular system metadata from input validation (optional)
         final_impression: LLM-generated final impression correlating analysis with literature (optional)
+        pdb_data: PDB file text content for 3D structure viewer (optional)
+        enriched_prompt: Supervisor-rephrased user task description (optional)
     
     Returns:
         Dict with report generation results
@@ -46,6 +50,10 @@ def generate_html_report(
     # Ensure output directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
+    # Auto-extract PDB for 3D viewer if not provided
+    if pdb_data is None:
+        pdb_data = _auto_extract_pdb(working_dir)
+    
     try:
         # Build HTML content
         html_content = build_html_content(
@@ -53,7 +61,9 @@ def generate_html_report(
             literature_refs=literature_refs or [],
             report_type=report_type,
             system_info=system_info,
-            final_impression=final_impression
+            final_impression=final_impression,
+            pdb_data=pdb_data,
+            enriched_prompt=enriched_prompt
         )
         
         # Write to file
@@ -77,12 +87,58 @@ def generate_html_report(
         }
 
 
+def _auto_extract_pdb(working_dir: str) -> Optional[str]:
+    """Try to extract/read PDB for the 3D viewer automatically.
+
+    Searches for an existing ``system_frame0.pdb`` first.  If not found,
+    attempts to run the structure extractor on the base working directory
+    (one level up from the reporter directory when appropriate).
+    """
+    try:
+        from src.reporter.structure_extractor import extract_first_frame_pdb, read_pdb_data
+    except ImportError:
+        logger.debug("structure_extractor not available; skipping PDB auto-extract")
+        return None
+
+    wd = Path(working_dir).resolve()
+
+    # Determine the base working directory (parent of reporter/ if we are inside it)
+    if wd.name == "reporter":
+        base_dir = wd.parent
+    else:
+        base_dir = wd
+
+    # 1. Check for an already-extracted PDB in reporter/
+    existing = base_dir / "reporter" / "system_frame0.pdb"
+    if existing.is_file():
+        pdb_text = read_pdb_data(str(existing))
+        if pdb_text:
+            logger.info("Auto-loaded existing PDB for 3D viewer: %s", existing)
+            return pdb_text
+
+    # 2. Extract from trajectory
+    try:
+        pdb_path = extract_first_frame_pdb(str(base_dir))
+        if pdb_path:
+            pdb_text = read_pdb_data(pdb_path)
+            if pdb_text:
+                logger.info("Auto-extracted PDB for 3D viewer (%d chars)", len(pdb_text))
+                return pdb_text
+    except Exception as exc:
+        logger.warning("PDB auto-extraction failed: %s", exc)
+
+    logger.debug("No PDB data available for 3D viewer")
+    return None
+
+
 def build_html_content(
     analysis_data: Dict[str, Any],
     literature_refs: List[Dict[str, Any]],
     report_type: str,
     system_info: Optional[Dict[str, Any]] = None,
-    final_impression: Optional[str] = None
+    final_impression: Optional[str] = None,
+    pdb_data: Optional[str] = None,
+    enriched_prompt: Optional[str] = None
 ) -> str:
     """Build HTML content for report (not a @tool, internal helper)"""
     
@@ -108,14 +164,16 @@ def build_html_content(
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Molecular Dynamics Report</title>
+    <script src="https://3Dmol.org/build/3Dmol-min.js"></script>
     <style>
         body {
             font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-            line-height: 1.6;
+            line-height: 1.7;
             color: #333;
             max-width: 1400px;
             margin: 0 auto;
             padding: 20px;
+            font-size: 16px;
             background: linear-gradient(135deg, #f5f7fa 0%, #e3e6eb 100%);
         }
         .container {
@@ -279,20 +337,43 @@ def build_html_content(
             margin: 10px 0;
         }
         .reference {
-            margin: 15px 0;
-            padding: 15px;
+            margin: 18px 0;
+            padding: 18px 20px;
             background-color: #f9fafb;
             border-left: 4px solid #6b7280;
-            border-radius: 4px;
+            border-radius: 6px;
         }
         .reference-title {
-            font-weight: bold;
+            font-weight: 700;
             color: #1f2937;
-            margin-bottom: 8px;
+            font-size: 16px;
+            margin-bottom: 6px;
+        }
+        .reference-title a {
+            color: #1e40af;
+            text-decoration: none;
+        }
+        .reference-title a:hover {
+            text-decoration: underline;
+        }
+        .reference-meta {
+            font-size: 14px;
+            color: #4b5563;
+            margin: 4px 0;
+        }
+        .reference-meta .journal {
+            font-style: italic;
+        }
+        .reference-doi {
+            font-size: 13px;
+            color: #6b7280;
+            margin-top: 4px;
+        }
+        .reference-doi a {
+            color: #2563eb;
         }
         .reference-authors {
-            font-style: italic;
-            color: #6b7280;
+            color: #4b5563;
             font-size: 14px;
         }
         .section-divider {
@@ -323,9 +404,12 @@ def build_html_content(
             border-left: 4px solid #f59e0b;
         }
         .final-impression p {
-            margin: 10px 0;
-            line-height: 1.8;
-            font-size: 16px;
+            margin: 12px 0;
+            line-height: 1.85;
+            font-size: 17px;
+        }
+        .final-impression strong {
+            color: #92400e;
         }
         .final-impression .ref-citations {
             font-size: 14px;
@@ -333,6 +417,78 @@ def build_html_content(
             margin-top: 20px;
             padding-top: 15px;
             border-top: 1px solid #fde68a;
+        }
+        .final-impression .ref-citations p {
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        /* 3D Structure Viewer */
+        .viewer-section {
+            margin: 30px 0;
+            padding: 25px;
+            border-radius: 10px;
+            background-color: #f0f4ff;
+            border: 1px solid #c7d2fe;
+            border-left: 4px solid #6366f1;
+        }
+        .viewer-container {
+            position: relative;
+            width: 100%;
+            height: 550px;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #1a1a2e;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+        }
+        .viewer-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 15px 0;
+            align-items: center;
+        }
+        .viewer-controls label {
+            font-size: 13px;
+            font-weight: 600;
+            color: #4338ca;
+            margin-right: 4px;
+        }
+        .viewer-controls select, .viewer-controls button {
+            padding: 6px 14px;
+            border: 1px solid #c7d2fe;
+            border-radius: 6px;
+            background: white;
+            font-size: 13px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .viewer-controls button {
+            background: #6366f1;
+            color: white;
+            border: none;
+            font-weight: 600;
+        }
+        .viewer-controls button:hover { background: #4f46e5; }
+        .viewer-controls select:focus { outline: 2px solid #6366f1; }
+        /* Task Description */
+        .task-description {
+            margin: 25px 0;
+            padding: 20px 25px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #ede9fe 0%, #ddd6fe 100%);
+            border: 1px solid #c4b5fd;
+            border-left: 4px solid #7c3aed;
+        }
+        .task-description h3 {
+            margin: 0 0 10px 0;
+            color: #5b21b6;
+            font-size: 16px;
+        }
+        .task-description p {
+            margin: 0;
+            color: #4c1d95;
+            font-size: 15px;
+            line-height: 1.7;
         }
     </style>
 </head>
@@ -348,6 +504,14 @@ def build_html_content(
     html_parts.append(f'<p><strong>🔬 Total Analyses:</strong> {len(entries)}</p>')
     html_parts.append(f'<p><strong>📈 Analysis Types:</strong> {", ".join(analysis_types.keys())}</p>')
     html_parts.append('</div>')
+    
+    # Task Description (enriched prompt from supervisor)
+    if enriched_prompt:
+        import html as html_mod
+        html_parts.append('<div class="task-description">')
+        html_parts.append('<h3>📝 Task Description</h3>')
+        html_parts.append(f'<p>{html_mod.escape(enriched_prompt)}</p>')
+        html_parts.append('</div>')
     
     # Section 1: System Information (from input validation)
     if system_info and system_info.get("success"):
@@ -445,6 +609,11 @@ def build_html_content(
         html_parts.append('</div>')  # close system-info
         html_parts.append('<div class="section-divider"></div>')
     
+    # 3D Structure Viewer section (powered by 3Dmol.js)
+    if pdb_data:
+        html_parts.append(_build_3d_viewer_section(pdb_data))
+        html_parts.append('<div class="section-divider"></div>')
+    
     # Analysis sections
     html_parts.append("<h2>📊 Analysis Results</h2>")
     
@@ -526,46 +695,67 @@ def build_html_content(
         html_parts.append(f'<p>Found {len(literature_refs)} relevant publications (showing top {len(display_refs)}):</p>')
         
         for idx, ref in enumerate(display_refs, 1):
-            html_parts.append(f'<div class="reference">')
-            html_parts.append(f'<div class="reference-title">[{idx}] {ref.get("title", "Unknown")}</div>')
-            
+            import html as _html_mod
+            title = _html_mod.escape(ref.get("title", "Unknown"))
+            doi = ref.get("doi")
+            pmid = ref.get("pmid")
+
+            html_parts.append('<div class="reference">')
+
+            # Title — linked to DOI if available, otherwise PubMed, otherwise url
+            url = ref.get("url")
+            source_tag = ref.get("source", "")
+            if doi:
+                html_parts.append(f'<div class="reference-title">[{idx}] <a href="https://doi.org/{_html_mod.escape(doi)}" target="_blank">{title}</a></div>')
+            elif pmid:
+                html_parts.append(f'<div class="reference-title">[{idx}] <a href="https://pubmed.ncbi.nlm.nih.gov/{_html_mod.escape(pmid)}/" target="_blank">{title}</a></div>')
+            elif url:
+                html_parts.append(f'<div class="reference-title">[{idx}] <a href="{_html_mod.escape(url)}" target="_blank">{title}</a></div>')
+            else:
+                html_parts.append(f'<div class="reference-title">[{idx}] {title}</div>')
+
+            # Authors
             authors = ref.get("authors", [])
             if authors:
-                author_str = ", ".join(authors[:3])
-                if len(authors) > 3:
+                author_str = ", ".join(authors[:5])
+                if len(authors) > 5:
                     author_str += " et al."
-                html_parts.append(f'<div class="reference-authors">{author_str}</div>')
-            
+                html_parts.append(f'<div class="reference-authors">{_html_mod.escape(author_str)}</div>')
+
+            # Journal, year (single compact line)
             journal = ref.get("journal", "")
             year = ref.get("year", "")
-            if journal or year:
-                html_parts.append(f'<p><em>{journal}</em> ({year})</p>')
-            
-            doi = ref.get("doi")
+            if journal or year or source_tag:
+                meta = f'<span class="journal">{_html_mod.escape(journal)}</span>'
+                if year:
+                    meta += f' ({year})'
+                if source_tag and source_tag not in ("PubMed", ""):
+                    meta += f' <span style="background:#e0e7ff;color:#3730a3;padding:1px 6px;border-radius:4px;font-size:0.75em;margin-left:4px;">{_html_mod.escape(source_tag)}</span>'
+                html_parts.append(f'<div class="reference-meta">{meta}</div>')
+
+            # DOI and PMID on one line
+            id_parts = []
             if doi:
-                html_parts.append(f'<p>DOI: <a href="https://doi.org/{doi}">{doi}</a></p>')
-            
-            pmid = ref.get("pmid")
+                id_parts.append(f'DOI: <a href="https://doi.org/{_html_mod.escape(doi)}" target="_blank">{_html_mod.escape(doi)}</a>')
             if pmid:
-                html_parts.append(f'<p>PMID: <a href="https://pubmed.ncbi.nlm.nih.gov/{pmid}/">{pmid}</a></p>')
-            
-            abstract = ref.get("abstract")
-            if abstract and len(abstract) > 100:
-                # Truncate long abstracts
-                abstract_preview = abstract[:300] + "..."
-                html_parts.append(f'<p><strong>Abstract:</strong> {abstract_preview}</p>')
-            
+                id_parts.append(f'PMID: <a href="https://pubmed.ncbi.nlm.nih.gov/{_html_mod.escape(pmid)}/" target="_blank">{_html_mod.escape(pmid)}</a>')
+            if id_parts:
+                html_parts.append(f'<div class="reference-doi">{", ".join(id_parts)}</div>')
+
             html_parts.append('</div>')
     
     # Final Impression section
     if final_impression:
+        import re as _re_fi
         html_parts.append('<div class="section-divider"></div>')
         html_parts.append("<h2>🎯 Final Impression</h2>")
         html_parts.append('<div class="final-impression">')
-        # Convert markdown-like paragraphs to HTML
+        # Convert markdown-like paragraphs to HTML, with **bold** support
         for paragraph in final_impression.split('\n\n'):
             paragraph = paragraph.strip()
             if paragraph:
+                # Convert **text** to <strong>text</strong>
+                paragraph = _re_fi.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', paragraph)
                 html_parts.append(f'<p>{paragraph}</p>')
         
         # Add cited references at the bottom of final impression
@@ -620,6 +810,359 @@ def build_html_content(
 """)
     
     return "\n".join(html_parts)
+
+
+def _build_3d_viewer_section(pdb_data: str) -> str:
+    """Build interactive 3D molecular viewer section using 3Dmol.js.
+
+    Provides controls for:
+    - Representation style (cartoon, stick, line, sphere, ball-and-stick)
+    - Show/hide components (protein, water, ions, ligand)
+    - Color scheme (spectrum, chain, secondary structure, element)
+    - Surface toggle (on/off with visual feedback)
+    - Spin toggle and reset view
+    - Protein sequence bar with click-to-highlight
+    - PNG screenshot export
+    """
+    # Escape PDB data for safe embedding in JS string literal
+    escaped_pdb = pdb_data.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+
+    return f'''
+<h2>🧪 3D Structure Viewer</h2>
+<div class="viewer-section">
+    <p>Interactive first-frame snapshot of the simulated system.
+       Use mouse to rotate (left-click), zoom (scroll), and translate (right-click).</p>
+
+    <!-- Controls -->
+    <div class="viewer-controls">
+        <label for="repr-select">Style:</label>
+        <select id="repr-select" onchange="updateViewer()">
+            <option value="cartoon">Cartoon</option>
+            <option value="stick">Stick (Licorice)</option>
+            <option value="line">Line</option>
+            <option value="sphere">Sphere</option>
+            <option value="cross">Ball &amp; Stick</option>
+        </select>
+
+        <label for="color-select">Color:</label>
+        <select id="color-select" onchange="updateViewer()">
+            <option value="spectrum">Spectrum (rainbow)</option>
+            <option value="chain">By Chain</option>
+            <option value="ss">Secondary Structure</option>
+            <option value="elem">By Element</option>
+            <option value="residue">By Residue</option>
+        </select>
+
+        <label for="comp-select">Show:</label>
+        <select id="comp-select" onchange="updateViewer()">
+            <option value="all">All Components</option>
+            <option value="protein">Protein Only</option>
+            <option value="water">Water Only</option>
+            <option value="ions">Ions Only</option>
+            <option value="ligand">Ligand / Non-protein</option>
+            <option value="nowater">Protein + Ions (no water)</option>
+        </select>
+
+        <button id="btn-spin" onclick="toggleSpin()">⟳ Spin</button>
+        <button id="btn-surface" onclick="toggleSurface()">◉ Surface</button>
+        <button onclick="resetView()">↺ Reset</button>
+        <button onclick="savePNG()" title="Save current view as PNG image">📷 Save PNG</button>
+    </div>
+
+    <!-- Viewer canvas -->
+    <div id="viewer3d" class="viewer-container"></div>
+
+    <!-- Sequence viewer -->
+    <div id="seq-viewer-wrap" style="margin-top:12px;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+            <label style="font-size:13px;font-weight:600;color:#4338ca;">Sequence:</label>
+            <span id="seq-info" style="font-size:12px;color:#6b7280;"></span>
+            <button onclick="clearSeqSelection()" style="margin-left:auto;padding:3px 10px;border:1px solid #c7d2fe;border-radius:5px;background:#fff;font-size:12px;cursor:pointer;">Clear selection</button>
+        </div>
+        <div id="seq-bar" style="
+            font-family:'Courier New',monospace;font-size:12px;line-height:1.15;
+            background:#1e1e2e;color:#a5b4fc;padding:10px 12px;border-radius:8px;
+            overflow-x:auto;white-space:nowrap;cursor:pointer;user-select:none;
+            max-height:80px;letter-spacing:1px;
+        "></div>
+    </div>
+</div>
+
+<script>
+(function() {{
+    // ========== PDB data embedded at build time ==========
+    var pdbData = `{escaped_pdb}`;
+
+    // ========== state ==========
+    var spinning   = false;
+    var showSurface = false;
+    var surfaceObj  = null;
+    var viewer      = null;
+    var seqResidues = [];    // [ {{resi, resn, chain}}, ... ]
+    var seqSelStart = null;
+    var seqSelEnd   = null;
+
+    // ========== selection helpers ==========
+    function selForComponent(comp) {{
+        switch (comp) {{
+            case "protein":
+                return {{or: [{{atom: "CA"}}, {{atom: "C"}}, {{atom: "N"}}, {{atom: "O"}}, {{atom: "CB"}}],
+                         not: {{resn: ["HOH","WAT","SOL","TIP3","NA","CL","K","MG","CA","ZN","FE","NA+","CL-","SOD","CLA"]}}}};
+            case "water":
+                return {{resn: ["HOH","WAT","SOL","TIP3"]}};
+            case "ions":
+                return {{resn: ["NA","CL","K","MG","CA","ZN","FE","NA+","CL-","SOD","CLA"]}};
+            case "ligand":
+                return {{not: {{or: [
+                    {{atom: "CA"}}, {{atom: "C"}}, {{atom: "N"}}, {{atom: "O"}}, {{atom: "CB"}},
+                    {{resn: ["HOH","WAT","SOL","TIP3","NA","CL","K","MG","CA","ZN","FE","NA+","CL-","SOD","CLA"]}}
+                ]}}}};
+            case "nowater":
+                return {{not: {{resn: ["HOH","WAT","SOL","TIP3"]}}}};
+            default:
+                return {{}};
+        }}
+    }}
+
+    function colorSpec(scheme) {{
+        switch (scheme) {{
+            case "spectrum":  return {{color: "spectrum"}};
+            case "chain":     return {{colorscheme: "chain"}};
+            case "ss":        return {{colorscheme: "ssJmol"}};
+            case "elem":      return {{colorscheme: "default"}};
+            case "residue":   return {{colorscheme: "amino"}};
+            default:          return {{color: "spectrum"}};
+        }}
+    }}
+
+    // ========== core render ==========
+    window.updateViewer = function() {{
+        if (!viewer) return;
+        var style  = document.getElementById("repr-select").value;
+        var color  = document.getElementById("color-select").value;
+        var comp   = document.getElementById("comp-select").value;
+
+        // Remove old surface first
+        viewer.removeAllSurfaces();
+        surfaceObj = null;
+
+        // Clear all styles, then apply
+        viewer.setStyle({{}}, {{}});  // hide everything
+
+        var sel  = selForComponent(comp);
+        var spec = {{}};
+        spec[style] = colorSpec(color);
+        viewer.setStyle(sel, spec);
+
+        // Highlight sequence selection if any
+        applySeqHighlight(style, color);
+
+        if (showSurface) {{
+            surfaceObj = viewer.addSurface($3Dmol.SurfaceType.VDW,
+                {{opacity: 0.7, color: "white"}}, sel);
+        }}
+        viewer.zoomTo(sel);
+        viewer.render();
+    }};
+
+    // ========== surface toggle ==========
+    window.toggleSurface = function() {{
+        if (!viewer) return;
+        showSurface = !showSurface;
+        var btn = document.getElementById("btn-surface");
+        if (showSurface) {{
+            btn.style.background = "#dc2626";
+            btn.textContent = "◉ Surface ON";
+        }} else {{
+            btn.style.background = "#6366f1";
+            btn.textContent = "◉ Surface";
+        }}
+        // Explicitly remove or add surface
+        viewer.removeAllSurfaces();
+        surfaceObj = null;
+        if (showSurface) {{
+            var comp = document.getElementById("comp-select").value;
+            var sel  = selForComponent(comp);
+            surfaceObj = viewer.addSurface($3Dmol.SurfaceType.VDW,
+                {{opacity: 0.7, color: "white"}}, sel);
+        }}
+        viewer.render();
+    }};
+
+    // ========== spin ==========
+    window.toggleSpin = function() {{
+        if (!viewer) return;
+        spinning = !spinning;
+        viewer.spin(spinning);
+        var btn = document.getElementById("btn-spin");
+        btn.style.background = spinning ? "#dc2626" : "#6366f1";
+    }};
+
+    // ========== reset ==========
+    window.resetView = function() {{
+        if (!viewer) return;
+        spinning = false;
+        showSurface = false;
+        viewer.spin(false);
+        viewer.removeAllSurfaces();
+        surfaceObj = null;
+        seqSelStart = null;
+        seqSelEnd = null;
+        document.getElementById("repr-select").value  = "cartoon";
+        document.getElementById("color-select").value  = "spectrum";
+        document.getElementById("comp-select").value   = "all";
+        document.getElementById("btn-spin").style.background    = "#6366f1";
+        document.getElementById("btn-surface").style.background = "#6366f1";
+        document.getElementById("btn-surface").textContent      = "◉ Surface";
+        renderSeqBar();
+        updateViewer();
+    }};
+
+    // ========== PNG export ==========
+    window.savePNG = function() {{
+        if (!viewer) return;
+        var uri = viewer.pngURI();
+        var a = document.createElement("a");
+        a.href = uri;
+        a.download = "structure_view.png";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    }};
+
+    // ========== SEQUENCE VIEWER ==========
+    function parseSequence() {{
+        // Extract unique CA atoms → one per residue, ordered by resi
+        seqResidues = [];
+        var seen = {{}};
+        var lines = pdbData.split("\\n");
+        for (var i = 0; i < lines.length; i++) {{
+            var line = lines[i];
+            if ((line.substring(0,6).trim() === "ATOM" || line.substring(0,6).trim() === "HETATM")) {{
+                var atomName = line.substring(12,16).trim();
+                var resName  = line.substring(17,20).trim();
+                var chain    = line.substring(21,22).trim() || "A";
+                var resi     = parseInt(line.substring(22,26).trim(), 10);
+                // Skip water / ions
+                if (["HOH","WAT","SOL","TIP3","NA","CL","K","MG","CA","ZN","FE"].indexOf(resName) >= 0) continue;
+                var key = chain + "_" + resi;
+                if (atomName === "CA" && !seen[key]) {{
+                    seen[key] = true;
+                    seqResidues.push({{resi: resi, resn: resName, chain: chain}});
+                }}
+            }}
+        }}
+    }}
+
+    var _AA_MAP = {{
+        "ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C","GLN":"Q","GLU":"E",
+        "GLY":"G","HIS":"H","ILE":"I","LEU":"L","LYS":"K","MET":"M","PHE":"F",
+        "PRO":"P","SER":"S","THR":"T","TRP":"W","TYR":"Y","VAL":"V",
+        "SEC":"U","PYL":"O","ASX":"B","GLX":"Z","XLE":"J","UNK":"X"
+    }};
+
+    function renderSeqBar() {{
+        var bar = document.getElementById("seq-bar");
+        var info = document.getElementById("seq-info");
+        if (!seqResidues.length) {{
+            bar.innerHTML = "<em style='color:#6b7280'>No protein residues found in PDB</em>";
+            return;
+        }}
+        info.textContent = seqResidues.length + " residues  |  Click to select start, click again for end";
+
+        var spans = [];
+        for (var i = 0; i < seqResidues.length; i++) {{
+            var r = seqResidues[i];
+            var letter = _AA_MAP[r.resn] || "X";
+            var highlighted = false;
+            if (seqSelStart !== null && seqSelEnd !== null) {{
+                var lo = Math.min(seqSelStart, seqSelEnd);
+                var hi = Math.max(seqSelStart, seqSelEnd);
+                if (i >= lo && i <= hi) highlighted = true;
+            }} else if (seqSelStart !== null && i === seqSelStart) {{
+                highlighted = true;
+            }}
+
+            var bg = highlighted ? "background:#fbbf24;color:#1e1e2e;border-radius:2px;" : "";
+            spans.push('<span data-idx="' + i + '" title="' + r.resn + ' ' + r.resi + ' (chain ' + r.chain + ')" ' +
+                       'style="cursor:pointer;padding:0 1px;' + bg + '">' + letter + '</span>');
+
+            // Add chain break marker + position every 10 residues
+            if ((i + 1) % 10 === 0 && i < seqResidues.length - 1) {{
+                spans.push('<span style="color:#4b5563;font-size:10px;" title="residue ' + seqResidues[i].resi + '">|</span>');
+            }}
+        }}
+        bar.innerHTML = spans.join("");
+
+        // Attach click handlers
+        var charSpans = bar.querySelectorAll("span[data-idx]");
+        for (var j = 0; j < charSpans.length; j++) {{
+            charSpans[j].addEventListener("click", onSeqClick);
+        }}
+    }}
+
+    function onSeqClick(e) {{
+        var idx = parseInt(e.target.getAttribute("data-idx"), 10);
+        if (isNaN(idx)) return;
+
+        if (seqSelStart === null) {{
+            seqSelStart = idx;
+            seqSelEnd = null;
+        }} else if (seqSelEnd === null) {{
+            seqSelEnd = idx;
+        }} else {{
+            // Third click resets
+            seqSelStart = idx;
+            seqSelEnd = null;
+        }}
+        renderSeqBar();
+        updateViewer();
+    }}
+
+    window.clearSeqSelection = function() {{
+        seqSelStart = null;
+        seqSelEnd = null;
+        renderSeqBar();
+        updateViewer();
+    }};
+
+    function applySeqHighlight(style, color) {{
+        if (seqSelStart === null) return;
+        var lo = seqSelStart;
+        var hi = (seqSelEnd !== null) ? seqSelEnd : seqSelStart;
+        if (lo > hi) {{ var t = lo; lo = hi; hi = t; }}
+
+        // Collect resi numbers for the selection range
+        var resiList = [];
+        for (var k = lo; k <= hi; k++) {{
+            if (k < seqResidues.length) resiList.push(seqResidues[k].resi);
+        }}
+        if (!resiList.length) return;
+
+        // Highlight with bright color
+        var hlSpec = {{}};
+        hlSpec[style] = {{color: "#fbbf24"}};
+        viewer.setStyle({{resi: resiList}}, hlSpec);
+    }}
+
+    // ========== initialise ==========
+    document.addEventListener("DOMContentLoaded", function() {{
+        var element = document.getElementById("viewer3d");
+        viewer = $3Dmol.createViewer(element, {{
+            backgroundColor: "#1a1a2e"
+        }});
+        viewer.addModel(pdbData, "pdb");
+        viewer.setStyle({{}}, {{cartoon: {{color: "spectrum"}}}});
+        viewer.zoomTo();
+        viewer.render();
+
+        // Build sequence bar
+        parseSequence();
+        renderSeqBar();
+    }});
+}})();
+</script>
+'''
 
 def _find_image_files(files: Dict[str, Any]) -> Dict[str, str]:
     """Extract image files from files dictionary"""

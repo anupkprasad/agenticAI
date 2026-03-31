@@ -870,7 +870,28 @@ def plot_3d(
             data_cols, col_names = parse_data_file(abs_file)
 
             # Resolve column indices -------------------------------------------
-            xi, yi, zi = x_col, y_col, z_col
+            # Handle string column names: convert to index by matching header
+            def _resolve_col(val, names):
+                if val is None:
+                    return None
+                if isinstance(val, int):
+                    return val
+                if isinstance(val, str):
+                    # Try matching column header name (case-insensitive)
+                    low = val.strip().lower()
+                    for i, name in enumerate(names):
+                        if name.lower() == low:
+                            return i
+                    # Try parsing as integer string
+                    try:
+                        return int(val)
+                    except ValueError:
+                        pass
+                return None
+
+            xi = _resolve_col(x_col, col_names)
+            yi = _resolve_col(y_col, col_names)
+            zi = _resolve_col(z_col, col_names)
 
             if xi is None or yi is None or zi is None:
                 detected = _detect_xyz_columns(col_names, data_cols)

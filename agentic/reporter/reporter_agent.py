@@ -431,58 +431,188 @@ No need to specify image paths in tool_params - they're extracted from the analy
         analysis_data: Dict[str, Any],
         state: MDState
     ) -> List[Dict[str, Any]]:
-        """Guaranteed literature search when plan-based searches failed or were skipped."""
-        literature_refs = []
+        """Guaranteed literature search across PubMed, bioRxiv,
+        and UniProt. Returns up to 15 deduplicated references."""
+        literature_refs: List[Dict[str, Any]] = []
+        MAX_REFS = 15
         try:
-            from src.reporter.literature_search import generate_literature_queries, search_pubmed
-            
-            # Get analysis types from data
-            analysis_types = []
+            from src.reporter.literature_search import (
+                generate_literature_queries, search_pubmed,
+                search_biorxiv, search_uniprot,
+            )
+
+            # --- Resolve analysis types ---
+            analysis_types: list = []
             if isinstance(analysis_data, dict):
                 at = analysis_data.get("analysis_types", {})
                 if isinstance(at, dict):
                     analysis_types = list(at.keys())
                 elif isinstance(at, list):
                     analysis_types = at
-            
             if not analysis_types:
                 analysis_types = ["RMSD", "RMSF"]
-            
+
             user_goal = state.get("enriched_prompt") or state.get("user_goal", "MD simulation analysis")
-            
-            # Generate queries
+
+            # Extract protein name from system_info
+            protein_name = None
+            sys_info = state.get("system_info")
+            if isinstance(sys_info, dict):
+                protein_name = sys_info.get("system_name") or sys_info.get("protein_name")
+
+            # --- Generate prioritised queries ---
             query_result = generate_literature_queries.invoke({
                 "analysis_types": analysis_types,
-                "user_goal": user_goal
+                "user_goal": user_goal,
+                "protein_name": protein_name or "",
             })
-            
             queries = {}
+            resolved_name = ""
             if isinstance(query_result, dict) and query_result.get("success"):
                 queries = query_result.get("queries", {})
-            
-            # Search PubMed with each query (max 10 total refs)
-            for atype, query_text in queries.items():
+                resolved_name = query_result.get("protein_name", "") or ""
+
+            # Deduplication set (PMIDs + DOIs)
+            seen_ids: set = set()
+
+            def _add_ref(ref: Dict[str, Any]) -> bool:
+                """Add ref if not duplicate. Returns True if added."""
+                pmid = ref.get("pmid")
+                doi = (ref.get("doi") or "").lower().strip()
+                if pmid and pmid in seen_ids:
+                    return False
+                if doi and doi in seen_ids:
+                    return False
+                if pmid:
+                    seen_ids.add(pmid)
+                if doi:
+                    seen_ids.add(doi)
+                literature_refs.append(ref)
+                return True
+
+            # ── 1. PubMed (protein-priority queries) ──────────────
+            for qkey, query_text in queries.items():
                 if len(literature_refs) >= 10:
                     break
-                if not query_text:
+                if not query_text or qkey == "_fallback_general":
                     continue
                 remaining = 10 - len(literature_refs)
                 result = search_pubmed.invoke({
                     "query": query_text,
                     "max_results": min(5, remaining),
                     "include_abstracts": True,
-                    "max_age_years": 10
+                    "max_age_years": 10,
                 })
                 if isinstance(result, dict) and result.get("success"):
-                    literature_refs.extend(result.get("results", []))
-            
-            logger.info(f"Fallback literature search found {len(literature_refs)} references")
-            
+                    for ref in result.get("results", []):
+                        if not _add_ref(ref):
+                            continue
+                        if len(literature_refs) >= 10:
+                            break
+            logger.info("After PubMed: %d refs", len(literature_refs))
+
+            # ── 2. bioRxiv preprints (top protein query) ──────────
+            if resolved_name and len(literature_refs) < MAX_REFS:
+                bio_query = queries.get("protein_dynamics") or queries.get("protein_function") or f"{resolved_name} molecular dynamics"
+                try:
+                    bio_result = search_biorxiv.invoke({
+                        "query": bio_query,
+                        "max_results": min(5, MAX_REFS - len(literature_refs)),
+                        "max_age_years": 5,
+                    })
+                    if isinstance(bio_result, dict) and bio_result.get("success"):
+                        for ref in bio_result.get("results", []):
+                            if not _add_ref(ref):
+                                continue
+                            if len(literature_refs) >= MAX_REFS:
+                                break
+                    logger.info("After bioRxiv: %d refs", len(literature_refs))
+                except Exception as e:
+                    logger.warning("bioRxiv search failed (non-fatal): %s", e)
+
+            # ── 3. UniProt protein context ────────────────────────
+            if resolved_name and len(literature_refs) < MAX_REFS:
+                try:
+                    uni_result = search_uniprot.invoke({
+                        "query": resolved_name,
+                        "max_results": 3,
+                    })
+                    if isinstance(uni_result, dict) and uni_result.get("success"):
+                        for entry in uni_result.get("entries", []):
+                            # Add a synthetic reference for the UniProt entry itself
+                            func_text = entry.get("function") or ""
+                            _add_ref({
+                                "title": f"{entry.get('protein_name', resolved_name)} — UniProt functional annotation ({entry.get('organism', '')})",
+                                "authors": ["UniProt Consortium"],
+                                "journal": "UniProt Knowledgebase",
+                                "year": 2025,
+                                "pmid": None,
+                                "doi": None,
+                                "abstract": func_text[:400] if func_text else None,
+                                "url": entry.get("url"),
+                                "source": "UniProt",
+                            })
+                            # Also pull in key literature refs from the entry
+                            for kref in entry.get("key_references", []):
+                                if len(literature_refs) >= MAX_REFS:
+                                    break
+                                if kref.get("title"):
+                                    _add_ref({
+                                        "title": kref["title"],
+                                        "authors": [],
+                                        "journal": kref.get("journal", ""),
+                                        "year": kref.get("year"),
+                                        "pmid": kref.get("pmid"),
+                                        "doi": kref.get("doi"),
+                                        "abstract": None,
+                                        "url": f"https://pubmed.ncbi.nlm.nih.gov/{kref['pmid']}/" if kref.get("pmid") else None,
+                                        "source": "UniProt",
+                                    })
+                            if len(literature_refs) >= MAX_REFS:
+                                break
+                    logger.info("After UniProt: %d refs", len(literature_refs))
+                except Exception as e:
+                    logger.warning("UniProt search failed (non-fatal): %s", e)
+
+            # ── Fallback if still empty ───────────────────────────
+            if not literature_refs:
+                logger.info("No results from any source; trying PubMed fallback")
+                fallback_q = queries.get("_fallback_general", "molecular dynamics protein stability review")
+                result = search_pubmed.invoke({
+                    "query": fallback_q,
+                    "max_results": 5,
+                    "include_abstracts": True,
+                    "max_age_years": 10,
+                })
+                if isinstance(result, dict) and result.get("success"):
+                    for ref in result.get("results", []):
+                        _add_ref(ref)
+
+            logger.info("Literature search complete: %d references from PubMed + bioRxiv + UniProt", len(literature_refs))
+
         except Exception as e:
-            logger.warning(f"Fallback literature search failed: {e}")
-        
-        return literature_refs[:10]
+            logger.warning(f"Literature search failed: {e}", exc_info=True)
+
+        return literature_refs[:MAX_REFS]
     
+    def _extract_pdb_for_viewer(self, state: MDState) -> Optional[str]:
+        """Extract first trajectory frame as PDB text for the 3D HTML viewer."""
+        try:
+            from src.reporter.structure_extractor import extract_first_frame_pdb, read_pdb_data
+
+            working_dir = state.get("working_directory", "working_dir")
+            pdb_path = extract_first_frame_pdb(working_dir)
+            if pdb_path:
+                pdb_text = read_pdb_data(pdb_path)
+                if pdb_text:
+                    logger.info("Extracted PDB for 3D viewer (%d chars)", len(pdb_text))
+                    log_agent_action("reporter", "Extracted first-frame PDB for interactive 3D viewer", {})
+                    return pdb_text
+            logger.warning("Could not extract PDB for 3D viewer")
+        except Exception as e:
+            logger.warning("PDB extraction for 3D viewer failed: %s", e)
+        return None
+
     def _generate_final_impression(
         self,
         analysis_data: Dict[str, Any],
@@ -758,11 +888,53 @@ No need to specify image paths in tool_params - they're extracted from the analy
         # Shared data between steps
         analysis_data = {}
         literature_refs = []
-        generated_queries = {}  # From generate_literature_queries tool
+        
+        # --- Hardcoded: read analysis summary first so we know the types ---
+        try:
+            base_dir = str(Path(self.file_manager.agent_dir).parent)
+            summary_result = self.tool_executor.execute_tool(
+                "read_analysis_summary",
+                {"summary_file": "analysis_summary.jsonl", "working_dir": base_dir}
+            )
+            if isinstance(summary_result, dict) and summary_result.get("entries"):
+                analysis_data = summary_result
+                logger.info("Pre-loaded analysis summary (%d entries)", len(analysis_data.get("entries", [])))
+        except Exception as e:
+            logger.warning("Pre-load of analysis summary failed: %s", e)
+
+        # --- Hardcoded: always run literature search before report generation ---
+        literature_refs = self._ensure_literature_search(analysis_data, state)
+        log_agent_action("reporter", f"Literature search completed: {len(literature_refs)} references found", {})
         
         total_steps = len(plan.steps)
         for i, step in enumerate(plan.steps):
             try:
+                # Skip plan-based literature steps — _ensure_literature_search
+                # already ran with protein-aware queries before the loop.
+                if step.tool_name in ("search_pubmed", "generate_literature_queries"):
+                    logger.info("Skipping plan step '%s' (%s) — literature already collected",
+                                step.name, step.tool_name)
+                    step_results.append({
+                        "step_name": step.name,
+                        "tool": step.tool_name,
+                        "success": True,
+                        "result": {"skipped": True, "reason": "literature handled by _ensure_literature_search"}
+                    })
+                    completed += 1
+                    continue
+
+                # Skip steps with no tool (virtual/narrative steps the LLM invented)
+                if not step.tool_name:
+                    logger.info("Skipping virtual plan step '%s' (no tool)", step.name)
+                    step_results.append({
+                        "step_name": step.name,
+                        "tool": "",
+                        "success": True,
+                        "result": {"skipped": True, "reason": "no tool associated"}
+                    })
+                    completed += 1
+                    continue
+
                 log_agent_action("reporter", f"Executing step {i+1}/{total_steps}", {
                     "step": step.name,
                     "tool": step.tool_name
@@ -793,26 +965,10 @@ No need to specify image paths in tool_params - they're extracted from the analy
                     params["final_impression"] = self._generate_final_impression(
                         analysis_data, literature_refs, state
                     )
-                
-                # Fix empty/placeholder search_pubmed queries: use generated queries as fallback
-                if step.tool_name == "search_pubmed":
-                    query_val = params.get("query", "")
-                    is_placeholder = (
-                        not query_val
-                        or (query_val.startswith("<") and query_val.endswith(">"))
-                        or query_val.startswith("<query")
-                    )
-                    if is_placeholder:
-                        # Pick first unused generated query
-                        for qtype, qtext in generated_queries.items():
-                            if qtext:
-                                params["query"] = qtext
-                                generated_queries[qtype] = ""  # mark used
-                                logger.info(f"Substituted placeholder PubMed query with: {qtext[:80]}")
-                                break
-                    # Always include abstracts for literature section
-                    params["include_abstracts"] = True
-                    params.setdefault("max_results", 10)
+                    # Extract first frame PDB for 3D viewer
+                    params["pdb_data"] = self._extract_pdb_for_viewer(state)
+                    # Pass enriched prompt (supervisor-rephrased user goal)
+                    params["enriched_prompt"] = state.get("enriched_prompt") or state.get("user_goal")
                 
                 # Execute tool
                 result = self.tool_executor.execute_tool(step.tool_name, params)
@@ -820,12 +976,6 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 # Store results for next steps
                 if step.tool_name == "read_analysis_summary":
                     analysis_data = result
-                elif step.tool_name == "search_pubmed":
-                    if result.get("success"):
-                        literature_refs.extend(result.get("results", []))
-                elif step.tool_name == "generate_literature_queries":
-                    if result.get("success"):
-                        generated_queries = result.get("queries", {})
                 
                 step_results.append({
                     "step_name": step.name,
