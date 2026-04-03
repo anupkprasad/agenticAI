@@ -106,7 +106,7 @@ def check_tool_has_logging(tool_path: str) -> Dict[str, any]:
         return result
 
 
-def validate_all_programmer_tools(programmer_dir: str = "working_dir/programmer") -> List[Dict]:
+def validate_all_programmer_tools(programmer_dir: str = "programmer") -> List[Dict]:
     """
     Validate all Python tools in the programmer directory.
     

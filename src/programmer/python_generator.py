@@ -72,7 +72,7 @@ def generate_python_tool(
     try:
         # Set default paths
         if not working_dir:
-            working_dir = "working_dir/programmer"
+            working_dir = "programmer"
         
         # Save directly to working_dir/programmer/, not subdirectory
         os.makedirs(working_dir, exist_ok=True)

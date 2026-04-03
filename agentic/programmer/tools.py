@@ -90,7 +90,7 @@ class ProgrammerToolExecutor:
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
-        self.working_directory = self.config.get("working_directory", "working_dir/programmer")
+        self.working_directory = self.config.get("working_directory", "programmer")
         self.tools = {tool.name: tool for tool in get_programmer_tools()}
         logger.info(f"ProgrammerToolExecutor initialized with {len(self.tools)} tools")
     
@@ -112,9 +112,8 @@ class ProgrammerToolExecutor:
             }
         
         try:
-            # Add working directory if not specified
-            if "working_dir" not in tool_params:
-                tool_params["working_dir"] = self.working_directory
+            # ALWAYS force working_dir to agent directory (prevent file leaks)
+            tool_params["working_dir"] = self.working_directory
             
             # Execute tool using run() which accepts a dict of params
             # LangChain @tool decorated functions have a run() method

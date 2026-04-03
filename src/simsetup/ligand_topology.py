@@ -52,16 +52,15 @@ class LigandTopologyGenerator:
         
         output_dir.mkdir(parents=True, exist_ok=True)
         
+        # Resolve ligand_pdb to absolute path (acpype runs from output_dir)
+        ligand_pdb_abs = str(Path(ligand_pdb).resolve())
+        
         cmd = [
             "acpype",
-            "-i", str(ligand_pdb),
+            "-i", ligand_pdb_abs,
             "-a", atom_type,
             "-c", charge_method
         ]
-        
-        # Only add -d flag if output_dir is not current directory
-        if str(output_dir.resolve()) != str(Path.cwd().resolve()):
-            cmd.extend(["-d", str(output_dir)])
         
         if net_charge is not None:
             cmd.extend(["-n", str(net_charge)])
@@ -72,7 +71,8 @@ class LigandTopologyGenerator:
                 capture_output=True,
                 text=True,
                 timeout=600,
-                check=True
+                check=True,
+                cwd=str(output_dir)
             )
             
             # Acpype creates subdirectory with ligand name

@@ -107,11 +107,11 @@ class MDProgrammer:
                 "fail_fast": False
             },
             "output": {
-                "base_directory": "working_dir/programmer",
-                "python_tools": "working_dir/programmer/python",
-                "tcl_scripts": "working_dir/programmer/tcl",
-                "mdp_files": "working_dir/programmer/mdp",
-                "analysis_scripts": "working_dir/programmer/analysis"
+                "base_directory": "programmer",
+                "python_tools": "python",
+                "tcl_scripts": "tcl",
+                "mdp_files": "mdp",
+                "analysis_scripts": "analysis"
             },
             "defaults": {
                 "language": "python",
@@ -257,7 +257,10 @@ class MDProgrammer:
             
             # Refresh the global tools registry
             logger.info("PROGRAMMER: Refreshing planner's tools registry...")
-            registry = get_tools_registry(refresh=True)
+            # Pass the programmer directory so registry scans the correct location
+            programmer_dir = self.file_manager.agent_dir if self.file_manager else None
+            working_dir = str(Path(programmer_dir).parent) if programmer_dir else None
+            registry = get_tools_registry(refresh=True, working_directory=working_dir)
             
             # Count programmer tools in registry
             programmer_tools = [k for k in registry.tools.keys() if 'programmer' in k.lower()]

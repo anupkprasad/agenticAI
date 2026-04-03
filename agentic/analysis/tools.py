@@ -33,6 +33,7 @@ from src.analysis.data_plotter import (
 from src.analysis.summary_logger import initialize_summary_file, generate_summary_report
 from src.analysis.dssp_analyzer import analyze_secondary_structure
 from src.analysis.sasa_calculator import calculate_sasa, plot_sasa
+from src.analysis.com_distance_calculator import calculate_com_distance
 
 # Import dynamic tool loader for programmer-generated tools
 from agentic.utils import get_dynamic_tool_loader
@@ -53,6 +54,7 @@ __all__ = [
     "plot_3d",
     "plot_md_data",
     "plot_md_multipanel",
+    "calculate_com_distance",
     "AnalysisToolExecutor",
     "get_analysis_tools",
     "get_tool_metadata",
@@ -82,14 +84,18 @@ def get_analysis_tools() -> list:
         analyze_secondary_structure,
         plot_md_data,
         plot_md_multipanel,
-        plot_combined_data
+        plot_combined_data,
+        calculate_com_distance
     ]
 
 
-def get_tool_metadata() -> Dict[str, Dict[str, Any]]:
+def get_tool_metadata(working_directory: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
     """
     Dynamically extract metadata from all @tool functions.
     This provides tool information for the planner agent.
+    
+    Args:
+        working_directory: Base working directory (e.g. 'work_di'). Used to locate programmer-generated tools.
     
     Returns:
         Dict mapping tool names to their metadata (description, args, etc.)
@@ -125,7 +131,8 @@ def get_tool_metadata() -> Dict[str, Dict[str, Any]]:
         from agentic.utils import get_dynamic_tool_loader
         
         # MUST use refresh=True to get newly created tools
-        tool_loader = get_dynamic_tool_loader(refresh=True)
+        programmer_dir = str(Path(working_directory) / "programmer") if working_directory else "working_dir/programmer"
+        tool_loader = get_dynamic_tool_loader(programmer_dir=programmer_dir, refresh=True)
         programmer_tools_metadata = tool_loader.get_tool_metadata_list()
         
         for prog_tool_meta in programmer_tools_metadata:
@@ -191,8 +198,13 @@ class AnalysisToolExecutor:
             "plot_3d": plot_3d,
             # backward-compat aliases
             "plot_md_data": plot_md_data,
-            "plot_md_multipanel": plot_md_multipanel
+            "plot_md_multipanel": plot_md_multipanel,
+            "calculate_com_distance": calculate_com_distance
         }
+        
+        # Record built-in tool names BEFORE loading programmer tools
+        # so _auto_log_summary can skip tools that already self-log
+        self._builtin_tool_names = set(self.tools.keys())
         
         # Setup working directory BEFORE loading programmer tools
         self.working_dir = self.config.get("working_directory", "./working_dir/analysis")
@@ -266,7 +278,9 @@ class AnalysisToolExecutor:
     def _load_programmer_tools(self):
         """Load dynamically generated tools from programmer agent."""
         try:
-            tool_loader = get_dynamic_tool_loader(refresh=True)
+            # Derive programmer dir from working_dir (e.g. work_di/analysis -> work_di/programmer)
+            programmer_dir = str(Path(self.working_dir).parent / "programmer") if self.working_dir else None
+            tool_loader = get_dynamic_tool_loader(programmer_dir=programmer_dir, refresh=True) if programmer_dir else get_dynamic_tool_loader(refresh=True)
             programmer_tools = tool_loader.get_tools_for_agent("analysis")
             
             if programmer_tools:
@@ -285,7 +299,8 @@ class AnalysisToolExecutor:
     def reload_programmer_tools(self):
         """Reload programmer-generated tools (call after programmer creates new tools)."""
         try:
-            tool_loader = get_dynamic_tool_loader(refresh=True)
+            programmer_dir = str(Path(self.working_dir).parent / "programmer") if self.working_dir else None
+            tool_loader = get_dynamic_tool_loader(programmer_dir=programmer_dir, refresh=True) if programmer_dir else get_dynamic_tool_loader(refresh=True)
             programmer_tools = tool_loader.get_tools_for_agent("analysis")
             
             # Add new tools
@@ -359,20 +374,16 @@ class AnalysisToolExecutor:
             tool_func = self.tools[tool_name]
             
             # Add working directory only if the function signature accepts it
-            if "working_dir" not in kwargs:
-                # Get the actual function (unwrap StructuredTool if needed)
-                actual_func = tool_func.func if hasattr(tool_func, 'func') else tool_func
-                
-                # Check if function accepts working_dir parameter
-                try:
-                    sig = inspect.signature(actual_func)
-                    if 'working_dir' in sig.parameters:
-                        kwargs["working_dir"] = self.working_dir
-                        logger.debug(f"Added working_dir parameter for {tool_name}")
-                    else:
-                        logger.debug(f"Tool {tool_name} does not accept working_dir parameter - skipping")
-                except Exception as e:
-                    logger.debug(f"Could not inspect signature for {tool_name}: {e}")
+            # ALWAYS force working_dir to agent directory (prevent file leaks)
+            # even if the LLM plan supplies a different value
+            actual_func = tool_func.func if hasattr(tool_func, 'func') else tool_func
+            try:
+                sig = inspect.signature(actual_func)
+                if 'working_dir' in sig.parameters:
+                    kwargs["working_dir"] = self.working_dir
+                    logger.debug(f"Forced working_dir={self.working_dir} for {tool_name}")
+            except Exception as e:
+                logger.debug(f"Could not inspect signature for {tool_name}: {e}")
             
             # StructuredTool objects (from @tool decorator) need special handling
             if hasattr(tool_func, 'func'):
@@ -392,6 +403,12 @@ class AnalysisToolExecutor:
 
             if result.get("success"):
                 logger.info(f"Tool {tool_name} completed successfully")
+                # ── Auto-log to analysis_summary.jsonl ────────────────
+                # Built-in tools (rmsd, rmsf, dssp etc.) self-log via
+                # append_analysis_summary().  Only auto-log for
+                # programmer-generated tools that don't self-log.
+                if tool_name not in self._builtin_tool_names and not result.get("_summary_logged"):
+                    self._auto_log_summary(tool_name, kwargs, result)
             else:
                 logger.error(f"Tool {tool_name} failed: {result.get('error', 'Unknown error')}")
             
@@ -403,7 +420,69 @@ class AnalysisToolExecutor:
                 "success": False,
                 "error": f"Tool execution error: {str(e)}"
             }
-    
+
+    def _auto_log_summary(self, tool_name: str, kwargs: Dict, result: Dict) -> None:
+        """Write a summary entry for tools that don't self-log.
+
+        Extracts statistics, file paths, and metadata from the tool's
+        return dict and appends to analysis_summary.jsonl.
+        """
+        try:
+            from src.analysis.summary_logger import append_analysis_summary
+
+            # Build a human-friendly analysis_type from tool_name
+            analysis_type = tool_name.replace("_", " ").replace("calculate ", "").title()
+
+            # Collect numeric values as statistics
+            statistics: Dict[str, Any] = {}
+            files: Dict[str, str] = {}
+            metadata: Dict[str, Any] = {}
+
+            for k, v in result.items():
+                if k in ("success", "error", "message", "_summary_logged"):
+                    continue
+                if isinstance(v, (int, float)):
+                    statistics[k] = v
+                elif isinstance(v, str) and ("/" in v or "\\" in v):
+                    # Looks like a file path
+                    files[k] = v
+                elif isinstance(v, dict):
+                    # Nested dict — flatten scalar values into statistics
+                    for nk, nv in v.items():
+                        if isinstance(nv, (int, float)):
+                            statistics[nk] = nv
+                        elif isinstance(nv, str) and ("/" in nv or "\\" in nv):
+                            files[nk] = nv
+
+            # Add input files that were passed as kwargs
+            _INPUT_KEYS = ("topology_file", "trajectory_file", "energy_file",
+                           "topology", "trajectory")
+            for ik in _INPUT_KEYS:
+                if ik in kwargs and kwargs[ik]:
+                    files.setdefault(ik, str(kwargs[ik]))
+
+            # Collect non-numeric/non-path kwargs as metadata
+            for k, v in kwargs.items():
+                if k in ("working_dir",):
+                    continue
+                if k in _INPUT_KEYS:
+                    continue
+                if isinstance(v, (str, int, float, bool, list)):
+                    metadata[k] = v
+
+            # Only log if we have something meaningful
+            if statistics or files:
+                append_analysis_summary(
+                    working_dir=self.working_dir,
+                    analysis_type=analysis_type,
+                    statistics=statistics,
+                    files=files,
+                    metadata=metadata,
+                )
+                logger.info(f"Auto-logged summary for {tool_name}: {len(statistics)} stats, {len(files)} files")
+        except Exception as e:
+            logger.warning(f"Failed to auto-log summary for {tool_name}: {e}")
+
     def execute_workflow(
         self,
         topology_file: str,

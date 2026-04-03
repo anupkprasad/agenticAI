@@ -236,6 +236,9 @@ class SimulationSetupToolExecutor:
         """
         Execute a simulation setup tool by name.
         
+        Filters parameters to only those accepted by the tool's signature and
+        forces output_dir / working_dir to the agent's designated directory.
+        
         Args:
             tool_name: Name of tool to execute
             params: Tool parameters
@@ -251,16 +254,41 @@ class SimulationSetupToolExecutor:
             }
         
         try:
-            # StructuredTool objects need .func or .invoke() to execute
+            import inspect
+            
+            # Get the underlying function for parameter inspection
+            fn = tool_func.func if hasattr(tool_func, 'func') else tool_func
+            sig = inspect.signature(fn)
+            has_var_keyword = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in sig.parameters.values()
+            )
+            accepted_params = set(sig.parameters.keys()) - {'kwargs'}
+            
+            # Force output_dir / working_dir to agent directory (prevent leaking files)
+            safe_params = dict(params)
+            if 'output_dir' in accepted_params:
+                safe_params['output_dir'] = str(self.working_dir)
+            if 'working_dir' in accepted_params:
+                safe_params['working_dir'] = str(self.working_dir)
+            
+            # Strip parameters the tool doesn't accept (unless it takes **kwargs)
+            if not has_var_keyword:
+                unknown = set(safe_params.keys()) - accepted_params
+                if unknown:
+                    self.logger.debug(
+                        f"Stripping params not accepted by {tool_name}: {unknown}"
+                    )
+                    for key in unknown:
+                        del safe_params[key]
+            
+            # Execute the tool
             if hasattr(tool_func, 'func'):
-                # @tool decorator wraps function in StructuredTool
-                return tool_func.func(**params)
+                return tool_func.func(**safe_params)
             elif hasattr(tool_func, 'invoke'):
-                # Alternative: use LangChain's invoke method
-                return tool_func.invoke(params)
+                return tool_func.invoke(safe_params)
             else:
-                # Direct function call (backward compatibility)
-                return tool_func(**params)
+                return tool_func(**safe_params)
         except Exception as e:
             self.logger.error(f"Tool execution failed: {tool_name}: {e}")
             return {

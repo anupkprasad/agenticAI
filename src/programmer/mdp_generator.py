@@ -36,7 +36,7 @@ def generate_mdp_file(
     """
     try:
         if not working_dir:
-            working_dir = "working_dir/programmer"
+            working_dir = "programmer"
         
         mdp_dir = os.path.join(working_dir, "mdp")
         os.makedirs(mdp_dir, exist_ok=True)

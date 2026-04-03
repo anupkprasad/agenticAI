@@ -74,7 +74,7 @@ def initialize_summary_file(working_dir: str) -> str:
                 "analysis_type": "Type of analysis performed",
                 "statistics": "Key statistical measures",
                 "files": "Input/output file paths",
-                "metadata": "Additional context"
+                "metadata": "Key observations and additional context (selections, parameters, notable residues)"
             }
         }
         
@@ -222,15 +222,19 @@ def update_analysis_summary_with_files(
         entries = read_summary_file(working_dir)
         
         # Find the most recent entry of this analysis type
+        # Try exact match first, then case-insensitive substring match
         updated = False
         for entry in reversed(entries):  # Start from most recent
-            if entry.get("analysis_type") == analysis_type:
+            entry_type = entry.get("analysis_type", "")
+            if (entry_type == analysis_type
+                    or entry_type.upper() == analysis_type.upper()
+                    or analysis_type.upper() in entry_type.upper()):
                 # Update the files dict
                 if "files" not in entry:
                     entry["files"] = {}
                 entry["files"].update(additional_files)
                 updated = True
-                logger.info(f"Updated {analysis_type} entry with files: {list(additional_files.keys())}")
+                logger.info(f"Updated {entry_type} entry with files: {list(additional_files.keys())}")
                 break
         
         if not updated:

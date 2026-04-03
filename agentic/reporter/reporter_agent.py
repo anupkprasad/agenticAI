@@ -217,15 +217,25 @@ class ReporterAgent:
         
         try:
             # Step 1: Create execution plan using LLM
+            logger.info("="*60)
+            logger.info("REPORTER WORKFLOW START")
+            logger.info("  User goal: %s", (agent_input.user_goal or 'N/A')[:120])
+            logger.info("  Report type: %s", agent_input.report_type.value)
+            logger.info("  Analysis file: %s", agent_input.analysis_summary_file)
+            logger.info("="*60)
+
             plan = None
             if self.llm.available:
-                logger.info("Creating reporter execution plan with LLM")
+                logger.info("[1/4] Creating execution plan via LLM...")
                 plan = self._create_llm_plan(agent_input, state)
             
             if not plan or not plan.steps:
-                logger.info("Using fallback plan generation (LLM plan empty or failed)")
+                logger.info("[1/4] LLM plan empty or unavailable — using fallback plan")
                 plan = self._create_fallback_plan(agent_input)
             
+            logger.info("[1/4] Plan created: %d steps, focus=%s",
+                        len(plan.steps),
+                        plan.report_focus[:3] if plan.report_focus else [])
             log_agent_action(
                 agent_name="reporter",
                 action="Generated reporter plan",
@@ -240,9 +250,12 @@ class ReporterAgent:
             self._save_execution_plan(plan, agent_input)
             
             # Step 2: Execute the plan
+            logger.info("[2/4] Executing reporter plan...")
             result = self._execute_reporter_plan(agent_input, plan, state)
             
             # Step 3: Create final output
+            logger.info("[3/4] Building final output (report=%s)",
+                        result.report_file or 'None')
             output = ReporterAgentOutput(
                 success=result.success and len(result.issues) == 0,
                 result=result,
@@ -595,22 +608,74 @@ No need to specify image paths in tool_params - they're extracted from the analy
 
         return literature_refs[:MAX_REFS]
     
-    def _extract_pdb_for_viewer(self, state: MDState) -> Optional[str]:
-        """Extract first trajectory frame as PDB text for the 3D HTML viewer."""
+    def _extract_pdb_for_viewer(self, state: MDState, analysis_data: Dict[str, Any] = None) -> Optional[Dict[str, str]]:
+        """Extract trajectory frames at analysis-driven time points for the 3D viewer.
+
+        Reads RMSD / COM-distance data to pick up to 5 scientifically
+        important timepoints (max RMSD, closest ligand approach, etc.)
+        and returns a dict mapping descriptive labels → PDB text.
+
+        Falls back to a single first frame if smart selection fails.
+        """
         try:
-            from src.reporter.structure_extractor import extract_first_frame_pdb, read_pdb_data
+            from src.reporter.structure_extractor import (
+                identify_important_timepoints,
+                extract_multi_frame_pdb,
+                extract_first_frame_pdb,
+                read_pdb_data,
+            )
 
             working_dir = state.get("working_directory", "working_dir")
+
+            # --- Smart timepoint selection from analysis data ---
+            if analysis_data:
+                important = identify_important_timepoints(
+                    analysis_data, working_dir, max_points=5
+                )
+                if important:
+                    time_points = [t for t, _lbl in important]
+                    labels_map = {t: lbl for t, lbl in important}
+                    logger.info(
+                        "Reporter: extracting PDB frames at %d analysis-driven timepoints: %s",
+                        len(important),
+                        ", ".join(f"{t} ns ({lbl})" for t, lbl in important),
+                    )
+                    log_agent_action(
+                        "reporter",
+                        f"Identified {len(important)} important timepoints from analysis data",
+                        {"timepoints": [f"{t} ns ({lbl})" for t, lbl in important]},
+                    )
+                    frames = extract_multi_frame_pdb(
+                        working_dir,
+                        time_points_ns=time_points,
+                        labels=labels_map,
+                    )
+                    if frames:
+                        logger.info(
+                            "Reporter: extracted %d PDB frames for 3D viewer (%s)",
+                            len(frames),
+                            ", ".join(frames.keys()),
+                        )
+                        log_agent_action(
+                            "reporter",
+                            f"Extracted {len(frames)} multi-timepoint PDB frames for 3D viewer",
+                            {"labels": list(frames.keys())},
+                        )
+                        return frames
+                    logger.warning("Smart PDB extraction returned empty; falling back")
+
+            # --- Fallback: first frame only ---
             pdb_path = extract_first_frame_pdb(working_dir)
             if pdb_path:
                 pdb_text = read_pdb_data(pdb_path)
                 if pdb_text:
-                    logger.info("Extracted PDB for 3D viewer (%d chars)", len(pdb_text))
-                    log_agent_action("reporter", "Extracted first-frame PDB for interactive 3D viewer", {})
-                    return pdb_text
-            logger.warning("Could not extract PDB for 3D viewer")
+                    logger.info("Extracted single first-frame PDB for 3D viewer (%d chars)", len(pdb_text))
+                    log_agent_action("reporter", "Extracted first-frame PDB for 3D viewer (fallback)", {})
+                    return {"0 ns — Start": pdb_text}
+
+            logger.warning("Could not extract any PDB for 3D viewer")
         except Exception as e:
-            logger.warning("PDB extraction for 3D viewer failed: %s", e)
+            logger.warning("PDB extraction for 3D viewer failed: %s", e, exc_info=True)
         return None
 
     def _generate_final_impression(
@@ -890,6 +955,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
         literature_refs = []
         
         # --- Hardcoded: read analysis summary first so we know the types ---
+        logger.info("  [exec] Reading analysis_summary.jsonl...")
         try:
             base_dir = str(Path(self.file_manager.agent_dir).parent)
             summary_result = self.tool_executor.execute_tool(
@@ -898,12 +964,18 @@ No need to specify image paths in tool_params - they're extracted from the analy
             )
             if isinstance(summary_result, dict) and summary_result.get("entries"):
                 analysis_data = summary_result
-                logger.info("Pre-loaded analysis summary (%d entries)", len(analysis_data.get("entries", [])))
+                logger.info("  [exec] Pre-loaded analysis summary (%d entries, types: %s)",
+                            len(analysis_data.get("entries", [])),
+                            ", ".join(analysis_data.get("analysis_types", {}).keys()
+                                      if isinstance(analysis_data.get("analysis_types"), dict)
+                                      else analysis_data.get("analysis_types", [])))
         except Exception as e:
             logger.warning("Pre-load of analysis summary failed: %s", e)
 
         # --- Hardcoded: always run literature search before report generation ---
+        logger.info("  [exec] Running literature search (PubMed + bioRxiv + UniProt)...")
         literature_refs = self._ensure_literature_search(analysis_data, state)
+        logger.info("  [exec] Literature search done: %d references collected", len(literature_refs))
         log_agent_action("reporter", f"Literature search completed: {len(literature_refs)} references found", {})
         
         total_steps = len(plan.steps)
@@ -911,9 +983,15 @@ No need to specify image paths in tool_params - they're extracted from the analy
             try:
                 # Skip plan-based literature steps — _ensure_literature_search
                 # already ran with protein-aware queries before the loop.
-                if step.tool_name in ("search_pubmed", "generate_literature_queries"):
+                if step.tool_name in ("search_pubmed", "generate_literature_queries", "search_biorxiv"):
                     logger.info("Skipping plan step '%s' (%s) — literature already collected",
                                 step.name, step.tool_name)
+                    log_agent_action("reporter", f"Step {i+1}/{total_steps} skipped (pre-handled)", {
+                        "step": step.name,
+                        "tool": step.tool_name,
+                        "reason": f"Literature already collected by _ensure_literature_search ({len(literature_refs)} refs)",
+                        "status": "⏭️ SKIPPED"
+                    })
                     step_results.append({
                         "step_name": step.name,
                         "tool": step.tool_name,
@@ -926,6 +1004,11 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 # Skip steps with no tool (virtual/narrative steps the LLM invented)
                 if not step.tool_name:
                     logger.info("Skipping virtual plan step '%s' (no tool)", step.name)
+                    log_agent_action("reporter", f"Step {i+1}/{total_steps} skipped (virtual step)", {
+                        "step": step.name,
+                        "reason": "No tool — handled internally (e.g. final impression generated during HTML report step)",
+                        "status": "⏭️ SKIPPED"
+                    })
                     step_results.append({
                         "step_name": step.name,
                         "tool": "",
@@ -962,11 +1045,19 @@ No need to specify image paths in tool_params - they're extracted from the analy
                     # Pass system info from state
                     params["system_info"] = state.get("system_info")
                     # Generate final impression using LLM
+                    logger.info("  [exec] Generating LLM final impression...")
                     params["final_impression"] = self._generate_final_impression(
                         analysis_data, literature_refs, state
                     )
-                    # Extract first frame PDB for 3D viewer
-                    params["pdb_data"] = self._extract_pdb_for_viewer(state)
+                    logger.info("  [exec] Final impression: %s",
+                                "generated" if params["final_impression"] else "skipped/unavailable")
+                    # Extract PDB frames at analysis-driven timepoints for 3D viewer
+                    logger.info("  [exec] Extracting PDB frames for 3D viewer (analysis-driven)...")
+                    pdb_frames = self._extract_pdb_for_viewer(state, analysis_data)
+                    params["pdb_data"] = pdb_frames  # Dict[str, str] or None
+                    logger.info("  [exec] PDB frames: %s",
+                                f"{len(pdb_frames)} timepoints ({', '.join(pdb_frames.keys())})"
+                                if pdb_frames else "none")
                     # Pass enriched prompt (supervisor-rephrased user goal)
                     params["enriched_prompt"] = state.get("enriched_prompt") or state.get("user_goal")
                 

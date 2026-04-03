@@ -17,11 +17,11 @@ logger = logging.getLogger(__name__)
 
 class DynamicToolLoader:
     """
-    Loads programmer-generated tools from working_dir/programmer/ 
+    Loads programmer-generated tools from the programmer directory
     and makes them available to field agents.
     """
     
-    def __init__(self, programmer_dir: str = "working_dir/programmer"):
+    def __init__(self, programmer_dir: str = "programmer"):
         """
         Initialize dynamic tool loader.
         
@@ -282,7 +282,7 @@ class DynamicToolLoader:
 _global_loader: Optional[DynamicToolLoader] = None
 
 
-def get_dynamic_tool_loader(programmer_dir: str = "working_dir/programmer", refresh: bool = False) -> DynamicToolLoader:
+def get_dynamic_tool_loader(programmer_dir: str = "programmer", refresh: bool = False) -> DynamicToolLoader:
     """
     Get or create global dynamic tool loader instance.
     

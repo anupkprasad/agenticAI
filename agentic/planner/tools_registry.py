@@ -26,12 +26,14 @@ class ToolsRegistry:
     - Agent context
     """
     
-    def __init__(self, base_path: Optional[str] = None):
+    def __init__(self, base_path: Optional[str] = None, working_directory: Optional[str] = None):
         """
         Initialize the tools registry.
         
         Args:
             base_path: Root directory to scan for tools (defaults to agentic/)
+            working_directory: Runtime working directory (e.g. from state['working_directory']).
+                Used to locate programmer-generated tools under {working_directory}/programmer/.
         """
         if base_path is None:
             # Default to agentic directory
@@ -39,6 +41,7 @@ class ToolsRegistry:
             base_path = str(current_dir)
         
         self.base_path = Path(base_path)
+        self.working_directory = working_directory
         self.tools = {}
         self.tools_by_agent = {}
         
@@ -88,19 +91,23 @@ class ToolsRegistry:
         return self.tools
     
     def _scan_programmer_generated_tools(self):
-        """Scan working_dir/programmer for dynamically generated tools."""
+        """Scan {working_directory}/programmer for dynamically generated tools."""
         try:
             from agentic.utils import get_dynamic_tool_loader
             import os
             
-            # Ensure programmer directory exists
-            programmer_dir = "working_dir/programmer"
+            # Resolve programmer directory from working_directory
+            if self.working_directory:
+                programmer_dir = str(Path(self.working_directory) / "programmer")
+            else:
+                programmer_dir = "working_dir/programmer"
+            
             if not os.path.exists(programmer_dir):
                 logger.debug(f"Programmer directory does not exist: {programmer_dir}")
                 return
             
             # Load programmer tools - MUST use refresh=True to reload from disk
-            tool_loader = get_dynamic_tool_loader(refresh=True)
+            tool_loader = get_dynamic_tool_loader(programmer_dir=programmer_dir, refresh=True)
             programmer_tools = tool_loader.get_tools_for_agent("all")
             tool_metadata_list = tool_loader.get_tool_metadata_list()
             
@@ -450,13 +457,15 @@ class ToolsRegistry:
 _global_registry = None
 
 
-def get_tools_registry(base_path: Optional[str] = None, refresh: bool = False) -> ToolsRegistry:
+def get_tools_registry(base_path: Optional[str] = None, refresh: bool = False,
+                       working_directory: Optional[str] = None) -> ToolsRegistry:
     """
     Get or create the global tools registry.
     
     Args:
         base_path: Root directory to scan (optional)
         refresh: If True, rediscover all tools
+        working_directory: Runtime working directory for resolving programmer tools
         
     Returns:
         ToolsRegistry instance
@@ -464,7 +473,7 @@ def get_tools_registry(base_path: Optional[str] = None, refresh: bool = False) -
     global _global_registry
     
     if _global_registry is None or refresh:
-        _global_registry = ToolsRegistry(base_path)
+        _global_registry = ToolsRegistry(base_path, working_directory=working_directory)
         _global_registry.discover_all_tools()
     
     return _global_registry

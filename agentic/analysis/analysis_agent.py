@@ -555,7 +555,8 @@ class MDAnalysisAgent:
         """Build prompt using planner's detailed natural language instructions"""
         
         # Get available tools for reference using tool metadata
-        tool_metadata = get_tool_metadata()
+        working_dir = state.get("working_directory") if state else None
+        tool_metadata = get_tool_metadata(working_directory=working_dir)
         tools_list = []
         
         for tool_info in tool_metadata.values():
@@ -586,7 +587,6 @@ class MDAnalysisAgent:
 - Topology File: {agent_input.topology_file or "Not available"}
 - Trajectory File: {agent_input.trajectory_file or "Not available"}
 - Energy File: {agent_input.energy_file or "Not available"}
-- Working Directory: {agent_input.working_directory}
 {registry_str}
 {pdb_info_str}
 
@@ -602,6 +602,11 @@ class MDAnalysisAgent:
 - You MUST ONLY use the tools listed above - do NOT invent or suggest non-existent tools
 - Every "tool_name" in your plan must match exactly one of the tool names listed above
 - FORBIDDEN tool names: "none", "manual", "skip", "custom", "placeholder", or any made-up tool
+- For input file parameters (topology_file, trajectory_file, energy_file etc.):
+  Use ONLY the file name (e.g. "md.gro"), NOT a full path.
+  The framework resolves correct paths automatically. Do NOT invent directory paths.
+- For output file parameters (output_file, plot_file, csv_file etc.):
+  Use ONLY the file name (e.g. "rmsd.dat"). The framework prepends the output directory.
 - If a required capability is missing, either:
   a) Use available tools creatively to achieve the same goal, OR
   b) OMIT that step entirely from your plan (do NOT include it with tool_name="none")
@@ -634,7 +639,8 @@ Output as JSON with this structure:
         config_prompt = self.config.get("llm", {}).get("planning_prompt_template", "")
         
         # Get available tools list dynamically from tool metadata
-        tool_metadata = get_tool_metadata()
+        working_dir = state.get("working_directory") if state else None
+        tool_metadata = get_tool_metadata(working_directory=working_dir)
         tools_list = []
         
         for tool_info in tool_metadata.values():
@@ -688,7 +694,12 @@ Output as JSON with this structure:
 **Available Tools:**
 {tools_list_str}
 
-**CRITICAL: You MUST ONLY use the tools listed above. Do NOT invent or suggest non-existent tools.**
+**CRITICAL:**
+- You MUST ONLY use the tools listed above. Do NOT invent or suggest non-existent tools.
+- For input file parameters (topology_file, trajectory_file, energy_file etc.):
+  Use ONLY the file name (e.g. "md.gro"), NOT a full path.
+  The framework resolves correct paths automatically.
+- For output file parameters: Use ONLY the file name (e.g. "rmsd.dat").
 
 Return JSON with: reasoning, overview, steps (name, description, tool_name, tool_params, reason)
 """
@@ -714,19 +725,25 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         """
         Create template-based fallback plan when LLM fails.
         Uses standard MD analysis workflow.
+        File paths use filenames only — _execute_analysis_plan resolves them.
         """
         steps = []
         
+        # Extract just the filenames — the execution engine resolves full paths
+        topo_name = Path(agent_input.topology_file).name if agent_input.topology_file else None
+        traj_name = Path(agent_input.trajectory_file).name if agent_input.trajectory_file else None
+        energy_name = Path(agent_input.energy_file).name if agent_input.energy_file else None
+        
         # Only add steps if we have the required files
-        if agent_input.trajectory_file and agent_input.topology_file:
+        if traj_name and topo_name:
             steps.extend([
                 AnalysisStep(
                     name="Calculate RMSD",
                     description="Calculate Root Mean Square Deviation to assess structural stability",
                     tool_name="calculate_rmsd",
                     tool_params={
-                        "topology_file": agent_input.topology_file,
-                        "trajectory_file": agent_input.trajectory_file,
+                        "topology_file": topo_name,
+                        "trajectory_file": traj_name,
                         "selection": "protein and name CA"
                     },
                     reason="RMSD indicates structural stability over time"
@@ -736,8 +753,8 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     description="Calculate Root Mean Square Fluctuation to identify flexible regions",
                     tool_name="calculate_rmsf",
                     tool_params={
-                        "topology_file": agent_input.topology_file,
-                        "trajectory_file": agent_input.trajectory_file,
+                        "topology_file": topo_name,
+                        "trajectory_file": traj_name,
                         "selection": "protein and name CA"
                     },
                     reason="RMSF identifies flexible and rigid regions"
@@ -747,22 +764,22 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     description="Calculate radius of gyration to assess protein compactness",
                     tool_name="calculate_radius_of_gyration",
                     tool_params={
-                        "topology_file": agent_input.topology_file,
-                        "trajectory_file": agent_input.trajectory_file,
+                        "topology_file": topo_name,
+                        "trajectory_file": traj_name,
                         "selection": "protein"
                     },
                     reason="Radius of gyration indicates protein compactness"
                 )
             ])
         
-        if agent_input.energy_file:
+        if energy_name:
             steps.append(
                 AnalysisStep(
                     name="Analyze Energy",
                     description="Extract and analyze energy terms from simulation",
                     tool_name="analyze_energy",
                     tool_params={
-                        "energy_file": agent_input.energy_file
+                        "energy_file": energy_name
                     },
                     reason="Energy analysis assesses simulation stability"
                 )
@@ -834,7 +851,49 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 # SECURITY: Sanitize output parameters (LLM may specify full paths)
                 tool_params = sanitize_tool_output_params(tool_params)
                 
-                # Prepend agent directory to output parameters  
+                # ── FORCE-OVERRIDE input file paths ──────────────────────
+                # The LLM often invents wrong paths.  We ignore whatever
+                # the LLM put in tool_params for input files and inject
+                # the real paths from state (which point to working_dir/hpc/
+                # or wherever the files actually live).
+                #
+                # 1. Build a map: canonical type → resolved absolute path
+                _state_input_map = self._resolve_input_files(state)
+                
+                # 2. For every recognised input-param name, override with
+                #    the correct path from the map (or scan input dir).
+                _INPUT_PARAM_TO_TYPE = {
+                    "topology_file": "topology",
+                    "topology": "topology",
+                    "structure": "topology",
+                    "trajectory_file": "trajectory",
+                    "trajectory": "trajectory",
+                    "traj": "trajectory",
+                    "energy_file": "energy",
+                    "edr": "energy",
+                    "edr_file": "energy",
+                }
+                
+                for param_name, file_type in _INPUT_PARAM_TO_TYPE.items():
+                    if param_name in tool_params:
+                        resolved = _state_input_map.get(file_type)
+                        if resolved:
+                            tool_params[param_name] = resolved
+                            logger.debug(f"  {param_name}: overridden → {resolved}")
+                        else:
+                            # Last resort: try resolve_input_file with LLM's filename
+                            file_ref = str(tool_params[param_name])
+                            resolved_path = self.file_manager.resolve_input_file(
+                                file_reference=file_ref,
+                                search_stages=["hpc", "simsetup", "preprocess"]
+                            )
+                            if resolved_path:
+                                tool_params[param_name] = resolved_path
+                                logger.debug(f"  {param_name}: registry → {resolved_path}")
+                            else:
+                                logger.warning(f"  {param_name}: could not resolve '{file_ref}'")
+                
+                # ── Prepend agent directory to output parameters ──────────
                 output_param_names = [
                     "output_file", "output_prefix", "plot_file", "figure_path",
                     "csv_file", "dat_file", "save_path", "output_csv", "output_fig"
@@ -847,33 +906,6 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         full_path = self.file_manager.get_agent_path(filename)
                         tool_params[param_name] = full_path
                         logger.debug(f"  {param_name}: {filename} -> {full_path}")
-                
-                # Resolve input file references (cross-agent access via file_registry)
-                input_param_names = [
-                    "trajectory_file", "trajectory", "traj",
-                    "topology_file", "topology", "structure",
-                    "energy_file", "edr"
-                ]
-                
-                for param_name in input_param_names:
-                    if param_name in tool_params and tool_params[param_name]:
-                        file_ref = str(tool_params[param_name])
-                        
-                        # Try to resolve from file_registry
-                        resolved_path = self.file_manager.resolve_input_file(
-                            file_reference=file_ref,
-                            search_stages=["hpc", "simsetup", "preprocess"]
-                        )
-                        
-                        if resolved_path:
-                            tool_params[param_name] = resolved_path
-                            logger.debug(f"  {param_name}: {file_ref} -> {resolved_path}")
-                        else:
-                            # File not in registry, try as direct path if absolute
-                            if Path(file_ref).is_absolute() and Path(file_ref).exists():
-                                logger.debug(f"  {param_name}: Using direct path {file_ref}")
-                            else:
-                                logger.warning(f"  Could not resolve {param_name}={file_ref}")
                 
                 # CRITICAL: Always use the analysis agent directory for working_dir
                 # LLMs may suggest workspace root, but tools must run in analysis subdirectory
@@ -1059,7 +1091,82 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         report_lines.append("\n" + "=" * 80)
         
         return "\n".join(report_lines)
-    
+
+    # ------------------------------------------------------------------
+    # Input-path resolution helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_input_files(self, state: MDState) -> Dict[str, str]:
+        """Resolve canonical input file paths for the analysis agent.
+
+        Returns a dict keyed by file type ("topology", "trajectory", "energy")
+        with absolute paths that actually exist on disk.  Resolution order:
+
+        1. State fields set by upstream agents (``topology``, ``trajectory_path``,
+           ``energy_file``).
+        2. Files copied into the analysis directory by
+           ``_copy_files_from_hpc_secure``.
+        3. Scan the hardcoded input directory (``working_dir/hpc/``) for common
+           extensions.
+        """
+        from ..state import AGENT_IO_MAP
+
+        resolved: Dict[str, str] = {}
+        working_dir = state.get("working_directory", "working_dir")
+
+        # Hardcoded input directory for this agent
+        input_subdir = AGENT_IO_MAP.get("analysis", {}).get("input_dir", "hpc")
+        input_dir = str(Path(working_dir) / input_subdir) if input_subdir else working_dir
+
+        # --- 1. Try state fields first (set by HPC / simsetup agent) --------
+        _STATE_KEYS = {
+            "topology":   ["topology", "coordinates", "cleaned_pdb"],
+            "trajectory":  ["trajectory_path"],
+            "energy":      ["energy_file"],
+        }
+        for ftype, keys in _STATE_KEYS.items():
+            for key in keys:
+                val = state.get(key)
+                if val and Path(val).is_file():
+                    resolved[ftype] = str(Path(val).resolve())
+                    logger.debug(f"_resolve_input_files: {ftype} from state['{key}'] → {resolved[ftype]}")
+                    break
+
+        # --- 2. Try files already in analysis_dir (copied earlier) -----------
+        analysis_dir = state.get("analysis_dir") or self.file_manager.agent_dir
+        _EXT_MAP = {
+            "topology":   [".gro", ".pdb", ".tpr", ".top"],
+            "trajectory":  [".xtc", ".trr", ".dcd", ".nc"],
+            "energy":      [".edr", ".ene"],
+        }
+        for ftype, exts in _EXT_MAP.items():
+            if ftype in resolved:
+                continue
+            for ext in exts:
+                candidates = sorted(Path(analysis_dir).glob(f"*{ext}"))
+                if candidates:
+                    resolved[ftype] = str(candidates[0].resolve())
+                    logger.debug(f"_resolve_input_files: {ftype} from analysis_dir → {resolved[ftype]}")
+                    break
+
+        # --- 3. Scan the hardcoded input directory (hpc/) --------------------
+        for ftype, exts in _EXT_MAP.items():
+            if ftype in resolved:
+                continue
+            for ext in exts:
+                candidates = sorted(Path(input_dir).glob(f"*{ext}"))
+                if candidates:
+                    resolved[ftype] = str(candidates[0].resolve())
+                    logger.debug(f"_resolve_input_files: {ftype} from input_dir({input_dir}) → {resolved[ftype]}")
+                    break
+
+        if not resolved:
+            logger.warning("_resolve_input_files: no input files resolved")
+        else:
+            logger.info(f"_resolve_input_files: resolved {list(resolved.keys())}")
+
+        return resolved
+
     def _classify_file_type(self, key_or_extension: str, file_path: str = "") -> str:
         """Classify file type based on parameter name or extension."""
         

@@ -46,14 +46,7 @@ _ANALYSIS_TYPE_MAP = {
 
 def _infer_analysis_type(output_file: str, data_files: List[str], working_dir: Optional[str] = None) -> Optional[str]:
     """Infer analysis type from file names, falling back to summary file lookup."""
-    # Strategy 1: keyword matching against file names
-    candidates = [output_file.lower()] + [f.lower() for f in data_files if f]
-    for name in candidates:
-        for keyword, atype in _ANALYSIS_TYPE_MAP.items():
-            if keyword in name:
-                return atype
-
-    # Strategy 2: match data files against existing summary entries
+    # Strategy 1: match data files against existing summary entries (most precise)
     if working_dir:
         try:
             from .summary_logger import infer_analysis_type_from_files
@@ -62,6 +55,13 @@ def _infer_analysis_type(output_file: str, data_files: List[str], working_dir: O
                 return result
         except Exception:
             pass
+
+    # Strategy 2: keyword matching against file names
+    candidates = [output_file.lower()] + [f.lower() for f in data_files if f]
+    for name in candidates:
+        for keyword, atype in _ANALYSIS_TYPE_MAP.items():
+            if keyword in name:
+                return atype
 
     return None
 
@@ -153,6 +153,8 @@ def plot_data(
     data_files: List[str],
     output_file: str,
     plot_type: str = "line",
+    x_col: Optional[int] = None,
+    y_col: Optional[int] = None,
     titles: Optional[List[str]] = None,
     xlabel: Optional[str] = None,
     ylabel: Optional[str] = None,
@@ -173,6 +175,8 @@ def plot_data(
         data_files: List of data file paths to plot (.xvg, .dat, .csv)
         output_file: Output image filename only (e.g., "plot.png") - saved in working_dir
         plot_type: Type of plot ("line", "scatter", "bar") - default: "line"
+        x_col: Column index for x-axis data (default: 0 = first column)
+        y_col: Column index for y-axis data (default: 1 = second column)
         titles: Plot title (optional)
         xlabel: X-axis label (optional, auto-detected from file if available)
         ylabel: Y-axis label (optional, auto-detected from file if available)
@@ -257,12 +261,16 @@ def plot_data(
             # Parse data
             data_columns, column_names = parse_data_file(abs_file)
             
-            if len(data_columns) < 2:
-                logger.warning(f"Insufficient data columns in {rel_file}, skipping")
+            # Resolve column indices (default: 0 for x, 1 for y)
+            xi = x_col if x_col is not None else 0
+            yi = y_col if y_col is not None else 1
+            
+            if len(data_columns) <= max(xi, yi):
+                logger.warning(f"Insufficient data columns in {rel_file} (need columns {xi},{yi}, have {len(data_columns)}), skipping")
                 continue
             
-            x_data = data_columns[0]
-            y_data = data_columns[1]
+            x_data = data_columns[xi]
+            y_data = data_columns[yi]
             
             # Determine label
             if labels is not None and idx < len(labels):
@@ -282,10 +290,10 @@ def plot_data(
                 ax.bar(x_data, y_data, label=label, color=color, alpha=0.7)
             
             # Auto-detect axis labels from first file
-            if idx == 0 and not xlabel and len(column_names) > 0:
-                xlabel = column_names[0]
-            if idx == 0 and not ylabel and len(column_names) > 1:
-                ylabel = column_names[1]
+            if idx == 0 and not xlabel and xi < len(column_names):
+                xlabel = column_names[xi]
+            if idx == 0 and not ylabel and yi < len(column_names):
+                ylabel = column_names[yi]
         
         # Set labels
         if xlabel:

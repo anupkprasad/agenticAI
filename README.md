@@ -175,7 +175,7 @@ export PYTHONDONTWRITEBYTECODE=1
 
 # 5. Run AgenticAI workflow with LLM
 python run_agenticAIWork.py \
-  --goal "I want to preprocess and simulation setup of protein only. The protein is availble in the pdb file of working_dir/3.pdb. Please setup simulation for 15 ns only. Once the simulation setup is done then please submit simulation job on HPC. Please do not do simulation analysis." \
+  --goal "I want to preprocess and simulation setup of protein only. The protein is availble in the pdb file of work_di/2_h.pdb. Please setup simulation for 15 ns only. Once the simulation setup is done then please submit simulation job on HPC. Please do not do simulation analysis." \
   --use-llm \
   --llm-base-url http://127.0.0.1:11434 \
   --llm-model gpt-oss:20b \
@@ -187,6 +187,15 @@ python run_agenticAIWork.py \
 # source /tmp/agenticai_local/bin/activate
 # python run_agenticAIWork.py --goal "..." --use-llm --llm-base-url http://127.0.0.1:11434 --no-human-loop
 
+
+python run_agenticAIWork.py \
+  --goal "I want to preprocess and simulation setup of protein-ligand-ions. The structure is availble in the pdb file of work_di/2_h.pdb. Please setup simulation for 15 ns only." \
+  --subtask preprocess simsetup \
+  --use-llm \
+  --llm-base-url http://127.0.0.1:11434 \
+  --llm-model gpt-oss:20b \
+  --working-dir work_di \
+  --no-human-loop
 
 
 # 5.2. Run analysis-only workflow (trajectory in working_dir/hpc/)
@@ -202,9 +211,9 @@ python run_agenticAIWork.py \
 # 5.2b. Run analysis + reporter together (multi-agent pipeline)
 # Multiple agents are run in order: analysis first, then reporter
 python run_agenticAIWork.py \
-  --goal "The simulation of initial structure 3.pdb is already done. Simulation trajectory is in working_dir/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM and secondary structure for protein only and plot those data. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is human psedukinase, please find the kinase and pseudokinase related literatures that correlate dynamics. Based on literature and results make comments on in report" \
+  --goal "The simulation of initial structure 2_h.pdb is already done. Simulation trajectory is in work_di/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM and secondary structure for protein only and plot those data. There is also ligand ATP, please calculate and plot the distance the center of mass of ATP to COM of protein. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is human psedukinase JAK1, please find the kinase and pseudokinase related literatures that correlate dynamics. Based on literature and results make comments on in report" \
   --subtask analysis reporter \
-  --working-dir working_dir \
+  --working-dir work_di \
   --use-llm \
   --llm-base-url http://127.0.0.1:11434 \
   --llm-model gpt-oss:20b \

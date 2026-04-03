@@ -16,6 +16,7 @@ from .rmsf_calculator import calculate_rmsf
 from .gyration_calculator import calculate_radius_of_gyration
 from .energy_analyzer import analyze_energy, extract_trajectory_metrics
 from .dssp_analyzer import analyze_secondary_structure
+from .com_distance_calculator import calculate_com_distance
 
 __all__ = [
     "calculate_rmsd",
@@ -24,4 +25,5 @@ __all__ = [
     "analyze_energy",
     "extract_trajectory_metrics",
     "analyze_secondary_structure",
+    "calculate_com_distance",
 ]

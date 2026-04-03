@@ -108,6 +108,23 @@ class ComplexSystemBuilder:
             "files": {}
         }
         
+        # Resolve all input PDB paths relative to working_dir if not absolute
+        def _resolve(path: Optional[str]) -> Optional[str]:
+            if path is None:
+                return None
+            p = Path(path)
+            if not p.is_absolute():
+                resolved = self.working_dir / p
+                if resolved.exists():
+                    return str(resolved)
+            return str(p)
+        
+        protein_pdb = _resolve(protein_pdb)
+        ligand_pdb = _resolve(ligand_pdb)
+        ion_pdb = _resolve(ion_pdb)
+        if ligand_itp:
+            ligand_itp = _resolve(ligand_itp)
+        
         # Step 1: Convert protein PDB to GRO
         converter = PDBtoGROConverter(str(self.working_dir))
         protein_gro = str(self.working_dir / "protein.gro")

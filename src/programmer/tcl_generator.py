@@ -40,7 +40,7 @@ def generate_tcl_script(
     """
     try:
         if not working_dir:
-            working_dir = "working_dir/programmer"
+            working_dir = "programmer"
         
         tcl_dir = os.path.join(working_dir, "tcl")
         os.makedirs(tcl_dir, exist_ok=True)

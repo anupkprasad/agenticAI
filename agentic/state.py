@@ -1,6 +1,24 @@
 """MD Simulation State Definition for LangGraph"""
 from typing import TypedDict, Optional, Dict, Any, List
 
+
+# ── Agent I/O Directory Mapping ──────────────────────────────────────────────
+# Each agent has a fixed input directory and output directory relative to
+# working_dir/.  Agents decide only *file names*; the framework resolves
+# full paths using this mapping.
+#
+#   input_dir = None  → agent reads user-supplied files (e.g. raw PDB)
+#   input_dir = "hpc" → agent reads from working_dir/hpc/
+#
+AGENT_IO_MAP: Dict[str, Dict[str, Optional[str]]] = {
+    "preprocess": {"input_dir": None,          "output_dir": "preprocess"},
+    "simsetup":   {"input_dir": "preprocess",  "output_dir": "simsetup"},
+    "hpc":        {"input_dir": "simsetup",    "output_dir": "hpc"},
+    "analysis":   {"input_dir": "hpc",         "output_dir": "analysis"},
+    "reporter":   {"input_dir": "analysis",    "output_dir": "reporter"},
+}
+
+
 class MDState(TypedDict):
     """Central state for MD simulation workflow."""
     

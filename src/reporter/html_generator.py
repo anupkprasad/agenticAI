@@ -2,7 +2,7 @@
 import os
 import logging
 import base64
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 from pathlib import Path
 from datetime import datetime
 from langchain.tools import tool
@@ -19,7 +19,7 @@ def generate_html_report(
     working_dir: Optional[str] = None,
     system_info: Optional[Dict[str, Any]] = None,
     final_impression: Optional[str] = None,
-    pdb_data: Optional[str] = None,
+    pdb_data: Optional[Any] = None,
     enriched_prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """
@@ -36,7 +36,7 @@ def generate_html_report(
         working_dir: Working directory for output
         system_info: Molecular system metadata from input validation (optional)
         final_impression: LLM-generated final impression correlating analysis with literature (optional)
-        pdb_data: PDB file text content for 3D structure viewer (optional)
+        pdb_data: PDB data — either a single PDB string or Dict[str, str] mapping labels to PDB text (optional)
         enriched_prompt: Supervisor-rephrased user task description (optional)
     
     Returns:
@@ -50,9 +50,16 @@ def generate_html_report(
     # Ensure output directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Auto-extract PDB for 3D viewer if not provided
-    if pdb_data is None:
-        pdb_data = _auto_extract_pdb(working_dir)
+    # Auto-extract PDB(s) for 3D viewer if not provided
+    pdb_frames: Dict[str, str] = {}
+    if isinstance(pdb_data, dict):
+        # Caller passed a dict of label → PDB text (multi-timepoint)
+        pdb_frames = pdb_data
+    elif isinstance(pdb_data, str):
+        # Caller passed a single PDB string — wrap as single-frame dict
+        pdb_frames = {"0 ns": pdb_data}
+    else:
+        pdb_frames = _auto_extract_pdbs(working_dir)
     
     try:
         # Build HTML content
@@ -62,7 +69,7 @@ def generate_html_report(
             report_type=report_type,
             system_info=system_info,
             final_impression=final_impression,
-            pdb_data=pdb_data,
+            pdb_data=pdb_frames,
             enriched_prompt=enriched_prompt
         )
         
@@ -87,48 +94,51 @@ def generate_html_report(
         }
 
 
-def _auto_extract_pdb(working_dir: str) -> Optional[str]:
-    """Try to extract/read PDB for the 3D viewer automatically.
+def _auto_extract_pdbs(working_dir: str) -> Dict[str, str]:
+    """Extract PDB frames at multiple time points for the 3D viewer.
 
-    Searches for an existing ``system_frame0.pdb`` first.  If not found,
-    attempts to run the structure extractor on the base working directory
-    (one level up from the reporter directory when appropriate).
+    Returns a dict mapping ``"<time> ns"`` labels to PDB text.
+    Falls back to a single first-frame if multi-frame extraction fails.
     """
     try:
-        from src.reporter.structure_extractor import extract_first_frame_pdb, read_pdb_data
+        from src.reporter.structure_extractor import (
+            extract_multi_frame_pdb,
+            extract_first_frame_pdb,
+            read_pdb_data,
+        )
     except ImportError:
         logger.debug("structure_extractor not available; skipping PDB auto-extract")
-        return None
+        return {}
 
     wd = Path(working_dir).resolve()
+    base_dir = wd.parent if wd.name == "reporter" else wd
 
-    # Determine the base working directory (parent of reporter/ if we are inside it)
-    if wd.name == "reporter":
-        base_dir = wd.parent
-    else:
-        base_dir = wd
+    # Try multi-frame extraction first
+    try:
+        frames = extract_multi_frame_pdb(str(base_dir))
+        if frames:
+            logger.info("Auto-extracted %d PDB frames for 3D viewer", len(frames))
+            return frames
+    except Exception as exc:
+        logger.warning("Multi-frame PDB extraction failed: %s", exc)
 
-    # 1. Check for an already-extracted PDB in reporter/
+    # Fall back to single frame
     existing = base_dir / "reporter" / "system_frame0.pdb"
     if existing.is_file():
-        pdb_text = read_pdb_data(str(existing))
-        if pdb_text:
-            logger.info("Auto-loaded existing PDB for 3D viewer: %s", existing)
-            return pdb_text
+        txt = read_pdb_data(str(existing))
+        if txt:
+            return {"0 ns": txt}
 
-    # 2. Extract from trajectory
     try:
         pdb_path = extract_first_frame_pdb(str(base_dir))
         if pdb_path:
-            pdb_text = read_pdb_data(pdb_path)
-            if pdb_text:
-                logger.info("Auto-extracted PDB for 3D viewer (%d chars)", len(pdb_text))
-                return pdb_text
+            txt = read_pdb_data(pdb_path)
+            if txt:
+                return {"0 ns": txt}
     except Exception as exc:
         logger.warning("PDB auto-extraction failed: %s", exc)
 
-    logger.debug("No PDB data available for 3D viewer")
-    return None
+    return {}
 
 
 def build_html_content(
@@ -137,10 +147,17 @@ def build_html_content(
     report_type: str,
     system_info: Optional[Dict[str, Any]] = None,
     final_impression: Optional[str] = None,
-    pdb_data: Optional[str] = None,
+    pdb_data: Optional[Union[str, Dict[str, str]]] = None,
     enriched_prompt: Optional[str] = None
 ) -> str:
     """Build HTML content for report (not a @tool, internal helper)"""
+
+    # Normalise pdb_data to dict
+    pdb_frames: Dict[str, str] = {}
+    if isinstance(pdb_data, str):
+        pdb_frames = {"0 ns": pdb_data}
+    elif isinstance(pdb_data, dict):
+        pdb_frames = pdb_data
     
     # Extract data
     entries = analysis_data.get("entries", [])
@@ -295,41 +312,66 @@ def build_html_content(
         }
         .key-stats {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 15px;
+            grid-template-columns: 1fr 1fr;
+            gap: 18px;
             margin: 25px 0;
         }
-        .stat-card {
-            background: linear-gradient(135deg, #ffffff 0%, #f3f4f6 100%);
-            padding: 20px;
-            border-radius: 8px;
+        .key-stats .tile-observations-row {
+            grid-column: 1 / -1;
+        }
+        .info-tile {
+            background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+            padding: 22px 24px;
+            border-radius: 10px;
             border: 2px solid #e5e7eb;
-            text-align: center;
             transition: transform 0.2s, box-shadow 0.2s;
         }
-        .stat-card:hover {
+        .info-tile:hover {
             transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+            box-shadow: 0 4px 16px rgba(59, 130, 246, 0.2);
         }
-        .stat-value {
-            font-size: 22px;
-            font-weight: bold;
-            color: #3b82f6;
-            margin: 5px 0;
-        }
-        .stat-label {
-            font-size: 14px;
-            color: #6b7280;
+        .info-tile.tile-stats { border-left: 5px solid #3b82f6; }
+        .info-tile.tile-files { border-left: 5px solid #10b981; }
+        .info-tile.tile-meta  { border-left: 5px solid #8b5cf6; }
+        .tile-header {
+            font-size: 13px;
+            font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 1px;
+            margin-bottom: 14px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        .tile-stats .tile-header { color: #2563eb; }
+        .tile-files .tile-header { color: #059669; }
+        .tile-meta  .tile-header { color: #7c3aed; }
+        .tile-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            padding: 4px 0;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        .tile-row:not(:last-child) {
+            border-bottom: 1px dashed #f0f0f0;
+        }
+        .tile-key {
+            color: #6b7280;
             font-weight: 600;
+            margin-right: 12px;
+            white-space: nowrap;
         }
-        .highlight-stat {
-            background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
-            border-color: #3b82f6;
+        .tile-val {
+            color: #1f2937;
+            font-weight: 500;
+            text-align: right;
+            word-break: break-all;
         }
-        .highlight-stat .stat-value {
-            color: #1e40af;
+        .tile-val.highlight {
+            color: #2563eb;
+            font-weight: 700;
+            font-size: 15px;
         }
         .timestamp {
             color: #9ca3af;
@@ -610,8 +652,8 @@ def build_html_content(
         html_parts.append('<div class="section-divider"></div>')
     
     # 3D Structure Viewer section (powered by 3Dmol.js)
-    if pdb_data:
-        html_parts.append(_build_3d_viewer_section(pdb_data))
+    if pdb_frames:
+        html_parts.append(_build_3d_viewer_section(pdb_frames))
         html_parts.append('<div class="section-divider"></div>')
     
     # Analysis sections
@@ -651,38 +693,60 @@ def build_html_content(
                     # Fallback to file path if encoding fails
                     html_parts.append(f'<p><em>Image: {img_path}</em></p>')
         
-        # Display key statistics in cards
-        if stats:
-            # Identify important statistics
-            key_stats = _extract_key_statistics(stats, atype)
-            
-            if key_stats:
-                html_parts.append('<div class="key-stats">')
-                for stat_name, stat_value, is_highlight in key_stats:
-                    card_class = "stat-card highlight-stat" if is_highlight else "stat-card"
-                    if isinstance(stat_value, float):
-                        formatted_value = f"{stat_value:.3f}"
-                    else:
-                        formatted_value = str(stat_value)
-                    
-                    html_parts.append(f'''
-                        <div class="{card_class}">
-                            <div class="stat-label">{stat_name}</div>
-                            <div class="stat-value">{formatted_value}</div>
-                        </div>
-                    ''')
-                html_parts.append('</div>')
-        
-        # Additional files (non-images) in compact format
+        # Three-tile display: Statistics + Files (side-by-side), Key Observations (full-width below)
+        has_stats = bool(stats)
         non_image_files = {k: v for k, v in files.items() if not _is_image_file(k, v)}
-        if non_image_files:
-            html_parts.append('<div class="files-list">')
-            html_parts.append('<p><strong>📁 Data Files:</strong></p>')
-            html_parts.append('<ul>')
-            for file_type, file_path in non_image_files.items():
-                file_name = Path(file_path).name if isinstance(file_path, str) else str(file_path)
-                html_parts.append(f'<li><strong>{file_type}:</strong> {file_name}</li>')
-            html_parts.append('</ul>')
+        has_files = bool(non_image_files)
+        has_meta = bool(metadata)
+
+        if has_stats or has_files or has_meta:
+            html_parts.append('<div class="key-stats">')
+
+            # --- Statistics tile (left) ---
+            if has_stats:
+                html_parts.append('<div class="info-tile tile-stats">')
+                html_parts.append('<div class="tile-header">📊 Statistics</div>')
+                for k, v in stats.items():
+                    if isinstance(v, float):
+                        fv = f"{v:.4f}"
+                    else:
+                        fv = str(v)
+                    label = k.replace("_", " ").title()
+                    html_parts.append(f'<div class="tile-row"><span class="tile-key">{label}</span><span class="tile-val highlight">{fv}</span></div>')
+                html_parts.append('</div>')
+
+            # --- Files tile (right, beside Statistics) ---
+            if has_files:
+                html_parts.append('<div class="info-tile tile-files">')
+                html_parts.append('<div class="tile-header">📁 Files</div>')
+                for k, v in non_image_files.items():
+                    fname = Path(v).name if isinstance(v, str) else str(v)
+                    label = k.replace("_", " ").title()
+                    html_parts.append(f'<div class="tile-row"><span class="tile-key">{label}</span><span class="tile-val">{fname}</span></div>')
+                html_parts.append('</div>')
+
+            # --- Key Observations tile (full-width row below) ---
+            if has_meta:
+                html_parts.append('<div class="tile-observations-row">')
+                html_parts.append('<div class="info-tile tile-meta">')
+                html_parts.append('<div class="tile-header">🔬 Key Observations</div>')
+                for k, v in metadata.items():
+                    label = k.replace("_", " ").title()
+                    if isinstance(v, dict):
+                        fv = "; ".join(f"{sk}: {sv}" for sk, sv in list(v.items())[:8])
+                    elif isinstance(v, list):
+                        if len(v) > 5:
+                            fv = ", ".join(str(x) for x in v[:5]) + f" … (+{len(v)-5})"
+                        else:
+                            fv = ", ".join(str(x) for x in v)
+                    elif isinstance(v, float):
+                        fv = f"{v:.4f}"
+                    else:
+                        fv = str(v)
+                    html_parts.append(f'<div class="tile-row"><span class="tile-key">{label}</span><span class="tile-val">{fv}</span></div>')
+                html_parts.append('</div>')
+                html_parts.append('</div>')
+
             html_parts.append('</div>')
         
         html_parts.append('</div>')
@@ -812,29 +876,49 @@ def build_html_content(
     return "\n".join(html_parts)
 
 
-def _build_3d_viewer_section(pdb_data: str) -> str:
+def _build_3d_viewer_section(pdb_frames: Dict[str, str]) -> str:
     """Build interactive 3D molecular viewer section using 3Dmol.js.
 
-    Provides controls for:
-    - Representation style (cartoon, stick, line, sphere, ball-and-stick)
-    - Show/hide components (protein, water, ions, ligand)
-    - Color scheme (spectrum, chain, secondary structure, element)
-    - Surface toggle (on/off with visual feedback)
-    - Spin toggle and reset view
-    - Protein sequence bar with click-to-highlight
-    - PNG screenshot export
+    *pdb_frames* maps ``"<time> ns"`` labels to PDB text.  When only one
+    frame is provided the timepoint dropdown is hidden.
     """
-    # Escape PDB data for safe embedding in JS string literal
-    escaped_pdb = pdb_data.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+    import json as _json
+
+    # Escape each PDB string for safe JS template-literal embedding
+    def _esc(txt: str) -> str:
+        return txt.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+
+    # Build a JS object literal:  { "0 ns": `...`, "50 ns": `...`, ... }
+    # We construct the raw JS source string ourselves (no json.dumps for
+    # the backtick-delimited values).
+    labels = list(pdb_frames.keys())
+    js_entries = []
+    for label in labels:
+        escaped = _esc(pdb_frames[label])
+        js_entries.append(f'"{label}": `{escaped}`')
+    js_frames_obj = "{\n        " + ",\n        ".join(js_entries) + "\n    }"
+
+    # Build <option> tags for timepoint dropdown
+    time_options = "\n".join(
+        f'            <option value="{lbl}">{lbl}</option>' for lbl in labels
+    )
+    # Hide the dropdown when there is only a single frame
+    time_display = "none" if len(labels) <= 1 else "inline"
 
     return f'''
 <h2>🧪 3D Structure Viewer</h2>
 <div class="viewer-section">
-    <p>Interactive first-frame snapshot of the simulated system.
-       Use mouse to rotate (left-click), zoom (scroll), and translate (right-click).</p>
+    <p>Interactive snapshot of the simulated system.
+       Rotate (left-drag), zoom (scroll), translate (right-drag).
+       {"Select a simulation timepoint to compare conformations." if len(labels) > 1 else ""}</p>
 
     <!-- Controls -->
     <div class="viewer-controls">
+        <label for="time-select" style="display:{time_display}">Time:</label>
+        <select id="time-select" onchange="switchTimepoint()" style="display:{time_display}">
+{time_options}
+        </select>
+
         <label for="repr-select">Style:</label>
         <select id="repr-select" onchange="updateViewer()">
             <option value="cartoon">Cartoon</option>
@@ -890,35 +974,47 @@ def _build_3d_viewer_section(pdb_data: str) -> str:
 
 <script>
 (function() {{
-    // ========== PDB data embedded at build time ==========
-    var pdbData = `{escaped_pdb}`;
+    // ========== PDB data for each timepoint ==========
+    var pdbFrames = {js_frames_obj};
+    var frameLabels = {_json.dumps(labels)};
+    var currentLabel = frameLabels[0];
+    var pdbData = pdbFrames[currentLabel];
 
     // ========== state ==========
     var spinning   = false;
     var showSurface = false;
     var surfaceObj  = null;
     var viewer      = null;
-    var seqResidues = [];    // [ {{resi, resn, chain}}, ... ]
+    var seqResidues = [];
     var seqSelStart = null;
     var seqSelEnd   = null;
 
     // ========== selection helpers ==========
     function selForComponent(comp) {{
+        var proteinResn = [
+            "ALA","ARG","ASN","ASP","CYS","GLN","GLU","GLY","HIS","ILE","LEU","LYS","MET","PHE","PRO","SER","THR","TRP","TYR","VAL",
+            "SEC","PYL","ASX","GLX","XLE","UNK"
+        ];
+        var waterResn = ["HOH","WAT","SOL","TIP3"];
+        var ionResn = [
+            "NA","CL","K","MG","CA","ZN","FE","MN","CU","CO","CD","NI","SR","BA","CS","LI","RB","PB","AL","CR","V","TI","AG","AU","HG",
+            "NA+","CL-","SOD","CLA","POT","IOD","BR","F"
+        ];
         switch (comp) {{
             case "protein":
-                return {{or: [{{atom: "CA"}}, {{atom: "C"}}, {{atom: "N"}}, {{atom: "O"}}, {{atom: "CB"}}],
-                         not: {{resn: ["HOH","WAT","SOL","TIP3","NA","CL","K","MG","CA","ZN","FE","NA+","CL-","SOD","CLA"]}}}};
+                return {{resn: proteinResn}};
             case "water":
-                return {{resn: ["HOH","WAT","SOL","TIP3"]}};
+                return {{resn: waterResn}};
             case "ions":
-                return {{resn: ["NA","CL","K","MG","CA","ZN","FE","NA+","CL-","SOD","CLA"]}};
+                return {{resn: ionResn}};
             case "ligand":
                 return {{not: {{or: [
-                    {{atom: "CA"}}, {{atom: "C"}}, {{atom: "N"}}, {{atom: "O"}}, {{atom: "CB"}},
-                    {{resn: ["HOH","WAT","SOL","TIP3","NA","CL","K","MG","CA","ZN","FE","NA+","CL-","SOD","CLA"]}}
+                    {{resn: proteinResn}},
+                    {{resn: waterResn}},
+                    {{resn: ionResn}}
                 ]}}}};
             case "nowater":
-                return {{not: {{resn: ["HOH","WAT","SOL","TIP3"]}}}};
+                return {{not: {{resn: waterResn}}}};
             default:
                 return {{}};
         }}
@@ -935,6 +1031,31 @@ def _build_3d_viewer_section(pdb_data: str) -> str:
         }}
     }}
 
+    // ========== load a model into the viewer ==========
+    function loadModel(pdbText) {{
+        viewer.removeAllModels();
+        viewer.removeAllSurfaces();
+        surfaceObj = null;
+        viewer.addModel(pdbText, "pdb");
+        // Multi-component default styling
+        viewer.setStyle(selForComponent("protein"), {{cartoon: {{color: "spectrum"}}}});
+        viewer.setStyle(selForComponent("ligand"), {{stick: {{colorscheme: "default", radius: 0.15}}}});
+        viewer.setStyle(selForComponent("ions"), {{sphere: {{colorscheme: "Jmol", scale: 0.5}}}});
+        viewer.zoomTo();
+        viewer.render();
+    }}
+
+    // ========== switch timepoint ==========
+    window.switchTimepoint = function() {{
+        var sel = document.getElementById("time-select");
+        if (!sel) return;
+        currentLabel = sel.value;
+        pdbData = pdbFrames[currentLabel];
+        loadModel(pdbData);
+        parseSequence();
+        renderSeqBar();
+    }};
+
     // ========== core render ==========
     window.updateViewer = function() {{
         if (!viewer) return;
@@ -942,19 +1063,21 @@ def _build_3d_viewer_section(pdb_data: str) -> str:
         var color  = document.getElementById("color-select").value;
         var comp   = document.getElementById("comp-select").value;
 
-        // Remove old surface first
         viewer.removeAllSurfaces();
         surfaceObj = null;
 
-        // Clear all styles, then apply
-        viewer.setStyle({{}}, {{}});  // hide everything
+        viewer.setStyle({{}}, {{}});
 
         var sel  = selForComponent(comp);
         var spec = {{}};
         spec[style] = colorSpec(color);
         viewer.setStyle(sel, spec);
 
-        // Highlight sequence selection if any
+        if (comp === "all" || comp === "nowater") {{
+            viewer.setStyle(selForComponent("ligand"), {{stick: {{colorscheme: "default", radius: 0.15}}}});
+            viewer.setStyle(selForComponent("ions"), {{sphere: {{colorscheme: "Jmol", scale: 0.5}}}});
+        }}
+
         applySeqHighlight(style, color);
 
         if (showSurface) {{
@@ -977,7 +1100,6 @@ def _build_3d_viewer_section(pdb_data: str) -> str:
             btn.style.background = "#6366f1";
             btn.textContent = "◉ Surface";
         }}
-        // Explicitly remove or add surface
         viewer.removeAllSurfaces();
         surfaceObj = null;
         if (showSurface) {{
@@ -1015,7 +1137,7 @@ def _build_3d_viewer_section(pdb_data: str) -> str:
         document.getElementById("btn-surface").style.background = "#6366f1";
         document.getElementById("btn-surface").textContent      = "◉ Surface";
         renderSeqBar();
-        updateViewer();
+        loadModel(pdbData);
     }};
 
     // ========== PNG export ==========
@@ -1024,7 +1146,7 @@ def _build_3d_viewer_section(pdb_data: str) -> str:
         var uri = viewer.pngURI();
         var a = document.createElement("a");
         a.href = uri;
-        a.download = "structure_view.png";
+        a.download = "structure_" + currentLabel.replace(" ", "_") + ".png";
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -1032,7 +1154,6 @@ def _build_3d_viewer_section(pdb_data: str) -> str:
 
     // ========== SEQUENCE VIEWER ==========
     function parseSequence() {{
-        // Extract unique CA atoms → one per residue, ordered by resi
         seqResidues = [];
         var seen = {{}};
         var lines = pdbData.split("\\n");
@@ -1043,8 +1164,7 @@ def _build_3d_viewer_section(pdb_data: str) -> str:
                 var resName  = line.substring(17,20).trim();
                 var chain    = line.substring(21,22).trim() || "A";
                 var resi     = parseInt(line.substring(22,26).trim(), 10);
-                // Skip water / ions
-                if (["HOH","WAT","SOL","TIP3","NA","CL","K","MG","CA","ZN","FE"].indexOf(resName) >= 0) continue;
+                if (["HOH","WAT","SOL","TIP3","NA","CL","K","MG","CA","ZN","FE","NA+","CL-","SOD","CLA"].indexOf(resName) >= 0) continue;
                 var key = chain + "_" + resi;
                 if (atomName === "CA" && !seen[key]) {{
                     seen[key] = true;
@@ -1087,14 +1207,12 @@ def _build_3d_viewer_section(pdb_data: str) -> str:
             spans.push('<span data-idx="' + i + '" title="' + r.resn + ' ' + r.resi + ' (chain ' + r.chain + ')" ' +
                        'style="cursor:pointer;padding:0 1px;' + bg + '">' + letter + '</span>');
 
-            // Add chain break marker + position every 10 residues
             if ((i + 1) % 10 === 0 && i < seqResidues.length - 1) {{
                 spans.push('<span style="color:#4b5563;font-size:10px;" title="residue ' + seqResidues[i].resi + '">|</span>');
             }}
         }}
         bar.innerHTML = spans.join("");
 
-        // Attach click handlers
         var charSpans = bar.querySelectorAll("span[data-idx]");
         for (var j = 0; j < charSpans.length; j++) {{
             charSpans[j].addEventListener("click", onSeqClick);
@@ -1111,7 +1229,6 @@ def _build_3d_viewer_section(pdb_data: str) -> str:
         }} else if (seqSelEnd === null) {{
             seqSelEnd = idx;
         }} else {{
-            // Third click resets
             seqSelStart = idx;
             seqSelEnd = null;
         }}
@@ -1132,14 +1249,12 @@ def _build_3d_viewer_section(pdb_data: str) -> str:
         var hi = (seqSelEnd !== null) ? seqSelEnd : seqSelStart;
         if (lo > hi) {{ var t = lo; lo = hi; hi = t; }}
 
-        // Collect resi numbers for the selection range
         var resiList = [];
         for (var k = lo; k <= hi; k++) {{
             if (k < seqResidues.length) resiList.push(seqResidues[k].resi);
         }}
         if (!resiList.length) return;
 
-        // Highlight with bright color
         var hlSpec = {{}};
         hlSpec[style] = {{color: "#fbbf24"}};
         viewer.setStyle({{resi: resiList}}, hlSpec);
@@ -1151,12 +1266,7 @@ def _build_3d_viewer_section(pdb_data: str) -> str:
         viewer = $3Dmol.createViewer(element, {{
             backgroundColor: "#1a1a2e"
         }});
-        viewer.addModel(pdbData, "pdb");
-        viewer.setStyle({{}}, {{cartoon: {{color: "spectrum"}}}});
-        viewer.zoomTo();
-        viewer.render();
-
-        // Build sequence bar
+        loadModel(pdbData);
         parseSequence();
         renderSeqBar();
     }});

@@ -158,7 +158,8 @@ class MDPlanner:
         
         # CRITICAL: Refresh tools registry to pick up any newly generated programmer tools
         # Programmer may have created new tools in previous workflow steps
-        self.tools_registry = get_tools_registry(refresh=True)
+        working_dir = state.get("working_directory")
+        self.tools_registry = get_tools_registry(refresh=True, working_directory=working_dir)
         logger.info(f"PLANNER: Refreshed tools registry - now {len(self.tools_registry.tools)} tools available")
         
         # Use structured prompt if available, otherwise fall back to rephrased/original goal

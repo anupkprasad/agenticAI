@@ -112,8 +112,8 @@ class ReporterToolExecutor:
             }
         
         try:
-            # Add working_dir to params if not present
-            if "working_dir" not in tool_params and "working_dir" in globals()[tool_name].func.__code__.co_varnames:
+            # ALWAYS force working_dir to agent directory (prevent file leaks)
+            if "working_dir" in globals()[tool_name].func.__code__.co_varnames:
                 tool_params["working_dir"] = self.working_dir
             
             # Execute tool

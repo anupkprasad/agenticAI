@@ -102,7 +102,7 @@ planner:
       - "no existing tool"
       - "should generate"
       - "programmer should create"
-    output_directory: "working_dir/programmer"  # Where programmer creates tools
+    output_directory: "programmer"  # Where programmer creates tools (relative to working_directory)
     
   # When to use fallback plan (keyword-based)
   fallback_triggers:

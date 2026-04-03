@@ -27,14 +27,14 @@ agent:
   validate_before_save: true # Validate syntax before writing
   fail_fast: false           # Continue on error or stop
 
-# Output directories
+# Output directories (relative to working_directory, resolved at runtime)
 output:
-  base_directory: "working_dir/programmer"
-  python_tools: "working_dir/programmer/python"
-  tcl_scripts: "working_dir/programmer/tcl"
-  mdp_files: "working_dir/programmer/mdp"
-  slurm_scripts: "working_dir/programmer/slurm"
-  analysis_scripts: "working_dir/programmer/analysis"
+  base_directory: "programmer"
+  python_tools: "python"
+  tcl_scripts: "tcl"
+  mdp_files: "mdp"
+  slurm_scripts: "slurm"
+  analysis_scripts: "analysis"
 
 # Default settings for code generation
 defaults:
