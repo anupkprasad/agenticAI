@@ -114,14 +114,24 @@ def main(argv=None):
     
     goal = args.goal
     
-    # Set up logging with the specified log file
-    set_log_file("agent_conversation.log")
+    # Resolve working directory (same logic as workflow._initialize_state)
+    from pathlib import Path
+    working_dir = args.working_dir
+    if working_dir == ".":
+        working_dir = "working_dir"
+    if not Path(working_dir).is_absolute():
+        working_dir = str(Path.cwd() / working_dir)
+    Path(working_dir).mkdir(parents=True, exist_ok=True)
+    
+    # Set up logging inside working_dir (not at project root)
+    log_path = str(Path(working_dir) / "agent_conversation.log")
+    set_log_file(log_path)
     
     # Initialize workflow
     workflow = MDWorkflow(llm_client)
     
     # Initialize conversation logger
-    conversation_logger = get_conversation_logger("agent_conversation.log")
+    conversation_logger = get_conversation_logger(log_path)
     
     # Log user prompt
     log_user_prompt(goal, config)
@@ -174,7 +184,12 @@ def main(argv=None):
             for warning in final_state["warnings"]:
                 print(f"  - {warning}")
         
-        print(f"\nFull conversation log saved to: agent_conversation.log")
+        print(f"\nFull conversation log saved to: {log_path}")
+        
+        # Show execution report path
+        report_path = str(Path(working_dir) / "supervisor" / "execution_report.md")
+        if Path(report_path).exists():
+            print(f"Execution report saved to: {report_path}")
         
         # Return appropriate exit code
         return 0 if not final_state.get("errors") else 1

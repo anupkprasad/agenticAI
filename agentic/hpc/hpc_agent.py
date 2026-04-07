@@ -516,7 +516,7 @@ Output as JSON with this structure:
             step_name = step.get("name", f"Step {i}")
             tool_name = step.get("tool_name")
             tool_params = step.get("tool_params", {})
-            max_retries = step.get("max_retries", 1)
+            max_retries = max(step.get("max_retries", 1), 1)
             retry_on_failure = step.get("retry_on_failure", False)
             
             logger.info(f"Executing step {i}/{len(steps)}: {step_name}")
@@ -533,6 +533,10 @@ Output as JSON with this structure:
                 attempt += 1
                 result = self._execute_tool(tool_name, tool_params, state, hpc_dir)
                 
+                # Guard against None result from tool execution
+                if result is None:
+                    result = {"success": False, "error": f"Tool '{tool_name}' returned None"}
+                
                 if result.get("success"):
                     break
                 elif retry_on_failure and attempt < max_retries:
@@ -542,6 +546,8 @@ Output as JSON with this structure:
                     break
             
             # Log result
+            if result is None:
+                result = {"success": False, "error": f"Tool '{tool_name}' returned None"}
             if result.get("success"):
                 log_agent_action("hpc", f"Step {i}/{len(steps)} completed", {
                     "step": step_name,

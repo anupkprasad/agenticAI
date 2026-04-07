@@ -4,7 +4,10 @@ LLM-Powered MD Workflow with Intelligent Routing
 This module implements the complete MD workflow that uses LLM reasoning
 for dynamic routing and agent coordination.
 """
+import json
 import logging
+from datetime import datetime
+from pathlib import Path
 from typing import Dict, Any, Optional, Callable
 from langgraph.graph import StateGraph, END
 from .state import MDState
@@ -236,6 +239,10 @@ class MDWorkflow:
         state["final_report"] = report
         state["workflow_status"] = "completed"
         
+        # Save execution report and state to working_dir/supervisor/
+        self._save_execution_report(state, report)
+        self._save_workflow_state(state)
+        
         return state
     
     def _generate_llm_report(self, state: MDState) -> str:
@@ -323,6 +330,152 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 summary["final_outputs"][key] = str(state[key])[:100]
         
         return summary
+    
+    def _save_execution_report(self, state: MDState, report: str):
+        """Save execution_report.md to working_dir/supervisor/."""
+        try:
+            working_dir = state.get("working_directory", ".")
+            supervisor_dir = Path(working_dir) / "supervisor"
+            supervisor_dir.mkdir(parents=True, exist_ok=True)
+            report_path = supervisor_dir / "execution_report.md"
+            
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Build a concise markdown report
+            status = 'SUCCESS' if not state.get('errors') else 'COMPLETED WITH ERRORS'
+            lines = [
+                f"# MD Workflow Execution Report",
+                f"",
+                f"**Generated:** {ts}  ",
+                f"**Status:** {status}",
+                f"",
+                f"---",
+                f"",
+                f"## User Prompt",
+                f"",
+                f"> {state.get('user_goal', 'N/A')}",
+                f"",
+            ]
+            
+            # Enriched prompt
+            rephrased = state.get("rephrased_goal") or state.get("enriched_prompt")
+            if rephrased:
+                lines += [
+                    f"## Enriched Prompt",
+                    f"",
+                    f"{rephrased}",
+                    f"",
+                ]
+            
+            # Agents executed
+            exec_path = state.get("execution_path", [])
+            if exec_path:
+                seen = set()
+                agents = []
+                for node in exec_path:
+                    if node not in seen and node not in ("supervisor", "input_validation", "final_report"):
+                        seen.add(node)
+                        agents.append(node)
+                if agents:
+                    lines += [
+                        f"## Agents Executed",
+                        f"",
+                        f"{' → '.join(agents)}",
+                        f"",
+                    ]
+            
+            # Errors & Warnings (only if present)
+            errors = state.get("errors", [])
+            warnings = state.get("warnings", [])
+            if errors:
+                lines += [f"## Errors ({len(errors)})", f""]
+                for e in errors:
+                    lines.append(f"- {e}")
+                lines.append("")
+            if warnings:
+                lines += [f"## Warnings ({len(warnings)})", f""]
+                for w in warnings:
+                    lines.append(f"- {w}")
+                lines.append("")
+            
+            # LLM-generated summary
+            if report:
+                lines += [f"## Summary", f"", report, f""]
+            
+            report_path.write_text("\n".join(lines), encoding="utf-8")
+            logger.info(f"Execution report saved to {report_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to save execution report: {e}")
+    
+    def _save_workflow_state(self, state: MDState):
+        """Save serializable workflow state to working_dir/supervisor/state.jsonl."""
+        try:
+            working_dir = state.get("working_directory", ".")
+            supervisor_dir = Path(working_dir) / "supervisor"
+            supervisor_dir.mkdir(parents=True, exist_ok=True)
+            state_path = supervisor_dir / "state.jsonl"
+            
+            # Build a serializable snapshot of the state
+            serializable_state = {}
+            for key, value in state.items():
+                try:
+                    json.dumps(value, default=str)
+                    serializable_state[key] = value
+                except (TypeError, ValueError):
+                    serializable_state[key] = str(value)
+            
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "workflow_status": state.get("workflow_status", "unknown"),
+                "state": serializable_state,
+            }
+            
+            # Append as a pretty-printed JSON block separated by a marker
+            with open(state_path, "a", encoding="utf-8") as f:
+                f.write("--- snapshot ---\n")
+                f.write(json.dumps(entry, indent=2, default=str) + "\n")
+            
+            logger.info(f"Workflow state saved to {state_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to save workflow state: {e}")
+    
+    def _load_workflow_state(self, working_dir: str) -> Optional[Dict[str, Any]]:
+        """Load the most recent workflow state from working_dir/supervisor/state.jsonl.
+        
+        Returns the last saved state dict, or None if no saved state exists.
+        """
+        state_path = Path(working_dir) / "supervisor" / "state.jsonl"
+        if not state_path.exists():
+            return None
+        
+        try:
+            content = state_path.read_text(encoding="utf-8")
+            # Split on snapshot markers and take the last block
+            blocks = content.split("--- snapshot ---")
+            last_block = ""
+            for block in reversed(blocks):
+                block = block.strip()
+                if block:
+                    last_block = block
+                    break
+            
+            if not last_block:
+                return None
+            
+            entry = json.loads(last_block)
+            saved_state = entry.get("state")
+            if saved_state:
+                logger.info(
+                    f"Loaded previous workflow state from {state_path} "
+                    f"(status={entry.get('workflow_status')}, ts={entry.get('timestamp')})"
+                )
+            return saved_state
+            
+        except Exception as e:
+            logger.warning(f"Failed to load workflow state from {state_path}: {e}")
+            return None
     
     def _initialize_state(self, user_goal: str, config: Optional[Dict[str, Any]]) -> MDState:
         """Create initial workflow state with config overrides applied."""
@@ -413,7 +566,6 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
 
         # CRITICAL: Convert working_directory to absolute path to prevent nested directory creation
         # This ensures that even if agents use os.chdir(), paths remain correct
-        from pathlib import Path
         working_dir = state.get("working_directory", "working_dir")
         if working_dir == ".":
             working_dir = "working_dir"  # Use working_dir instead of current directory
@@ -430,8 +582,42 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         # Create all agent directories
         for agent_dir in [state["preprocess_dir"], state["simsetup_dir"], 
                          state["hpc_dir"], state["analysis_dir"],
-                         str(Path(working_dir) / "reporter")]:
+                         str(Path(working_dir) / "reporter"),
+                         str(Path(working_dir) / "supervisor")]:
             Path(agent_dir).mkdir(parents=True, exist_ok=True)
+        
+        # Check for saved workflow state from a previous run
+        saved_state = self._load_workflow_state(working_dir)
+        if saved_state:
+            # Restore artifact paths and completed-stage outputs so agents
+            # can skip already-finished work.  Control-flow and retry counters
+            # are intentionally NOT restored — the workflow re-evaluates routing
+            # fresh each time.
+            restore_keys = [
+                # Preprocessing outputs
+                "raw_pdb", "cleaned_pdb", "preprocessing_report",
+                "pdb_analysis", "component_selection", "file_registry", "generated_files",
+                # Setup outputs
+                "topology", "coordinates", "mdp_files", "setup_report",
+                # HPC outputs
+                "job_script", "job_id", "job_status", "trajectory_path", "energy_file",
+                "hpc_report", "hpc_output_directory",
+                # Analysis outputs
+                "analysis_results", "figures", "conclusions",
+                # Reporter outputs
+                "reporter_output",
+                # Enriched prompt / plan (avoid re-doing expensive LLM calls)
+                "rephrased_goal", "enriched_prompt", "execution_plan",
+                "structured_prompt", "pdb_summary",
+                # Agent instructions
+                "preprocessing_instructions", "setup_instructions",
+                "hpc_instructions", "analysis_instructions", "reporter_instructions",
+            ]
+            for key in restore_keys:
+                if key in saved_state and saved_state[key] is not None:
+                    state[key] = saved_state[key]
+            
+            logger.info("Restored previous workflow state — supervisor will skip completed stages")
         
         # Ensure execution_path is always a list we control
         state["execution_path"] = list(state.get("execution_path", []))
