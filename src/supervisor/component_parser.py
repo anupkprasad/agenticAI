@@ -11,6 +11,9 @@ def parse_component_selection(user_goal: str, analysis: Dict[str, Any]) -> Dict[
     """
     Parse user intent to determine components for simulation.
     
+    Supports compound phrases like "protein-ligand-ions", "protein-ligand",
+    "protein only", "protein and ligand", etc.
+    
     Args:
         user_goal: User's natural language goal
         analysis: PDB analysis results
@@ -21,15 +24,50 @@ def parse_component_selection(user_goal: str, analysis: Dict[str, Any]) -> Dict[
     goal_lower = user_goal.lower()
     explicit = {component: None for component in ["protein", "ligand", "water", "ions", "specific_chains"]}
     
-    # Check explicit "only" requests
-    if any(p in goal_lower for p in ["only protein", "just protein", "protein only", "extract protein"]):
+    # ── Detect compound component phrases (e.g. "protein-ligand-ions") ───────
+    # These hyphenated or "and"-joined phrases explicitly enumerate requested components.
+    # Match patterns like: "of protein-ligand-ions", "for protein-ligand", 
+    # "setup protein, ligand and ions", "protein and ligand and ions"
+    compound_pattern = re.search(
+        r'(?:of|for|setup|simulate|simulation\s+(?:of|for))\s+'
+        r'((?:protein|ligand|ions?|water|complex)'
+        r'(?:\s*[-,/&]\s*(?:protein|ligand|ions?|water|complex)'
+        r'|\s+and\s+(?:protein|ligand|ions?|water|complex))+)',
+        goal_lower
+    )
+    
+    if compound_pattern:
+        compound_str = compound_pattern.group(1)
+        # Split on hyphens, commas, slashes, ampersands, and "and"
+        parts = re.split(r'\s*[-,/&]\s*|\s+and\s+', compound_str)
+        parts = [p.strip() for p in parts if p.strip()]
+        
+        # Start with everything False, then enable only mentioned components
+        explicit.update({"protein": False, "ligand": False, "ions": False, "water": False})
+        for part in parts:
+            if "protein" in part:
+                explicit["protein"] = True
+            elif "ligand" in part:
+                explicit["ligand"] = True
+            elif "ion" in part:
+                explicit["ions"] = True
+            elif "water" in part:
+                explicit["water"] = True
+            elif "complex" in part:
+                # "complex" implies protein + ligand
+                explicit["protein"] = True
+                explicit["ligand"] = True
+    
+    # ── Single-component "only" / "just" requests ───────────────────────────
+    # These override compound detection because the user is being very specific.
+    elif any(p in goal_lower for p in ["only protein", "just protein", "protein only", "extract protein"]):
         explicit.update({"protein": True, "ligand": False, "ions": False, "water": False})
     elif any(p in goal_lower for p in ["only ligand", "just ligand", "ligand only", "extract ligand"]):
         explicit.update({"protein": False, "ligand": True, "ions": False, "water": False})
     elif "complex" in goal_lower or "protein and ligand" in goal_lower:
         explicit.update({"protein": True, "ligand": True})
     
-    # Check inclusions
+    # ── Explicit inclusion overrides ─────────────────────────────────────────
     if any(p in goal_lower for p in ["with ligand", "include ligand", "retaining ligand", "retain ligand", "keeping ligand", "keep ligand"]):
         explicit["ligand"] = True
     if any(p in goal_lower for p in ["with water", "include water", "keep water", "retaining water", "retain water"]):
@@ -37,7 +75,7 @@ def parse_component_selection(user_goal: str, analysis: Dict[str, Any]) -> Dict[
     if any(p in goal_lower for p in ["with ions", "include ions", "retaining ions", "retain ions", "keeping ions", "keep ions"]):
         explicit["ions"] = True
     
-    # Check exclusions
+    # ── Explicit exclusion overrides ─────────────────────────────────────────
     if any(p in goal_lower for p in ["without ligand", "remove ligand", "no ligand"]):
         explicit["ligand"] = False
     if any(p in goal_lower for p in ["without water", "remove water", "no water"]):
@@ -45,7 +83,7 @@ def parse_component_selection(user_goal: str, analysis: Dict[str, Any]) -> Dict[
     if any(p in goal_lower for p in ["without ions", "remove ions", "no ions"]):
         explicit["ions"] = False
     
-    # Check specific chains
+    # ── Check specific chains ────────────────────────────────────────────────
     chain_match = re.search(r"chain\s+([A-Z](?:\s+and\s+[A-Z]|,\s*[A-Z])*)", user_goal, re.IGNORECASE)
     if chain_match:
         chains = re.findall(r"[A-Z]", chain_match.group(1).upper())

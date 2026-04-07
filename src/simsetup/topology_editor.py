@@ -5,7 +5,6 @@ Prevents duplicate entries and maintains proper formatting
 """
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from langchain.tools import tool
 
 
 class TopologyEditor:
@@ -152,7 +151,6 @@ class TopologyEditor:
             }
 
 
-@tool
 def edit_topology_file(
     topology_file: str,
     ligand_itp: Optional[str] = None,

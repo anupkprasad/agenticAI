@@ -6,7 +6,6 @@ Based on user's working MDP templates in src/python/setup/
 """
 from pathlib import Path
 from typing import Dict, Any, Optional
-from langchain.tools import tool
 
 
 class MDPGenerator:
@@ -471,8 +470,6 @@ pbc             = xyz
         return mdp_files
 
 
-# LangChain tool wrapper
-@tool
 def generate_mdp_files(
     output_dir: str,
     force_field: str = "amber99sb-ildn",

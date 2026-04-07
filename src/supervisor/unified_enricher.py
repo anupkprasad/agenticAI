@@ -122,7 +122,25 @@ def enrich_prompt_unified(
         sys_context += "\n"
         context_parts.append(sys_context)
 
-    # 4. Task type context
+    # 4. Component selection context (what user wants to simulate)
+    component_selection = state.get("component_selection")
+    if component_selection:
+        sel_parts = []
+        for comp_name in ["protein", "ligand", "ions", "water"]:
+            val = component_selection.get(comp_name)
+            if val is True:
+                sel_parts.append(f"{comp_name}: INCLUDE")
+            elif val is False:
+                sel_parts.append(f"{comp_name}: EXCLUDE")
+        if sel_parts:
+            comp_context = f"""
+**User's Component Selection:**
+{chr(10).join(f'- {p}' for p in sel_parts)}
+Note: Only included components should be extracted during preprocessing and set up during simulation setup.
+"""
+            context_parts.append(comp_context)
+    
+    # 5. Task type context
     task_context = f"""
 **Task Type:** {subtask_type}
 **Working Directory:** {working_dir}
@@ -156,7 +174,24 @@ Include:
 3. What specific outputs or results are expected
 4. Any constraints or special requirements
 
-Provide a clear, comprehensive rephrased goal that captures the user's intent with full context."""
+**Critical Guidelines:**
+- Preserve the user's exact intent - don't add or remove steps
+- If user says "preprocess and setup", that means ONLY those two steps - do NOT add simulation execution, equilibration, production runs, or trajectory generation
+- "simulation setup" means preparing the input files (topology, coordinates, MDP, TPR) - NOT running the simulation
+- If user specifies components (protein, ligand, ions), preserve exactly as stated
+- If user excludes something (no HPC, no simulation), make that explicit
+- Be concise (3-6 sentences maximum)
+
+**Default Simulation Conditions (DO NOT CHANGE unless user explicitly requests otherwise):**
+- Force field: amber99sb-ildn (do NOT switch to CHARMM or other force fields)
+- Water model: tip3p (the system MUST be solvated in water, NOT vacuum)
+- Temperature: 310 K, Pressure: 1 bar, NaCl: 0.15 M (physiological ionization)
+"Protein only" means only the protein component from the PDB — it does NOT mean vacuum or unsolvated.
+ALL simulation systems are solvated with water and ions by default. Only build vacuum/gas-phase systems if the user explicitly says "in vacuum" or "gas phase".
+Only change these conditions if the user explicitly requests different values.
+
+Provide a clear, comprehensive rephrased goal that captures the user's intent with full context.
+No additional commentary or suggestions."""
     
     # Format the prompt
     formatted_prompt = prompt_template.format(

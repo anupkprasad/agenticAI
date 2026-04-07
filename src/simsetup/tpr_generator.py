@@ -5,10 +5,8 @@ Creates GROMACS binary run input files (.tpr) using gmx grompp
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional
-from langchain.tools import tool
 
 
-@tool
 def generate_tpr_file(
     mdp_file: str,
     coordinate_file: str,

@@ -5,10 +5,8 @@ Generates GROMACS topology files using gmx pdb2gmx
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional
-from langchain.tools import tool
 
 
-@tool
 def build_topology(
     pdb_file: str,
     force_field: str = "amber99sb-ildn",
@@ -40,6 +38,11 @@ def build_topology(
         output_file = str(working_dir / "processed.gro")
     if not topology_file:
         topology_file = str(working_dir / "topol.top")
+    
+    # Sanitize water_model: reject "none"/empty → default to tip3p
+    valid_water_models = {"tip3p", "tip4p", "tip5p", "spc", "spc216", "spce"}
+    if not water_model or water_model.lower().strip() in ("none", "", "vacuum"):
+        water_model = "tip3p"
     
     try:
         # Run gmx pdb2gmx

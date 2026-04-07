@@ -214,7 +214,8 @@ class PreprocessingAgent:
             remove_waters=state.get("remove_waters", defaults.get("remove_waters", True)),
             add_hydrogens=state.get("add_hydrogens", defaults.get("add_hydrogens", True)),
             user_goal=state.get("user_goal", ""),
-            additional_instructions=planner_instructions
+            additional_instructions=planner_instructions,
+            component_selection=state.get("component_selection")
         )
     
     def _run_preprocessing_workflow(self, agent_input: PreprocessingAgentInput, 
@@ -399,6 +400,28 @@ class PreprocessingAgent:
             f"- Alternate Locations: {analysis.get('alternate_locations', False)}"
         ])
         
+        # Format component selection context
+        comp_sel = agent_input.component_selection or {}
+        if comp_sel:
+            comp_lines = [
+                f"- Include Protein: {comp_sel.get('protein', True)}",
+                f"- Include Ligand: {comp_sel.get('ligand', False)}",
+                f"- Include Ions: {comp_sel.get('ions', False)}",
+                f"- Keep Crystallographic Water: {comp_sel.get('water', False)}",
+            ]
+            comp_str = "\n".join(comp_lines)
+            component_context = f"""
+**COMPONENT SELECTION (from user goal):**
+{comp_str}
+
+IMPORTANT: After separating complex components, ONLY keep the components marked True above.
+- If ligand is True, keep ligand files for handoff to Setup Agent
+- If ions is True, keep ion files for handoff to Setup Agent
+- If a component is False, do NOT include it in generated_files or pass it downstream
+- The Setup Agent will only process components that preprocessing provides"""
+        else:
+            component_context = ""
+        
         return f"""You are a molecular dynamics preprocessing expert executing a detailed plan from the workflow planner.
 
 **PDB Information:**
@@ -408,6 +431,7 @@ class PreprocessingAgent:
 
 **Structure Analysis:**
 {analysis_str}
+{component_context}
 
 **DETAILED INSTRUCTIONS FROM PLANNER:**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -599,6 +623,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         warnings = []
         generated_files = {}
         ion_files = []  # Track ion files to skip hydrogen addition
+        ligand_files = []  # Track ligand files for hydrogen addition
         
         current_pdb = agent_input.pdb_path
         topology_file = None
@@ -666,26 +691,27 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         tool_params["pdb_file"] = current_pdb if current_pdb else agent_input.pdb_path
                 
                 # Generate appropriate output paths for specific tools
-                if step.tool_name in ["add_hydrogens", "separate_complex_components"]:
+                if step.tool_name == "separate_complex_components":
+                    # Let the tool auto-name by real residue names (protein.pdb, ATP.pdb, MG.pdb)
+                    # Only set output_dir so files land in the preprocess directory
+                    tool_params["output_dir"] = str(preprocess_dir)
+                    # Remove any agent-forced output names — let tool detect component names
+                    tool_params.pop("protein_output", None)
+                    tool_params.pop("ligand_output", None)
+                    tool_params.pop("ion_output", None)
+                    
+                elif step.tool_name == "add_hydrogens":
                     input_file = tool_params.get("pdb_file", current_pdb)
                     base_name = Path(input_file).stem
-                    
                     # Remove repeated _h suffixes
                     while base_name.endswith("_h"):
                         base_name = base_name[:-2]
-                    
-                    if step.tool_name == "separate_complex_components":
-                        tool_params["output_dir"] = preprocess_dir
-                        tool_params["protein_output"] = get_output_path_for_agent(f"{base_name}_protein.pdb", preprocess_dir)
-                        tool_params["ligand_output"] = get_output_path_for_agent(f"{base_name}_ligand.pdb", preprocess_dir)
-                        tool_params["ion_output"] = get_output_path_for_agent(f"{base_name}_ions.pdb", preprocess_dir)
-                    else:  # add_hydrogens
-                        tool_params["output_file"] = get_output_path_for_agent(f"{base_name}_h.pdb", preprocess_dir)
+                    tool_params["output_file"] = get_output_path_for_agent(f"{base_name}_h.pdb", preprocess_dir)
                 
                 # Log actual paths being used (after overrides)
                 execution_log.append(f"Parameters: {json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in tool_params.items()}, indent=2)}")
                 
-                # Skip hydrogen addition for ion files
+                # Skip hydrogen addition for ion files and already-processed ligand files
                 if step.tool_name == "add_hydrogens":
                     input_file = tool_params.get("pdb_file", current_pdb)
                     input_stem = Path(input_file).stem
@@ -697,6 +723,16 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                             "step": step.name,
                             "tool": step.tool_name,
                             "reason": "Hydrogen addition not needed for ions"
+                        })
+                        continue  # Skip to next step
+                    
+                    # Check if this is a ligand file already processed in auto-step
+                    if input_file in ligand_files:
+                        execution_log.append(f"⊘ Skipping hydrogen addition for ligand — already added in auto-step: {Path(input_file).name}")
+                        log_agent_action("preprocessing", f"Step {i+1}/{len(plan.steps)} skipped", {
+                            "step": step.name,
+                            "tool": step.tool_name,
+                            "reason": "Ligand hydrogens already added in auto-step after separation"
                         })
                         continue  # Skip to next step
                     
@@ -732,6 +768,9 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 if result and result.get("success"):
                     execution_log.append(f"✓ Success: {result.get('message', 'Step completed')}")
                     
+                    # Component selection filtering for separate_complex_components
+                    comp_sel = agent_input.component_selection or {}
+                    
                     # Collect output files for logging
                     output_files = []
                     if "output_file" in result:
@@ -739,16 +778,26 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         current_pdb = result["output_file"]
                         generated_files[result["output_file"]] = step.description
                     if "protein_file" in result:
+                        # Protein is always kept (required for MD)
                         output_files.append(result["protein_file"])
                         current_pdb = result["protein_file"]  # Use protein for chaining
                         generated_files[result["protein_file"]] = "Protein component"
                     if "ligand_file" in result:
-                        output_files.append(result["ligand_file"])
-                        generated_files[result["ligand_file"]] = "Ligand component"
+                        # Only keep ligand if component_selection says so (or if no selection specified)
+                        if not comp_sel or comp_sel.get("ligand", True):
+                            output_files.append(result["ligand_file"])
+                            generated_files[result["ligand_file"]] = "Ligand component"
+                            ligand_files.append(result["ligand_file"])
+                        else:
+                            execution_log.append(f"  ⊘ Ligand file excluded by component selection: {Path(result['ligand_file']).name}")
                     if "ion_file" in result:
-                        output_files.append(result["ion_file"])
-                        generated_files[result["ion_file"]] = "Ion component"
-                        ion_files.append(result["ion_file"])  # Track ion file to skip hydrogen addition
+                        # Only keep ions if component_selection says so (or if no selection specified)
+                        if not comp_sel or comp_sel.get("ions", True):
+                            output_files.append(result["ion_file"])
+                            generated_files[result["ion_file"]] = "Ion component"
+                            ion_files.append(result["ion_file"])
+                        else:
+                            execution_log.append(f"  ⊘ Ion file excluded by component selection: {Path(result['ion_file']).name}")
                     if "topology_file" in result:
                         topology_file = result["topology_file"]
                         generated_files[topology_file] = "GROMACS topology file"

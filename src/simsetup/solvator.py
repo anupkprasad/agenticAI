@@ -5,10 +5,8 @@ Adds water molecules to simulation box using gmx solvate
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional
-from langchain.tools import tool
 
 
-@tool
 def solvate_system(
     coordinate_file: str,
     topology_file: str,

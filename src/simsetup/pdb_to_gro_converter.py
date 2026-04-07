@@ -6,7 +6,6 @@ Handles protein, ligand, and ion components separately
 import MDAnalysis as mda
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from langchain.tools import tool
 
 
 class PDBtoGROConverter:
@@ -138,7 +137,6 @@ class PDBtoGROConverter:
             }
 
 
-@tool
 def convert_pdb_to_gro(
     pdb_file: str,
     output_gro: str,
@@ -164,7 +162,6 @@ def convert_pdb_to_gro(
     return converter.convert_pdb_to_gro(pdb_file, output_gro, selection)
 
 
-@tool
 def split_complex_pdb_to_gro(
     pdb_file: str,
     output_dir: str,

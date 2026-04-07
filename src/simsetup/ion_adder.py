@@ -5,10 +5,8 @@ Adds ions to neutralize system and set ionic strength using gmx genion
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional
-from langchain.tools import tool
 
 
-@tool
 def add_ions(
     coordinate_file: str,
     topology_file: str,

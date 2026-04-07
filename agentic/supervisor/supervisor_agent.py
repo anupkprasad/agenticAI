@@ -431,9 +431,12 @@ class MDSupervisor:
             rephrased_goal = state.get("rephrased_goal", "").lower()
             combined_goals = f"{user_goal} {rephrased_goal}"
             
-            user_excluded_hpc = any(phrase in combined_goals for phrase in [
-                "no hpc", "skip hpc", "do not submit", "don't submit", "setup only", 
-                "without hpc", "no simulation", "local only"
+            # Only skip HPC if the user EXPLICITLY excludes it.
+            # Use user_goal only (not rephrased_goal) to avoid false positives
+            # from enricher phrases like "No simulation execution is performed".
+            user_excluded_hpc = any(phrase in user_goal for phrase in [
+                "no hpc", "skip hpc", "do not submit", "don't submit",
+                "without hpc", "local only"
             ])
             
             if user_excluded_hpc:

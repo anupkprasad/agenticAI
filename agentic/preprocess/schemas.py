@@ -81,6 +81,10 @@ class PreprocessingAgentInput(BaseModel):
         default=None,
         description="Any additional instructions from user"
     )
+    component_selection: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="User-specified component selection: {protein: bool, ligand: bool, ions: bool, water: bool}"
+    )
 
 
 class PreprocessingAgentOutput(BaseModel):

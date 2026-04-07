@@ -71,7 +71,6 @@ class LigandTopologyGenerator:
                 capture_output=True,
                 text=True,
                 timeout=600,
-                check=True,
                 cwd=str(output_dir)
             )
             
@@ -79,37 +78,36 @@ class LigandTopologyGenerator:
             ligand_name = Path(ligand_pdb).stem
             acpype_dir = output_dir / f"{ligand_name}.acpype"
             
-            if not acpype_dir.exists():
-                return {
-                    "success": False,
-                    "error": "Acpype output directory not created"
-                }
+            # Check for output files regardless of exit code —
+            # acpype can return non-zero even on success (e.g. warnings)
+            if acpype_dir.exists():
+                topology_file = acpype_dir / f"{ligand_name}_GMX.itp"
+                coordinate_file = acpype_dir / f"{ligand_name}_GMX.gro"
+                
+                if topology_file.exists():
+                    return {
+                        "success": True,
+                        "topology": str(topology_file),
+                        "coordinates": str(coordinate_file) if coordinate_file.exists() else None,
+                        "output_dir": str(acpype_dir),
+                        "method": "acpype",
+                        "atom_type": atom_type,
+                        "charge_method": charge_method,
+                        "stdout": result.stdout[-500:] if result.stdout else "",
+                        "stderr": result.stderr[-500:] if result.stderr else ""
+                    }
             
-            # Find generated files
-            topology_file = acpype_dir / f"{ligand_name}_GMX.itp"
-            coordinate_file = acpype_dir / f"{ligand_name}_GMX.gro"
-            
+            # If we get here, acpype didn't produce expected output
+            combined_output = (result.stdout or "") + "\n" + (result.stderr or "")
             return {
-                "success": True,
-                "topology": str(topology_file) if topology_file.exists() else None,
-                "coordinates": str(coordinate_file) if coordinate_file.exists() else None,
-                "output_dir": str(acpype_dir),
-                "method": "acpype",
-                "atom_type": atom_type,
-                "charge_method": charge_method,
-                "stdout": result.stdout,
-                "stderr": result.stderr
+                "success": False,
+                "error": f"Acpype finished (exit {result.returncode}) but did not produce expected files. Output: {combined_output[-800:]}"
             }
             
         except subprocess.TimeoutExpired:
             return {
                 "success": False,
                 "error": "Acpype execution timed out (>600s)"
-            }
-        except subprocess.CalledProcessError as e:
-            return {
-                "success": False,
-                "error": f"Acpype failed: {e.stderr}"
             }
         except Exception as e:
             return {

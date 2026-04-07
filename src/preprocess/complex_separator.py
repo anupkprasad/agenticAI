@@ -99,7 +99,7 @@ def separate_complex_components(
         # Write protein if found
         if len(protein) > 0:
             if not protein_output:
-                protein_output = str(working_dir / f"{base}_protein.pdb")
+                protein_output = str(working_dir / "protein.pdb")
             protein.write(protein_output)
             result["protein_file"] = protein_output
             result["files_created"].append(protein_output)
@@ -113,33 +113,38 @@ def separate_complex_components(
             result["warnings"] = result.get("warnings", [])
             result["warnings"].append("No protein atoms found")
         
-        # Write ligands if found
+        # Write ligands if found — name by actual residue name (e.g. ATP.pdb)
         if ligands is not None and len(ligands) > 0:
+            unique_ligand_resnames = sorted(set(ligands.residues.resnames))
             if not ligand_output:
-                ligand_output = str(working_dir / f"{base}_ligand.pdb")
+                # Use actual residue name for the output filename
+                ligand_label = unique_ligand_resnames[0] if len(unique_ligand_resnames) == 1 else "_".join(unique_ligand_resnames)
+                ligand_output = str(working_dir / f"{ligand_label}.pdb")
             ligands.write(ligand_output)
             result["ligand_file"] = ligand_output
             result["files_created"].append(ligand_output)
             result["statistics"]["ligand"] = {
                 "atoms": len(ligands),
                 "residues": len(ligands.residues),
-                "resnames": list(set(ligands.residues.resnames))
+                "resnames": unique_ligand_resnames
             }
         else:
             result["warnings"] = result.get("warnings", [])
             result["warnings"].append("No ligand molecules found")
         
-        # Write ions if found
+        # Write ions if found — name by actual residue name (e.g. MG.pdb)
         if ions is not None and len(ions) > 0:
+            unique_ion_resnames = sorted(set(ions.residues.resnames))
             if not ion_output:
-                ion_output = str(working_dir / f"{base}_ions.pdb")
+                ion_label = unique_ion_resnames[0] if len(unique_ion_resnames) == 1 else "_".join(unique_ion_resnames)
+                ion_output = str(working_dir / f"{ion_label}.pdb")
             ions.write(ion_output)
             result["ion_file"] = ion_output
             result["files_created"].append(ion_output)
             result["statistics"]["ions"] = {
                 "atoms": len(ions),
                 "residues": len(ions.residues),
-                "resnames": list(set(ions.residues.resnames))
+                "resnames": unique_ion_resnames
             }
         else:
             result["warnings"] = result.get("warnings", [])

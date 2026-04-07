@@ -8,7 +8,6 @@ from MDAnalysis.coordinates.GRO import GROWriter
 from MDAnalysis.core.universe import Merge
 from pathlib import Path
 from typing import Dict, Any, List
-from langchain.tools import tool
 
 
 class GROMerger:
@@ -78,7 +77,6 @@ class GROMerger:
             }
 
 
-@tool
 def merge_gro_files(
     gro_files: List[str],
     output_file: str

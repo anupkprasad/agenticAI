@@ -200,8 +200,12 @@ class SimulationSetupAgent:
         return full_plan
     
     def _copy_preprocessed_files(self, state: MDState, simsetup_dir: str):
-        """Copy necessary files from preprocess directory to simsetup directory"""
+        """Copy necessary files from preprocess directory to simsetup directory.
+        
+        Respects component_selection: only copies files for components the user requested.
+        """
         preprocess_dir = state.get("preprocess_directory")
+        component_selection = state.get("component_selection", {})
         
         # Fallback: try to construct preprocess directory path
         if not preprocess_dir:
@@ -225,9 +229,19 @@ class SimulationSetupAgent:
         copied_files = set()  # Track what we've copied to avoid duplicates
         
         if preprocess_files:
-            # Copy all preprocessing files using SecureFileManager
+            # Copy preprocessing files, respecting component selection
             for file_path, metadata in preprocess_files:
                 filename = Path(file_path).name
+                file_type = metadata.get("type", "file")
+                
+                # Filter by component selection
+                if component_selection:
+                    if file_type == "ligand" and not component_selection.get("ligand", True):
+                        logger.info(f"Skipping ligand file {filename} (excluded by component selection)")
+                        continue
+                    if file_type == "ion" and not component_selection.get("ions", True):
+                        logger.info(f"Skipping ion file {filename} (excluded by component selection)")
+                        continue
                 
                 if filename not in copied_files:
                     # Use secure copy (automatically registers)
@@ -291,7 +305,8 @@ class SimulationSetupAgent:
             temperature=state.get("temperature", defaults.get("temperature", 300.0)),
             pressure=state.get("pressure", defaults.get("pressure", 1.0)),
             user_goal=state.get("user_goal", ""),
-            additional_instructions=planner_instructions
+            additional_instructions=planner_instructions,
+            component_selection=state.get("component_selection")
         )
     
     def _run_setup_workflow(self, agent_input: SimSetupAgentInput, 
@@ -381,7 +396,7 @@ class SimulationSetupAgent:
         """
         # Analyze the system first
         cleaned_pdb = agent_input.cleaned_pdb
-        analysis = self._analyze_system(cleaned_pdb)
+        analysis = self._analyze_system(cleaned_pdb, component_selection=agent_input.component_selection)
         # Store for use in _execute_plan
         self._last_analysis = analysis
         
@@ -434,11 +449,14 @@ class SimulationSetupAgent:
     # Pre-built ligand parameter directory
     LIGAND_PARAM_DIR = Path(__file__).resolve().parent.parent.parent / "src" / "simsetup" / "amber_ligand_param"
     
-    def _analyze_system(self, pdb_file: str) -> Dict[str, Any]:
+    def _analyze_system(self, pdb_file: str, component_selection: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Analyze the preprocessed system to inform setup decisions.
         
         Detects ligand residue names, ion types, and checks for pre-built
         ligand parameters in src/simsetup/amber_ligand_param/.
+        
+        If component_selection is provided, overrides detection for components
+        that the user explicitly excluded.
         """
         analysis = {
             "has_ligand": False,
@@ -501,6 +519,36 @@ class SimulationSetupAgent:
                     
             except Exception as e:
                 logger.warning(f"Could not analyze system: {e}")
+        
+        # Override based on component_selection (user intent)
+        # If user explicitly excluded ligand/ions, respect that regardless of PDB contents
+        if component_selection:
+            if component_selection.get("ligand") is False and analysis["has_ligand"]:
+                logger.info(f"Component selection excludes ligand — overriding has_ligand to False "
+                           f"(detected: {analysis['ligand_resnames']})")
+                analysis["has_ligand"] = False
+                analysis["ligand_resnames"] = []
+                analysis["ligand_params_available"] = {}
+                analysis["ligand_params_missing"] = []
+            if component_selection.get("ions") is False and analysis["has_ions"]:
+                logger.info(f"Component selection excludes ions — overriding has_ions to False "
+                           f"(detected: {analysis['ion_resnames']})")
+                analysis["has_ions"] = False
+                analysis["ion_resnames"] = []
+            
+            # Recalculate system_type after overrides
+            if analysis["has_ligand"] and analysis["has_ions"]:
+                analysis["system_type"] = "protein_ligand_ion"
+            elif analysis["has_ligand"]:
+                analysis["system_type"] = "protein_ligand"
+            elif analysis["has_ions"]:
+                analysis["system_type"] = "protein_ion"
+            else:
+                analysis["system_type"] = "protein_only"
+            
+            # Store component_selection in analysis for downstream use
+            analysis["component_selection"] = component_selection
+            logger.info(f"System type after component selection: {analysis['system_type']}")
                 
         return analysis
     
@@ -559,6 +607,28 @@ class SimulationSetupAgent:
             analysis_lines.append(f"- Pre-built params for {resname}: MISSING (must use generate_ligand_parameters)")
         analysis_str = "\n".join(analysis_lines)
         
+        # Format component selection context
+        comp_sel = agent_input.component_selection or {}
+        if comp_sel:
+            comp_lines = [
+                f"- Include Protein: {comp_sel.get('protein', True)}",
+                f"- Include Ligand: {comp_sel.get('ligand', False)}",
+                f"- Include Ions (crystallographic): {comp_sel.get('ions', False)}",
+                f"- Keep Crystallographic Water: {comp_sel.get('water', False)}",
+            ]
+            component_context = "\n**COMPONENT SELECTION (from user goal):**\n" + "\n".join(comp_lines)
+            component_context += (
+                "\n\nCRITICAL: Only set up simulation for the components marked True above."
+                "\n- If ligand is False, do NOT use generate_ligand_parameters or include ligand in topology."
+                "\n- If ions (crystallographic) is False, do NOT include crystallographic ions (genion for neutralization is still needed)."
+                "\n- Only use build_topology on the protein PDB file, not the full complex."
+                "\n\n**IMPORTANT:** 'Keep Crystallographic Water: False' means do NOT keep water from the original PDB file."
+                "\n  It does NOT mean skip solvation. Solvation with tip3p water is ALWAYS part of standard simulation setup."
+                "\n  The build_simulation_system tool handles solvation automatically — do NOT pass water_model='none' or ion_concentration=0."
+            )
+        else:
+            component_context = ""
+        
         # Extract file registry information
         file_registry = state.get("file_registry", {})
         if file_registry:
@@ -582,6 +652,7 @@ class SimulationSetupAgent:
 
 **System Analysis:**
 {analysis_str}
+{component_context}
 {registry_str}
 
 **DETAILED INSTRUCTIONS FROM PLANNER:**
@@ -724,76 +795,61 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
     def _create_fallback_plan(self, agent_input: SimSetupAgentInput, 
                              analysis: Dict[str, Any]) -> SimSetupPlan:
         """
-        Create template-based fallback plan when LLM fails
-        Uses workflows from config.yaml
+        Create template-based fallback plan when LLM fails.
+        Uses build_simulation_system which handles all system types end-to-end.
         """
         system_type = analysis.get("system_type", "protein_only")
-        
-        # Standard GROMACS workflow for all system types
+
+        # Build tool params based on what components are present
+        tool_params: Dict[str, Any] = {
+            "protein_file": agent_input.cleaned_pdb,
+            "force_field": agent_input.force_field,
+            "water_model": agent_input.water_model,
+            "box_type": "cubic",
+            "box_distance": 1.0,
+            "ion_concentration": 0.15,
+            "temperature": agent_input.temperature,
+            "pressure": agent_input.pressure,
+        }
+        if hasattr(agent_input, 'production_ns') and agent_input.production_ns:
+            tool_params["production_ns"] = agent_input.production_ns
+
+        # Add ligand params if present
+        if analysis.get("has_ligand"):
+            ligand_files = analysis.get("ligand_files", [])
+            if ligand_files:
+                tool_params["ligand_file"] = ligand_files[0]
+            ligand_names = analysis.get("ligand_names", [])
+            if ligand_names:
+                tool_params["ligand_resname"] = ligand_names[0]
+            ligand_itps = analysis.get("ligand_itps", [])
+            if ligand_itps:
+                tool_params["ligand_itp"] = ligand_itps[0]
+
+        # Add ion params if present
+        if analysis.get("has_ions"):
+            ion_files = analysis.get("ion_files", [])
+            if ion_files:
+                tool_params["ion_file"] = ion_files[0]
+            ion_names = analysis.get("ion_names", [])
+            if ion_names:
+                tool_params["ion_resname"] = ion_names[0]
+
         steps = [
             SimSetupStep(
-                name="Build Topology",
-                description=f"Generate GROMACS topology for {system_type} system using pdb2gmx",
-                tool_name="build_topology",
-                tool_params={
-                    "pdb_file": agent_input.cleaned_pdb,
-                    "force_field": agent_input.force_field,
-                    "water_model": agent_input.water_model
-                },
-                reason="Required to create force field parameters and topology file"
-            ),
-            SimSetupStep(
-                name="Build Simulation Box",
-                description="Create cubic simulation box with 1.0 nm buffer",
-                tool_name="build_simulation_box",
-                tool_params={
-                    "box_type": "cubic",
-                    "box_distance": 1.0
-                },
-                reason="Define periodic boundary conditions for simulation"
-            ),
-            SimSetupStep(
-                name="Solvate System",
-                description=f"Add {agent_input.water_model} water molecules",
-                tool_name="solvate_system",
-                tool_params={
-                    "water_model": "spc216"
-                },
-                reason="Simulate aqueous environment"
-            ),
-            SimSetupStep(
-                name="Generate MDP Files",
-                description="Create parameter files for all simulation phases",
-                tool_name="generate_mdp_files",
-                tool_params={
-                    "temperature": agent_input.temperature,
-                    "pressure": agent_input.pressure
-                },
-                reason="Define simulation protocols for minimization, equilibration, and production"
-            ),
-            SimSetupStep(
-                name="Add Ions",
-                description="Neutralize system and add 0.15 M NaCl",
-                tool_name="add_ions",
-                tool_params={
-                    "neutral": True,
-                    "concentration": 0.15
-                },
-                reason="Maintain electroneutrality and physiological salt concentration"
-            ),
-            SimSetupStep(
-                name="Generate TPR File",
-                description="Create binary run input file (minim.tpr) for energy minimization",
-                tool_name="generate_tpr_file",
-                tool_params={
-                    "mdp_file": "minim.mdp"
-                },
-                reason="Prepare system for HPC submission - TPR file contains all simulation parameters"
+                name="Build Complete System",
+                description=(
+                    f"Build complete {system_type} GROMACS system end-to-end: "
+                    "topology → merge → box → solvate → ions → MDP → TPR"
+                ),
+                tool_name="build_simulation_system",
+                tool_params=tool_params,
+                reason="Single orchestrator handles all system types with modular delegation"
             ),
         ]
-        
+
         return SimSetupPlan(
-            reasoning="Using standard GROMACS setup workflow (LLM fallback)",
+            reasoning="Using build_simulation_system orchestrator (LLM fallback)",
             overview=f"Standard {system_type} simulation system setup",
             steps=steps,
             potential_issues=[],
@@ -911,14 +967,16 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     simsetup_dir,
                     param_names=[
                         "pdb_file", "coordinate_file", "topology_file", "mdp_file",
-                        "protein_pdb", "ligand_pdb", "ion_pdb", "ligand_itp",
+                        "protein_file", "ligand_file", "ion_file", "ligand_itp",
+                        "protein_pdb", "ligand_pdb", "ion_pdb",
                         "input_structure", "restraint_file", "output_file", "output_path"
                     ]
                 )
                 
                 # Copy input files to simsetup directory if they exist elsewhere
                 path_keys = ["pdb_file", "coordinate_file", "topology_file", "mdp_file",
-                            "protein_pdb", "ligand_pdb", "ion_pdb", "ligand_itp",
+                            "protein_file", "ligand_file", "ion_file", "ligand_itp",
+                            "protein_pdb", "ligand_pdb", "ion_pdb",
                             "input_structure", "restraint_file"]
                             
                 for path_key in path_keys:
@@ -1090,6 +1148,37 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                             topology_file = topo
                         generated_files[topology_file] = "GROMACS topology file"
                         log_file_operation("setup", "create", topology_file, True)
+                    
+                    # Handle nested output from build_simulation_system
+                    # which returns {"files": {"system_gro": ..., "topology": ...}}
+                    if "files" in result and isinstance(result["files"], dict):
+                        files_dict = result["files"]
+                        if not current_gro and "system_gro" in files_dict:
+                            output = files_dict["system_gro"]
+                            if not Path(output).is_absolute():
+                                current_gro = str(Path(simsetup_dir) / output)
+                            else:
+                                current_gro = output
+                            generated_files[current_gro] = step.description
+                            log_file_operation("setup", "create", current_gro, True)
+                        if not topology_file and "topology" in files_dict:
+                            topo = files_dict["topology"]
+                            if not Path(topo).is_absolute():
+                                topology_file = str(Path(simsetup_dir) / topo)
+                            else:
+                                topology_file = topo
+                            generated_files[topology_file] = "GROMACS topology file"
+                            log_file_operation("setup", "create", topology_file, True)
+                        if "minim_tpr" in files_dict:
+                            tpr = files_dict["minim_tpr"]
+                            if not Path(tpr).is_absolute():
+                                tpr_path = str(Path(simsetup_dir) / tpr)
+                            else:
+                                tpr_path = tpr
+                            generated_files[tpr_path] = "GROMACS binary run input file (TPR)"
+                            log_file_operation("setup", "create", tpr_path, True)
+                        if "mdp_files" in files_dict and isinstance(files_dict["mdp_files"], dict):
+                            mdp_files.update(files_dict["mdp_files"])
                         
                     if "box_dimensions" in result:
                         box_dimensions = result["box_dimensions"]

@@ -54,6 +54,10 @@ class SimSetupAgentInput(BaseModel):
     pressure: float = Field(default=1.0, description="Simulation pressure (bar)")
     user_goal: str = Field(default="", description="User's simulation goals")
     additional_instructions: Optional[str] = Field(None, description="Planner's detailed instructions for this agent")
+    component_selection: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="User-specified component selection: {protein: bool, ligand: bool, ions: bool, water: bool}"
+    )
 
 
 class SimSetupAgentOutput(BaseModel):

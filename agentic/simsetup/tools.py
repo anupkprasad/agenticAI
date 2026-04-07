@@ -8,41 +8,42 @@ from typing import Dict, Any, Optional
 from pathlib import Path
 from functools import wraps
 
-# Import modular @tool functions from src/simsetup/
-from src.simsetup.topology_builder import build_topology
+# Import @tool functions exposed to the agent
 from src.simsetup.ligand_topology import generate_ligand_parameters
 from src.simsetup.amber_to_gromacs_converter import convert_amber_to_gromacs
+from src.simsetup.atom_name_mapper import map_ligand_atom_names
+from src.simsetup.system_builder import build_simulation_system
+
+# Import internal helper functions (plain functions, not exposed to agent)
+from src.simsetup.topology_builder import build_topology
 from src.simsetup.box_builder import build_simulation_box
 from src.simsetup.solvator import solvate_system
 from src.simsetup.ion_adder import add_ions
 from src.simsetup.mdp_generator import generate_mdp_files
 from src.simsetup.tpr_generator import generate_tpr_file
-
-# New modular tools for component-based workflow
 from src.simsetup.pdb_to_gro_converter import convert_pdb_to_gro, split_complex_pdb_to_gro
 from src.simsetup.gro_merger import merge_gro_files
 from src.simsetup.topology_editor import edit_topology_file
-from src.simsetup.atom_name_mapper import map_ligand_atom_names
-from src.simsetup.system_builder import build_simulation_system
 
 # Export tool functions for direct access
 __all__ = [
     "SimulationSetupToolExecutor",
-    "build_topology",
+    # @tool functions exposed to the agent
     "generate_ligand_parameters",
     "convert_amber_to_gromacs",
+    "map_ligand_atom_names",
+    "build_simulation_system",
+    # Plain helper functions (used internally by system_builder)
+    "build_topology",
     "build_simulation_box",
     "solvate_system",
     "add_ions",
     "generate_mdp_files",
     "generate_tpr_file",
-    # New component-based tools
     "convert_pdb_to_gro",
     "split_complex_pdb_to_gro",
     "merge_gro_files",
     "edit_topology_file",
-    "map_ligand_atom_names",
-    "build_simulation_system",
     "get_simulation_setup_tools",
     "get_tool_metadata",
 ]
@@ -52,30 +53,20 @@ logger = logging.getLogger(__name__)
 
 def get_simulation_setup_tools() -> list:
     """
-    Get all simulation setup @tool functions for LLM binding.
-    These StructuredTool objects can be passed directly to LLM.bind_tools()
+    Get simulation setup @tool functions for LLM binding.
+    Only returns StructuredTool objects that should be exposed to the agent.
+    Internal helper functions are NOT included.
     
     Returns:
         List of StructuredTool objects ready for LLM use
     """
     return [
-        # Core topology and parameter generation
-        build_topology,
+        # Ligand parameterisation (separate step before system building)
         generate_ligand_parameters,
         convert_amber_to_gromacs,
-        # System building and solvation
-        build_simulation_box,
-        solvate_system,
-        add_ions,
-        generate_tpr_file,
-        generate_mdp_files,
-        # Component-based workflow tools
-        convert_pdb_to_gro,
-        split_complex_pdb_to_gro,
-        merge_gro_files,
-        edit_topology_file,
+        # Atom name mapping utility
         map_ligand_atom_names,
-        # High-level orchestrator
+        # High-level orchestrator (handles all system types end-to-end)
         build_simulation_system,
     ]
 
@@ -137,23 +128,23 @@ class SimulationSetupToolExecutor:
         self.logger = logging.getLogger(__name__)
         
         # Tool map for built-in tools
+        # @tool objects (exposed to agent via get_simulation_setup_tools)
         self.tool_map = {
-            # Core tools
-            "build_topology": build_topology,
             "generate_ligand_parameters": generate_ligand_parameters,
             "convert_amber_to_gromacs": convert_amber_to_gromacs,
+            "map_ligand_atom_names": map_ligand_atom_names,
+            "build_simulation_system": build_simulation_system,
+            # Plain helper functions (callable internally / by fallback plans)
+            "build_topology": build_topology,
             "build_simulation_box": build_simulation_box,
             "solvate_system": solvate_system,
             "add_ions": add_ions,
             "generate_mdp_files": generate_mdp_files,
             "generate_tpr_file": generate_tpr_file,
-            # Component-based workflow tools
             "convert_pdb_to_gro": convert_pdb_to_gro,
             "split_complex_pdb_to_gro": split_complex_pdb_to_gro,
             "merge_gro_files": merge_gro_files,
             "edit_topology_file": edit_topology_file,
-            "map_ligand_atom_names": map_ligand_atom_names,
-            "build_simulation_system": build_simulation_system,
         }
         
         # Load programmer-generated tools
@@ -282,6 +273,25 @@ class SimulationSetupToolExecutor:
                     for key in unknown:
                         del safe_params[key]
             
+            # Coerce parameter types based on function annotations
+            # LLM plans often pass numeric values as strings (e.g. "300.0" instead of 300.0)
+            for pname, param in sig.parameters.items():
+                if pname not in safe_params or param.annotation is inspect.Parameter.empty:
+                    continue
+                ann = param.annotation
+                val = safe_params[pname]
+                try:
+                    if ann is float and isinstance(val, str):
+                        safe_params[pname] = float(val)
+                    elif ann is int and isinstance(val, str):
+                        safe_params[pname] = int(val)
+                    elif ann is bool and isinstance(val, str):
+                        safe_params[pname] = val.lower() in ('true', '1', 'yes')
+                except (ValueError, TypeError) as conv_err:
+                    self.logger.warning(
+                        f"Could not coerce {pname}={val!r} to {ann.__name__}: {conv_err}"
+                    )
+            
             # Execute the tool
             if hasattr(tool_func, 'func'):
                 return tool_func.func(**safe_params)
@@ -296,13 +306,12 @@ class SimulationSetupToolExecutor:
                 "error": str(e)
             }
     
-    # Convenience methods that delegate to @tool functions
-    # Note: @tool decorators wrap functions in StructuredTool, access via .func
+    # Convenience methods that delegate to helper functions
     def build_topology(self, pdb_file: str, force_field: str = "amber99sb-ildn",
                       water_model: str = "tip3p", output_file: Optional[str] = None, 
                       **kwargs) -> Dict[str, Any]:
-        """Generate GROMACS topology using gmx pdb2gmx - delegates to @tool function"""
-        return build_topology.func(pdb_file=pdb_file, force_field=force_field, 
+        """Generate GROMACS topology using gmx pdb2gmx"""
+        return build_topology(pdb_file=pdb_file, force_field=force_field, 
                             water_model=water_model, output_file=output_file, **kwargs)
     
     def generate_ligand_parameters(self, ligand_pdb: str, output_dir: str,
@@ -324,22 +333,22 @@ class SimulationSetupToolExecutor:
     def build_simulation_box(self, coordinate_file: str, box_type: str = "cubic",
                            box_distance: float = 1.0, output_file: Optional[str] = None,
                            **kwargs) -> Dict[str, Any]:
-        """Create simulation box using gmx editconf - delegates to @tool function"""
-        return build_simulation_box.func(coordinate_file=coordinate_file, box_type=box_type,
+        """Create simulation box using gmx editconf"""
+        return build_simulation_box(coordinate_file=coordinate_file, box_type=box_type,
                                    box_distance=box_distance, output_file=output_file, **kwargs)
     
     def solvate_system(self, coordinate_file: str, topology_file: str,
                       water_model: str = "spc216", output_file: Optional[str] = None,
                       **kwargs) -> Dict[str, Any]:
-        """Add water molecules using gmx solvate - delegates to @tool function"""
-        return solvate_system.func(coordinate_file=coordinate_file, topology_file=topology_file,
+        """Add water molecules using gmx solvate"""
+        return solvate_system(coordinate_file=coordinate_file, topology_file=topology_file,
                             water_model=water_model, output_file=output_file, **kwargs)
     
     def add_ions(self, coordinate_file: str, topology_file: str, mdp_file: str,
                 neutral: bool = True, concentration: float = 0.15, 
                 output_file: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-        """Add ions for neutralization and salt concentration - delegates to @tool function"""
-        return add_ions.func(coordinate_file=coordinate_file, topology_file=topology_file,
+        """Add ions for neutralization and salt concentration"""
+        return add_ions(coordinate_file=coordinate_file, topology_file=topology_file,
                        mdp_file=mdp_file, neutral=neutral, concentration=concentration,
                        output_file=output_file, **kwargs)
     
@@ -347,8 +356,8 @@ class SimulationSetupToolExecutor:
                           temperature: float = 310.0, pressure: float = 1.0,
                           has_ligand: bool = False, has_ions: bool = False,
                           production_ns: float = 200.0, **kwargs) -> Dict[str, Any]:
-        """Generate all MDP parameter files for simulation workflow - delegates to @tool function"""
-        return generate_mdp_files.func(output_dir=output_dir, force_field=force_field,
+        """Generate all MDP parameter files for simulation workflow"""
+        return generate_mdp_files(output_dir=output_dir, force_field=force_field,
                                       temperature=temperature, pressure=pressure,
                                       has_ligand=has_ligand, has_ions=has_ions,
                                       production_ns=production_ns, **kwargs)

@@ -5,10 +5,8 @@ Defines simulation box using gmx editconf
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional
-from langchain.tools import tool
 
 
-@tool
 def build_simulation_box(
     coordinate_file: str,
     box_type: str = "cubic",

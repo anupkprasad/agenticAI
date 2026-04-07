@@ -968,6 +968,31 @@ Provide a comprehensive natural language plan explaining how the Reporter Agent 
                 )
             example_structure = "\n\n".join(example_sections)
             
+            # Format component selection for multi-agent prompt
+            comp_sel_str = ""
+            if component_selection:
+                sel_parts = []
+                if component_selection.get("protein"):
+                    sel_parts.append("protein")
+                if component_selection.get("ligand"):
+                    sel_parts.append("ligand")
+                if component_selection.get("ions"):
+                    sel_parts.append("crystallographic ions")
+                if component_selection.get("water"):
+                    sel_parts.append("crystallographic water")
+                comp_sel_str = (
+                    f"\n**User's Component Selection (from PDB):** {', '.join(sel_parts) if sel_parts else 'all available'}"
+                    f"\n- Protein: {'Include' if component_selection.get('protein', True) else 'EXCLUDE'}"
+                    f"\n- Ligand: {'Include' if component_selection.get('ligand') else 'EXCLUDE'}"
+                    f"\n- Crystallographic Ions: {'Include' if component_selection.get('ions') else 'EXCLUDE'}"
+                    f"\n- Crystallographic Water: {'Keep' if component_selection.get('water') else 'Remove from PDB'}"
+                    f"\nCRITICAL: Only process PDB components marked 'Include'. Excluded components must not be parameterized or included in simulation setup."
+                    f"\n\nIMPORTANT: The component selection above refers to components FROM THE PDB FILE."
+                    f"\n  'Crystallographic Water: Remove from PDB' does NOT mean build a vacuum system."
+                    f"\n  Solvation with tip3p water is ALWAYS part of standard simulation setup (handled by build_simulation_system)."
+                    f"\n  Do NOT instruct the setup agent to skip solvation or use water_model='none'."
+                )
+            
             return f"""Create a detailed natural language execution plan for a MULTI-AGENT workflow.
 
 USER GOAL:
@@ -975,15 +1000,32 @@ USER GOAL:
 
 PDB File: {pdb_path or 'Not specified'}
 TASK: Run ONLY these agents in order: {agents_str}
+{comp_sel_str}
 
 Do NOT add any agents that are not listed above.
+
+**SCOPE BOUNDARY (CRITICAL):**
+- "Preprocessing" means: clean PDB, separate components, add hydrogens, validate. Outputs: cleaned PDB files.
+- "Simulation setup" means: generate topology, build box, SOLVATE with tip3p water, add counter-ions + 0.15M NaCl, generate MDP files, generate TPR file. Outputs: topology (.top), coordinates (.gro), MDP files, TPR file.
+- Solvation and ion addition are ALWAYS part of standard simulation setup. Do NOT create vacuum/unsolvated systems unless the user explicitly says "in vacuum" or "gas phase".
+- "Simulation setup" does NOT mean running the simulation (no mdrun, no equilibration, no production run, no trajectory generation).
+- Only plan for the agents listed above. Do NOT plan steps that belong to agents not in the list (e.g., HPC submission, simulation execution, analysis).
+- Do NOT request creation of tools for running simulations (e.g., run_gromacs_simulation) unless an HPC agent is in the agent list.
+
+**Default Simulation Conditions (DO NOT CHANGE unless user explicitly states otherwise):**
+- Force field: {state.get('force_field', 'amber99sb-ildn')}
+- Water model: {state.get('water_model', 'tip3p')} (solvated system, NOT vacuum)
+- Temperature: 310 K, Pressure: 1 bar
+- NaCl concentration: 0.15 M (physiological)
+- Box type: cubic, distance: 1.2 nm
+These are the defaults already built into the pipeline tools. Do not override them unless the user explicitly requests different values.
 
 Working Directory: {working_dir}
 
 **Available Tools (for the listed agents only):**
 {tools_context}
 
-{self._get_tool_creation_instructions(include_new_tools_note)}
+{self._get_tool_creation_instructions(include_new_tools_note, agent_list)}
 
 **CRITICAL INSTRUCTIONS:**
 - Your plan MUST cover ONLY the agents listed: {agents_str}
@@ -1017,6 +1059,32 @@ Provide a comprehensive natural language plan following this structure."""
 
         else:
             components = pdb_analysis.get("components_available", {})
+            
+            # Format component selection for LLM context
+            comp_sel_lines = ""
+            if component_selection:
+                sel_parts = []
+                if component_selection.get("protein"):
+                    sel_parts.append("protein")
+                if component_selection.get("ligand"):
+                    sel_parts.append("ligand")
+                if component_selection.get("ions"):
+                    sel_parts.append("crystallographic ions")
+                if component_selection.get("water"):
+                    sel_parts.append("crystallographic water")
+                comp_sel_lines = (
+                    f"\n**User's Component Selection (from PDB):** {', '.join(sel_parts) if sel_parts else 'all available'}"
+                    f"\n- Protein: {'Include' if component_selection.get('protein', True) else 'EXCLUDE'}"
+                    f"\n- Ligand: {'Include' if component_selection.get('ligand') else 'EXCLUDE'}"
+                    f"\n- Crystallographic Ions: {'Include' if component_selection.get('ions') else 'EXCLUDE'}"
+                    f"\n- Crystallographic Water: {'Keep' if component_selection.get('water') else 'Remove from PDB during preprocessing'}"
+                    f"\n\nCRITICAL: The preprocessing agent should only extract PDB components marked 'Include'."
+                    f"\nThe setup agent should only generate topology and parameters for included components."
+                    f"\nDo NOT include excluded components in the simulation setup."
+                    f"\n\nIMPORTANT: 'Remove Crystallographic Water from PDB' does NOT mean build a vacuum system."
+                    f"\n  Solvation with tip3p water is ALWAYS part of standard simulation setup."
+                )
+            
             return f"""Create a detailed natural language execution plan for the complete MD workflow.
 
 USER GOAL:
@@ -1024,10 +1092,17 @@ USER GOAL:
 
 PDB File: {pdb_path}
 Atoms: {pdb_analysis.get('total_atoms', '?')} | Residues: {pdb_analysis.get('total_residues', '?')}
-Components: Protein={components.get('protein', False)} Ligand={components.get('ligand', False)} Water={components.get('water', False)}
+Components in PDB: Protein={components.get('protein', False)} Ligand={components.get('ligand', False)} Water={components.get('water', False)}
+{comp_sel_lines}
 
 Force Field: {state.get('force_field', 'amber99sb-ildn')}
 Water Model: {state.get('water_model', 'tip3p')}
+
+**Default Simulation Conditions (DO NOT CHANGE unless user explicitly states otherwise):**
+- Force field: {state.get('force_field', 'amber99sb-ildn')} (do NOT switch to CHARMM or other force fields)
+- Water model: {state.get('water_model', 'tip3p')} (solvated system, NOT vacuum)
+- Temperature: 310 K, Pressure: 1 bar, NaCl concentration: 0.15 M
+- These are the defaults built into the pipeline tools. Only change if user explicitly requests it.
 
 **Available Agents and Their Tools:**
 {tools_context}
@@ -1081,12 +1156,18 @@ CRITICAL: Use the section headers exactly as shown above with ** markers (e.g., 
 
 Provide a comprehensive natural language plan following this structure. DO NOT output JSON, YAML, or any structured data format."""
     
-    def _get_tool_creation_instructions(self, include_new_tools_note: bool = False) -> str:
+    def _get_tool_creation_instructions(self, include_new_tools_note: bool = False,
+                                        agent_list: Optional[list] = None) -> str:
         """
         Get instructions about tool creation capability for LLM prompt.
         
+        Tool creation is only relevant when agents that might need custom tools
+        are involved (e.g., analysis, hpc). For preprocess + simsetup only workflows,
+        all required tools are already available.
+        
         Args:
             include_new_tools_note: Whether to note that new tools were just created
+            agent_list: List of agents in the workflow (used to decide if tool creation applies)
             
         Returns:
             Formatted instructions string
@@ -1095,6 +1176,18 @@ Provide a comprehensive natural language plan following this structure. DO NOT o
         
         if not tool_creation_enabled:
             return ""
+        
+        # Tool creation is NOT needed for preprocess + simsetup only workflows.
+        # All required tools (build_topology, solvate_system, etc.) already exist.
+        if agent_list:
+            agents_needing_custom_tools = {"analysis", "hpc", "hpcjob", "reporter"}
+            if not agents_needing_custom_tools.intersection(set(agent_list)):
+                return """
+**NOTE ON TOOLS:**
+All required tools for preprocessing and simulation setup are already available in the tools list above.
+Do NOT request creation of new tools. Use ONLY the existing tools listed above.
+Do NOT plan steps that require tools not in the list (e.g., running simulations with gmx mdrun).
+"""
         
         if include_new_tools_note:
             return """
@@ -1432,18 +1525,28 @@ When you indicate missing tools, the Programmer Agent will be automatically invo
         # === MULTI-AGENT WORKFLOW ===
         elif subtask_type == "multi_agent":
             agent_list = state.get("agent_list") or []
+            
+            # Build component description for fallback plans
+            comp_desc = ""
+            if component_selection:
+                sel_parts = [k for k in ["protein", "ligand", "ions"] if component_selection.get(k)]
+                if sel_parts:
+                    comp_desc = f" for {'+'.join(sel_parts)} components"
+            
             _cli_agent_descriptions = {
                 "preprocess": (
                     "preprocessing_agent",
                     f"**Preprocessing Agent Responsibilities:**\n\n"
-                    f"Clean and prepare the PDB structure: remove waters, fix residues, add hydrogens.\n"
-                    f"Expected output: cleaned .pdb file ready for topology generation."
+                    f"Clean and prepare the PDB structure{comp_desc}: separate components, remove waters, fix residues, add hydrogens.\n"
+                    f"Only extract and pass downstream the components the user requested.\n"
+                    f"Expected output: cleaned .pdb files for each requested component."
                 ),
                 "simsetup": (
                     "setup_agent",
                     f"**Setup Agent Responsibilities:**\n\n"
-                    f"Generate the complete simulation system using {state.get('force_field', 'amber99sb-ildn')} "
+                    f"Generate the simulation system{comp_desc} using {state.get('force_field', 'amber99sb-ildn')} "
                     f"force field and {state.get('water_model', 'tip3p')} water model. "
+                    f"Only build topology and parameters for components provided by preprocessing.\n"
                     f"Produce topology, solvated coordinates, ions, and MDP files."
                 ),
                 "hpcjob": (
