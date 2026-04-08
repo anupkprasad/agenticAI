@@ -415,9 +415,11 @@ class MDSupervisor:
             # Check retry limit
             retry_count = state.get("setup_retry_count", 0)
             if retry_count >= 3:
-                state["errors"].append("SimSetup failed after 3 retries")
-                state["current_agent_idx"] = current_agent_idx + 1
-                return self._assign_field_agent_tasks(state)
+                state["errors"].append("SimSetup failed after 3 retries — skipping HPC submission")
+                state["next_node"] = "final_report"
+                logger.warning("SimSetup exhausted 3 retries — aborting workflow (no HPC submission)")
+                log_supervisor_routing(state, "final_report", "SimSetup failed after 3 retries, skipping HPC")
+                return state
             
             state["next_node"] = "setup"
             state["setup_retry_count"] = retry_count + 1

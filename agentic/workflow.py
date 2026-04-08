@@ -597,6 +597,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 # Preprocessing outputs
                 "raw_pdb", "cleaned_pdb", "preprocessing_report",
                 "pdb_analysis", "component_selection", "file_registry", "generated_files",
+                "ligand_files", "ligand_resnames", "ion_files", "ion_resnames",
                 # Setup outputs
                 "topology", "coordinates", "mdp_files", "setup_report",
                 # HPC outputs

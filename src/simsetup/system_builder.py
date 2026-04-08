@@ -85,12 +85,29 @@ class ComplexSystemBuilder:
         converter = PDBtoGROConverter(str(self.working_dir))
         return converter.convert_pdb_to_gro(input_file, output_gro, selection)
 
+    # Known monoatomic ions: each atom = one molecule in GROMACS topology
+    _MONOATOMIC_IONS = frozenset({
+        "MG", "CA", "ZN", "FE", "MN", "CU", "CO", "NI", "K", "NA", "CL",
+        "BR", "F", "I", "LI", "RB", "CS", "BA", "SR", "CD", "HG", "PB",
+    })
+
     def _count_residues(self, gro_file: str, resname: str) -> int:
-        """Count residues with a given name in a GRO file."""
+        """Count molecules with a given resname in a GRO file.
+
+        For monoatomic ions (MG, CA, ZN, …), GRO format loses chain IDs,
+        so MDAnalysis may collapse multiple ions into a single residue.
+        We count *atoms* for known monoatomic species and *residues* for
+        multi-atom molecules (e.g. ATP).
+        """
         try:
             import MDAnalysis as mda
             u = mda.Universe(gro_file)
-            return len(u.select_atoms(f"resname {resname}").residues)
+            sel = u.select_atoms(f"resname {resname}")
+            if len(sel) == 0:
+                return 0
+            if resname.upper() in self._MONOATOMIC_IONS:
+                return len(sel)
+            return len(sel.residues)
         except Exception:
             return 0
 
@@ -283,10 +300,20 @@ class ComplexSystemBuilder:
         ligand_gro = None
         if has_ligand:
             ligand_gro = self._out(f"{ligand_resname}.gro")
-            r = self._ensure_gro(ligand_file, ligand_gro, f"resname {ligand_resname}")
-            if not r.get("success"):
-                return {"success": False, "error": f"Ligand GRO conversion failed: {r.get('error')}"}
-            results["steps"].append(f"Converted ligand ({ligand_resname}) to GRO")
+            # Prefer the acpype-generated GRO ({resname}_GMX.gro) whose atom
+            # names/ordering match the ITP.  Fall back to converting the
+            # original ligand PDB if the acpype GRO is not available.
+            acpype_gro = self.working_dir / f"{ligand_resname}_GMX.gro"
+            if acpype_gro.exists():
+                import shutil
+                shutil.copy2(str(acpype_gro), ligand_gro)
+                logger.info(f"Using acpype-generated GRO: {acpype_gro.name}")
+                results["steps"].append(f"Using acpype ligand GRO ({ligand_resname}_GMX.gro)")
+            else:
+                r = self._ensure_gro(ligand_file, ligand_gro, f"resname {ligand_resname}")
+                if not r.get("success"):
+                    return {"success": False, "error": f"Ligand GRO conversion failed: {r.get('error')}"}
+                results["steps"].append(f"Converted ligand ({ligand_resname}) to GRO")
             results["files"]["ligand_gro"] = ligand_gro
 
         ion_gro = None

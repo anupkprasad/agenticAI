@@ -18,7 +18,7 @@ class TopologyEditor:
         ligand_count: int = 1,
         ion_resname: Optional[str] = None,
         ion_count: Optional[int] = None,
-        force_field_include: str = '#include "./amber99sb-ildn.ff/forcefield.itp"'
+        force_field_include: str = '#include "amber99sb-ildn.ff/forcefield.itp"'
     ) -> Dict[str, Any]:
         """
         Edit topology file to include ligand and ion parameters.
@@ -31,7 +31,7 @@ class TopologyEditor:
             ligand_count: Number of ligand molecules (default: 1)
             ion_resname: Ion residue name (e.g., "MG")
             ion_count: Number of ion molecules
-            force_field_include: Force field include line to match
+            force_field_include: Force field include line to match (substring)
             
         Returns:
             Dict with success status and modifications made
@@ -54,7 +54,12 @@ class TopologyEditor:
             ion_in_molecules = False
             
             if ligand_itp:
-                ligand_itp_included = any(ligand_itp in line for line in lines)
+                # Match by basename so both absolute and relative paths are detected
+                ligand_itp_basename = Path(ligand_itp).name
+                ligand_itp_included = any(
+                    ligand_itp_basename in line or ligand_itp in line
+                    for line in lines
+                )
             
             if ligand_resname:
                 ligand_in_molecules = any(
@@ -75,28 +80,37 @@ class TopologyEditor:
             new_lines = []
             
             # Add ligand ITP include after force field include
+            # Use flexible matching: strip "./" prefix, match substring
+            ff_match_key = force_field_include.replace('./', '')
             for line in lines:
                 new_lines.append(line)
                 
                 if ligand_itp and not ligand_itp_included:
-                    if force_field_include in line.strip():
+                    stripped = line.strip().replace('./', '')
+                    if ff_match_key in stripped:
                         # Extract ligand name for position restraints
                         if ligand_resname:
                             lig_name = ligand_resname
                         else:
                             lig_name = ligand_itp.split(".")[0]
                         
-                        new_lines.append(f'#include "{ligand_itp}"\n')
+                        # Always use basename in #include so grompp finds it
+                        # relative to the topology file directory
+                        itp_include_name = Path(ligand_itp).name
+                        new_lines.append(f'#include "{itp_include_name}"\n')
                         new_lines.append(f'#ifdef POSRES_LIG\n')
                         new_lines.append(f'#include "posre_{lig_name}.itp"\n')
                         new_lines.append(f'#endif\n')
-                        modifications.append(f"Added ligand include: {ligand_itp}")
+                        modifications.append(f"Added ligand include: {itp_include_name}")
                         ligand_itp_included = True
             
             lines = new_lines
             new_lines = []
             
             # Add molecules to [ molecules ] section
+            # We need to insert ligand/ion entries AFTER existing molecule lines
+            # (e.g. after "Protein  1") to match the order in complex.gro:
+            # protein first, then ligand, then ions.
             molecules_found = False
             insert_index = None
             
@@ -105,13 +119,20 @@ class TopologyEditor:
                 
                 if line.strip().lower().startswith("[ molecules ]"):
                     molecules_found = True
-                    # Find insert position (after existing molecules)
+                    # Scan forward past comments, blanks, and existing molecule entries
+                    # to find the insertion point AFTER the last molecule line.
                     insert_index = i + 1
                     while insert_index < len(lines):
                         next_line = lines[insert_index].strip()
                         if next_line == "" or next_line.startswith(";"):
-                            break
-                        insert_index += 1
+                            # Skip empty lines and comments
+                            insert_index += 1
+                            continue
+                        # This is a molecule entry — keep scanning past it
+                        if next_line and not next_line.startswith("["):
+                            insert_index += 1
+                            continue
+                        break  # Hit next section header or EOF
             
             # Insert ligand and ion entries
             if molecules_found and insert_index is not None:
@@ -125,10 +146,12 @@ class TopologyEditor:
                     entries_to_add.append(f"{ion_resname:<12} {ion_count}\n")
                     modifications.append(f"Added ion to molecules: {ion_resname} x{ion_count}")
                 
-                # Insert entries at proper location
+                # Append entries AFTER existing molecules (Protein first,
+                # then ligand, then ions) so the order matches complex.gro
                 if entries_to_add:
-                    for entry in reversed(entries_to_add):
+                    for entry in entries_to_add:
                         new_lines.insert(insert_index, entry)
+                        insert_index += 1
             
             # Write modified topology
             with open(topology_path, "w") as f:

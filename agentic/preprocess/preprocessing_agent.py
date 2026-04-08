@@ -624,6 +624,8 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         generated_files = {}
         ion_files = []  # Track ion files to skip hydrogen addition
         ligand_files = []  # Track ligand files for hydrogen addition
+        ligand_resnames = []  # Track ligand residue names (e.g. ATP)
+        ion_resnames = []    # Track ion residue names (e.g. MG)
         
         current_pdb = agent_input.pdb_path
         topology_file = None
@@ -788,6 +790,10 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                             output_files.append(result["ligand_file"])
                             generated_files[result["ligand_file"]] = "Ligand component"
                             ligand_files.append(result["ligand_file"])
+                            # Extract resnames from statistics
+                            stats = result.get("statistics", {}).get("ligand", {})
+                            if stats.get("resnames"):
+                                ligand_resnames.extend(stats["resnames"])
                         else:
                             execution_log.append(f"  ⊘ Ligand file excluded by component selection: {Path(result['ligand_file']).name}")
                     if "ion_file" in result:
@@ -796,6 +802,10 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                             output_files.append(result["ion_file"])
                             generated_files[result["ion_file"]] = "Ion component"
                             ion_files.append(result["ion_file"])
+                            # Extract resnames from statistics
+                            stats = result.get("statistics", {}).get("ions", {})
+                            if stats.get("resnames"):
+                                ion_resnames.extend(stats["resnames"])
                         else:
                             execution_log.append(f"  ⊘ Ion file excluded by component selection: {Path(result['ion_file']).name}")
                     if "topology_file" in result:
@@ -845,6 +855,10 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 issues=issues,
                 warnings=warnings,
                 generated_files=generated_files,
+                ligand_files=ligand_files,
+                ligand_resnames=sorted(set(ligand_resnames)),
+                ion_files=ion_files,
+                ion_resnames=sorted(set(ion_resnames)),
                 execution_log=execution_log_str
             )
             
@@ -868,15 +882,30 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         state["preprocessing_warnings"] = agent_output.result.warnings
         state["preprocessing_execution_log"] = agent_output.result.execution_log
         
+        # Propagate ligand/ion component tracking to workflow state
+        if agent_output.result.ligand_files:
+            state["ligand_files"] = agent_output.result.ligand_files
+        if agent_output.result.ligand_resnames:
+            state["ligand_resnames"] = agent_output.result.ligand_resnames
+        if agent_output.result.ion_files:
+            state["ion_files"] = agent_output.result.ion_files
+        if agent_output.result.ion_resnames:
+            state["ion_resnames"] = agent_output.result.ion_resnames
+        
+        # Build a set of known ligand/ion resnames for type detection
+        known_ligand_rn = {r.lower() for r in agent_output.result.ligand_resnames}
+        known_ion_rn = {r.lower() for r in agent_output.result.ion_resnames}
+        
         # Register all generated files using SecureFileManager
         for file_path, description in agent_output.result.generated_files.items():
-            # Determine file type from filename
+            # Determine file type: use resname-based detection first, then fallback
             file_type = "unknown"
+            stem = Path(file_path).stem.lower()
             if "protein" in file_path.lower():
                 file_type = "protein"
-            elif "ligand" in file_path.lower() or "atp" in file_path.lower() or "gtp" in file_path.lower():
+            elif stem in known_ligand_rn or description.lower().startswith("ligand"):
                 file_type = "ligand"
-            elif "ion" in file_path.lower() or "mg" in file_path.lower() or "mn" in file_path.lower():
+            elif stem in known_ion_rn or description.lower().startswith("ion"):
                 file_type = "ion"
             
             self.file_manager.register_external_file(

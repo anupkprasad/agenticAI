@@ -189,7 +189,7 @@ python run_agenticAIWork.py \
 
 
 python run_agenticAIWork.py \
-  --goal "I want to preprocess and simulation setup of protein only. The structure is availble in the pdb file of work_di/2_h.pdb. Please setup simulation for 15 ns only. Once the simulation setup is done, please submit the job on HPC" \
+  --goal "I want to preprocess and simulation setup of protein-ATP-Mg system. The structure is availble in the pdb file of work_di/2_h.pdb. Please setup simulation for 10 ns only. Once the simulation setup is done, please submit the job on HPC" \
   --subtask preprocess simsetup hpcjob \
   --use-llm \
   --llm-base-url http://127.0.0.1:11434 \

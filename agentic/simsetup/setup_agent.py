@@ -396,7 +396,7 @@ class SimulationSetupAgent:
         """
         # Analyze the system first
         cleaned_pdb = agent_input.cleaned_pdb
-        analysis = self._analyze_system(cleaned_pdb, component_selection=agent_input.component_selection)
+        analysis = self._analyze_system(cleaned_pdb, component_selection=agent_input.component_selection, state=state)
         # Store for use in _execute_plan
         self._last_analysis = analysis
         
@@ -449,11 +449,18 @@ class SimulationSetupAgent:
     # Pre-built ligand parameter directory
     LIGAND_PARAM_DIR = Path(__file__).resolve().parent.parent.parent / "src" / "simsetup" / "amber_ligand_param"
     
-    def _analyze_system(self, pdb_file: str, component_selection: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _analyze_system(self, pdb_file: str, component_selection: Optional[Dict[str, Any]] = None,
+                        state: Optional[MDState] = None) -> Dict[str, Any]:
         """Analyze the preprocessed system to inform setup decisions.
         
         Detects ligand residue names, ion types, and checks for pre-built
         ligand parameters in src/simsetup/amber_ligand_param/.
+        
+        Uses THREE sources (in priority order):
+          1. State fields (ligand_files, ligand_resnames, ion_files, ion_resnames)
+             — set by preprocessing agent from separate_complex_components
+          2. File registry (type == "ligand" / "ion") — files copied to simsetup
+          3. HETATM scan of pdb_file — fallback if above are empty
         
         If component_selection is provided, overrides detection for components
         that the user explicitly excluded.
@@ -465,10 +472,74 @@ class SimulationSetupAgent:
             "system_type": "protein_only",
             "ligand_resnames": [],
             "ion_resnames": [],
+            "ligand_files": [],       # paths to ligand PDB/GRO files in simsetup
+            "ion_files": [],          # paths to ion PDB/GRO files in simsetup
+            "ligand_itps": [],        # paths to pre-built ITP files
             "ligand_params_available": {},  # {resname: path_to_itp} for pre-built params
             "ligand_params_missing": [],    # resnames that need generation
         }
         
+        # --- Source 1: State fields from preprocessing ---
+        if state:
+            state_ligand_resnames = state.get("ligand_resnames") or []
+            state_ligand_files = state.get("ligand_files") or []
+            state_ion_resnames = state.get("ion_resnames") or []
+            state_ion_files = state.get("ion_files") or []
+            
+            if state_ligand_resnames:
+                analysis["ligand_resnames"] = list(state_ligand_resnames)
+                analysis["has_ligand"] = True
+                logger.info(f"Ligand resnames from state: {state_ligand_resnames}")
+            if state_ion_resnames:
+                analysis["ion_resnames"] = list(state_ion_resnames)
+                analysis["has_ions"] = True
+                logger.info(f"Ion resnames from state: {state_ion_resnames}")
+        
+        # --- Source 2: File registry (files copied to simsetup) ---
+        simsetup_dir = None
+        if state:
+            simsetup_dir = state.get("simsetup_directory")
+        
+        if not analysis["has_ligand"] or not analysis["has_ions"]:
+            for file_path, metadata in self.file_manager.file_registry.items():
+                ftype = metadata.get("type", "")
+                if ftype == "ligand" and not analysis["has_ligand"]:
+                    analysis["has_ligand"] = True
+                    # Infer resname from filename stem (e.g. ATP.pdb → ATP)
+                    resname = Path(file_path).stem.upper()
+                    if resname not in analysis["ligand_resnames"]:
+                        analysis["ligand_resnames"].append(resname)
+                    logger.info(f"Ligand detected from file_registry: {file_path}")
+                elif ftype == "ion" and not analysis["has_ions"]:
+                    analysis["has_ions"] = True
+                    resname = Path(file_path).stem.upper()
+                    if resname not in analysis["ion_resnames"]:
+                        analysis["ion_resnames"].append(resname)
+                    logger.info(f"Ion detected from file_registry: {file_path}")
+        
+        # Locate actual ligand/ion files in the simsetup directory
+        if simsetup_dir and os.path.isdir(simsetup_dir):
+            for resname in analysis["ligand_resnames"]:
+                for ext in [".pdb", ".gro"]:
+                    candidate = Path(simsetup_dir) / f"{resname}{ext}"
+                    if candidate.exists() and str(candidate) not in analysis["ligand_files"]:
+                        analysis["ligand_files"].append(str(candidate))
+                # Also check lowercase
+                for ext in [".pdb", ".gro"]:
+                    candidate = Path(simsetup_dir) / f"{resname.lower()}{ext}"
+                    if candidate.exists() and str(candidate) not in analysis["ligand_files"]:
+                        analysis["ligand_files"].append(str(candidate))
+            for resname in analysis["ion_resnames"]:
+                for ext in [".pdb", ".gro"]:
+                    candidate = Path(simsetup_dir) / f"{resname}{ext}"
+                    if candidate.exists() and str(candidate) not in analysis["ion_files"]:
+                        analysis["ion_files"].append(str(candidate))
+                for ext in [".pdb", ".gro"]:
+                    candidate = Path(simsetup_dir) / f"{resname.lower()}{ext}"
+                    if candidate.exists() and str(candidate) not in analysis["ion_files"]:
+                        analysis["ion_files"].append(str(candidate))
+        
+        # --- Source 3: HETATM scan of pdb_file (fallback) ---
         if os.path.exists(pdb_file):
             try:
                 with open(pdb_file, 'r') as f:
@@ -477,48 +548,51 @@ class SimulationSetupAgent:
                 heteroatoms = [l for l in lines if l.startswith('HETATM')]
                 analysis["estimated_atoms"] = len([l for l in lines if l.startswith(('ATOM', 'HETATM'))])
                 
-                # Extract unique residue names from HETATM records
-                het_resnames = set()
-                for l in heteroatoms:
-                    parts = l.split()
-                    if len(parts) > 3:
-                        het_resnames.add(parts[3].strip())
-                
-                # Classify: ions vs ligands
-                ion_names = het_resnames & self.STANDARD_RESNAMES
-                # Ligands: anything in KNOWN_LIGAND_RESNAMES, or any HETATM residue
-                # that is not a standard residue/ion/water and has > 5 atoms
-                ligand_names = het_resnames & self.KNOWN_LIGAND_RESNAMES
-                
-                # Also detect unknown HETATM residues with many atoms (likely ligands)
-                remaining = het_resnames - self.STANDARD_RESNAMES - ligand_names
-                for resname in remaining:
-                    atom_count = sum(1 for l in heteroatoms if len(l.split()) > 3 and l.split()[3].strip() == resname)
-                    if atom_count > 5:
-                        ligand_names.add(resname)
-                
-                analysis["ligand_resnames"] = sorted(ligand_names)
-                analysis["ion_resnames"] = sorted(ion_names - {'HOH', 'WAT', 'SOL', 'TIP'})
-                analysis["has_ligand"] = len(ligand_names) > 0
-                analysis["has_ions"] = len(analysis["ion_resnames"]) > 0
-                
-                # Check for pre-built ligand parameters
-                for resname in analysis["ligand_resnames"]:
-                    itp_path = self.LIGAND_PARAM_DIR / f"{resname}.itp"
-                    if itp_path.exists():
-                        analysis["ligand_params_available"][resname] = str(itp_path)
-                        logger.info(f"Found pre-built parameters for {resname}: {itp_path}")
-                    else:
-                        analysis["ligand_params_missing"].append(resname)
-                        logger.info(f"No pre-built parameters for {resname} — will need generation")
-                
-                if analysis["has_ligand"] and analysis["has_ions"]:
-                    analysis["system_type"] = "protein_ligand_ion"
-                elif analysis["has_ligand"]:
-                    analysis["system_type"] = "protein_ligand"
+                if not analysis["has_ligand"] and not analysis["has_ions"]:
+                    # Only scan HETATM if we haven't already found components
+                    het_resnames = set()
+                    for l in heteroatoms:
+                        parts = l.split()
+                        if len(parts) > 3:
+                            het_resnames.add(parts[3].strip())
+                    
+                    ion_names = het_resnames & self.STANDARD_RESNAMES
+                    ligand_names = het_resnames & self.KNOWN_LIGAND_RESNAMES
+                    
+                    remaining = het_resnames - self.STANDARD_RESNAMES - ligand_names
+                    for resname in remaining:
+                        atom_count = sum(1 for l in heteroatoms if len(l.split()) > 3 and l.split()[3].strip() == resname)
+                        if atom_count > 5:
+                            ligand_names.add(resname)
+                    
+                    if ligand_names:
+                        analysis["ligand_resnames"] = sorted(ligand_names)
+                        analysis["has_ligand"] = True
+                    if ion_names - {'HOH', 'WAT', 'SOL', 'TIP'}:
+                        analysis["ion_resnames"] = sorted(ion_names - {'HOH', 'WAT', 'SOL', 'TIP'})
+                        analysis["has_ions"] = True
+                else:
+                    # Still count atoms even if we already know components
+                    pass
                     
             except Exception as e:
                 logger.warning(f"Could not analyze system: {e}")
+        
+        # All ligands require parameterization via generate_ligand_parameters
+        # (pre-built params are only used if explicitly requested by the user)
+        for resname in analysis["ligand_resnames"]:
+            analysis["ligand_params_missing"].append(resname)
+            logger.info(f"Ligand {resname} requires parameterization via generate_ligand_parameters")
+        
+        # Determine system type
+        if analysis["has_ligand"] and analysis["has_ions"]:
+            analysis["system_type"] = "protein_ligand_ion"
+        elif analysis["has_ligand"]:
+            analysis["system_type"] = "protein_ligand"
+        elif analysis["has_ions"]:
+            analysis["system_type"] = "protein_ion"
+        else:
+            analysis["system_type"] = "protein_only"
         
         # Override based on component_selection (user intent)
         # If user explicitly excluded ligand/ions, respect that regardless of PDB contents
@@ -819,9 +893,9 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             ligand_files = analysis.get("ligand_files", [])
             if ligand_files:
                 tool_params["ligand_file"] = ligand_files[0]
-            ligand_names = analysis.get("ligand_names", [])
-            if ligand_names:
-                tool_params["ligand_resname"] = ligand_names[0]
+            ligand_resnames = analysis.get("ligand_resnames", [])
+            if ligand_resnames:
+                tool_params["ligand_resname"] = ligand_resnames[0]
             ligand_itps = analysis.get("ligand_itps", [])
             if ligand_itps:
                 tool_params["ligand_itp"] = ligand_itps[0]
@@ -831,9 +905,9 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             ion_files = analysis.get("ion_files", [])
             if ion_files:
                 tool_params["ion_file"] = ion_files[0]
-            ion_names = analysis.get("ion_names", [])
-            if ion_names:
-                tool_params["ion_resname"] = ion_names[0]
+            ion_resnames = analysis.get("ion_resnames", [])
+            if ion_resnames:
+                tool_params["ion_resname"] = ion_resnames[0]
 
         steps = [
             SimSetupStep(
@@ -873,6 +947,8 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         box_dimensions = None
         water_molecules = None
         ion_count = None
+        ligand_itp_path = None  # Actual ITP from generate_ligand_parameters
+        ligand_gro_path = None  # Actual GRO from generate_ligand_parameters
         
         # Get execution limits from config
         agent_config = self.config.get("agent", {})
@@ -901,49 +977,6 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         "reason": f"Invalid tool name: {step.tool_name}"
                     })
                     continue  # Skip this step entirely
-                
-                # --- Pre-built ligand parameter shortcut ---
-                # If the plan asks to generate_ligand_parameters but we already
-                # have a pre-built .itp, copy it into simsetup and skip the tool.
-                if step.tool_name == "generate_ligand_parameters":
-                    analysis = getattr(self, '_last_analysis', {})
-                    available = analysis.get('ligand_params_available', {})
-                    # Determine which ligand this step targets
-                    step_params = step.tool_params or {}
-                    # Try to match by ligand_pdb filename (e.g. "2_ligand.pdb" → look for resnames)
-                    matched_resname = None
-                    for resname in available:
-                        if resname.lower() in step.name.lower() or resname.lower() in step.description.lower():
-                            matched_resname = resname
-                            break
-                    # Fallback: if only one ligand and one pre-built param, use it
-                    if not matched_resname and len(available) == 1:
-                        matched_resname = next(iter(available))
-                    
-                    if matched_resname:
-                        src_itp = Path(available[matched_resname])
-                        dest_itp = Path(simsetup_dir) / f"{matched_resname}.itp"
-                        shutil.copy2(str(src_itp), str(dest_itp))
-                        # Also copy .gro if it exists alongside the .itp
-                        src_gro = src_itp.with_suffix('.gro')
-                        if src_gro.exists():
-                            dest_gro = Path(simsetup_dir) / f"{matched_resname}.gro"
-                            shutil.copy2(str(src_gro), str(dest_gro))
-                        
-                        msg = (f"Using pre-built parameters for {matched_resname} "
-                               f"from {src_itp} (skipping acpype generation)")
-                        execution_log.append(f"\n--- Step {i+1}: {step.name} ---")
-                        execution_log.append(f"✓ {msg}")
-                        generated_files[str(dest_itp)] = f"Ligand topology for {matched_resname} (pre-built)"
-                        log_agent_action("setup", f"Step {i+1}/{len(plan.steps)} used pre-built params", {
-                            "step": step.name,
-                            "ligand": matched_resname,
-                            "itp": str(dest_itp)
-                        })
-                        log_file_operation("setup", "copy", str(dest_itp), True,
-                                          f"Pre-built ligand params for {matched_resname}")
-                        logger.info(msg)
-                        continue  # Skip to next step
                 
                 # Log step start
                 log_agent_action("setup", f"Executing step {i+1}/{len(plan.steps)}", {
@@ -1009,10 +1042,31 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 tool_params["working_dir"] = simsetup_dir
                 
                 # Tool-specific default output filenames (relative paths)
-                if step.tool_name == "build_topology" and "output_file" not in tool_params:
+                if step.tool_name == "generate_ligand_parameters":
+                    # Acpype creates its own subdirectory ({ligand}.acpype/) inside
+                    # output_dir, so output_dir must be simsetup_dir (already set above).
+                    # Resolve ligand_pdb to absolute path inside simsetup_dir so
+                    # acpype can find the file regardless of the process CWD.
+                    lpdb = tool_params.get("ligand_pdb", "")
+                    if lpdb and not Path(lpdb).is_absolute():
+                        tool_params["ligand_pdb"] = str(Path(simsetup_dir) / Path(lpdb).name)
+                
+                elif step.tool_name == "build_topology" and "output_file" not in tool_params:
                     tool_params["output_file"] = "processed.gro"
                     if "topology_file" not in tool_params:
                         tool_params["topology_file"] = "topol.top"
+                
+                elif step.tool_name == "build_simulation_system":
+                    # Override ligand_itp/ligand_file with the actual acpype
+                    # outputs if generate_ligand_parameters ran earlier.
+                    # The LLM plan often guesses wrong names (e.g. "ATP.itp"
+                    # instead of "ATP_GMX.itp").
+                    if ligand_itp_path:
+                        tool_params["ligand_itp"] = Path(ligand_itp_path).name
+                        logger.info(f"Injecting actual ligand_itp: {Path(ligand_itp_path).name}")
+                    if ligand_gro_path:
+                        tool_params["ligand_file"] = Path(ligand_gro_path).name
+                        logger.info(f"Injecting actual ligand_file: {Path(ligand_gro_path).name}")
                         
                 elif step.tool_name == "build_simulation_box" and "output_file" not in tool_params:
                     tool_params["output_file"] = "boxed.gro"
@@ -1127,6 +1181,35 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 # Process results
                 if result and result.get("success"):
                     execution_log.append(f"✓ Success: {result.get('message', 'Step completed')}")
+                    
+                    # --- Post-processing: copy acpype outputs to simsetup dir ---
+                    if step.tool_name == "generate_ligand_parameters":
+                        for key in ("topology", "coordinates"):
+                            src_path = result.get(key)
+                            if src_path and Path(src_path).exists():
+                                dst_path = Path(simsetup_dir) / Path(src_path).name
+                                if str(Path(src_path).resolve()) != str(dst_path.resolve()):
+                                    shutil.copy2(src_path, str(dst_path))
+                                    logger.info(f"Copied {Path(src_path).name} → {simsetup_dir}")
+                                    execution_log.append(f"  Copied {Path(src_path).name} to simsetup/")
+                                    generated_files[str(dst_path)] = f"Ligand {key} file"
+                                    log_file_operation("setup", "create", str(dst_path), True)
+                                # Track actual filenames for chaining to next steps
+                                if key == "topology":
+                                    ligand_itp_path = str(dst_path)
+                                elif key == "coordinates":
+                                    ligand_gro_path = str(dst_path)
+                        # Also copy posre_{RESNAME}.itp from acpype output dir
+                        acpype_dir = result.get("output_dir")
+                        if acpype_dir:
+                            for posre in Path(acpype_dir).glob("posre_*.itp"):
+                                dst = Path(simsetup_dir) / posre.name
+                                if not dst.exists():
+                                    shutil.copy2(str(posre), str(dst))
+                                    logger.info(f"Copied {posre.name} → {simsetup_dir}")
+                                    execution_log.append(f"  Copied {posre.name} to simsetup/")
+                                    generated_files[str(dst)] = "Ligand position restraint file"
+                                    log_file_operation("setup", "create", str(dst), True)
                     
                     # Update current state from results (store absolute paths internally)
                     if "output_file" in result:

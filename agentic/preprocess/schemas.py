@@ -65,6 +65,10 @@ class PreprocessingResult(BaseModel):
         default_factory=dict,
         description="Map of all generated files and their descriptions"
     )
+    ligand_files: List[str] = Field(default_factory=list, description="Paths to ligand PDB files")
+    ligand_resnames: List[str] = Field(default_factory=list, description="Ligand residue names (e.g. ATP, GTP)")
+    ion_files: List[str] = Field(default_factory=list, description="Paths to ion PDB files")
+    ion_resnames: List[str] = Field(default_factory=list, description="Ion residue names (e.g. MG, ZN)")
     execution_log: str = Field(default="", description="Log of all commands executed")
 
 

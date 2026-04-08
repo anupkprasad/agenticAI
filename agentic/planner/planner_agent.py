@@ -1005,12 +1005,15 @@ TASK: Run ONLY these agents in order: {agents_str}
 Do NOT add any agents that are not listed above.
 
 **SCOPE BOUNDARY (CRITICAL):**
-- "Preprocessing" means: clean PDB, separate components, add hydrogens, validate. Outputs: cleaned PDB files.
-- "Simulation setup" means: generate topology, build box, SOLVATE with tip3p water, add counter-ions + 0.15M NaCl, generate MDP files, generate TPR file. Outputs: topology (.top), coordinates (.gro), MDP files, TPR file.
+- "Preprocessing" means: clean PDB, separate components, add hydrogens, validate. Outputs: cleaned PDB files ONLY (.pdb).
+  Preprocessing does NOT generate topology (.itp), parameter files, or force-field data. Those are the Setup Agent's job.
+- "Simulation setup" means: generate ligand parameters (if ligand present), generate protein topology, build box, SOLVATE with tip3p water, add counter-ions + 0.15M NaCl, generate MDP files, generate TPR file. Outputs: topology (.top), coordinates (.gro), ligand parameters (.itp), MDP files, TPR file.
+  Ligand parameterization (generate_ligand_parameters) is ALWAYS done by the Simulation Setup Agent, never by Preprocessing.
 - Solvation and ion addition are ALWAYS part of standard simulation setup. Do NOT create vacuum/unsolvated systems unless the user explicitly says "in vacuum" or "gas phase".
 - "Simulation setup" does NOT mean running the simulation (no mdrun, no equilibration, no production run, no trajectory generation).
 - Only plan for the agents listed above. Do NOT plan steps that belong to agents not in the list (e.g., HPC submission, simulation execution, analysis).
 - Do NOT request creation of tools for running simulations (e.g., run_gromacs_simulation) unless an HPC agent is in the agent list.
+- Do NOT assume any .itp or topology files exist from preprocessing. The Setup Agent must generate all topology and parameter files from scratch.
 
 **Default Simulation Conditions (DO NOT CHANGE unless user explicitly states otherwise):**
 - Force field: {state.get('force_field', 'amber99sb-ildn')}
@@ -1104,6 +1107,13 @@ Water Model: {state.get('water_model', 'tip3p')}
 - Temperature: 310 K, Pressure: 1 bar, NaCl concentration: 0.15 M
 - These are the defaults built into the pipeline tools. Only change if user explicitly requests it.
 
+**SCOPE BOUNDARY (CRITICAL):**
+- "Preprocessing" means: clean PDB, separate components, add hydrogens, validate. Outputs: cleaned PDB files ONLY (.pdb).
+  Preprocessing does NOT generate topology (.itp), parameter files, or force-field data.
+- "Simulation setup" means: generate ligand parameters (if ligand present), generate protein topology, build box, solvate, add ions, generate MDP files, generate TPR.
+  Ligand parameterization (generate_ligand_parameters) is ALWAYS done by the Simulation Setup Agent, never by Preprocessing.
+- Do NOT assume any .itp or topology files exist from preprocessing. The Setup Agent must generate all topology and parameter files from scratch.
+
 **Available Agents and Their Tools:**
 {tools_context}
 
@@ -1141,10 +1151,10 @@ Write complete sentences like:
 **Workflow Execution:**
 
 **Preprocessing Agent:**
-The Preprocessing Agent will handle structure preparation. It will use the separate_complex_components tool to extract the protein chain, removing the ATP ligand and MG ions as requested. The add_hydrogens tool will then ensure complete protonation using the reduce method at neutral pH.
+The Preprocessing Agent will handle structure preparation. It will use the separate_complex_components tool to split the complex into protein, ligand, and ion PDB files. The add_hydrogens tool will then ensure complete protonation of the protein (reduce method) and ligand (obabel method) at neutral pH. The agent outputs cleaned PDB files only — no topology or parameter files.
 
 **Simulation Setup Agent:**
-The Simulation Setup Agent will prepare the simulation system. Using build_topology, it generates AMBER99SB-ILDN topology files. The system will be placed in a cubic simulation box with adequate spacing, solvated with TIP3P water molecules, and neutralized with appropriate ions. The generate_mdp_files tool will create parameter files for a 10 ns production run.
+The Simulation Setup Agent will prepare the simulation system. First, it will use generate_ligand_parameters to create the ligand topology (.itp) from the ligand PDB provided by preprocessing. Then, using build_simulation_system, it generates AMBER99SB-ILDN topology files for the protein, merges all components, places the system in a cubic simulation box, solvates with TIP3P water, and neutralizes with appropriate ions. MDP parameter files will be created for all simulation phases.
 
 **HPC Agent:**
 The HPC Agent will handle job submission to the compute cluster. It will use create_slurm_script to generate an appropriate job submission script, then submit_job to initiate the simulation on the HPC system.

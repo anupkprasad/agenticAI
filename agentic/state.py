@@ -54,6 +54,12 @@ class MDState(TypedDict):
     preprocessing_report: Optional[str]
     preprocessing_issues: List[str]
     
+    # Ligand / ion component tracking (set by preprocessing, consumed by setup)
+    ligand_files: Optional[List[str]]          # Paths to separated ligand PDB files
+    ligand_resnames: Optional[List[str]]       # Residue names (e.g. ["ATP", "GTP"])
+    ion_files: Optional[List[str]]             # Paths to separated ion PDB files
+    ion_resnames: Optional[List[str]]          # Residue names (e.g. ["MG", "ZN"])
+    
     # File registry - tracks all files created during workflow
     file_registry: Dict[str, Dict[str, str]]  # {file_path: {"type": "protein", "description": "...", "stage": "preprocess"}}
     
