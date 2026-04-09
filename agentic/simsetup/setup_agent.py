@@ -15,7 +15,7 @@ from ..llm import LLMClient
 from ..utils import (
     log_agent_start, log_llm_interaction, log_agent_action, 
     log_file_operation, log_agent_completion, log_error,
-    SecureFileManager
+    SecureFileManager, save_agent_metadata
 )
 from .schemas import (
     SimSetupPlan, SimSetupStep, 
@@ -128,6 +128,26 @@ class SimulationSetupAgent:
             # Update state with results
             self._update_state(state, agent_output)
             
+            # Save agent metadata for HITL context
+            gen_files = list(agent_output.result.generated_files.keys()) if hasattr(agent_output.result, 'generated_files') and agent_output.result.generated_files else []
+            save_agent_metadata(
+                agent_dir=simsetup_dir,
+                agent_name="setup",
+                success=agent_output.success,
+                steps_executed=len(agent_output.plan.steps),
+                steps_succeeded=sum(1 for s in agent_output.result.execution_log if "\u2713" in s),
+                steps_failed=sum(1 for s in agent_output.result.execution_log if "\u2717" in s),
+                issues=agent_output.result.issues,
+                warnings=agent_output.result.warnings,
+                generated_files=gen_files,
+                key_outputs={
+                    "topology": state.get("topology"),
+                    "coordinates": state.get("coordinates"),
+                },
+                execution_log_tail="\n".join(agent_output.result.execution_log[-30:]),
+                human_recommendation=state.get("human_recommendation"),
+            )
+            
             # Determine next workflow node
             if agent_output.success:
                 if state.get("human_in_loop"):
@@ -136,11 +156,9 @@ class SimulationSetupAgent:
                     state["next_node"] = "supervisor"
             else:
                 state["errors"].append(f"Setup failed: {agent_output.result.report}")
-                # Route to human checkpoint even on failure so user can decide
-                if state.get("human_in_loop"):
-                    state["next_node"] = "human_setup_check"
-                else:
-                    state["next_node"] = "supervisor"
+                # Error-triggered HITL
+                state["next_node"] = "human_setup_check"
+                state["error_triggered_hitl"] = True
             
             success = agent_output.success and len(agent_output.result.issues) == 0
             log_agent_completion("setup", "Simulation System Setup", state, success)
@@ -152,7 +170,18 @@ class SimulationSetupAgent:
             logger.error(f"Traceback: {tb}")
             log_error("setup_agent.setup_node", e, {"state": str(state), "traceback": tb})
             state["errors"].append(f"Setup error: {str(e)}")
-            state["next_node"] = "supervisor"
+            # Save metadata even on crash
+            agent_dir = state.get("simsetup_dir", state.get("simsetup_directory", ""))
+            if agent_dir:
+                save_agent_metadata(
+                    agent_dir=agent_dir, agent_name="setup",
+                    success=False, issues=[str(e)],
+                    execution_log_tail=tb[-2000:],
+                    human_recommendation=state.get("human_recommendation"),
+                )
+            # Error-triggered HITL
+            state["next_node"] = "human_setup_check"
+            state["error_triggered_hitl"] = True
         
         return state
     

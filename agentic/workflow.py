@@ -645,6 +645,9 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             # Final report
             "final_report": None,
             "workflow_status": None,
+            # Human-in-the-loop
+            "human_recommendation": None,
+            "error_triggered_hitl": False,
         }
 
         if config:

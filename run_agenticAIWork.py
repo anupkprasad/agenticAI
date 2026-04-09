@@ -29,14 +29,23 @@ _ACTION_KEYWORDS = {
     "approved", "continue", "retry", "redo", "exit", "quit", "stop"
 }
 
+# Friendly display names for agents
+_AGENT_DISPLAY_NAMES = {
+    "preprocess": "Preprocessing Agent",
+    "setup": "Simulation Setup Agent",
+    "hpc": "HPC Agent",
+    "analysis": "Analysis Agent",
+    "reporter": "Reporter Agent",
+}
+
 def _is_action(text: str) -> bool:
     """Return True if the user input is a workflow action (not a question)."""
     lower = text.lower().strip()
     # Exact match
     if lower in _ACTION_KEYWORDS:
         return True
-    # "modify: ..." prefix
-    if lower.startswith("modify"):
+    # "modify: ..." or "recommend: ..." prefix
+    if lower.startswith("modify") or lower.startswith("recommend"):
         return True
     return False
 
@@ -44,6 +53,9 @@ def _is_action(text: str) -> bool:
 def _build_qa_context(summary: Dict[str, Any]) -> str:
     """Build a textual context block from the checkpoint summary for LLM Q&A."""
     parts = [f"Checkpoint: {summary['checkpoint_type']}"]
+    
+    if summary.get("error_triggered"):
+        parts.append("STATUS: Error — agent needs human guidance")
     
     parts.append("\nCurrent state:")
     for k, v in summary.get("current_state", {}).items():
@@ -363,11 +375,20 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
     state = summary.pop("_state", {})
     
     checkpoint_type = summary["checkpoint_type"]
+    agent_label = _AGENT_DISPLAY_NAMES.get(checkpoint_type, checkpoint_type.title() + " Agent")
+    error_triggered = summary.get("error_triggered", False)
     
-    # --- Display summary ---
+    # --- Display banner ---
     print("\n" + "="*60, flush=True)
-    print(f"  HUMAN CHECKPOINT: {checkpoint_type.upper()}", flush=True)
+    if error_triggered:
+        print(f"  {agent_label} — Human Chat  [ERROR RECOVERY]", flush=True)
+    else:
+        print(f"  {agent_label} — Human Chat", flush=True)
     print("="*60, flush=True)
+    
+    if error_triggered:
+        print("\n⚠ This agent encountered errors after maximum retries.", flush=True)
+        print("  Please review the issues below and provide guidance.", flush=True)
     
     print("\nCurrent State:", flush=True)
     for key, value in summary.get("current_state", {}).items():
@@ -403,7 +424,7 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
     }
     
     print("\n" + "-"*60, flush=True)
-    print("Interactive session — ask questions or give a command:", flush=True)
+    print(f"{agent_label} — ask questions or give a command:", flush=True)
     print("  Ask anything about the results (LLM can read files to answer)", flush=True)
     print("  'show <filename>' — display a file", flush=True)
     print("  'files' — list generated files", flush=True)
@@ -412,6 +433,8 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
     print("  'approved' / 'continue' — proceed to next step", flush=True)
     print("  'retry' — redo this step from scratch", flush=True)
     print("  'modify: <instructions>' — redo with specific changes", flush=True)
+    if error_triggered:
+        print("  'recommend: <your advice>' — agent will retry with your guidance", flush=True)
     print("  'exit' / 'quit' — stop workflow", flush=True)
     print("-"*60 + "\n", flush=True)
     

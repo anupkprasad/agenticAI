@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, Any, List
 from .state import MDState
 from .utils import log_human_checkpoint
+from .utils.agent_metadata import load_agent_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,9 @@ class HumanCheckpoints:
         log_human_checkpoint(checkpoint_label, {}, feedback.lower(), feedback)
         logger.info(f"Received human feedback for {checkpoint_label}: {feedback}")
         
+        # Clear error-triggered flag on any human response
+        state.pop("error_triggered_hitl", None)
+        
         lower = feedback.lower()
         if "approved" in lower or "continue" in lower:
             state["human_feedback"] = f"{checkpoint_label}_approved"
@@ -44,11 +48,23 @@ class HumanCheckpoints:
                     default = [] if isinstance(state.get(key), list) else ({} if isinstance(state.get(key), dict) else None)
                     state[key] = default
             state["next_node"] = retry_node
+        elif lower.startswith("recommend"):
+            # Human provides guidance — store it and retry with recommendation
+            recommendation = feedback.split(":", 1)[1].strip() if ":" in feedback else feedback
+            state["human_recommendation"] = recommendation
+            # Append to agent-specific issues so the LLM planner sees it
+            issues_key = f"{checkpoint_label}_issues"
+            if issues_key in state and isinstance(state[issues_key], list):
+                state[issues_key].append(f"Human recommendation: {recommendation}")
+            state.setdefault("warnings", []).append(f"Human recommendation ({checkpoint_label}): {recommendation}")
+            state["next_node"] = retry_node
         elif "modify" in lower:
             # Store the human's modification instructions for the agent
-            issues_key = f"{checkpoint_label}_issues" if f"{checkpoint_label}_issues" in state else None
-            if issues_key:
-                state[issues_key].append(f"Human modification request: {feedback}")
+            modification = feedback.split(":", 1)[1].strip() if ":" in feedback else feedback
+            state["human_recommendation"] = modification
+            issues_key = f"{checkpoint_label}_issues"
+            if issues_key in state and isinstance(state[issues_key], list):
+                state[issues_key].append(f"Human modification request: {modification}")
             else:
                 state.setdefault("warnings", []).append(f"Human modify request ({checkpoint_label}): {feedback}")
             state["next_node"] = retry_node
@@ -65,6 +81,7 @@ class HumanCheckpoints:
         """
         Human checkpoint after preprocessing.
         Allows human to review and provide feedback on PDB cleaning.
+        Auto-approves if not in interactive HITL mode (graph-only execution).
         """
         feedback = state.get("human_feedback", "")
         if feedback:
@@ -72,6 +89,10 @@ class HumanCheckpoints:
                 feedback, state, "preprocessing", "preprocess",
                 clear_keys=["cleaned_pdb", "topology", "preprocessing_report", "preprocessing_issues"]
             )
+        elif not state.get("human_in_loop"):
+            # Non-interactive: auto-approve and continue
+            state["next_node"] = "supervisor"
+            return state
         else:
             state["next_node"] = "human_preprocess_check"
             return state
@@ -88,6 +109,9 @@ class HumanCheckpoints:
                 feedback, state, "setup", "setup",
                 clear_keys=["coordinates", "mdp_files", "setup_report", "setup_issues"]
             )
+        elif not state.get("human_in_loop"):
+            state["next_node"] = "supervisor"
+            return state
         else:
             state["next_node"] = "human_setup_check"
             return state
@@ -104,6 +128,9 @@ class HumanCheckpoints:
                 feedback, state, "hpc", "hpc",
                 clear_keys=[]
             )
+        elif not state.get("human_in_loop"):
+            state["next_node"] = "supervisor"
+            return state
         else:
             state["next_node"] = "human_hpc_check"
             return state
@@ -120,6 +147,9 @@ class HumanCheckpoints:
                 feedback, state, "analysis", "analysis",
                 clear_keys=["analysis_results", "figures", "conclusions"]
             )
+        elif not state.get("human_in_loop"):
+            state["next_node"] = "supervisor"
+            return state
         else:
             state["next_node"] = "human_analysis_check"
             return state
@@ -128,17 +158,30 @@ class HumanCheckpoints:
     def get_checkpoint_summary(state: MDState, checkpoint_type: str) -> Dict[str, Any]:
         """
         Generate summary for human review at checkpoints.
-        Includes actual agent output and generated files for informed decisions.
+        Includes actual agent output, generated files, and agent metadata
+        for informed decisions.
         """
+        error_triggered = bool(state.get("error_triggered_hitl"))
+        
         summary: Dict[str, Any] = {
             "checkpoint_type": checkpoint_type,
+            "error_triggered": error_triggered,
             "current_state": {},
             "issues_found": [],
             "recommendations": []
         }
         
+        # Load agent metadata if available
+        agent_dir_map = {
+            "preprocess": state.get("preprocess_dir", ""),
+            "setup": state.get("simsetup_dir", ""),
+            "hpc": state.get("hpc_dir", ""),
+            "analysis": state.get("analysis_dir", ""),
+        }
+        agent_dir = agent_dir_map.get(checkpoint_type, "")
+        agent_meta = load_agent_metadata(agent_dir) if agent_dir else None
+        
         if checkpoint_type == "preprocess":
-            # Show actual preprocessing results
             preprocess_dir = state.get("preprocess_dir", "")
             generated = _list_files_in_dir(preprocess_dir, [".pdb", ".log", ".txt"])
             
@@ -150,12 +193,11 @@ class HumanCheckpoints:
                 "ion_resnames": state.get("ion_resnames", []),
                 "generated_files": generated,
             }
-            # Include preprocessing report (truncated for readability)
             report = state.get("preprocessing_report", "")
             if report:
                 summary["current_state"]["preprocessing_report"] = report[:500]
             
-            summary["issues_found"] = state.get("preprocessing_issues", [])
+            summary["issues_found"] = list(state.get("preprocessing_issues", []))
             summary["recommendations"] = [
                 "Review cleaned PDB and check that correct chains/molecules were kept",
                 "Verify ligand and ion residue names were correctly identified",
@@ -163,7 +205,6 @@ class HumanCheckpoints:
             ]
             
         elif checkpoint_type == "setup":
-            # Show actual setup results
             simsetup_dir = state.get("simsetup_dir", "")
             generated = _list_files_in_dir(simsetup_dir, [".top", ".gro", ".mdp", ".itp"])
             
@@ -179,7 +220,7 @@ class HumanCheckpoints:
             if report:
                 summary["current_state"]["setup_report"] = report[:500]
             
-            summary["issues_found"] = state.get("setup_issues", [])
+            summary["issues_found"] = list(state.get("setup_issues", []))
             summary["recommendations"] = [
                 "Verify topology includes all components (protein, ligands, ions, solvent)",
                 "Check box size and ion concentration",
@@ -223,10 +264,35 @@ class HumanCheckpoints:
                 "Check that all requested analyses were completed",
                 "Verify analysis results make physical sense",
             ]
-            
+        
+        # Merge agent metadata into summary if available
+        if agent_meta:
+            # Add step counts to current_state
+            summary["current_state"]["steps_executed"] = agent_meta.get("steps_executed", 0)
+            summary["current_state"]["steps_succeeded"] = agent_meta.get("steps_succeeded", 0)
+            summary["current_state"]["steps_failed"] = agent_meta.get("steps_failed", 0)
+            # Add execution log tail for error context
+            log_tail = agent_meta.get("execution_log_tail", "")
+            if log_tail:
+                summary["current_state"]["execution_log_tail"] = log_tail[-1000:]
+            # Merge issues from metadata
+            meta_issues = agent_meta.get("issues", [])
+            if meta_issues:
+                summary["issues_found"] = list(summary["issues_found"]) + meta_issues
+        
         # Add errors from the workflow so far
         errors = state.get("errors", [])
         if errors:
             summary["issues_found"] = list(summary["issues_found"]) + [f"ERROR: {e}" for e in errors[-5:]]
+        
+        # Adjust recommendations for error-triggered checkpoints
+        if error_triggered:
+            summary["recommendations"] = [
+                "Use 'recommend: <your advice>' to guide the agent on how to fix the issue",
+                "Use 'retry' to let the agent try again from scratch",
+                "Use 'modify: <instructions>' to specify exact changes",
+                "Use 'show <filename>' to inspect generated files",
+                "Use 'continue' to skip this agent and proceed",
+            ] + summary["recommendations"]
         
         return summary

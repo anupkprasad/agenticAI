@@ -14,7 +14,7 @@ from ..llm import LLMClient
 from ..utils import (
     log_agent_start, log_llm_interaction, log_agent_action, 
     log_file_operation, log_agent_completion, log_error,
-    SecureFileManager
+    SecureFileManager, save_agent_metadata
 )
 from .schemas import (
     PreprocessingPlan, PreprocessingStep, 
@@ -125,6 +125,23 @@ class PreprocessingAgent:
             # Update state with results
             self._update_state(state, agent_output)
             
+            # Save agent metadata for HITL context
+            gen_files = list(agent_output.result.generated_files.keys()) if agent_output.result.generated_files else []
+            save_agent_metadata(
+                agent_dir=preprocess_dir,
+                agent_name="preprocessing",
+                success=agent_output.success,
+                steps_executed=len(agent_output.plan.steps),
+                steps_succeeded=sum(1 for s in agent_output.result.execution_log if "\u2713" in s),
+                steps_failed=sum(1 for s in agent_output.result.execution_log if "\u2717" in s),
+                issues=agent_output.result.issues,
+                warnings=agent_output.result.warnings,
+                generated_files=gen_files,
+                key_outputs={"cleaned_pdb": agent_output.result.cleaned_pdb},
+                execution_log_tail="\n".join(agent_output.result.execution_log[-30:]),
+                human_recommendation=state.get("human_recommendation"),
+            )
+            
             # Determine next workflow node
             if agent_output.success:
                 if state.get("human_in_loop"):
@@ -133,20 +150,32 @@ class PreprocessingAgent:
                     state["next_node"] = "supervisor"
             else:
                 state["errors"].append(f"Preprocessing failed: {agent_output.result.report}")
-                # Route to human checkpoint even on failure so user can decide
-                if state.get("human_in_loop"):
-                    state["next_node"] = "human_preprocess_check"
-                else:
-                    state["next_node"] = "supervisor"
+                # Route to human checkpoint on failure (error-triggered HITL)
+                state["next_node"] = "human_preprocess_check"
+                state["error_triggered_hitl"] = True
             
             success = agent_output.success and len(agent_output.result.issues) == 0
             log_agent_completion("preprocessing", "PDB Preprocessing", state, success)
             
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
             logger.error(f"Preprocessing agent failed: {e}")
+            logger.error(f"Traceback: {tb}")
             log_error("preprocessing_agent.preprocess_node", e, {"state": state})
             state["errors"].append(f"Preprocessing error: {str(e)}")
-            state["next_node"] = "supervisor"
+            # Save metadata even on crash
+            agent_dir = state.get("preprocess_dir", state.get("preprocess_directory", ""))
+            if agent_dir:
+                save_agent_metadata(
+                    agent_dir=agent_dir, agent_name="preprocessing",
+                    success=False, issues=[str(e)],
+                    execution_log_tail=tb[-2000:],
+                    human_recommendation=state.get("human_recommendation"),
+                )
+            # Error-triggered HITL
+            state["next_node"] = "human_preprocess_check"
+            state["error_triggered_hitl"] = True
         
         return state
     

@@ -17,7 +17,7 @@ from ..llm import LLMClient
 from ..utils import (
     log_agent_start, log_llm_interaction, log_agent_action,
     log_file_operation, log_agent_completion, log_error,
-    log_supervisor_routing, SecureFileManager
+    log_supervisor_routing, SecureFileManager, save_agent_metadata
 )
 from .tools import (
     copy_simulation_files, estimate_simulation_time, create_slurm_script,
@@ -131,6 +131,7 @@ class MDHPCAgent:
         
         log_agent_start("hpc", "HPC Job Submission and Monitoring", input_summary)
         
+        hpc_dir = state.get("hpc_dir", "")
         try:
             # Initialize secure file manager
             working_dir = state.get("working_directory", "working_dir")
@@ -183,6 +184,22 @@ class MDHPCAgent:
             
             log_agent_completion("hpc", "HPC Job Submission and Monitoring", state, success)
             
+            # Save agent metadata
+            save_agent_metadata(
+                agent_dir=hpc_dir,
+                agent_name="hpc",
+                success=success,
+                issues=[e for e in state.get("errors", []) if "HPC" in e or "hpc" in e.lower()],
+                warnings=[w for w in state.get("warnings", []) if "HPC" in w],
+                key_outputs={
+                    "job_id": state.get("job_id"),
+                    "job_status": state.get("job_status"),
+                    "job_script": state.get("job_script"),
+                    "trajectory_path": state.get("trajectory_path"),
+                },
+                human_recommendation=state.get("human_recommendation"),
+            )
+            
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -192,9 +209,20 @@ class MDHPCAgent:
             state["errors"].append(msg)
             log_error("hpc_agent.hpc_node", e, {"traceback": tb})
             success = False
+            # Save metadata even on crash
+            if hpc_dir:
+                save_agent_metadata(
+                    agent_dir=hpc_dir, agent_name="hpc",
+                    success=False, issues=[msg],
+                    execution_log_tail=tb[-2000:],
+                    human_recommendation=state.get("human_recommendation"),
+                )
         
-        # Route back to supervisor (or human checkpoint if HITL enabled)
-        if state.get("human_in_loop"):
+        # Route — error-triggered HITL on failure, normal HITL if enabled
+        if not success:
+            state["next_node"] = "human_hpc_check"
+            state["error_triggered_hitl"] = True
+        elif state.get("human_in_loop"):
             state["next_node"] = "human_hpc_check"
         else:
             state["next_node"] = "supervisor"
