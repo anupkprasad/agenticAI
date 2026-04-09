@@ -127,13 +127,17 @@ class PreprocessingAgent:
             
             # Determine next workflow node
             if agent_output.success:
-                if state.get("human_in_loop") and agent_output.result.issues:
+                if state.get("human_in_loop"):
                     state["next_node"] = "human_preprocess_check"
                 else:
                     state["next_node"] = "supervisor"
             else:
                 state["errors"].append(f"Preprocessing failed: {agent_output.result.report}")
-                state["next_node"] = "supervisor"
+                # Route to human checkpoint even on failure so user can decide
+                if state.get("human_in_loop"):
+                    state["next_node"] = "human_preprocess_check"
+                else:
+                    state["next_node"] = "supervisor"
             
             success = agent_output.success and len(agent_output.result.issues) == 0
             log_agent_completion("preprocessing", "PDB Preprocessing", state, success)

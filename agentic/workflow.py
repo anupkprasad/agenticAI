@@ -58,11 +58,24 @@ class MDWorkflow:
         
         logger.info("MD workflow initialized with supervisor → planner → programmer hierarchy")
     
+    # Nodes that produce meaningful artifacts worth saving incrementally
+    _SAVE_AFTER_NODES = frozenset({
+        "input_validation", "planner", "preprocess",
+        "setup", "hpc", "analysis", "reporter",
+    })
+
     def _wrap_node(self, node_name: str, node_func: Callable) -> Callable:
-        """Wrap a node function to automatically set current_node in state."""
+        """Wrap a node function to track current_node and save progress."""
         def wrapped_node(state: MDState) -> MDState:
             state["current_node"] = node_name
-            return node_func(state)
+            result = node_func(state)
+            # Save incremental state after key stages (used by non-HITL run())
+            if node_name in self._SAVE_AFTER_NODES:
+                try:
+                    self._save_progress(result, node_name)
+                except Exception as exc:
+                    logger.debug(f"Incremental save after {node_name} failed: {exc}")
+            return result
         return wrapped_node
     
     def _build_graph(self) -> StateGraph:
@@ -83,6 +96,7 @@ class MDWorkflow:
         workflow.add_node("human_preprocess_check", self._wrap_node("human_preprocess_check", self.checkpoints.human_preprocess_check))
         workflow.add_node("human_setup_check", self._wrap_node("human_setup_check", self.checkpoints.human_setup_check))
         workflow.add_node("human_hpc_check", self._wrap_node("human_hpc_check", self.checkpoints.human_hpc_check))
+        workflow.add_node("human_analysis_check", self._wrap_node("human_analysis_check", self.checkpoints.human_analysis_check))
         workflow.add_node("final_report", self._wrap_node("final_report", self._final_report_node))
         
         # Set entry point
@@ -186,11 +200,23 @@ class MDWorkflow:
         )
         
         # ========== FIELD AGENTS - ANALYSIS ==========
+        # ========== FIELD AGENTS - ANALYSIS ==========
         workflow.add_conditional_edges(
             "analysis",
             lambda state: state.get("next_node", "supervisor"),
             {
-                "supervisor": "supervisor"
+                "supervisor": "supervisor",
+                "human_analysis_check": "human_analysis_check"
+            }
+        )
+        
+        # Human analysis checkpoint
+        workflow.add_conditional_edges(
+            "human_analysis_check",
+            lambda state: state.get("next_node", "supervisor"),
+            {
+                "supervisor": "supervisor",
+                "analysis": "analysis"
             }
         )
         
@@ -240,7 +266,7 @@ class MDWorkflow:
         state["workflow_status"] = "completed"
         
         # Save execution report and state to working_dir/supervisor/
-        self._save_execution_report(state, report)
+        self._save_execution_report(state, report, stage="final_report")
         self._save_workflow_state(state)
         
         return state
@@ -331,8 +357,14 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         
         return summary
     
-    def _save_execution_report(self, state: MDState, report: str):
-        """Save execution_report.md to working_dir/supervisor/."""
+    def _save_execution_report(self, state: MDState, report: str, stage: str = None):
+        """Save execution_report.md to working_dir/supervisor/.
+        
+        Args:
+            state: Current workflow state.
+            report: Optional LLM-generated summary or progress note.
+            stage: Optional current stage label (e.g. 'planner', 'preprocess').
+        """
         try:
             working_dir = state.get("working_directory", ".")
             supervisor_dir = Path(working_dir) / "supervisor"
@@ -342,7 +374,14 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             # Build a concise markdown report
-            status = 'SUCCESS' if not state.get('errors') else 'COMPLETED WITH ERRORS'
+            wf_status = state.get("workflow_status", "")
+            if wf_status and wf_status.startswith("in_progress"):
+                status = f"IN PROGRESS ({stage or wf_status})" 
+            elif not state.get('errors'):
+                status = 'SUCCESS'
+            else:
+                status = 'COMPLETED WITH ERRORS'
+
             lines = [
                 f"# MD Workflow Execution Report",
                 f"",
@@ -367,6 +406,23 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     f"",
                 ]
             
+            # Execution Plan (from planner)
+            plan = state.get("execution_plan")
+            if plan and isinstance(plan, dict):
+                lines += [f"## Execution Plan", f""]
+                if plan.get("title"):
+                    lines.append(f"**{plan['title']}**")
+                    lines.append("")
+                agent_seq = plan.get("agent_sequence", [])
+                if agent_seq:
+                    lines.append(f"Agent sequence: {' → '.join(agent_seq)}")
+                    lines.append("")
+                full_plan = plan.get("full_plan", "")
+                if full_plan:
+                    # Truncate very long plans
+                    lines.append(full_plan[:3000] + ("..." if len(full_plan) > 3000 else ""))
+                    lines.append("")
+
             # Agents executed
             exec_path = state.get("execution_path", [])
             if exec_path:
@@ -383,7 +439,26 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                         f"{' → '.join(agents)}",
                         f"",
                     ]
-            
+
+            # Key Artifacts produced so far
+            artifacts = []
+            if state.get("cleaned_pdb"):
+                artifacts.append(f"- Cleaned PDB: `{state['cleaned_pdb']}`")
+            if state.get("topology"):
+                artifacts.append(f"- Topology: `{state['topology']}`")
+            if state.get("coordinates"):
+                artifacts.append(f"- Coordinates: `{state['coordinates']}`")
+            mdp = state.get("mdp_files", {})
+            if mdp:
+                artifacts.append(f"- MDP files: {', '.join(f'`{k}`' for k in mdp)}")
+            if state.get("job_script"):
+                artifacts.append(f"- Job script: `{state['job_script']}`")
+            figs = state.get("figures", [])
+            if figs:
+                artifacts.append(f"- Figures: {len(figs)} generated")
+            if artifacts:
+                lines += [f"## Key Artifacts", f""] + artifacts + [f""]
+
             # Errors & Warnings (only if present)
             errors = state.get("errors", [])
             warnings = state.get("warnings", [])
@@ -408,6 +483,17 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         except Exception as e:
             logger.error(f"Failed to save execution report: {e}")
     
+    def _save_progress(self, state: MDState, stage: str):
+        """Save incremental state and execution report after a workflow stage.
+        
+        Called after each major stage so that HITL checkpoints and the
+        interactive Q&A handler always have up-to-date context files.
+        """
+        state["workflow_status"] = f"in_progress:{stage}"
+        self._save_workflow_state(state)
+        progress = f"Workflow in progress — last completed stage: **{stage}**"
+        self._save_execution_report(state, progress, stage=stage)
+
     def _save_workflow_state(self, state: MDState):
         """Save serializable workflow state to working_dir/supervisor/state.jsonl."""
         try:
@@ -684,26 +770,37 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
 
             elif current_node == "input_validation":
                 state = self.supervisor.input_validation_node(state)
+                self._save_progress(state, "input_validation")
                 current_node = state.get("next_node", "supervisor")
 
             elif current_node == "planner":
                 state = self.planner.planner_node(state)
+                self._save_progress(state, "planner")
                 current_node = state.get("next_node", "supervisor")
 
             elif current_node == "preprocess":
                 state = self.preprocessor.preprocess_node(state)
+                self._save_progress(state, "preprocess")
                 current_node = state.get("next_node", "supervisor")
 
             elif current_node == "setup":
                 state = self.setup_agent.setup_node(state)
+                self._save_progress(state, "setup")
                 current_node = state.get("next_node", "supervisor")
 
             elif current_node == "hpc":
                 state = self.hpc_agent.hpc_node(state)
+                self._save_progress(state, "hpc")
                 current_node = state.get("next_node", "supervisor")
 
             elif current_node == "analysis":
                 state = self.analysis_agent.analysis_node(state)
+                self._save_progress(state, "analysis")
+                current_node = state.get("next_node", "supervisor")
+
+            elif current_node == "reporter":
+                state = self.reporter_agent.reporter_node(state)
+                self._save_progress(state, "reporter")
                 current_node = state.get("next_node", "supervisor")
 
             elif current_node == "human_preprocess_check":
@@ -733,6 +830,15 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 state = self.checkpoints.human_hpc_check(state)
                 current_node = state.get("next_node", "supervisor")
 
+            elif current_node == "human_analysis_check":
+                feedback = self._collect_human_feedback(state, "analysis", feedback_handler)
+                if self._should_stop(feedback, state, "analysis"):
+                    current_node = "final_report"
+                    continue
+                state["human_feedback"] = feedback
+                state = self.checkpoints.human_analysis_check(state)
+                current_node = state.get("next_node", "supervisor")
+
             elif current_node == "final_report":
                 return self._final_report_node(state)
 
@@ -750,8 +856,15 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         checkpoint_type: str,
         feedback_handler: Callable[[Dict[str, Any]], str]
     ) -> str:
-        """Prompt human for feedback using provided handler."""
+        """Prompt human for feedback using provided handler.
+        
+        Injects '_llm' and '_state' into the summary so interactive handlers
+        can answer user questions conversationally.
+        """
         summary = self.checkpoints.get_checkpoint_summary(state, checkpoint_type)
+        # Provide LLM and full state to handler for interactive Q&A
+        summary["_llm"] = self.llm
+        summary["_state"] = state
         try:
             response = feedback_handler(summary)
         except Exception as exc:

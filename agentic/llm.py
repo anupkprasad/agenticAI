@@ -101,6 +101,21 @@ class LLMClient:
         """Check if LLM client is available and not in mock mode."""
         return not self._is_mock_mode and self._client is not None
 
+    def prompt_raw(self, prompt: str, system: Optional[str] = None, **kwargs) -> str:
+        """Send a prompt via /api/generate (no tool-call parsing).
+        
+        Use this for free-form Q&A where the model output may contain text
+        patterns that would be misinterpreted by the chat endpoint's native
+        tool-call parser (e.g. 'TOOL: ...' or 'ACTION: ...').
+        """
+        if not self.base_url:
+            return f"MOCK_LLM_RESPONSE: would send: {prompt[:200]}"
+        try:
+            return self._http_call(prompt, system=system, **kwargs)
+        except Exception as e:
+            logger.error(f"prompt_raw HTTP call failed: {e}")
+            return f"MOCK_LLM_RESPONSE: HTTP_ERROR: {e}"
+
     def prompt(self, prompt: str, system: Optional[str] = None, **kwargs) -> str:
         """Send a prompt to the LLM and return a text response.
 

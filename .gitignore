@@ -13,6 +13,8 @@ results/
 jobs/
 working_dir_backup/
 work_di/
+work_dir_hl/
+work_dir_hl2/
 backup/
 tests/
 tmp/

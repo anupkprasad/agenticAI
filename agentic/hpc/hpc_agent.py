@@ -193,10 +193,13 @@ class MDHPCAgent:
             log_error("hpc_agent.hpc_node", e, {"traceback": tb})
             success = False
         
-        # Route back to supervisor
-        state["next_node"] = "supervisor"
+        # Route back to supervisor (or human checkpoint if HITL enabled)
+        if state.get("human_in_loop"):
+            state["next_node"] = "human_hpc_check"
+        else:
+            state["next_node"] = "supervisor"
         reasoning = f"HPC agent completed - {'success' if success else 'with errors'}"
-        log_supervisor_routing(state, "supervisor", reasoning)
+        log_supervisor_routing(state, state["next_node"], reasoning)
         
         return state
     
