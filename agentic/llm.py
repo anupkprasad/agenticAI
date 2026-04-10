@@ -552,9 +552,16 @@ class LLMClient:
         # 1) Try preferred non-streaming endpoints with explicit stream:false first
         for ep in preferred_endpoints:
             url = urllib.parse.urljoin(self.base_url.rstrip('/') + '/', ep.lstrip('/'))
-            payload = {"model": self.model, "prompt": prompt, "stream": False, "max_tokens": self.config.get("max_tokens", 512)}
+            payload = {
+                "model": self.model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"num_predict": self.config.get("max_tokens", 1024)},
+            }
+            if system:
+                payload["system"] = system
             try:
-                resp = session.post(url, headers=headers, json=payload, timeout=30)
+                resp = session.post(url, headers=headers, json=payload, timeout=120)
             except Exception as e:
                 logger.debug("preferred endpoint %s failed: %s", url, e)
                 continue
@@ -566,10 +573,14 @@ class LLMClient:
         # 2) Fallback to chat-style endpoints which may stream NDJSON
         for ep in endpoints:
             url = urllib.parse.urljoin(self.base_url.rstrip('/') + '/', ep.lstrip('/'))
-            payload = {"model": self.model, "messages": (([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]), "max_tokens": self.config.get("max_tokens", 512)}
+            payload = {
+                "model": self.model,
+                "messages": (([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]),
+                "options": {"num_predict": self.config.get("max_tokens", 1024)},
+            }
             try:
                 # allow streaming iter_lines on the response
-                resp = session.post(url, headers=headers, data=json.dumps(payload), timeout=30, stream=True)
+                resp = session.post(url, headers=headers, data=json.dumps(payload), timeout=120, stream=True)
             except Exception as e:
                 logger.debug("chat endpoint %s failed: %s", url, e)
                 continue

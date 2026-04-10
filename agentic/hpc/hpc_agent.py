@@ -17,7 +17,7 @@ from ..llm import LLMClient
 from ..utils import (
     log_agent_start, log_llm_interaction, log_agent_action,
     log_file_operation, log_agent_completion, log_error,
-    log_supervisor_routing, SecureFileManager, save_agent_metadata
+    log_supervisor_routing, SecureFileManager
 )
 from .tools import (
     copy_simulation_files, estimate_simulation_time, create_slurm_script,
@@ -151,12 +151,29 @@ class MDHPCAgent:
             state["hpc_directory"] = hpc_dir  # Backward compatibility
             state["hpc_output_directory"] = hpc_dir  # Also set this for analysis agent
             
-            # Generate execution plan using LLM
-            plan = self._create_execution_plan(state)
-            
-            if not plan:
-                logger.warning("Failed to create execution plan, using fallback workflow")
-                plan = self._create_fallback_plan(state)
+            # Generate execution plan using LLM.
+            # When human_recommendation is set, replan on top of the existing plan
+            # so the recommendation is actually applied (not bypassed).
+            exec_plan = state.get("execution_plan")
+            human_rec = state.get("human_recommendation")
+            if human_rec:
+                logger.info("hpc: replanning with human guidance: %s", human_rec[:120])
+                plan = self.replan_with_guidance(human_rec, state)
+                if not plan:
+                    # LLM unavailable — fall back to fresh plan
+                    plan = self._create_execution_plan(state)
+                    if not plan:
+                        logger.warning("Failed to create execution plan, using fallback workflow")
+                        plan = self._create_fallback_plan(state)
+            else:
+                plan = self._create_execution_plan(state)
+                if not plan:
+                    logger.warning("Failed to create execution plan, using fallback workflow")
+                    plan = self._create_fallback_plan(state)
+
+            # Persist structured plan to state for HITL inspection/modification
+            if exec_plan is not None and plan:
+                exec_plan.setdefault("structured_plans", {})["hpc"] = plan
             
             log_agent_action(
                 "hpc",
@@ -184,22 +201,6 @@ class MDHPCAgent:
             
             log_agent_completion("hpc", "HPC Job Submission and Monitoring", state, success)
             
-            # Save agent metadata
-            save_agent_metadata(
-                agent_dir=hpc_dir,
-                agent_name="hpc",
-                success=success,
-                issues=[e for e in state.get("errors", []) if "HPC" in e or "hpc" in e.lower()],
-                warnings=[w for w in state.get("warnings", []) if "HPC" in w],
-                key_outputs={
-                    "job_id": state.get("job_id"),
-                    "job_status": state.get("job_status"),
-                    "job_script": state.get("job_script"),
-                    "trajectory_path": state.get("trajectory_path"),
-                },
-                human_recommendation=state.get("human_recommendation"),
-            )
-            
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -209,23 +210,21 @@ class MDHPCAgent:
             state["errors"].append(msg)
             log_error("hpc_agent.hpc_node", e, {"traceback": tb})
             success = False
-            # Save metadata even on crash
-            if hpc_dir:
-                save_agent_metadata(
-                    agent_dir=hpc_dir, agent_name="hpc",
-                    success=False, issues=[msg],
-                    execution_log_tail=tb[-2000:],
-                    human_recommendation=state.get("human_recommendation"),
-                )
         
         # Route — error-triggered HITL on failure, normal HITL if enabled
         if not success:
             state["next_node"] = "human_hpc_check"
             state["error_triggered_hitl"] = True
-        elif state.get("human_in_loop"):
-            state["next_node"] = "human_hpc_check"
         else:
-            state["next_node"] = "supervisor"
+            # Clear any previous HPC-related errors from earlier retry attempts
+            state["errors"] = [
+                e for e in state.get("errors", [])
+                if not (e.startswith("HPC agent failed:") or e.startswith("HPC execution failed"))
+            ]
+            if state.get("human_in_loop"):
+                state["next_node"] = "human_hpc_check"
+            else:
+                state["next_node"] = "supervisor"
         reasoning = f"HPC agent completed - {'success' if success else 'with errors'}"
         log_supervisor_routing(state, state["next_node"], reasoning)
         
@@ -282,6 +281,15 @@ class MDHPCAgent:
                 hpc_section = self._extract_agent_instructions(full_plan, "HPC Agent")
                 if hpc_section:
                     planner_instructions = hpc_section
+        
+        # Append human recommendation so the LLM sees it
+        human_rec = state.get("human_recommendation")
+        if human_rec:
+            rec_block = (
+                f"\n\n**HUMAN RECOMMENDATION (must be followed):**\n{human_rec}\n"
+                "Adjust the HPC plan to incorporate this recommendation."
+            )
+            planner_instructions = (planner_instructions or "") + rec_block
         
         # Get system information
         mdp_files = state.get("mdp_files", {})
@@ -475,7 +483,71 @@ Output as JSON with this structure:
     • remote_user (optional): No description
     • ssh_key_path (optional): No description
 """
-    
+
+    def replan_with_guidance(self, human_recommendation: str, state: dict) -> Optional[dict]:
+        """Update the structured HPC plan by applying human guidance.
+
+        If a current structured plan exists in state: sends it together with the human
+        recommendation to the LLM so ONLY the requested changes are made (tool_params,
+        steps, parameters).  Falls back to full re-planning via the normal prompt
+        infrastructure when no current plan is available.
+
+        Returns the updated plan dict, or None if the LLM call fails.
+        """
+        if not (self.llm and self.llm.available):
+            return None
+
+        import re as _re
+
+        current_plan = (
+            (state.get("execution_plan") or {})
+            .get("structured_plans", {})
+            .get("hpc")
+        )
+
+        if current_plan:
+            # Modification mode: keep existing plan, apply targeted changes
+            tools_str = self._get_tools_description()
+            prompt = (
+                f"You are updating an HPC SLURM job submission execution plan.\n\n"
+                f"CURRENT PLAN (JSON):\n```json\n{json.dumps(current_plan, indent=2)}\n```\n\n"
+                f"HUMAN GUIDANCE (apply ONLY these changes):\n{human_recommendation}\n\n"
+                f"Available tools for reference (tool_name must match):\n{tools_str}\n\n"
+                f"Rules:\n"
+                f"- Apply ONLY the changes the human requested.\n"
+                f"- Update tool_params values, add/remove/reorder steps as needed.\n"
+                f"- Keep all other steps and fields exactly as they are.\n"
+                f"- Preserve JSON structure: reasoning, overview, steps, potential_issues, recommendations.\n"
+                f"- Each step must have: name, description, tool_name, tool_params, reason.\n"
+                f"- Return ONLY valid JSON — no explanation, no markdown fences.\n"
+            )
+        else:
+            # Fresh planning mode: build from planner NL instructions + human guidance
+            nl_instructions = (
+                (state.get("execution_plan") or {})
+                .get("agent_plans", {})
+                .get("hpc_agent", "")
+            )
+            augmented = (
+                nl_instructions
+                + "\n\n**HUMAN RECOMMENDATION (must be followed):**\n"
+                + human_recommendation
+                + "\nAdjust the HPC plan to incorporate this recommendation."
+            ) if nl_instructions else (
+                human_recommendation
+                + "\nAdjust the HPC plan to incorporate this recommendation."
+            )
+            system_size = self._estimate_system_size(state.get("coordinates"))
+            mdp_files = state.get("mdp_files", {})
+            prompt = self._build_planning_prompt(state, augmented, system_size, mdp_files)
+
+        try:
+            resp = self.llm.prompt(prompt, temperature=0.1)
+            m = _re.search(r'\{[\s\S]*\}', resp)
+            return json.loads(m.group()) if m else None
+        except Exception:
+            return None
+
     def _estimate_system_size(self, coordinates_file: Optional[str]) -> int:
         """Estimate number of atoms from coordinate file"""
         if not coordinates_file or not Path(coordinates_file).exists():

@@ -26,7 +26,6 @@ from .log_utils import reconstruct_assistant_text
 from .workflow_visualizer import WorkflowVisualizer
 from .dynamic_tool_loader import DynamicToolLoader, get_dynamic_tool_loader
 from .file_manager import SecureFileManager
-from .agent_metadata import save_agent_metadata, load_agent_metadata
 from .path_utils import (
     sanitize_tool_output_params,
     normalize_to_filename,
@@ -58,8 +57,6 @@ __all__ = [
     "DynamicToolLoader",
     "get_dynamic_tool_loader",
     "SecureFileManager",
-    "save_agent_metadata",
-    "load_agent_metadata",
     "sanitize_tool_output_params",
     "normalize_to_filename",
     "normalize_tool_params_for_agent",

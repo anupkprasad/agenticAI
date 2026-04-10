@@ -462,6 +462,34 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             # Errors & Warnings (only if present)
             errors = state.get("errors", [])
             warnings = state.get("warnings", [])
+            
+            # Human Recommendations (if any were given during HITL)
+            human_rec = state.get("human_recommendation")
+            # Also gather recommendation entries from warnings
+            rec_entries = [w for w in warnings if "Human recommendation" in w or "Human modification" in w or "Human modify" in w]
+            if human_rec or rec_entries:
+                lines += [f"## Human Recommendations", f""]
+                if human_rec:
+                    lines.append(f"**Active recommendation:** {human_rec}")
+                    lines.append("")
+                if rec_entries:
+                    for r in rec_entries:
+                        lines.append(f"- {r}")
+                    lines.append("")
+                # Show parameter overrides
+                param_overrides = []
+                if state.get("force_field"):
+                    param_overrides.append(f"Force field: {state['force_field']}")
+                if state.get("water_model"):
+                    param_overrides.append(f"Water model: {state['water_model']}")
+                if state.get("temperature"):
+                    param_overrides.append(f"Temperature: {state['temperature']} K")
+                if state.get("pressure"):
+                    param_overrides.append(f"Pressure: {state['pressure']} bar")
+                if param_overrides:
+                    lines.append("**Current parameters:** " + " | ".join(param_overrides))
+                    lines.append("")
+            
             if errors:
                 lines += [f"## Errors ({len(errors)})", f""]
                 for e in errors:
@@ -517,10 +545,8 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 "state": serializable_state,
             }
             
-            # Append as a pretty-printed JSON block separated by a marker
-            with open(state_path, "a", encoding="utf-8") as f:
-                f.write("--- snapshot ---\n")
-                f.write(json.dumps(entry, indent=2, default=str) + "\n")
+            # Overwrite with a single entry so the file is always the latest state
+            state_path.write_text(json.dumps(entry, indent=2, default=str) + "\n", encoding="utf-8")
             
             logger.info(f"Workflow state saved to {state_path}")
             
@@ -537,20 +563,10 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             return None
         
         try:
-            content = state_path.read_text(encoding="utf-8")
-            # Split on snapshot markers and take the last block
-            blocks = content.split("--- snapshot ---")
-            last_block = ""
-            for block in reversed(blocks):
-                block = block.strip()
-                if block:
-                    last_block = block
-                    break
-            
-            if not last_block:
+            content = state_path.read_text(encoding="utf-8").strip()
+            if not content:
                 return None
-            
-            entry = json.loads(last_block)
+            entry = json.loads(content)
             saved_state = entry.get("state")
             if saved_state:
                 logger.info(
@@ -558,7 +574,6 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     f"(status={entry.get('workflow_status')}, ts={entry.get('timestamp')})"
                 )
             return saved_state
-            
         except Exception as e:
             logger.warning(f"Failed to load workflow state from {state_path}: {e}")
             return None
@@ -813,6 +828,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     continue
                 state["human_feedback"] = feedback
                 state = self.checkpoints.human_preprocess_check(state)
+                self._save_progress(state, "human_preprocess_check")
                 current_node = state.get("next_node", "supervisor")
 
             elif current_node == "human_setup_check":
@@ -822,6 +838,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     continue
                 state["human_feedback"] = feedback
                 state = self.checkpoints.human_setup_check(state)
+                self._save_progress(state, "human_setup_check")
                 current_node = state.get("next_node", "supervisor")
 
             elif current_node == "human_hpc_check":
@@ -831,6 +848,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     continue
                 state["human_feedback"] = feedback
                 state = self.checkpoints.human_hpc_check(state)
+                self._save_progress(state, "human_hpc_check")
                 current_node = state.get("next_node", "supervisor")
 
             elif current_node == "human_analysis_check":
@@ -840,6 +858,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     continue
                 state["human_feedback"] = feedback
                 state = self.checkpoints.human_analysis_check(state)
+                self._save_progress(state, "human_analysis_check")
                 current_node = state.get("next_node", "supervisor")
 
             elif current_node == "final_report":

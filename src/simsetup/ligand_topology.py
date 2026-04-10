@@ -85,11 +85,19 @@ class LigandTopologyGenerator:
                 coordinate_file = acpype_dir / f"{ligand_name}_GMX.gro"
                 
                 if topology_file.exists():
+                    # Copy output files to output_dir so callers get clean paths
+                    # without the confusing .acpype suffix in the directory name
+                    dest_itp = output_dir / topology_file.name
+                    dest_gro = output_dir / coordinate_file.name if coordinate_file.exists() else None
+                    shutil.copy2(str(topology_file), str(dest_itp))
+                    if dest_gro:
+                        shutil.copy2(str(coordinate_file), str(dest_gro))
                     return {
                         "success": True,
-                        "topology": str(topology_file),
-                        "coordinates": str(coordinate_file) if coordinate_file.exists() else None,
-                        "output_dir": str(acpype_dir),
+                        "topology": str(dest_itp),
+                        "coordinates": str(dest_gro) if dest_gro else None,
+                        "output_dir": str(output_dir),
+                        "acpype_dir": str(acpype_dir),
                         "method": "acpype",
                         "atom_type": atom_type,
                         "charge_method": charge_method,

@@ -1,10 +1,10 @@
 """Human-in-the-Loop Checkpoint Nodes"""
 import logging
+import re
 from pathlib import Path
 from typing import Dict, Any, List
 from .state import MDState
 from .utils import log_human_checkpoint
-from .utils.agent_metadata import load_agent_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,13 @@ class HumanCheckpoints:
             # Human provides guidance — store it and retry with recommendation
             recommendation = feedback.split(":", 1)[1].strip() if ":" in feedback else feedback
             state["human_recommendation"] = recommendation
+            # Extract parameter overrides from recommendation text
+            HumanCheckpoints._apply_parameter_overrides(recommendation, state)
+            # Clear previous results so the agent re-runs cleanly
+            for key in (clear_keys or []):
+                if key in state:
+                    default = [] if isinstance(state.get(key), list) else ({} if isinstance(state.get(key), dict) else None)
+                    state[key] = default
             # Append to agent-specific issues so the LLM planner sees it
             issues_key = f"{checkpoint_label}_issues"
             if issues_key in state and isinstance(state[issues_key], list):
@@ -62,6 +69,13 @@ class HumanCheckpoints:
             # Store the human's modification instructions for the agent
             modification = feedback.split(":", 1)[1].strip() if ":" in feedback else feedback
             state["human_recommendation"] = modification
+            # Extract parameter overrides from modification text
+            HumanCheckpoints._apply_parameter_overrides(modification, state)
+            # Clear previous results so the agent re-runs cleanly
+            for key in (clear_keys or []):
+                if key in state:
+                    default = [] if isinstance(state.get(key), list) else ({} if isinstance(state.get(key), dict) else None)
+                    state[key] = default
             issues_key = f"{checkpoint_label}_issues"
             if issues_key in state and isinstance(state[issues_key], list):
                 state[issues_key].append(f"Human modification request: {modification}")
@@ -75,6 +89,64 @@ class HumanCheckpoints:
             state["next_node"] = "supervisor"
         
         return state
+    
+    @staticmethod
+    def _apply_parameter_overrides(text: str, state: MDState):
+        """Extract and apply parameter overrides from human recommendation text.
+        
+        Detects force field, water model, temperature, pressure, and simulation
+        length keywords and updates state directly so agents pick them up.
+        """
+        lower = text.lower()
+        
+        # Force field detection
+        ff_patterns = {
+            "charmm36": "charmm27",  # GROMACS uses charmm27 for CHARMM36
+            "charmm27": "charmm27",
+            "charmm": "charmm27",
+            "opls": "oplsaa",
+            "opls-aa": "oplsaa",
+            "oplsaa": "oplsaa",
+            "amber99sb-ildn": "amber99sb-ildn",
+            "amber99sb": "amber99sb-ildn",
+            "amber03": "amber03",
+            "amber94": "amber94",
+            "gromos": "gromos54a7",
+        }
+        for pattern, ff_value in ff_patterns.items():
+            if pattern in lower:
+                old_ff = state.get("force_field", "")
+                state["force_field"] = ff_value
+                logger.info(f"Parameter override: force_field {old_ff!r} -> {ff_value!r} (from human recommendation)")
+                break
+        
+        # Water model detection
+        wm_patterns = {
+            "spc/e": "spce", "spce": "spce", "spc": "spc216",
+            "tip3p": "tip3p", "tip4p": "tip4p", "tip5p": "tip5p",
+        }
+        for pattern, wm_value in wm_patterns.items():
+            if pattern in lower:
+                old_wm = state.get("water_model", "")
+                state["water_model"] = wm_value
+                logger.info(f"Parameter override: water_model {old_wm!r} -> {wm_value!r} (from human recommendation)")
+                break
+        
+        # Temperature detection (e.g. "310 K", "temperature 350")
+        temp_match = re.search(r'(?:temperature|temp)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*k?\b', lower)
+        if not temp_match:
+            temp_match = re.search(r'(\d+(?:\.\d+)?)\s*k\b', lower)
+        if temp_match:
+            state["temperature"] = float(temp_match.group(1))
+            logger.info(f"Parameter override: temperature -> {state['temperature']} K")
+        
+        # Pressure detection (e.g. "1.5 bar")
+        pres_match = re.search(r'(?:pressure|pres)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*bar\b', lower)
+        if not pres_match:
+            pres_match = re.search(r'(\d+(?:\.\d+)?)\s*bar\b', lower)
+        if pres_match:
+            state["pressure"] = float(pres_match.group(1))
+            logger.info(f"Parameter override: pressure -> {state['pressure']} bar")
     
     @staticmethod
     def human_preprocess_check(state: MDState) -> MDState:
@@ -171,16 +243,6 @@ class HumanCheckpoints:
             "recommendations": []
         }
         
-        # Load agent metadata if available
-        agent_dir_map = {
-            "preprocess": state.get("preprocess_dir", ""),
-            "setup": state.get("simsetup_dir", ""),
-            "hpc": state.get("hpc_dir", ""),
-            "analysis": state.get("analysis_dir", ""),
-        }
-        agent_dir = agent_dir_map.get(checkpoint_type, "")
-        agent_meta = load_agent_metadata(agent_dir) if agent_dir else None
-        
         if checkpoint_type == "preprocess":
             preprocess_dir = state.get("preprocess_dir", "")
             generated = _list_files_in_dir(preprocess_dir, [".pdb", ".log", ".txt"])
@@ -264,21 +326,6 @@ class HumanCheckpoints:
                 "Check that all requested analyses were completed",
                 "Verify analysis results make physical sense",
             ]
-        
-        # Merge agent metadata into summary if available
-        if agent_meta:
-            # Add step counts to current_state
-            summary["current_state"]["steps_executed"] = agent_meta.get("steps_executed", 0)
-            summary["current_state"]["steps_succeeded"] = agent_meta.get("steps_succeeded", 0)
-            summary["current_state"]["steps_failed"] = agent_meta.get("steps_failed", 0)
-            # Add execution log tail for error context
-            log_tail = agent_meta.get("execution_log_tail", "")
-            if log_tail:
-                summary["current_state"]["execution_log_tail"] = log_tail[-1000:]
-            # Merge issues from metadata
-            meta_issues = agent_meta.get("issues", [])
-            if meta_issues:
-                summary["issues_found"] = list(summary["issues_found"]) + meta_issues
         
         # Add errors from the workflow so far
         errors = state.get("errors", [])

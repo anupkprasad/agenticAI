@@ -15,7 +15,7 @@ from ..llm import LLMClient
 from ..utils import (
     log_agent_start, log_llm_interaction, log_agent_action, 
     log_file_operation, log_agent_completion, log_error,
-    SecureFileManager, save_agent_metadata
+    SecureFileManager
 )
 from .schemas import (
     SimSetupPlan, SimSetupStep, 
@@ -128,28 +128,13 @@ class SimulationSetupAgent:
             # Update state with results
             self._update_state(state, agent_output)
             
-            # Save agent metadata for HITL context
-            gen_files = list(agent_output.result.generated_files.keys()) if hasattr(agent_output.result, 'generated_files') and agent_output.result.generated_files else []
-            save_agent_metadata(
-                agent_dir=simsetup_dir,
-                agent_name="setup",
-                success=agent_output.success,
-                steps_executed=len(agent_output.plan.steps),
-                steps_succeeded=sum(1 for s in agent_output.result.execution_log if "\u2713" in s),
-                steps_failed=sum(1 for s in agent_output.result.execution_log if "\u2717" in s),
-                issues=agent_output.result.issues,
-                warnings=agent_output.result.warnings,
-                generated_files=gen_files,
-                key_outputs={
-                    "topology": state.get("topology"),
-                    "coordinates": state.get("coordinates"),
-                },
-                execution_log_tail="\n".join(agent_output.result.execution_log[-30:]),
-                human_recommendation=state.get("human_recommendation"),
-            )
-            
             # Determine next workflow node
             if agent_output.success:
+                # Clear any previous setup-related errors from earlier retry attempts
+                state["errors"] = [
+                    e for e in state.get("errors", [])
+                    if not (e.startswith("Setup failed:") or e.startswith("Setup error:"))
+                ]
                 if state.get("human_in_loop"):
                     state["next_node"] = "human_setup_check"
                 else:
@@ -170,15 +155,6 @@ class SimulationSetupAgent:
             logger.error(f"Traceback: {tb}")
             log_error("setup_agent.setup_node", e, {"state": str(state), "traceback": tb})
             state["errors"].append(f"Setup error: {str(e)}")
-            # Save metadata even on crash
-            agent_dir = state.get("simsetup_dir", state.get("simsetup_directory", ""))
-            if agent_dir:
-                save_agent_metadata(
-                    agent_dir=agent_dir, agent_name="setup",
-                    success=False, issues=[str(e)],
-                    execution_log_tail=tb[-2000:],
-                    human_recommendation=state.get("human_recommendation"),
-                )
             # Error-triggered HITL
             state["next_node"] = "human_setup_check"
             state["error_triggered_hitl"] = True
@@ -329,6 +305,18 @@ class SimulationSetupAgent:
             if execution_plan.get("format") == "natural_language":
                 full_plan = execution_plan.get("full_plan", "")
                 planner_instructions = self._extract_agent_instructions(full_plan, "Simulation Setup Agent")
+        
+        # Append human recommendation to instructions so the LLM planner sees it
+        human_rec = state.get("human_recommendation")
+        if human_rec:
+            rec_block = (
+                f"\n\n**HUMAN RECOMMENDATION (must be followed):**\n{human_rec}\n"
+                "Adjust the setup plan to incorporate this recommendation."
+            )
+            if planner_instructions:
+                planner_instructions += rec_block
+            else:
+                planner_instructions = rec_block
             
         return SimSetupAgentInput(
             cleaned_pdb=state.get("cleaned_pdb", ""),
@@ -351,13 +339,46 @@ class SimulationSetupAgent:
         3. Return structured results
         """
         try:
-            # Step 1: LLM analyzes system and creates plan
-            plan = self._create_setup_plan(agent_input, state)
-            
+            # Step 1: LLM analyzes system and creates plan —
+            # BUT if a human already modified the structured plan via HITL, use that
+            # directly so their changes are not overwritten by a fresh LLM re-plan.
+            exec_plan = state.get("execution_plan")
+            human_rec = state.get("human_recommendation")
+            if human_rec:
+                # Human provided guidance: apply changes on top of existing plan (if any)
+                logger.info("setup: replanning with human guidance: %s", human_rec[:120])
+                _updated = self.replan_with_guidance(human_rec, state)
+                if _updated:
+                    plan = SimSetupPlan(
+                        reasoning=_updated.get("reasoning", ""),
+                        overview=_updated.get("overview", ""),
+                        steps=[
+                            SimSetupStep(
+                                name=s.get("name", ""),
+                                description=s.get("description", ""),
+                                tool_name=s.get("tool_name", ""),
+                                tool_params=s.get("tool_params", {}),
+                                reason=s.get("reason", "")
+                            )
+                            for s in _updated.get("steps", [])
+                        ],
+                        potential_issues=_updated.get("potential_issues", []),
+                        recommendations=_updated.get("recommendations", []),
+                    )
+                else:
+                    # LLM unavailable — fall back; human_rec is already in additional_instructions
+                    plan = self._create_setup_plan(agent_input, state)
+            else:
+                plan = self._create_setup_plan(agent_input, state)
+
             log_agent_action("setup", "Generated setup plan", {
                 "steps": len(plan.steps),
                 "reasoning": plan.reasoning[:200]
             })
+
+            # Persist structured plan to state for HITL inspection/modification
+            if exec_plan is not None:
+                exec_plan.setdefault("structured_plans", {})["setup"] = plan.model_dump()
             
             # Step 2: Execute plan using tool executor
             result = self._execute_plan(agent_input, plan, state)
@@ -898,7 +919,87 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             "overview": "Simulation setup plan",
             "steps": []
         }
-    
+
+    def replan_with_guidance(self, human_recommendation: str, state: dict) -> Optional[dict]:
+        """Update the structured setup plan by applying human guidance.
+
+        If a current structured plan exists in state: sends it together with the human
+        recommendation to the LLM so ONLY the requested changes are made (tool_params,
+        steps, parameters).  Falls back to full re-planning via the normal prompt
+        infrastructure when no current plan is available.
+
+        Returns the updated plan dict, or None if the LLM call fails.
+        """
+        if not (self.llm and self.llm.available):
+            return None
+
+        import json as _j
+
+        current_plan = (
+            (state.get("execution_plan") or {})
+            .get("structured_plans", {})
+            .get("setup")
+        )
+
+        if current_plan:
+            # Modification mode: keep existing plan, apply targeted changes
+            tool_metadata = get_tool_metadata()
+            tools_list = [
+                f"→ {t['name']}: {t['description']}"
+                for t in tool_metadata.values()
+            ]
+            tools_str = "\n".join(tools_list)
+            prompt = (
+                f"You are updating a GROMACS MD simulation setup execution plan.\n\n"
+                f"CURRENT PLAN (JSON):\n```json\n{_j.dumps(current_plan, indent=2)}\n```\n\n"
+                f"HUMAN GUIDANCE (apply ONLY these changes):\n{human_recommendation}\n\n"
+                f"Available tools for reference (tool_name must match):\n{tools_str}\n\n"
+                f"Rules:\n"
+                f"- Apply ONLY the changes the human requested.\n"
+                f"- Update tool_params values, add/remove/reorder steps as needed.\n"
+                f"- Keep all other steps and fields exactly as they are.\n"
+                f"- Preserve JSON structure: reasoning, overview, steps, potential_issues, recommendations.\n"
+                f"- Each step must have: name, description, tool_name, tool_params, reason.\n"
+                f"- Return ONLY valid JSON — no explanation, no markdown fences.\n"
+            )
+        else:
+            # Fresh planning mode: build from planner NL instructions + human guidance
+            nl_instructions = (
+                (state.get("execution_plan") or {})
+                .get("agent_plans", {})
+                .get("setup_agent", "")
+            )
+            augmented = (
+                nl_instructions
+                + "\n\n**HUMAN RECOMMENDATION (must be followed):**\n" + human_recommendation
+            ) if nl_instructions else human_recommendation
+            try:
+                temperature = float(state.get("temperature", 300.0))
+            except (TypeError, ValueError):
+                temperature = 300.0
+            try:
+                pressure = float(state.get("pressure", 1.0))
+            except (TypeError, ValueError):
+                pressure = 1.0
+            agent_input = SimSetupAgentInput(
+                cleaned_pdb=state.get("cleaned_pdb") or state.get("pdb_path", ""),
+                working_directory=state.get("working_directory", "."),
+                force_field=state.get("force_field", "amber99sb-ildn"),
+                water_model=state.get("water_model", "tip3p"),
+                temperature=temperature,
+                pressure=pressure,
+                user_goal=state.get("user_goal", ""),
+                additional_instructions=augmented,
+                component_selection=state.get("component_selection"),
+            )
+            prompt = self._build_planning_prompt(agent_input, {}, state)
+
+        try:
+            resp = self.llm.prompt(prompt, temperature=0.1)
+            return self._extract_plan_json(resp)
+        except Exception:
+            return None
+
     def _create_fallback_plan(self, agent_input: SimSetupAgentInput, 
                              analysis: Dict[str, Any]) -> SimSetupPlan:
         """
