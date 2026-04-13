@@ -198,6 +198,17 @@ python run_agenticAIWork.py \
   --no-human-loop
 
 
+python run_agenticAIWork.py \
+  --goal "The simulation setup is already done for the protein-ATP-Mg system. The structure was taken from the pdb file of work_dir_hl2/2_h.pdb. The production of simulation is 12 ns only. Please submit the job on HPC" \
+  --subtask hpcjob \
+  --use-llm \
+  --llm-base-url http://127.0.0.1:11434 \
+  --llm-model gpt-oss:20b \
+  --working-dir work_dir_hl2 \
+  --no-human-loop
+
+
+
 # 5.2. Run analysis-only workflow (trajectory in working_dir/hpc/)
 python run_agenticAIWork.py \
   --goal "The protein availble in the pdb file of working_dir/3.pdb, was used for the simulation. The simulation production is already done and data output is stored in working_dir/hpc. Please dont preprocess, do not setup simulation and do not job submit the simulation. Only use the analysis agent to analyze and plot the center of mass of protein in 3D plot of simulation trajectory. The trajectory file is md.xtc and topology file is md.gro after analyis please use the reporter agent to make simulaiton report" \
@@ -213,7 +224,7 @@ python run_agenticAIWork.py \
 python run_agenticAIWork.py \
   --goal "The simulation of initial structure 2_h.pdb is already done. Simulation trajectory is in work_di/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM and secondary structure for protein only and plot those data. There is also ligand ATP, please calculate and plot the distance the center of mass of ATP to COM of protein. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is human psedukinase JAK1, please find the kinase and pseudokinase related literatures that correlate dynamics. Based on literature and results make comments on in report" \
   --subtask analysis reporter \
-  --working-dir work_di \
+  --working-dir work_di_hl \
   --use-llm \
   --llm-base-url http://127.0.0.1:11434 \
   --llm-model gpt-oss:20b \
