@@ -15,6 +15,20 @@ from agentic.llm import LLMClient
 from agentic.utils import (
     get_conversation_logger, log_user_prompt, log_workflow_completion, set_log_file
 )
+from src.utils.chat_tools import (
+    BUILTIN_TOOL_NAMES as _BUILTIN_TOOLS,
+    TOOL_CALL_PATTERN as _TOOL_PATTERN,
+    TOOL_INTENT_PATTERNS,
+    MAX_TOOL_ROUNDS as _MAX_TOOL_ROUNDS,
+    TOOL_INSTRUCTIONS as _TOOL_INSTRUCTIONS,
+    resolve_path as _resolve_path,
+    read_file_tool as _read_file_snippet,
+    list_dir_tool as _list_dir_safe,
+    write_file_tool as _write_file_safe,
+    extract_tool_intent as _extract_tool_intent,
+    execute_tool_call as _execute_tool_call,
+    execute_domain_tool as _execute_domain_tool,
+)
 
 # Set up logging
 logging.basicConfig(
@@ -135,93 +149,8 @@ def _build_qa_context(summary: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _read_file_snippet(path_str: str, max_lines: int = 60) -> str:
-    """Read the first max_lines of a file, return content or error message."""
-    p = Path(path_str)
-    if not p.exists():
-        return f"(file not found: {path_str})"
-    try:
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        if len(lines) > max_lines:
-            return "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines)"
-        return "\n".join(lines)
-    except Exception as e:
-        return f"(error reading file: {e})"
-
-
-def _resolve_path(filename: str, working_dir: str, agent_dirs: Dict[str, str]) -> Optional[Path]:
-    """Resolve a filename to an absolute path within the working directory tree.
-    
-    Security: only allows access under working_dir.
-    """
-    # Try absolute first (but must be under working_dir)
-    candidate = Path(filename)
-    if candidate.is_absolute():
-        try:
-            candidate.resolve().relative_to(Path(working_dir).resolve())
-            if candidate.exists():
-                return candidate
-        except ValueError:
-            return None  # outside working_dir
-        return None
-    
-    # Try agent dirs, supervisor dir, then working_dir root
-    search_dirs = list(agent_dirs.values()) + [
-        str(Path(working_dir) / "supervisor"),
-        str(Path(working_dir) / "reporter"),
-        working_dir,
-    ]
-    for d in search_dirs:
-        if not d:
-            continue
-        p = Path(d) / filename
-        if p.exists():
-            return p
-    # Final fallback: recursive search under the entire working directory tree
-    wd = Path(working_dir)
-    if wd.is_dir():
-        basename = Path(filename).name
-        matches = sorted(wd.rglob(basename))
-        for match in matches:
-            try:
-                match.resolve().relative_to(wd.resolve())
-                return match
-            except ValueError:
-                pass
-    return None
-
-
-def _list_dir_safe(dir_path: str, working_dir: str) -> str:
-    """List directory contents, restricted to working_dir tree."""
-    p = Path(dir_path)
-    if not p.is_absolute():
-        p = Path(working_dir) / dir_path
-    try:
-        p.resolve().relative_to(Path(working_dir).resolve())
-    except ValueError:
-        return f"(access denied: {dir_path} is outside the working directory)"
-    if not p.is_dir():
-        return f"(not a directory: {dir_path})"
-    entries = sorted(p.iterdir())
-    lines = []
-    for e in entries:
-        suffix = "/" if e.is_dir() else f"  ({e.stat().st_size} bytes)"
-        lines.append(f"  {e.name}{suffix}")
-    return "\n".join(lines) if lines else "(empty directory)"
-
-
-def _write_file_safe(filepath: str, content: str, working_dir: str) -> str:
-    """Write content to a file, restricted to working_dir tree. No deletion."""
-    p = Path(filepath)
-    if not p.is_absolute():
-        p = Path(working_dir) / filepath
-    try:
-        p.resolve().relative_to(Path(working_dir).resolve())
-    except ValueError:
-        return f"ERROR: {filepath} is outside the working directory"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
-    return f"OK: wrote {len(content)} chars to {p}"
+# _read_file_snippet, _resolve_path, _list_dir_safe, _write_file_safe
+# are imported from src.utils.chat_tools at the top of this file.
 
 
 def _persist_state_to_jsonl(state: dict, working_dir: str) -> bool:
@@ -345,6 +274,7 @@ def _llm_route_or_replan(
     user_input: str,
     state: dict,
     working_dir: str,
+    agent_name: str = "MD Workflow Assistant",
 ) -> Optional[str]:
     """Use the LLM to decide intent: answer question OR update a structured plan.
 
@@ -372,7 +302,8 @@ def _llm_route_or_replan(
         except Exception:
             plans_snapshot = f"\n\nStructured plans available for: {', '.join(avail_agents)}"
 
-    prompt = f"""You are an MD workflow assistant at a human checkpoint.
+    prompt = f"""You are the {agent_name} in a molecular dynamics simulation workflow.
+Your name is '{agent_name}'. When asked your name or role, identify yourself as the {agent_name}.
 The human is chatting with you about the current workflow state and plans.
 
 Your job is to decide whether the human's message is:
@@ -551,50 +482,9 @@ def _load_execution_report(working_dir: str) -> str:
         return ""
 
 
-# ---------------------------------------------------------------------------
-# LLM tool-calling loop for interactive Q&A
-# ---------------------------------------------------------------------------
-# Use >>CALL format to avoid triggering Ollama's native tool-call parser
-# which chokes on "TOOL:" prefix in model output.
-# ---------------------------------------------------------------------------
-_TOOL_PATTERN = re.compile(
-    r"^>>CALL:\s*(\w+)\s*\|\s*(.+)$",
-    re.MULTILINE
-)
-_BUILTIN_TOOLS = {"read_file", "list_dir", "write_file"}
-
-# Fallback patterns: detect when the LLM *describes* wanting to use a tool
-# but didn't emit the >>CALL: format.  We extract the intent and file path.
-_TOOL_INTENT_PATTERNS = [
-    # "Let me read protein_h.pdb" / "I'll read the file protein_h.pdb"
-    re.compile(r"(?:let(?:'s| me|us)|I(?:'ll| will| need to| should|'d like to))\s+(?:read|open|inspect|look at|check|view|examine)\s+(?:the\s+)?(?:file\s+)?([^\s,;\"']+\.(?:pdb|gro|top|itp|mdp|log|txt|xvg|edr|xtc|trr|json|csv|sh|slurm))", re.IGNORECASE),
-    # "read_file protein_h.pdb" / "call read_file on protein_h.pdb" — must have file extension
-    re.compile(r"(?:call\s+)?read_file\s+(?:on\s+)?([^\s,;\"']+\.[a-zA-Z0-9]+)", re.IGNORECASE),
-    # "We need to read protein_h.pdb" / "Must read protein_h.pdb"
-    re.compile(r"(?:need to|must|should|want to|going to)\s+(?:read|inspect|open|check|view|look at)\s+(?:the\s+)?(?:file\s+)?([^\s,;\"']+\.(?:pdb|gro|top|itp|mdp|log|txt|xvg|edr|xtc|trr|json|csv|sh|slurm))", re.IGNORECASE),
-    # "read protein_h.pdb" at end of response or on its own
-    re.compile(r"\bread\s+(?:the\s+)?(?:file\s+)?([^\s,;\"']+\.(?:pdb|gro|top|itp|mdp|log|txt|xvg|edr|xtc|trr|json|csv|sh|slurm))", re.IGNORECASE),
-    # "list the directory" / "list files" / "we need to list" / "let's list that"
-    re.compile(r"(?:let(?:'s| me|us)|I(?:'ll| will)|we(?:'ll| need to| should| can| will)|need to|should|must|going to)\s+(?:list|show|browse|check)\s+(?:the\s+)?(?:files|directory|dir|folder|contents|that|it)", re.IGNORECASE),
-]
-
-
-def _extract_tool_intent(response: str) -> Optional[str]:
-    """If the LLM described wanting to call a tool without using >>CALL: format,
-    extract the intent and return a synthetic >>CALL: line. Returns None if no
-    tool intent detected."""
-    for pattern in _TOOL_INTENT_PATTERNS:
-        m = pattern.search(response)
-        if m:
-            groups = m.groups()
-            if groups and groups[0]:
-                filepath = groups[0].strip().rstrip(".")
-                return f">>CALL: read_file | {filepath}"
-            else:
-                # list_dir intent with no specific path
-                return ">>CALL: list_dir | ."
-    return None
-
+# Tool constants and helpers are imported from src.utils.chat_tools:
+#   TOOL_CALL_PATTERN, BUILTIN_TOOL_NAMES, TOOL_INTENT_PATTERNS, extract_tool_intent
+#   execute_domain_tool, TOOL_INSTRUCTIONS, MAX_TOOL_ROUNDS, execute_tool_call
 
 # ---------------------------------------------------------------------------
 # Agent domain tool registry — loads StructuredTool objects per checkpoint type
@@ -706,116 +596,8 @@ def _load_agent_domain_tools(checkpoint_type: str, working_dir: str = "") -> Tup
     return tools_map, "\n".join(lines)
 
 
-def _execute_domain_tool(tool_name: str, args_str: str, tool: Any, working_dir: str) -> str:
-    """Execute a domain StructuredTool with parsed key=value arguments."""
-    kwargs: Dict[str, Any] = {}
-    parts = [p.strip() for p in args_str.split("|")]
-    for part in parts:
-        if "=" in part:
-            key, _, value = part.partition("=")
-            kwargs[key.strip()] = value.strip()
-        elif len(parts) == 1 and part:
-            # Single arg with no key — use the first arg from schema
-            if hasattr(tool, "args_schema") and tool.args_schema:
-                schema = tool.args_schema.schema()
-                required = schema.get("required", [])
-                first_key = required[0] if required else list(schema.get("properties", {}).keys())[0] if schema.get("properties") else None
-                if first_key:
-                    kwargs[first_key] = part
-
-    if not kwargs:
-        return f"(no arguments provided for {tool_name}. Use: >>CALL: {tool_name} | key=value)"
-
-    # Resolve file-like paths relative to working_dir
-    file_extensions = ('.pdb', '.gro', '.top', '.itp', '.mdp', '.xtc', '.trr', '.edr', '.xvg', '.tpr', '.log', '.csv')
-    for key, val in list(kwargs.items()):
-        if isinstance(val, str) and val.lower().endswith(file_extensions):
-            p = Path(val)
-            if not p.is_absolute():
-                candidate = Path(working_dir) / val
-                if candidate.exists():
-                    kwargs[key] = str(candidate)
-
-    try:
-        result = tool.invoke(kwargs)
-        if isinstance(result, dict):
-            return json.dumps(result, indent=2, default=str)
-        return str(result)
-    except Exception as e:
-        return f"(error executing {tool_name}: {e})"
-
-
-_TOOL_INSTRUCTIONS = """
-You have access to tools for inspecting files in the working directory.
-To use a tool, output EXACTLY one line in this format (no other text on that line):
-
-  >>CALL: read_file | <filepath>
-  >>CALL: list_dir | <directory_path>
-  >>CALL: write_file | <filepath> | <content>
-
-Rules:
-- Paths are relative to the working directory unless absolute.
-- read_file: returns file content (max 80 lines). Use to inspect topology, MDP, logs, etc.
-- list_dir: lists files in a directory. Use "." for the working directory root.
-- write_file: creates or overwrites a file. Use ONLY if the user asks to write/edit.
-- You may call ONE tool per response. After calling a tool, wait for the result.
-- When you have enough information, give a FINAL ANSWER (no tool call).
-- NEVER describe that you want to call a tool — just call it directly.
-
-EXAMPLES:
-  User asks: "How many residues are in protein_h.pdb?"
-  Correct response:
->>CALL: read_file | protein_h.pdb
-
-  User asks: "What files were generated?"
-  Correct response:
->>CALL: list_dir | .
-
-  WRONG — never respond like this:
-  "I need to read the file. Let me use a tool call to inspect it."
-""".strip()
-
-_MAX_TOOL_ROUNDS = 4
-
-
-def _execute_tool_call(line: str, working_dir: str, agent_dirs: Dict[str, str],
-                       domain_tools: Optional[Dict[str, Any]] = None) -> str:
-    """Parse and execute a single tool call line. Returns result text."""
-    m = _TOOL_PATTERN.match(line.strip())
-    if not m:
-        return "(invalid tool call format)"
-    
-    tool_name = m.group(1)
-    args_str = m.group(2).strip()
-    
-    # --- Built-in file tools ---
-    if tool_name == "read_file":
-        resolved = _resolve_path(args_str, working_dir, agent_dirs)
-        if resolved is None:
-            # Tell the LLM where to look so it can try list_dir next
-            return (
-                f"(file not found: {args_str}. "
-                f"Use >>CALL: list_dir | . to browse the working directory, "
-                f"or >>CALL: list_dir | preprocess to check the preprocess output folder.)"
-            )
-        return _read_file_snippet(str(resolved), max_lines=80)
-    
-    elif tool_name == "list_dir":
-        return _list_dir_safe(args_str, working_dir)
-    
-    elif tool_name == "write_file":
-        parts = args_str.split("|", 1)
-        if len(parts) < 2:
-            return "(write_file requires: filepath | content)"
-        filepath = parts[0].strip()
-        content = parts[1].strip()
-        return _write_file_safe(filepath, content, working_dir)
-    
-    # --- Agent domain tools ---
-    if domain_tools and tool_name in domain_tools:
-        return _execute_domain_tool(tool_name, args_str, domain_tools[tool_name], working_dir)
-    
-    return f"(unknown tool: {tool_name})"
+# _execute_domain_tool, _TOOL_INSTRUCTIONS, _MAX_TOOL_ROUNDS, _execute_tool_call
+# are imported from src.utils.chat_tools at the top of this file.
 
 
 def _llm_qa_with_tools(
@@ -827,6 +609,7 @@ def _llm_qa_with_tools(
     agent_dirs: Dict[str, str],
     domain_tools: Optional[Dict[str, Any]] = None,
     domain_tool_instructions: str = "",
+    agent_name: str = "MD Workflow",
 ) -> Optional[str]:
     """Run LLM Q&A with tool-calling loop.
     
@@ -852,7 +635,8 @@ def _llm_qa_with_tools(
             history_text += f"  User: {turn['q']}\n  Assistant: {turn['a']}\n"
     
     system_prompt = (
-        "You are a molecular dynamics simulation expert assistant. "
+        f"You are the {agent_name} in a molecular dynamics simulation workflow. "
+        f"Your name is '{agent_name}'. When asked your name or role, identify yourself as the {agent_name}. "
         "The user is reviewing results at a human checkpoint in an MD workflow. "
         "IMPORTANT: The current workflow state is provided in the CHECKPOINT CONTEXT below. "
         "ALWAYS try to answer the question from the state and context FIRST. "
@@ -950,7 +734,8 @@ If you still need more information, output ONLY a tool call line — nothing els
                 f"If the file content wasn't useful, say so directly."
             )
             final_text = llm_call(no_tool_prompt, system=(
-                "You are a molecular dynamics simulation expert. "
+                f"You are the {agent_name} in a molecular dynamics simulation workflow. "
+                f"Your name is '{agent_name}'. "
                 "Answer the user's question in plain text. No tool calls."
             )).strip()
         except Exception:
@@ -1165,7 +950,7 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
         )
 
         if _has_structured_plans:
-            route_result = _llm_route_or_replan(llm, user_input, state, working_dir)
+            route_result = _llm_route_or_replan(llm, user_input, state, working_dir, agent_name=agent_label)
             if route_result is None:
                 # Mock / LLM unavailable
                 print(f"\n  [LLM unavailable — cannot process request]", flush=True)
@@ -1182,6 +967,7 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
                 conversation_history, working_dir, agent_dirs,
                 domain_tools=domain_tools,
                 domain_tool_instructions=domain_tool_instructions,
+                agent_name=agent_label,
             )
             if answer is None:
                 print(f"\n  [LLM unavailable — cannot answer questions in mock mode]", flush=True)
