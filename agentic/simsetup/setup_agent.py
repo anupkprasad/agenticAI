@@ -1333,10 +1333,13 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                                     ligand_itp_path = str(dst_path)
                                 elif key == "coordinates":
                                     ligand_gro_path = str(dst_path)
-                        # Also copy posre_{RESNAME}.itp from acpype output dir
-                        acpype_dir = result.get("output_dir")
-                        if acpype_dir:
-                            for posre in Path(acpype_dir).glob("posre_*.itp"):
+                        # Also copy posre_{RESNAME}.itp from acpype output dir.
+                        # Prefer the dedicated acpype_dir key; fall back to output_dir.
+                        # (ligand_topology.py already copies them to output_dir, so
+                        # either search dir will work, but acpype_dir is authoritative.)
+                        _posre_search_dir = result.get("acpype_dir") or result.get("output_dir")
+                        if _posre_search_dir:
+                            for posre in Path(_posre_search_dir).glob("posre_*.itp"):
                                 dst = Path(simsetup_dir) / posre.name
                                 if not dst.exists():
                                     shutil.copy2(str(posre), str(dst))

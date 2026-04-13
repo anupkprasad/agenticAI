@@ -92,10 +92,18 @@ class LigandTopologyGenerator:
                     shutil.copy2(str(topology_file), str(dest_itp))
                     if dest_gro:
                         shutil.copy2(str(coordinate_file), str(dest_gro))
+                    # Copy position-restraint files (posre_<RESNAME>.itp) — needed
+                    # by topol.top #ifdef POSRES_LIG blocks during NPT/NVT/MD runs
+                    posre_files = []
+                    for posre in acpype_dir.glob("posre_*.itp"):
+                        dest_posre = output_dir / posre.name
+                        shutil.copy2(str(posre), str(dest_posre))
+                        posre_files.append(str(dest_posre))
                     return {
                         "success": True,
                         "topology": str(dest_itp),
                         "coordinates": str(dest_gro) if dest_gro else None,
+                        "posre_files": posre_files,
                         "output_dir": str(output_dir),
                         "acpype_dir": str(acpype_dir),
                         "method": "acpype",
