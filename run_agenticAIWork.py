@@ -565,7 +565,7 @@ def _load_agent_domain_tools(checkpoint_type: str, working_dir: str = "") -> Tup
 
     # Build formatted instructions text
     agent_label = _AGENT_DISPLAY_NAMES.get(checkpoint_type, checkpoint_type.title())
-    lines = [f"\nYou also have access to {agent_label} domain tools:"]
+    lines = [f"\nIn addition to the built-in file tools above, you have these {agent_label} domain tools:"]
     for name, info in metadata.items():
         desc = info.get("description", "")
         if len(desc) > 200:

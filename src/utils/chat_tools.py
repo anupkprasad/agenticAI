@@ -81,9 +81,16 @@ TOOL_INTENT_PATTERNS: List[re.Pattern] = [
 ]
 
 TOOL_INSTRUCTIONS: str = r"""
-You have access to built-in tools for inspecting files in the working directory.
-To use a tool, output EXACTLY one line in this format (no other text on that line):
+You have access to the following built-in file tools (available in EVERY agent session):
 
+  - read_file  : Read file content (up to 80 lines). Args: filepath
+  - list_dir   : List files in a directory. Use "." for the working-directory root. Args: directory_path
+  - write_file : Create or overwrite a file. Use ONLY when user explicitly asks to write/edit. Args: filepath | content
+  - grep_file  : Search a regex pattern inside a file or all files (use "." to search all). Args: regex_pattern | filepath_or_dot_for_all
+
+When asked "what tools do you have?" ALWAYS list BOTH these built-in tools AND any domain tools shown below.
+
+To call any tool, output EXACTLY one line — no other text on that line:
   >>CALL: read_file  | <filepath>
   >>CALL: list_dir   | <directory_path>
   >>CALL: write_file | <filepath> | <content>
@@ -91,11 +98,7 @@ To use a tool, output EXACTLY one line in this format (no other text on that lin
 
 Rules:
 - Paths are relative to the working directory unless absolute.
-- read_file  : returns file content (max 80 lines).
-- list_dir   : lists files in a directory. Use "." for the working-directory root.
-- write_file : creates or overwrites a file. Use ONLY if the user explicitly asks to write/edit.
-- grep_file  : searches for a regex pattern. Use "." as filepath to search all files.
-- Call ONE tool per response. After calling a tool, wait for the result.
+- Call ONE tool per response. Wait for the result before calling another.
 - When you have enough information, give a FINAL ANSWER (no tool call).
 - NEVER describe wanting to call a tool — just call it directly.
 
