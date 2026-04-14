@@ -275,6 +275,7 @@ def _llm_route_or_replan(
     state: dict,
     working_dir: str,
     agent_name: str = "MD Workflow Assistant",
+    domain_tools: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Use the LLM to decide intent: answer question OR update a structured plan.
 
@@ -291,12 +292,18 @@ def _llm_route_or_replan(
     structured_plans = exec_plan.get("structured_plans", {})
     avail_agents = list(structured_plans.keys())
 
+    # Separate full_plan (planner narrative) from structured_plans (agent step lists)
+    full_plan = exec_plan.get("full_plan", "")
+    full_plan_section = ""
+    if full_plan:
+        full_plan_section = f"\n\nPLANNER FULL EXECUTION PLAN (full_plan):\n{full_plan}"
+
     # Snapshot of current plans to give the LLM full context
     plans_snapshot = ""
     if structured_plans:
         try:
             plans_snapshot = (
-                "\n\nCURRENT STRUCTURED PLANS (JSON):\n"
+                "\n\nCURRENT STRUCTURED PLANS — per-agent step lists (structured_plans):\n"
                 + _j.dumps(structured_plans, indent=2)
             )
         except Exception:
@@ -310,12 +317,27 @@ Your job is to decide whether the human's message is:
 (A) A QUESTION  — answer it using the context provided.
 (B) A PLAN UPDATE REQUEST — the human wants to change something in a structured plan.
 
-For (B), you must:
+PLAN ANSWERING RULES:
+- "full plan" / "execution plan" / "planner plan" / "overall plan"
+  → reproduce the EXACT text from PLANNER FULL EXECUTION PLAN below. Show it verbatim.
+- "agent plan" / "analysis plan" / "structured plan" / "step plan"
+  → reproduce the EXACT content from CURRENT STRUCTURED PLANS below.
+
+For (B) plan updates — CRITICAL RULES:
 1. Identify which agent's plan to change (preprocess / setup / hpc / analysis).
-2. Return the full updated plan as valid JSON.
-3. Start your response with EXACTLY the sentinel: PLAN_UPDATE:<agent_key>
-   followed immediately by the JSON on the next line.
+   If the request mentions temperature, simulation time/ns, pressure, force field, or water
+   model, the target agent is ALWAYS "setup".
+2. Take the EXISTING plan for that agent from CURRENT STRUCTURED PLANS below.
+   DO NOT invent new steps. ONLY change the specific parameter values the human requested.
+   Keep every other field (step names, descriptions, tool names, other tool_params) identical.
+3. Reproduce the ENTIRE updated plan object as valid JSON — no comments, no trailing commas.
+4. Start your response with EXACTLY this sentinel on its own line:
+     PLAN_UPDATE:<agent_key>
+   Then output ONLY the raw JSON object. Nothing else before or after the JSON.
    agent_key must be one of: preprocess, setup, hpc, analysis.
+   Example response for a temperature change:
+PLAN_UPDATE:setup
+{{"reasoning":"Updated temperature to 310 K","steps":[...full step list...]}}
 
 For (A), just answer the question directly. Do NOT include a sentinel.
 
@@ -325,14 +347,28 @@ Context:
 - Water model: {state.get("water_model", "tip3p")}
 - Temperature: {state.get("temperature", 300.0)} K
 - Available structured plans: {avail_agents if avail_agents else "none yet"}
+{full_plan_section}
 {plans_snapshot}
+
+AVAILABLE TOOLS (call with >>CALL: tool_name | args):
+  Built-in file tools (always available):
+    read_file   | <filepath>                      — read file content (max 80 lines)
+    list_dir    | <directory>                     — list directory contents
+    write_file  | <filepath> | <content>          — write/overwrite a file
+    grep_file   | <pattern>  | <filepath_or_dot>  — regex search in file(s)
+  {agent_name} domain tools:
+    {chr(10).join(('    ' + n) for n in (domain_tools or {}).keys()) or '    (none loaded)'}
+
+TOOL CALL RULE — if you need to call a tool to answer, your ENTIRE response must be ONLY:
+  >>CALL: tool_name | argument
+No reasoning. No quotes around the call. No explanation before or after.
 
 Human message:
 {user_input}
 """
 
     try:
-        resp = llm.prompt(prompt, temperature=0.1)
+        resp = (getattr(llm, 'prompt_raw', None) or llm.prompt)(prompt, temperature=0.1)
     except Exception as e:
         return f"[LLM error: {e}]"
 
@@ -341,7 +377,7 @@ Human message:
 
     # Check if LLM decided this is a plan update
     import re as _re
-    sentinel_match = _re.match(r'PLAN_UPDATE:(\w+)\s*\n([\s\S]+)', resp.strip())
+    sentinel_match = _re.search(r'PLAN_UPDATE:(\w+)[ \t]*\n([\s\S]+)', resp.strip())
     if sentinel_match:
         agent_key = sentinel_match.group(1).strip().lower()
         json_body = sentinel_match.group(2).strip()
@@ -354,39 +390,79 @@ Human message:
             # Not a recognised key — treat as plain answer
             return resp.strip()
 
-        try:
-            updated_plan = _j.loads(json_body)
-        except _j.JSONDecodeError:
-            # JSON extraction fallback
-            m = _re.search(r'\{[\s\S]*\}', json_body)
-            if not m:
-                return "Could not parse updated plan JSON from LLM response. Please rephrase."
+        # --- Robust JSON extraction ---
+        # Try the body as-is first, then fall back to extracting the outermost { } block
+        updated_plan = None
+        for candidate in [json_body, None]:
+            if candidate is None:
+                # find the outermost matching { } in json_body
+                brace_m = _re.search(r'\{', json_body)
+                if not brace_m:
+                    break
+                depth, start = 0, brace_m.start()
+                for ci, ch in enumerate(json_body[start:], start):
+                    if ch == '{': depth += 1
+                    elif ch == '}': depth -= 1
+                    if depth == 0:
+                        candidate = json_body[start: ci + 1]
+                        break
+                if candidate is None:
+                    break
             try:
-                updated_plan = _j.loads(m.group())
+                updated_plan = _j.loads(candidate)
+                break
             except _j.JSONDecodeError:
-                return "Could not parse updated plan JSON from LLM response. Please rephrase."
+                continue
+
+        if updated_plan is None:
+            return (
+                "Could not parse updated plan JSON from LLM response. "
+                "Please try again or rephrase your request."
+            )
+
+        # --- Scalar param extraction from user text ---
+        _param_specs = [
+            (_re.compile(r'\b(?:force.?field|ff)\s*[:=]?\s*([\w-]+)', _re.I),
+             "force_field", ["force_field"], str),
+            (_re.compile(r'\bwater.?model\s*[:=]?\s*(\w+)', _re.I),
+             "water_model", ["water_model"], str),
+            (_re.compile(
+                r'(?:temperature|temp)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*k?\b'
+                r'|(\d+(?:\.\d+)?)\s*k\b',
+                _re.I),
+             "temperature", ["temperature"], float),
+            (_re.compile(r'\bpressure\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(?:bar)?\b', _re.I),
+             "pressure", ["pressure"], float),
+            (_re.compile(
+                r'(?:simulation\s*(?:time|length|duration|ns)|production(?:\s*run)?|run\s*(?:time|length)?)'
+                r'\s*[:=of]?\s*(\d+(?:\.\d+)?)\s*(?:ns|nanoseconds?)?\b'
+                r'|(\d+(?:\.\d+)?)\s*(?:ns|nanoseconds?)\b',
+                _re.I),
+             "production_ns", ["production_ns"], float),
+        ]
+
+        for pat, state_key, tool_keys, cast in _param_specs:
+            pm = pat.search(user_input)
+            if pm:
+                raw = next((g for g in pm.groups() if g is not None), None)
+                if raw is None:
+                    continue
+                try:
+                    val: Any = cast(raw)
+                except (ValueError, TypeError):
+                    val = raw
+                state[state_key] = val
+                # Also patch tool_params in every step of the updated plan
+                for step in updated_plan.get("steps", []):
+                    tp = step.get("tool_params")
+                    if isinstance(tp, dict):
+                        for tk in tool_keys:
+                            if tk in tp:
+                                tp[tk] = val
 
         exec_plan.setdefault("structured_plans", {})[agent_key] = updated_plan
         state["execution_plan"] = exec_plan
         state["human_recommendation"] = user_input
-
-        # Apply scalar parameter overrides extracted from user text
-        _param_patterns = [
-            (_re.compile(r'\b(?:force.?field|ff)\s*[:=]?\s*([\w-]+)', _re.I), "force_field"),
-            (_re.compile(r'\bwater.?model\s*[:=]?\s*(\w+)', _re.I), "water_model"),
-            (_re.compile(r'\btemperature\s*[:=]?\s*(\d+(?:\.\d+)?)\s*k?\b', _re.I), "temperature"),
-            (_re.compile(r'\bpressure\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(?:bar)?\b', _re.I), "pressure"),
-        ]
-        for pat, key in _param_patterns:
-            pm = pat.search(user_input)
-            if pm:
-                val: Any = pm.group(1)
-                if key in ("temperature", "pressure"):
-                    try:
-                        val = float(val)
-                    except ValueError:
-                        pass
-                state[key] = val
 
         _persist_state_to_jsonl(state, working_dir)
         n_steps = len(updated_plan.get("steps", []))
@@ -643,26 +719,78 @@ def _llm_qa_with_tools(
         "Only call a tool if the state context does not contain enough detail to answer. "
         "Be concise and specific. "
         "Do NOT tell the user to approve or continue \u2014 just answer their question.\n"
-        "PLAN QUESTIONS: When the user asks about any plan (full plan, structured plan, "
-        "agent plan, execution plan), ALWAYS reproduce the EXACT content from "
-        "execution_plan in the workflow state \u2014 do NOT paraphrase, summarize or rephrase. "
-        "Show exact tool names, parameters, step descriptions as stored in "
-        "structured_plans or full_plan fields of the state.\n\n"
+        "PLAN QUESTIONS — use the following rules:\n"
+        "  * 'full plan', 'execution plan', 'planner plan', 'overall plan' "
+        "    → reproduce the EXACT text from execution_plan.full_plan in the workflow state. "
+        "    This is the planner's complete natural-language narrative. Show it verbatim.\n"
+        "  * 'agent plan', 'analysis plan', 'structured plan', 'step plan' "
+        "    → reproduce the EXACT content from execution_plan.structured_plans.<agent_key>. "
+        "    Show exact tool names, parameters, step descriptions.\n"
+        "  * Both full_plan and structured_plans are embedded in PLANNER EXECUTION PLAN below.\n\n"
         + _TOOL_INSTRUCTIONS
         + (("\n" + domain_tool_instructions) if domain_tool_instructions else "")
     )
     
+    # Build a compact tool inventory for injection into the prompt body so
+    # the LLM sees all available tools regardless of which part of the prompt
+    # it focuses on when answering "what tools do you have?"
+    _builtin_inventory = (
+        "AVAILABLE TOOLS (call with >>CALL: tool_name | args):\n"
+        "  Built-in file tools (always available):\n"
+        "    read_file   | <filepath>                      — read file content\n"
+        "    list_dir    | <directory>                     — list directory contents\n"
+        "    write_file  | <filepath> | <content>          — write/overwrite a file\n"
+        "    grep_file   | <pattern>  | <filepath_or_dot>  — regex search in file(s)\n"
+    )
+    _domain_inventory = ""
+    if domain_tools:
+        _domain_inventory = (
+            f"  {agent_name} domain tools:\n"
+            + "".join(
+                f"    {name}\n"
+                for name in domain_tools
+            )
+        )
+    _tool_inventory = _builtin_inventory + _domain_inventory
+
+    # Embed the planner execution plan directly in the prompt body so the LLM
+    # always has it available without needing to read state.jsonl via a tool.
+    _exec_plan_section = ""
+    _live_ep = _load_full_state_from_jsonl(working_dir)
+    _ep = (_live_ep or {}).get("execution_plan") if _live_ep else None
+    if not _ep:
+        # fall back to domain_tools parent state if available
+        import json as _j2
+        _state_raw = _load_last_state_snapshot(working_dir)
+        if _state_raw:
+            try:
+                _ep = _j2.loads(_state_raw).get("execution_plan") if _state_raw.strip().startswith("{") else None
+            except Exception:
+                _ep = None
+    if _ep:
+        _fp = _ep.get("full_plan", "")
+        _sp = _ep.get("structured_plans", {})
+        _exec_plan_section = "\nPLANNER EXECUTION PLAN:\n"
+        if _fp:
+            _exec_plan_section += f"  full_plan:\n{_fp}\n"
+        if _sp:
+            import json as _j3
+            _exec_plan_section += f"  structured_plans:\n{_j3.dumps(_sp, indent=4)}\n"
+
     prompt_text = f"""CHECKPOINT CONTEXT:
 {qa_context}
 {key_files_context}
+{_exec_plan_section}
 {history_text}
 
+{_tool_inventory}
 USER QUESTION: {user_question}
 
 If you can answer from the context above, give a FINAL ANSWER directly.
-If you need to inspect a file, output ONLY a tool call line — nothing else:
->>CALL: read_file | <filename>
-Do NOT describe what you want to do. Just call the tool."""
+TOOL CALL RULE — if you need a tool: your ENTIRE response must be ONLY the bare >>CALL: line.
+  CORRECT:   >>CALL: read_file | rmsf.dat
+  WRONG:     Use ">>CALL: read_file | rmsf.dat" or I will call read_file...
+No reasoning. No quotes around the call. No explanation. Nothing else."""
     
     # Choose LLM call method: prefer prompt_raw to avoid tool-call parser
     llm_call = getattr(llm, 'prompt_raw', None) or llm.prompt
@@ -880,7 +1008,7 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
         
         # --- Handle 'tools' command — show detailed domain tool descriptions ---
         if user_input.lower().strip() == "tools":
-            print(f"\n  Built-in tools: read_file, list_dir, write_file", flush=True)
+            print(f"\n  Built-in tools: read_file, list_dir, write_file, grep_file", flush=True)
             if domain_tools:
                 print(f"\n  {agent_label} domain tools:", flush=True)
                 for tname, tobj in domain_tools.items():
@@ -950,14 +1078,25 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
         )
 
         if _has_structured_plans:
-            route_result = _llm_route_or_replan(llm, user_input, state, working_dir, agent_name=agent_label)
+            route_result = _llm_route_or_replan(llm, user_input, state, working_dir, agent_name=agent_label, domain_tools=domain_tools)
             if route_result is None:
                 # Mock / LLM unavailable
                 print(f"\n  [LLM unavailable — cannot process request]", flush=True)
                 print(f"  Try: 'show <filename>' or 'files' to inspect results manually.\n", flush=True)
                 continue
-            # If the LLM decided this was a plan update, route_result is the confirmation msg;
-            # otherwise it's the plain answer.  Either way we print it.
+            # If the LLM decided this was a plan update, route_result is the confirmation msg.
+            # If it's a plain answer but the LLM embedded a >>CALL: line (or described
+            # wanting to call a tool), _llm_route_or_replan has no execution loop — delegate
+            # to _llm_qa_with_tools which does.
+            _has_tool_call = _TOOL_PATTERN.search(route_result) or _extract_tool_intent(route_result)
+            if _has_tool_call and not route_result.startswith("Plan updated"):
+                route_result = _llm_qa_with_tools(
+                    llm, user_input, qa_context,
+                    conversation_history, working_dir, agent_dirs,
+                    domain_tools=domain_tools,
+                    domain_tool_instructions=domain_tool_instructions,
+                    agent_name=agent_label,
+                ) or route_result
             print(f"\nAssistant: {route_result}\n", flush=True)
             conversation_history.append({"q": user_input, "a": route_result[:200]})
         else:
@@ -1006,8 +1145,57 @@ def main(argv=None):
                        help="Base working directory (agents use subdirs: working_dir/preprocess/, working_dir/hpc/, etc.)")
     
     args = parser.parse_args(argv)
-    
-    # Set up LLM client (required, uses fallback/mock mode if no server)
+
+    # -------------------------------------------------------------------------
+    # Early path validation — fail fast with a clear error before any agent runs
+    # -------------------------------------------------------------------------
+    _validation_errors: List[str] = []
+
+    # 1. Validate --working-dir (must exist if user explicitly specified it)
+    if args.working_dir not in (".", "working_dir"):
+        _wd_path = Path(args.working_dir)
+        if not _wd_path.exists():
+            _validation_errors.append(
+                f"--working-dir '{args.working_dir}' does not exist. "
+                f"Please create it first or check for a typo."
+            )
+        elif not _wd_path.is_dir():
+            _validation_errors.append(
+                f"--working-dir '{args.working_dir}' is not a directory."
+            )
+
+    # 2. Validate PDB / file paths mentioned in --goal
+    import re as _re_val
+    _path_candidates = _re_val.findall(
+        r'(?:^|\s)([^\s"\']+\.(?:pdb|gro|top|xtc|trr|tpr|itp|mdp))',
+        args.goal, _re_val.IGNORECASE
+    )
+    _wd_for_check = Path(args.working_dir) if args.working_dir not in (".", "working_dir") else Path.cwd()
+    for _cand in _path_candidates:
+        _p = Path(_cand)
+        # Only check paths that look like explicit relative or absolute references
+        if _p.is_absolute():
+            if not _p.exists():
+                _validation_errors.append(
+                    f"File referenced in --goal not found: '{_cand}'"
+                )
+        else:
+            # Check relative to cwd and relative to working-dir
+            if not (Path.cwd() / _cand).exists() and not (_wd_for_check / _cand).exists():
+                _validation_errors.append(
+                    f"File referenced in --goal not found: '{_cand}' "
+                    f"(checked relative to cwd and '{_wd_for_check}')"
+                )
+
+    if _validation_errors:
+        print("\n" + "=" * 60, flush=True)
+        print("  INPUT VALIDATION FAILED — workflow not started", flush=True)
+        print("=" * 60, flush=True)
+        for _err in _validation_errors:
+            print(f"  ERROR: {_err}", flush=True)
+        print("=" * 60 + "\n", flush=True)
+        return 1
+    # -------------------------------------------------------------------------
     llm_client = LLMClient(
         model=args.llm_model,
         base_url=args.llm_base_url if args.use_llm else None
@@ -1040,7 +1228,6 @@ def main(argv=None):
     goal = args.goal
     
     # Resolve working directory (same logic as workflow._initialize_state)
-    from pathlib import Path
     working_dir = args.working_dir
     if working_dir == ".":
         working_dir = "working_dir"

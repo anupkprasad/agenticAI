@@ -189,12 +189,12 @@ python run_agenticAIWork.py \
 
 
 python run_agenticAIWork.py \
-  --goal "I want to preprocess and simulation setup of protein-ATP-Mg system. The structure is availble in the pdb file of work_dir_hl2/2_h.pdb. Please setup simulation for 12 ns only. Once the simulation setup is done, please submit the job on HPC" \
+  --goal "I want to preprocess and simulation setup of protein-ATP-Mg system. The structure is availble in the pdb file of work_dir_hl/2_h.pdb. Please setup simulation for 12 ns only. Once the simulation setup is done, please submit the job on HPC" \
   --subtask preprocess simsetup hpcjob \
   --use-llm \
   --llm-base-url http://127.0.0.1:11434 \
   --llm-model gpt-oss:20b \
-  --working-dir work_dir_hl2 \
+  --working-dir work_dir_hl \
   --no-human-loop
 
 
@@ -222,9 +222,9 @@ python run_agenticAIWork.py \
 # 5.2b. Run analysis + reporter together (multi-agent pipeline)
 # Multiple agents are run in order: analysis first, then reporter
 python run_agenticAIWork.py \
-  --goal "The simulation of initial structure 2_h.pdb is already done. Simulation trajectory is in work_di/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM and secondary structure for protein only and plot those data. There is also ligand ATP, please calculate and plot the distance the center of mass of ATP to COM of protein. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is human psedukinase JAK1, please find the kinase and pseudokinase related literatures that correlate dynamics. Based on literature and results make comments on in report" \
+  --goal "The simulation of initial structure 2_h.pdb is already done. Simulation trajectory is in work_di_hl/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM and secondary structure for protein only and plot those data. There is also ligand ATP, please calculate and plot the distance the center of mass of ATP to COM of protein. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is human psedukinase JAK1, please find the kinase and pseudokinase related literatures that correlate dynamics. Based on literature and results make comments on in report" \
   --subtask analysis reporter \
-  --working-dir work_di_hl \
+  --working-dir work_dir_hl \
   --use-llm \
   --llm-base-url http://127.0.0.1:11434 \
   --llm-model gpt-oss:20b \

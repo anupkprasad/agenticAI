@@ -752,6 +752,9 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         ligand_files = []  # Track ligand files for hydrogen addition
         ligand_resnames = []  # Track ligand residue names (e.g. ATP)
         ion_resnames = []    # Track ion residue names (e.g. MG)
+        # Maps generic plan names (e.g. "ligand.pdb", "ions.pdb") and actual
+        # basenames to full resolved paths, populated after separate_complex_components.
+        file_alias_map: dict = {}
         
         current_pdb = agent_input.pdb_path
         topology_file = None
@@ -806,9 +809,14 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 if "pdb_file" in tool_params:
                     filename = tool_params["pdb_file"]
                     preprocess_path = Path(preprocess_dir) / filename
-                    
-                    if preprocess_path.exists():
+
+                    if filename in file_alias_map:
+                        # Alias registered after separation (e.g. "ligand.pdb" → "ATP.pdb")
+                        tool_params["pdb_file"] = file_alias_map[filename]
+                    elif preprocess_path.exists():
                         tool_params["pdb_file"] = str(preprocess_path)
+                    elif Path(filename).name in file_alias_map:
+                        tool_params["pdb_file"] = file_alias_map[Path(filename).name]
                     elif current_pdb and os.path.exists(current_pdb):
                         tool_params["pdb_file"] = current_pdb
                     else:
@@ -853,17 +861,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                             "reason": "Hydrogen addition not needed for ions"
                         })
                         continue  # Skip to next step
-                    
-                    # Check if this is a ligand file already processed in auto-step
-                    if input_file in ligand_files:
-                        execution_log.append(f"⊘ Skipping hydrogen addition for ligand — already added in auto-step: {Path(input_file).name}")
-                        log_agent_action("preprocessing", f"Step {i+1}/{len(plan.steps)} skipped", {
-                            "step": step.name,
-                            "tool": step.tool_name,
-                            "reason": "Ligand hydrogens already added in auto-step after separation"
-                        })
-                        continue  # Skip to next step
-                    
+
                     # Check if hydrogens were already added (file ends with _h)
                     if input_stem.endswith("_h"):
                         execution_log.append(f"⊘ Skipping hydrogen addition - file already has hydrogens: {Path(input_file).name}")
@@ -916,6 +914,11 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                             output_files.append(result["ligand_file"])
                             generated_files[result["ligand_file"]] = "Ligand component"
                             ligand_files.append(result["ligand_file"])
+                            # Register generic aliases so subsequent plan steps that use
+                            # names like "ligand.pdb" resolve to the actual file.
+                            actual_ligand = result["ligand_file"]
+                            file_alias_map["ligand.pdb"] = actual_ligand
+                            file_alias_map[Path(actual_ligand).name] = actual_ligand
                             # Extract resnames from statistics
                             stats = result.get("statistics", {}).get("ligand", {})
                             if stats.get("resnames"):
@@ -928,6 +931,12 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                             output_files.append(result["ion_file"])
                             generated_files[result["ion_file"]] = "Ion component"
                             ion_files.append(result["ion_file"])
+                            # Register generic aliases so subsequent plan steps that use
+                            # names like "ions.pdb" resolve to the actual file.
+                            actual_ion = result["ion_file"]
+                            file_alias_map["ions.pdb"] = actual_ion
+                            file_alias_map["ion.pdb"] = actual_ion
+                            file_alias_map[Path(actual_ion).name] = actual_ion
                             # Extract resnames from statistics
                             stats = result.get("statistics", {}).get("ions", {})
                             if stats.get("resnames"):

@@ -627,6 +627,19 @@ No need to specify image paths in tool_params - they're extracted from the analy
 
             working_dir = state.get("working_directory", "working_dir")
 
+            # Resolve the HPC directory from state if available so that
+            # extract_multi_frame_pdb looks in the right place for the
+            # trajectory (md.xtc) regardless of session-specific nesting.
+            from pathlib import Path as _Path
+            hpc_raw = state.get("hpc_output_directory") or state.get("hpc_dir")
+            if hpc_raw and _Path(hpc_raw).is_dir():
+                _hpc_p = _Path(hpc_raw)
+                hpc_parent = str(_hpc_p.parent)
+                hpc_subdir_name = _hpc_p.name
+            else:
+                hpc_parent = working_dir
+                hpc_subdir_name = "hpc"
+
             # --- Smart timepoint selection from analysis data ---
             if analysis_data:
                 important = identify_important_timepoints(
@@ -646,7 +659,8 @@ No need to specify image paths in tool_params - they're extracted from the analy
                         {"timepoints": [f"{t} ns ({lbl})" for t, lbl in important]},
                     )
                     frames = extract_multi_frame_pdb(
-                        working_dir,
+                        hpc_parent,
+                        hpc_subdir=hpc_subdir_name,
                         time_points_ns=time_points,
                         labels=labels_map,
                     )
@@ -665,7 +679,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
                     logger.warning("Smart PDB extraction returned empty; falling back")
 
             # --- Fallback: first frame only ---
-            pdb_path = extract_first_frame_pdb(working_dir)
+            pdb_path = extract_first_frame_pdb(hpc_parent, hpc_subdir=hpc_subdir_name)
             if pdb_path:
                 pdb_text = read_pdb_data(pdb_path)
                 if pdb_text:
@@ -686,15 +700,31 @@ No need to specify image paths in tool_params - they're extracted from the analy
     ) -> Optional[str]:
         """Generate LLM-based final impression correlating analysis results with literature."""
         
-        if not self.llm.available:
-            logger.info("LLM unavailable; skipping final impression generation")
-            return None
-        
-        # Build analysis summary for LLM
         entries = analysis_data.get("entries", []) if isinstance(analysis_data, dict) else []
         if not entries:
             logger.info("No analysis entries; skipping final impression")
             return None
+
+        if not self.llm.available:
+            logger.info("LLM unavailable; generating rule-based final impression")
+            lines = [
+                "This molecular dynamics simulation was analysed with the following results:"
+            ]
+            for entry in entries:
+                atype = entry.get("analysis_type", "Unknown")
+                stats = entry.get("statistics", {})
+                if isinstance(stats, dict) and stats:
+                    stat_parts = [
+                        f"{k}: {v}"
+                        for k, v in stats.items()
+                        if isinstance(v, (int, float, str)) and str(v).strip()
+                    ]
+                    lines.append(
+                        f"**{atype}**: " + ("; ".join(stat_parts) if stat_parts else "completed")
+                    )
+                else:
+                    lines.append(f"**{atype}**: Analysis completed")
+            return "\n\n".join(lines)
         
         analysis_summary_parts = []
         for entry in entries:
@@ -1064,9 +1094,18 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 # Execute tool
                 result = self.tool_executor.execute_tool(step.tool_name, params)
                 
-                # Store results for next steps
+                # Store results for next steps; only update if the new result has
+                # entries — don't discard a good pre-loaded analysis_data with an
+                # empty result from a duplicate plan step.
                 if step.tool_name == "read_analysis_summary":
-                    analysis_data = result
+                    if isinstance(result, dict) and result.get("entries"):
+                        analysis_data = result
+                    else:
+                        logger.warning(
+                            "Plan-step read_analysis_summary returned no entries; "
+                            "keeping pre-loaded analysis_data (%d entries)",
+                            len(analysis_data.get("entries", [])),
+                        )
                 
                 step_results.append({
                     "step_name": step.name,

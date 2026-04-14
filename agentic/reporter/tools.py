@@ -112,8 +112,12 @@ class ReporterToolExecutor:
             }
         
         try:
-            # ALWAYS force working_dir to agent directory (prevent file leaks)
-            if "working_dir" in globals()[tool_name].func.__code__.co_varnames:
+            # Only force working_dir to the agent directory for output tools
+            # (e.g. generate_html_report).  Input tools like read_analysis_summary
+            # need to read from the parent working directory and must keep whatever
+            # working_dir the caller has already set in tool_params.
+            _OUTPUT_TOOLS = {"generate_html_report"}
+            if tool_name in _OUTPUT_TOOLS:
                 tool_params["working_dir"] = self.working_dir
             
             # Execute tool

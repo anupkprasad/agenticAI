@@ -39,9 +39,12 @@ logger = logging.getLogger(__name__)
 
 BUILTIN_TOOL_NAMES: frozenset = frozenset({"read_file", "list_dir", "write_file", "grep_file"})
 
-# Pattern that matches a single >>CALL: line emitted by the LLM
+# Pattern that matches a >>CALL: invocation anywhere in the LLM response.
+# Does NOT require the line-start anchor so it also catches calls the LLM
+# embeds inside reasoning text like: Use ">>CALL: read_file | rmsf.dat".
+# Trailing quotes / ? are excluded from the captured args via the lookahead.
 TOOL_CALL_PATTERN = re.compile(
-    r"^>>CALL:\s*(\w+)\s*\|\s*(.+)$",
+    r">>CALL:\s*(\w+)\s*\|\s*([^\n\"'?]+?)(?=[\"'?\s]*(?:\n|$))",
     re.MULTILINE,
 )
 
@@ -131,9 +134,12 @@ def resolve_path(
             candidate.resolve().relative_to(wd)
             if candidate.exists():
                 return candidate
+            # Safe path but file not at that exact location (e.g. LLM used
+            # working_dir root but file is in analysis/ subdir).  Fall
+            # through to the recursive basename search below.
+            filename = candidate.name
         except ValueError:
-            return None
-        return None
+            return None  # path escapes sandbox — reject
 
     # Search order: agent dirs → supervisor → reporter → working_dir root
     search_dirs: List[str] = list(agent_dirs.values()) + [
@@ -168,16 +174,51 @@ def resolve_path(
 # Built-in tool implementations
 # ---------------------------------------------------------------------------
 
-def read_file_tool(path_str: str, max_lines: int = 80) -> str:
-    """Return up to *max_lines* lines of content from *path_str*."""
+def read_file_tool(path_str: str, max_lines: int = 500) -> str:
+    """Return up to *max_lines* lines of content from *path_str*.
+
+    For files where users ask about statistics (e.g. atom counts in a PDB),
+    the truncation notice includes pre-computed summary statistics so that
+    the LLM can answer accurately even when the full file exceeds *max_lines*.
+    """
     p = Path(path_str)
     if not p.exists():
         return f"(file not found: {path_str})"
     try:
         lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        if len(lines) > max_lines:
-            return "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines)"
-        return "\n".join(lines)
+        total_lines = len(lines)
+        if total_lines <= max_lines:
+            return "\n".join(lines)
+
+        # File is longer than the cap — compute useful summary statistics before
+        # truncating so the LLM can answer count/statistics questions correctly.
+        suffix = p.suffix.lower()
+        summary_parts: list = [f"total lines: {total_lines}"]
+
+        if suffix in (".pdb", ".ent"):
+            atom_count = sum(
+                1 for ln in lines if ln.startswith("ATOM  ") or ln.startswith("HETATM")
+            )
+            residue_set = set()
+            for ln in lines:
+                if ln.startswith("ATOM  ") or ln.startswith("HETATM"):
+                    residue_set.add((ln[21:22].strip(), ln[22:26].strip()))
+            summary_parts.append(f"ATOM+HETATM records: {atom_count}")
+            summary_parts.append(f"unique residues: {len(residue_set)}")
+        elif suffix in (".gro",):
+            # GRO files have the atom count on line 2
+            if total_lines >= 2:
+                summary_parts.append(f"atom count (from header): {lines[1].strip()}")
+        elif suffix in (".dat", ".csv", ".tsv", ".xvg"):
+            data_lines = [ln for ln in lines if ln.strip() and not ln.startswith(("#", "@"))]
+            summary_parts.append(f"data rows: {len(data_lines)}")
+
+        summary_str = " | ".join(summary_parts)
+        return (
+            "\n".join(lines[:max_lines])
+            + f"\n... ({total_lines - max_lines} more lines not shown"
+            + f" — FILE SUMMARY: {summary_str})"
+        )
     except Exception as exc:
         return f"(error reading file: {exc})"
 
@@ -382,7 +423,7 @@ def execute_tool_call(
                 f"(file not found: {args_str}. "
                 "Use >>CALL: list_dir | . to browse the working directory.)"
             )
-        return read_file_tool(str(resolved), max_lines=80)
+        return read_file_tool(str(resolved))
 
     if tool_name == "list_dir":
         return list_dir_tool(args_str, working_dir)
