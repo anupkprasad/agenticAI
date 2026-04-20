@@ -146,6 +146,8 @@ Required:
   --goal TEXT                 Natural language description of your MD simulation goal
 
 Optional:
+  --pdb-list PDB [PDB ...]  Multiple PDB files for multi-simulation mode
+  --max-concurrent N         Max concurrent simulations in multi-sim mode (default: 4)
   --use-llm                   Enable LLM-powered planning (default: mock mode)
   --llm-model TEXT           LLM model name (default: gpt-oss:20b for HPC systems)
   --llm-base-url TEXT        LLM endpoint URL (default: http://127.0.0.1:11434)
@@ -154,6 +156,70 @@ Optional:
   --water-model TEXT         Override default water model (default: tip3p)
   --working-dir PATH         Specify working directory for all generated files
   --log-file PATH           Specify log file location (default: ./agent_conversation.log)
+```
+
+## Multi-Simulation Mode
+
+Run multiple MD simulations in parallel from a single command. Each PDB gets its
+own pipeline (preprocess → setup → hpc → analysis) in a separate directory. After
+all simulations complete, a combined analysis generates comparative plots,
+statistical summaries, cross-simulation PCA, and an LLM-generated report.
+
+### Using --pdb-list
+
+```bash
+python run_agenticAIWork.py \
+  --goal "Run 100 ns MD simulations at 310 K and analyse RMSD, RMSF, secondary structure" \
+  --pdb-list protein_a.pdb protein_b.pdb protein_c.pdb \
+  --working-dir multi_run \
+  --use-llm --llm-base-url http://127.0.0.1:11434 \
+  --no-human-loop --max-concurrent 4
+```
+
+### Auto-detection from --goal
+
+If multiple PDB files are mentioned in the goal text, multi-sim mode activates
+automatically:
+
+```bash
+python run_agenticAIWork.py \
+  --goal "Simulate 1A.pdb, 2B.pdb, 3C.pdb for 50 ns and compare dynamics" \
+  --working-dir multi_run \
+  --use-llm --no-human-loop \
+  --subtask preprocess simsetup hpcjob analysis reporter
+```
+
+
+
+python run_agenticAIWork.py \
+  --goal "Simulation for 1A.pdb, 2B.pdb, 3C.pdb is already done for 50 ns and data is stored in the 1A, 2B and 3C repectively. Please do the analysis of trajectories and compare dynamics among them" \
+  --working-dir multi_run \
+  --use-llm --no-human-loop \
+  --subtask analysis reporter
+
+
+### Directory structure
+
+```
+multi_run/
+├── protein_a/          # Per-simulation pipeline
+│   ├── preprocess/
+│   ├── simsetup/
+│   ├── hpc/
+│   ├── analysis/
+│   ├── reporter/
+│   └── supervisor/
+├── protein_b/
+│   └── ...
+├── protein_c/
+│   └── ...
+├── combinedAnalysis/   # Cross-simulation analysis
+│   ├── comparative_rmsd.png
+│   ├── comparative_rmsf.png
+│   ├── cross_sim_pca.png
+│   ├── statistical_summary.json
+│   └── combined_analysis_report.md
+└── multi_sim_status.md
 ```
 
 ## HPC Integration with Ollama

@@ -1117,12 +1117,23 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
 
 # Remove the old log_workflow_state function since we now use conversation_logger
 
+
+def _extract_pdb_paths_from_goal(goal: str) -> list:
+    """Extract PDB file paths / filenames from a natural-language goal string."""
+    import re as _re
+    return _re.findall(r'[\w./\\-]+\.pdb', goal, _re.IGNORECASE)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="LangGraph-based MD Simulation Workflow"
     )
     parser.add_argument("--goal", required=True, 
                        help="Natural language description of simulation goal")
+    parser.add_argument("--pdb-list", default=None, nargs='+', metavar="PDB",
+                       help=("Multiple PDB files for multi-simulation mode. "
+                             "Each PDB gets its own pipeline in a separate directory. "
+                             "Example: --pdb-list 1abc.pdb 2def.pdb 3ghi.pdb"))
     parser.add_argument("--subtask", default=None, nargs='+',
                        choices=["preprocess", "simsetup", "hpcjob", "analysis", "reporter"],
                        metavar="AGENT",
@@ -1143,6 +1154,8 @@ def main(argv=None):
                        help="Water model to use")
     parser.add_argument("--working-dir", default=".",
                        help="Base working directory (agents use subdirs: working_dir/preprocess/, working_dir/hpc/, etc.)")
+    parser.add_argument("--max-concurrent", type=int, default=4,
+                       help="Maximum concurrent simulations in multi-sim mode (default: 4)")
     
     args = parser.parse_args(argv)
 
@@ -1238,6 +1251,80 @@ def main(argv=None):
     # Set up logging inside working_dir (not at project root)
     log_path = str(Path(working_dir) / "agent_conversation.log")
     set_log_file(log_path)
+
+    # ------------------------------------------------------------------
+    # Multi-simulation mode detection
+    # ------------------------------------------------------------------
+    pdb_list = getattr(args, 'pdb_list', None) or []
+    if not pdb_list:
+        # Try extracting multiple PDBs from the goal text
+        _goal_pdbs = _extract_pdb_paths_from_goal(goal)
+        if len(_goal_pdbs) > 1:
+            pdb_list = _goal_pdbs
+
+    if len(pdb_list) > 1:
+        # ---- MULTI-SIMULATION (in-graph) ----
+        print(f"\nDetected multi-simulation mode with {len(pdb_list)} PDBs", flush=True)
+        log_user_prompt(goal, config)
+
+        # Set multi-sim flags in config so _initialize_state picks them up
+        config["is_multi_simulation"] = True
+        # Resolve PDB paths: check working_dir first, then cwd, then keep as-is
+        resolved_pdbs = []
+        for p in pdb_list:
+            _p = Path(p)
+            if _p.is_absolute() and _p.exists():
+                resolved_pdbs.append(str(_p))
+            elif (Path(working_dir) / p).exists():
+                resolved_pdbs.append(str((Path(working_dir) / p).resolve()))
+            elif _p.exists():
+                resolved_pdbs.append(str(_p.resolve()))
+            else:
+                # File not found yet — store the path under working_dir so
+                # agents know where to look
+                resolved_pdbs.append(str((Path(working_dir) / p).resolve()))
+        config["pdb_list"] = resolved_pdbs
+
+        feedback_handler = None
+        if config["human_in_loop"]:
+            print("\n  HUMAN-IN-THE-LOOP MODE: You will be prompted at checkpoints", flush=True)
+            feedback_handler = interactive_feedback_handler
+
+        workflow = MDWorkflow(llm_client)
+
+        try:
+            if config["human_in_loop"] and feedback_handler:
+                final_state = workflow.run_with_human_feedback(goal, feedback_handler, config)
+            else:
+                final_state = workflow.run(goal, config)
+
+            # Print summary
+            completed_sims = final_state.get("completed_sim_states") or []
+            n_ok = sum(1 for s in completed_sims if not s.get("errors"))
+            n_fail = len(completed_sims) - n_ok
+            print(f"\n{'='*60}")
+            print("MULTI-SIMULATION WORKFLOW COMPLETED")
+            print(f"{'='*60}")
+            print(f"  Total: {len(pdb_list)}")
+            print(f"  Completed: {n_ok}")
+            print(f"  Failed: {n_fail}")
+            combined_dir = str(Path(working_dir) / "combinedAnalysis")
+            if Path(combined_dir).exists():
+                print(f"  Combined analysis: {combined_dir}")
+            print(f"\nFull log saved to: {log_path}")
+            return 0 if n_fail == 0 else 1
+
+        except KeyboardInterrupt:
+            print("\nMulti-simulation workflow interrupted by user")
+            return 130
+        except Exception as e:
+            print(f"\nMulti-simulation workflow failed: {e}")
+            logging.exception("Multi-simulation execution failed")
+            return 1
+
+    # ------------------------------------------------------------------
+    # Single-simulation pipeline (original flow)
+    # ------------------------------------------------------------------
     
     # Initialize workflow
     workflow = MDWorkflow(llm_client)

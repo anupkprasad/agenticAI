@@ -69,6 +69,9 @@ class MDWorkflow:
         def wrapped_node(state: MDState) -> MDState:
             state["current_node"] = node_name
             result = node_func(state)
+            if result is None:
+                logger.error(f"Node '{node_name}' returned None – returning input state as fallback")
+                return state
             # Save incremental state after key stages (used by non-HITL run())
             if node_name in self._SAVE_AFTER_NODES:
                 try:
@@ -663,6 +666,15 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             # Human-in-the-loop
             "human_recommendation": None,
             "error_triggered_hitl": False,
+            # Multi-simulation mode
+            "is_multi_simulation": False,
+            "multi_sim_phase": None,
+            "pdb_list": None,
+            "sim_prompts": None,
+            "combined_analysis_plan": None,
+            "current_sim_index": 0,
+            "completed_sim_states": None,
+            "sim_working_dirs": None,
         }
 
         if config:
@@ -677,18 +689,30 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             working_dir = str(Path.cwd() / working_dir)
         state["working_directory"] = working_dir
         
-        # Initialize agent-specific directories (hardcoded structure)
-        state["preprocess_dir"] = str(Path(working_dir) / "preprocess")
-        state["simsetup_dir"] = str(Path(working_dir) / "simsetup")
-        state["hpc_dir"] = str(Path(working_dir) / "hpc")
-        state["analysis_dir"] = str(Path(working_dir) / "analysis")
-        
-        # Create all agent directories
-        for agent_dir in [state["preprocess_dir"], state["simsetup_dir"], 
-                         state["hpc_dir"], state["analysis_dir"],
-                         str(Path(working_dir) / "reporter"),
-                         str(Path(working_dir) / "supervisor")]:
-            Path(agent_dir).mkdir(parents=True, exist_ok=True)
+        # In multi-sim mode, agent sub-directories live inside each per-simulation
+        # directory (e.g. {basepath}/1A/analysis/).  Only shared dirs are created at
+        # basepath level: planner/, programmer/, supervisor/.
+        # Combined analysis/reporter dirs are created by supervisor when needed.
+        if state.get("is_multi_simulation"):
+            Path(working_dir).mkdir(parents=True, exist_ok=True)
+            for shared_dir in ("planner", "programmer", "supervisor"):
+                Path(working_dir, shared_dir).mkdir(parents=True, exist_ok=True)
+            # Placeholder dir state — per-sim supervisor will overwrite these
+            state["preprocess_dir"] = str(Path(working_dir) / "preprocess")
+            state["simsetup_dir"] = str(Path(working_dir) / "simsetup")
+            state["hpc_dir"] = str(Path(working_dir) / "hpc")
+            state["analysis_dir"] = str(Path(working_dir) / "analysis")
+        else:
+            # Single-sim: create standard agent directories at working_dir level
+            state["preprocess_dir"] = str(Path(working_dir) / "preprocess")
+            state["simsetup_dir"] = str(Path(working_dir) / "simsetup")
+            state["hpc_dir"] = str(Path(working_dir) / "hpc")
+            state["analysis_dir"] = str(Path(working_dir) / "analysis")
+            for agent_dir in [state["preprocess_dir"], state["simsetup_dir"],
+                             state["hpc_dir"], state["analysis_dir"],
+                             str(Path(working_dir) / "reporter"),
+                             str(Path(working_dir) / "supervisor")]:
+                Path(agent_dir).mkdir(parents=True, exist_ok=True)
         
         # Check for saved workflow state from a previous run
         saved_state = self._load_workflow_state(working_dir)
@@ -744,7 +768,11 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         initial_state["human_in_loop"] = bool(initial_state.get("human_in_loop", False))
         
         try:
-            final_state = self.graph.invoke(initial_state)
+            # Multi-sim needs many iterations (each sim ≈ 15 graph steps)
+            recursion_limit = 500 if initial_state.get("is_multi_simulation") else 50
+            final_state = self.graph.invoke(
+                initial_state, {"recursion_limit": recursion_limit}
+            )
             return final_state
             
         except Exception as e:

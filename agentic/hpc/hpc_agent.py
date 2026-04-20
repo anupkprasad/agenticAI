@@ -780,7 +780,36 @@ Output as JSON with this structure:
     def _update_state_from_result(self, state: MDState, tool_name: str, result: Dict[str, Any]) -> None:
         """Update state based on tool execution results"""
         
-        if tool_name == "create_slurm_script":
+        if tool_name == "copy_simulation_files":
+            # Update state paths to point to hpc_dir copies so downstream
+            # agents (analysis) use the staged files, not the simsetup originals.
+            for file_info in result.get("copied_files", []):
+                dest = file_info.get("destination")
+                if not dest:
+                    continue
+                fname = Path(dest).name
+                if fname.endswith(".top"):
+                    state["topology"] = dest
+                    logger.info(f"Updated topology path to hpc copy: {dest}")
+                    self.file_manager.register_external_file(
+                        file_path=dest,
+                        file_type="topology",
+                        description="Topology staged in HPC directory"
+                    )
+                elif fname.endswith(".tpr"):
+                    self.file_manager.register_external_file(
+                        file_path=dest,
+                        file_type="topology",
+                        description="TPR topology staged in HPC directory"
+                    )
+                elif fname.endswith(".gro"):
+                    self.file_manager.register_external_file(
+                        file_path=dest,
+                        file_type="coordinates",
+                        description="Coordinates staged in HPC directory"
+                    )
+        
+        elif tool_name == "create_slurm_script":
             state["job_script"] = result.get("script_path")
             log_file_operation("hpc", "create", state["job_script"], True, "SLURM submission script")
         
@@ -815,6 +844,14 @@ Output as JSON with this structure:
                         file_path=local_path,
                         file_type="coordinates",
                         description="Final MD coordinates"
+                    )
+                elif filename.endswith(".top"):
+                    state["topology"] = local_path
+                    logger.info(f"Updated topology path from downloaded .top: {local_path}")
+                    self.file_manager.register_external_file(
+                        file_path=local_path,
+                        file_type="topology",
+                        description="Downloaded GROMACS topology"
                     )
                 elif filename.endswith(".tpr"):
                     self.file_manager.register_external_file(

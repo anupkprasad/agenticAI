@@ -150,27 +150,46 @@ class MDPlanner:
             return {"planner": {"templates": {}}}
     
     def planner_node(self, state: MDState) -> MDState:
-        """Main planner node - creates execution plan from structured prompt."""
+        """Main planner node - creates execution plan from structured prompt.
+        
+        In multi-simulation mode on the first call (sim_prompts not yet set),
+        this generates a *master plan* that includes per-simulation prompts
+        and a combined analysis plan.  Subsequent per-sim calls proceed normally.
+        """
         
         logger.info("=" * 60)
         logger.info("PLANNER: Creating execution plan from structured prompt")
         logger.info("=" * 60)
         
         # CRITICAL: Refresh tools registry to pick up any newly generated programmer tools
-        # Programmer may have created new tools in previous workflow steps
         working_dir = state.get("working_directory")
         self.tools_registry = get_tools_registry(refresh=True, working_directory=working_dir)
         logger.info(f"PLANNER: Refreshed tools registry - now {len(self.tools_registry.tools)} tools available")
         
         # Use structured prompt if available, otherwise fall back to rephrased/original goal
-        # Use unified enriched prompt (set by supervisor after validation)
         structured_prompt = state.get("enriched_prompt") or state.get("rephrased_goal") or state.get("user_goal", "")
         pdb_path = state.get("raw_pdb", "")
         pdb_analysis = state.get("pdb_analysis", {})
         component_selection = state.get("component_selection", {})
         
         logger.info(f"PLANNER: Using structured prompt: {structured_prompt[:100]}...")
-        
+
+        # ── Multi-sim master planning ────────────────────────────────────
+        # On the FIRST planner call in multi-sim mode (sim_prompts not yet set),
+        # generate per-sim prompts and combined analysis plan, then return
+        # immediately WITHOUT creating a regular execution_plan.
+        # Supervisor detects (sim_prompts set, execution_plan None) and starts
+        # the per-sim loop.  Subsequent per-sim planner calls proceed normally.
+        if state.get("is_multi_simulation") and not state.get("sim_prompts"):
+            logger.info("PLANNER: Multi-simulation mode — generating master plan with per-sim prompts")
+            state = self._create_multi_sim_master_plan(state, structured_prompt)
+            state["next_node"] = "supervisor"
+            log_supervisor_routing(
+                state, "supervisor",
+                "Planner: Multi-sim master plan complete. Supervisor will start per-sim loop."
+            )
+            return state  # Do NOT create a regular execution_plan yet
+
         # Create plan from structured prompt and PDB analysis
         plan = self._create_plan_from_analysis(
             structured_prompt, 
@@ -193,8 +212,7 @@ class MDPlanner:
         # Log detailed plan to conversation log
         from ..utils import log_agent_action
         
-        # Log natural language plan details
-        plan_preview = plan.get("full_plan", "")[:500]  # First 500 chars for preview
+        plan_preview = plan.get("full_plan", "")[:500]
         plan_details = {
             "format": "natural_language",
             "title": plan.get("title", "N/A"),
@@ -433,6 +451,161 @@ class MDPlanner:
         return self._create_fallback_plan(
             structured_prompt, pdb_path, pdb_analysis, component_selection, state
         )
+
+    # ── Multi-Simulation Master Planning ─────────────────────────────────
+
+    def _create_multi_sim_master_plan(self, state: MDState, enriched_prompt: str) -> MDState:
+        """
+        Generate per-simulation prompts and a combined analysis plan.
+
+        Uses the LLM to decompose the enriched (multi-PDB) prompt into
+        individual simulation goals and a cross-simulation analysis plan.
+        Falls back to deterministic splitting when the LLM is unavailable.
+
+        Populates state["sim_prompts"], state["combined_analysis_plan"],
+        and state["sim_working_dirs"].
+        """
+        import json as _json
+        from pathlib import Path as _Path
+
+        pdb_list = state.get("pdb_list", [])
+        base_working_dir = state.get("working_directory", "working_dir")
+
+        if not pdb_list:
+            logger.warning("PLANNER [multi-sim]: No pdb_list in state — cannot create master plan")
+            return state
+
+        # Build per-sim working directories (PDB stem names)
+        sim_working_dirs = []
+        for pdb in pdb_list:
+            label = _Path(pdb).stem
+            sim_dir = str((_Path(base_working_dir) / label).resolve())
+            sim_working_dirs.append(sim_dir)
+        state["sim_working_dirs"] = sim_working_dirs
+
+        # ── Try LLM-based decomposition ──────────────────────────────────
+        working_dir = state.get("working_directory")
+        tools_context = self._get_tools_context()  # All tools
+        pdb_names = [_Path(p).name for p in pdb_list]
+        decomposition_prompt = (
+            f"You are planning a multi-simulation MD workflow.\n\n"
+            f"OVERALL GOAL:\n{enriched_prompt}\n\n"
+            f"PDB FILES ({len(pdb_list)}):\n"
+            + "\n".join(f"  {i+1}. {name}" for i, name in enumerate(pdb_names))
+            + "\n\n"
+            f"AVAILABLE TOOLS:\n{tools_context[:3000]}\n\n"
+            f"TASK: Produce a JSON object with exactly two keys:\n"
+            f'  "sim_prompts": a list of {len(pdb_list)} strings, one per PDB, '
+            f"each being a self-contained simulation goal that references ONLY "
+            f"its own PDB filename and includes the shared simulation parameters "
+            f"(force field, water model, temperature, pressure, production time, "
+            f"analyses) from the overall goal.\n"
+            f'  "combined_analysis_plan": a multi-paragraph string describing '
+            f"the cross-simulation analysis to perform AFTER all individual sims "
+            f"complete. Include: comparative overlay plots (RMSD, RMSF, Rg, etc.), "
+            f"statistical summary table, cross-simulation PCA if trajectories are "
+            f"available, and a markdown narrative report.\n\n"
+            f"Return ONLY the JSON object, no other text."
+        )
+
+        sim_prompts_list = None
+        combined_plan = None
+
+        try:
+            llm_response = self.llm.prompt(decomposition_prompt, temperature=0.2, max_tokens=2000)
+            log_llm_interaction("planner.multi_sim_master", decomposition_prompt, llm_response)
+
+            # Extract JSON from response (brace-counting)
+            parsed = self._extract_json_from_response(llm_response)
+            if parsed and "sim_prompts" in parsed:
+                sim_prompts_list = parsed["sim_prompts"]
+                combined_plan = parsed.get("combined_analysis_plan", "")
+                logger.info(f"PLANNER [multi-sim]: LLM generated {len(sim_prompts_list)} per-sim prompts")
+        except Exception as e:
+            logger.warning(f"PLANNER [multi-sim]: LLM decomposition failed: {e}")
+
+        # ── Fallback: deterministic prompt splitting ─────────────────────
+        if not sim_prompts_list or len(sim_prompts_list) != len(pdb_list):
+            logger.info("PLANNER [multi-sim]: Using deterministic prompt decomposition")
+            sim_prompts_list = []
+            for pdb in pdb_list:
+                pdb_name = _Path(pdb).name
+                # Replace ALL PDB mentions with just this one
+                per_sim = enriched_prompt
+                for other_pdb in pdb_list:
+                    if other_pdb != pdb:
+                        per_sim = per_sim.replace(_Path(other_pdb).name, "")
+                        per_sim = per_sim.replace(other_pdb, "")
+                # Ensure our PDB is mentioned
+                if pdb_name not in per_sim:
+                    per_sim = f"Process {pdb_name}. " + per_sim
+                sim_prompts_list.append(per_sim.strip())
+
+            combined_plan = (
+                "Perform combined cross-simulation analysis:\n"
+                "1. Generate comparative overlay plots for RMSD, RMSF, Rg, and any other "
+                "time-series metrics available across all simulations.\n"
+                "2. Compute a statistical summary (mean, std, min, max) of scalar metrics.\n"
+                "3. If trajectory and topology files are available, perform cross-simulation "
+                "PCA on C-alpha coordinates.\n"
+                "4. Generate a markdown narrative report summarising per-simulation highlights "
+                "and cross-simulation trends."
+            )
+
+        # ── Build structured sim_prompts with metadata ───────────────────
+        sim_prompts = []
+        for i, (pdb, prompt_text) in enumerate(zip(pdb_list, sim_prompts_list)):
+            label = _Path(pdb).stem
+            sim_prompts.append({
+                "pdb": str(_Path(pdb).resolve()) if _Path(pdb).exists() else pdb,
+                "label": label,
+                "prompt": prompt_text,
+                "working_dir": sim_working_dirs[i],
+            })
+
+        state["sim_prompts"] = sim_prompts
+        state["combined_analysis_plan"] = combined_plan
+
+        logger.info(
+            f"PLANNER [multi-sim]: Master plan ready — {len(sim_prompts)} simulations, "
+            f"combined plan {len(combined_plan)} chars"
+        )
+
+        # Log to conversation
+        from ..utils import log_agent_action
+        log_agent_action(
+            agent_name="planner",
+            action="Generated Multi-Simulation Master Plan",
+            details={
+                "num_simulations": len(sim_prompts),
+                "pdb_files": [s["label"] for s in sim_prompts],
+                "combined_plan_preview": combined_plan[:300],
+            },
+        )
+
+        return state
+
+    def _extract_json_from_response(self, response: str) -> Optional[Dict[str, Any]]:
+        """Extract JSON object from LLM response using brace counting."""
+        import json as _json
+
+        # Find the first '{' and its matching '}'
+        start = response.find("{")
+        if start == -1:
+            return None
+
+        depth = 0
+        for i, ch in enumerate(response[start:], start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return _json.loads(response[start : i + 1])
+                    except _json.JSONDecodeError:
+                        return None
+        return None
     
     def _detect_missing_tools_in_response(self, llm_response: str) -> tuple[bool, str]:
         """

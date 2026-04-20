@@ -7,16 +7,21 @@ Responsibilities:
 3. Validate input feasibility (PDB files, parameters, user intent)
 4. Collaborate with planner to create execution plans
 5. Route tasks to field agents in STRICT ORDER: preprocessing → simsetup → hpc → analysis → reporter
+6. Multi-simulation orchestration: loop through per-sim prompts, then combined analysis + reporter
 """
 
+import json
 import logging
+import shutil
 import yaml
 import os
 import re
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from ..state import MDState
 from ..utils import log_supervisor_routing, log_agent_action
+from ..utils.conversation_logger import set_log_file
 from ..llm import LLMClient
 from ..planner import MDPlanner
 from .tools import (
@@ -93,102 +98,502 @@ class MDSupervisor:
         """
         Main supervisor routing logic with unified enrichment and strict agent ordering.
 
-        Pipeline:
-        1. Detect Subtask Type → If analysis-only, setup-only, etc., route accordingly
-        2. Input Validation → PDB analysis and feasibility check (skipped for analysis-only)
-        3. Unified Enrichment → SINGLE LLM call to enrich prompt with all context
-        4. Create Execution Plan → Collaborate with planner using enriched prompt
-        5. Execute Agents → Route to field agents in STRICT ORDER (preprocess → simsetup → hpc → analysis → reporter)
-        6. Generate Final Report → Summarize results
+        Pipeline (regular mode):
+        1. Input Validation → PDB analysis and feasibility check
+        2. Unified Enrichment → SINGLE LLM call to enrich prompt
+        3. Create Execution Plan → Collaborate with planner
+        4. Execute Agents → Route to field agents in STRICT ORDER
+        5. Generate Final Report
+
+        Pipeline (multi-simulation mode):
+        1-3. Same (enrichment of overall goal, master plan creates per-sim prompts)
+        4. Per-Sim Loop → For each sim: full pipeline in {basepath}/{label}/
+        5. Combined Analysis → analysis + reporter at {basepath}/ level
+        6. Final Report
         """
-        # Lazy-load planner on first use
         if self.planner is None:
             self.planner = MDPlanner(llm_client=self.llm)
-        
+
         logger.info("=" * 60)
         logger.info("SUPERVISOR: Analyzing workflow state and routing decision")
         logger.info("=" * 60)
 
-        # Get subtask type from state (passed from config via command-line args)
+        multi_sim_phase = state.get("multi_sim_phase")
+
+        # ── Subtask type initialisation (once) ───────────────────────────
         if not state.get("subtask_type_initialized"):
             subtask_type = state.get("subtask_type")
             if subtask_type:
                 logger.info(f"SUPERVISOR: Subtask type: {subtask_type}")
                 if subtask_type == "multi_agent":
                     logger.info(f"SUPERVISOR: Agent list: {state.get('agent_list', [])}")
-            
-            # Store required inputs for this subtask
             required_inputs = detect_task_required_inputs(subtask_type, state.get("agent_list"))
             state["required_inputs"] = required_inputs
             state["subtask_type_initialized"] = True
 
-        # Check if we're returning from a field agent - increment agent counter
-        current_node = state.get("current_node", "")
-        if current_node in ["preprocess", "setup", "hpc", "analysis", "reporter"]:
-            current_agent_idx = state.get("current_agent_idx", 0)
-            logger.info(f"SUPERVISOR: Returned from {current_node}, advancing from agent {current_agent_idx} to {current_agent_idx + 1}")
-            state["current_agent_idx"] = current_agent_idx + 1
-
-        # Debug: Check workflow state
+        # ── Debug log ─────────────────────────────────────────────────────
         has_plan = bool(state.get("execution_plan"))
-        logger.info(f"SUPERVISOR: execution_plan exists: {has_plan}")
-        if has_plan:
-            current_agent_idx = state.get("current_agent_idx", 0)
-            subtask_type = state.get("subtask_type", "full_task")
-            from src.supervisor.unified_enricher import get_agent_execution_order
-            required_agents = get_agent_execution_order(subtask_type, state)
-            total_agents = len(required_agents)
-            logger.info(f"SUPERVISOR: Agent progress: {current_agent_idx}/{total_agents} ({required_agents})")
-
-        # Step 1: Input validation if needed (unified for all task types)
+        current_agent_idx = state.get("current_agent_idx", 0)
         subtask_type = state.get("subtask_type", "full_task")
-        
-        # Single unified validation check
+        required_agents = get_agent_execution_order(subtask_type, state)
+        logger.info(
+            f"SUPERVISOR: plan={has_plan}, phase={multi_sim_phase}, "
+            f"agent_idx={current_agent_idx}/{len(required_agents)}, "
+            f"plan_executed={state.get('plan_executed')}"
+        )
+
+        # ── Per-sim or combined workflow complete ─────────────────────────
+        # Must check BEFORE step 1 so that plan_executed=True routes correctly.
+        if state.get("plan_executed"):
+            if multi_sim_phase == "executing_sims":
+                logger.info("SUPERVISOR [multi-sim]: Per-sim cycle complete — advancing")
+                return self._advance_multi_sim(state)
+            else:
+                logger.info("SUPERVISOR: All tasks complete — final report")
+                state["next_node"] = "final_report"
+                log_supervisor_routing(state, "final_report", "All workflow tasks complete")
+                return state
+
+        # ── Step 1: Input validation ──────────────────────────────────────
         if not state.get("input_validated") and state.get("user_goal"):
-            logger.info(f"SUPERVISOR: Routing to unified input validation for task type: {subtask_type}")
+            logger.info(f"SUPERVISOR: Routing to input validation (subtask={subtask_type})")
             state["next_node"] = "input_validation"
             return state
 
-        # Step 2: Unified prompt enrichment (SINGLE enrichment for entire workflow)
+        # ── Step 2: Prompt enrichment (single call per sim/phase) ─────────
         if state.get("input_validated") and not state.get("enriched_prompt"):
-            logger.info("SUPERVISOR: Input validated, enriching prompt with unified enrichment")
+            logger.info("SUPERVISOR: Input validated, enriching prompt")
             enriched = enrich_prompt_unified(state, self.llm, self.supervisor_config)
             state["enriched_prompt"] = enriched
-            state["rephrased_goal"] = enriched  # Keep for backward compatibility
-            logger.info(f"SUPERVISOR: Unified enrichment complete ({len(enriched)} chars)")
-        
-        # Step 3: Create execution plan if not exists
-        # Route to planner for all validated tasks (including reporter_only, analysis_only, multi_agent)
+            state["rephrased_goal"] = enriched
+            logger.info(f"SUPERVISOR: Enrichment complete ({len(enriched)} chars)")
+
+        # ── Multi-sim: master plan returned (sim_prompts set, no exec plan) ──
+        # Planner returned with sim_prompts but WITHOUT an execution_plan,
+        # signalling that master planning is complete and per-sim loop should start.
+        if (state.get("is_multi_simulation")
+                and state.get("sim_prompts")
+                and not state.get("execution_plan")
+                and multi_sim_phase is None):
+            logger.info("SUPERVISOR [multi-sim]: Master plan ready — starting per-sim loop")
+            state["multi_sim_phase"] = "executing_sims"
+            state["current_sim_index"] = 0
+            state["completed_sim_states"] = []
+            return self._start_next_sim(state)
+
+        # ── Step 3: Create execution plan ────────────────────────────────
         if not state.get("execution_plan") and state.get("enriched_prompt"):
-            logger.info("SUPERVISOR: Enriched prompt ready, creating execution plan with planner")
+            logger.info("SUPERVISOR: Routing to planner for execution plan")
             state["next_node"] = "planner"
             return state
-        
-        # Step 3.5: Extract agent-specific plans after planner returns
-        # This ensures each agent receives only its relevant instructions
+
+        # ── Step 4: Extract agent-specific sub-plans ─────────────────────
         if state.get("execution_plan") and not state.get("preprocessing_instructions"):
-            logger.info("SUPERVISOR: Extracting agent-specific plans from full execution plan")
+            logger.info("SUPERVISOR: Extracting agent-specific plans")
             state = self._extract_agent_specific_plans(state)
 
-        # Step 4: Assign field agent tasks using STRICT ORDERING
-        plan = state.get("execution_plan", {})
-        if plan and not state.get("plan_executed"):
-            logger.info("SUPERVISOR: Execution plan ready, assigning field agent tasks with strict ordering")
-            return self._assign_field_agent_tasks(state)
+        # ── Step 5: Assign field agents ───────────────────────────────────
+        if state.get("execution_plan") and not state.get("plan_executed"):
+            logger.info("SUPERVISOR: Assigning field agents")
+            state = self._assign_field_agent_tasks(state)
 
-        # Step 5: Handle errors and complete
+            # "_assign_field_agent_tasks" sets next_node="supervisor" when all
+            # per-sim (or combined-analysis) agents complete, to signal that the
+            # multi-sim loop should advance.  But "supervisor" is not a valid
+            # target in _route_from_supervisor — handle the advancement here so
+            # the returned state always carries a valid next_node for LangGraph.
+            if state.get("plan_executed"):
+                if state.get("multi_sim_phase") == "executing_sims":
+                    logger.info(
+                        "SUPERVISOR [multi-sim]: Per-sim cycle complete — "
+                        "advancing multi-sim loop inline"
+                    )
+                    return self._advance_multi_sim(state)
+                # combined_analysis done (multi_sim_phase was just set to
+                # "combined_reporter" by _assign_field_agent_tasks), or any
+                # other case where next_node was left as "supervisor".
+                if state.get("next_node") == "supervisor":
+                    logger.info(
+                        "SUPERVISOR: plan_executed with next_node=supervisor — "
+                        "redirecting to final_report"
+                    )
+                    state["next_node"] = "final_report"
+            return state
+
+        # ── Fallback ──────────────────────────────────────────────────────
         if state.get("errors"):
-            logger.error(
-                f"SUPERVISOR: Workflow has {len(state['errors'])} errors. "
-                f"Routing to final report."
-            )
+            logger.error(f"SUPERVISOR: {len(state['errors'])} errors — final report")
+        else:
+            logger.info("SUPERVISOR: Workflow complete")
+        state["next_node"] = "final_report"
+        return state
+
+    # ── Multi-Simulation Orchestration ───────────────────────────────────
+
+    def _start_next_sim(self, state: MDState) -> MDState:
+        """
+        Reset state for the current sim_index and route to input_validation.
+        Called when starting (or restarting) a per-sim pipeline.
+        """
+        sim_prompts = state.get("sim_prompts", [])
+        current_idx = state.get("current_sim_index", 0)
+
+        sim_info = sim_prompts[current_idx]
+        sim_label = sim_info.get("label", f"sim_{current_idx}")
+        sim_pdb = sim_info.get("pdb", "")
+        sim_goal = sim_info.get("prompt", "")
+        sim_working_dir = sim_info.get("working_dir", "")
+
+        logger.info(
+            f"SUPERVISOR [multi-sim]: Starting sim {current_idx + 1}/"
+            f"{len(sim_prompts)}: {sim_label}  pdb={sim_pdb}"
+        )
+
+        # Reset per-sim state, set working_directory to {basepath}/{label}/
+        state = self._reset_state_for_new_sim(state, sim_goal, sim_working_dir, sim_pdb)
+
+        # Copy PDB into per-sim directory so validator can find it
+        if sim_pdb and os.path.isfile(sim_pdb):
+            dest = Path(sim_working_dir) / Path(sim_pdb).name
+            if not dest.exists():
+                Path(sim_working_dir).mkdir(parents=True, exist_ok=True)
+                shutil.copy2(sim_pdb, dest)
+                logger.info(f"Copied PDB {sim_pdb} → {dest}")
+            state["user_goal"] = sim_goal.replace(sim_pdb, Path(sim_pdb).name)
+
+        state["next_node"] = "input_validation"
+        return state
+
+    def _advance_multi_sim(self, state: MDState) -> MDState:
+        """
+        Save current sim state, increment index, start next sim or combined analysis.
+        Called when plan_executed=True in executing_sims phase.
+        """
+        sim_prompts = state.get("sim_prompts", [])
+        current_idx = state.get("current_sim_index", 0)
+
+        # Save snapshot of completed sim
+        self._save_sim_state(state, current_idx)
+        current_idx += 1
+        state["current_sim_index"] = current_idx
+
+        logger.info(
+            f"SUPERVISOR [multi-sim]: Sim {current_idx}/{len(sim_prompts)} saved"
+        )
+
+        if current_idx >= len(sim_prompts):
+            # All sims complete — start combined analysis at basepath level
+            logger.info("SUPERVISOR [multi-sim]: All sims complete — combined analysis")
+            return self._setup_combined_analysis(state)
+
+        # Start next sim
+        return self._start_next_sim(state)
+
+    def _setup_combined_analysis(self, state: MDState) -> MDState:
+        """
+        Prepare state for combined analysis at basepath level.
+
+        After this, the regular supervisor flow handles everything:
+          enrichment is skipped (enriched_prompt is set)
+          planner creates a combined execution plan
+          analysis and reporter agents run in {basepath}/
+        """
+        completed = state.get("completed_sim_states", [])
+
+        # basepath = parent of per-sim dirs
+        basepath = str(
+            Path(state.get("sim_working_dirs", [state.get("working_directory", "")])[0]).parent.resolve()
+        )
+
+        logger.info(f"SUPERVISOR [multi-sim]: Combined analysis at basepath={basepath}")
+
+        # Switch log back to basepath
+        set_log_file(str(Path(basepath) / "agent_conversation.log"))
+
+        # Build combined instructions
+        sim_data_summary = self._build_sim_data_summary(completed)
+        combined_plan = state.get("combined_analysis_plan", "")
+        combined_instructions = (
+            f"## Combined Multi-Simulation Analysis\n\n"
+            f"{combined_plan}\n\n"
+            f"## Simulation Data\n\n{sim_data_summary}\n\n"
+            f"Save all combined plots and reports to the analysis and reporter "
+            f"directories under: {basepath}"
+        )
+
+        # Preserve multi-sim bookkeeping + config
+        preserved_keys = {
+            "is_multi_simulation", "sim_prompts", "combined_analysis_plan",
+            "sim_working_dirs", "pdb_list", "completed_sim_states",
+            "md_engine", "force_field", "water_model", "human_in_loop",
+            "subtask_type", "subtask_type_initialized", "agent_list",
+            "required_inputs",
+        }
+        preserved = {k: state[k] for k in preserved_keys if k in state}
+
+        # Reset per-sim artifacts
+        for key in [
+            "raw_pdb", "cleaned_pdb", "preprocessing_report", "pdb_analysis",
+            "pdb_summary", "component_selection", "system_info",
+            "ligand_files", "ligand_resnames", "ion_files", "ion_resnames",
+            "topology", "coordinates", "mdp_files", "setup_report",
+            "hpc_action", "hpc_output_directory", "job_script", "job_id",
+            "job_status", "trajectory_path", "energy_file", "hpc_report",
+            "analysis_action", "analysis_request", "analysis_results",
+            "figures", "conclusions", "analysis_directory",
+            "reporter_output", "reporter_plan", "reporter_instructions",
+            "reporter_file_info", "execution_plan", "plan_executed",
+            "preprocessing_instructions", "setup_instructions",
+            "hpc_instructions", "analysis_instructions",
+            "final_report", "workflow_status",
+            "file_registry", "generated_files",
+            "human_feedback", "human_recommendation", "error_triggered_hitl",
+        ]:
+            if key in ("mdp_files", "file_registry", "generated_files", "component_selection"):
+                state[key] = {}
+            elif key in ("figures",):
+                state[key] = []
+            elif key == "plan_executed":
+                state[key] = False
+            elif key == "error_triggered_hitl":
+                state[key] = False
+            elif key == "analysis_action":
+                state[key] = "full_analysis"
+            else:
+                state[key] = None
+
+        state.update(preserved)
+
+        # Set up combined analysis context
+        state["multi_sim_phase"] = "combined_analysis"
+        state["current_sim_index"] = len(state.get("sim_prompts", []))  # mark sims done
+        state["working_directory"] = basepath
+        state["user_goal"] = combined_instructions
+        state["enriched_prompt"] = combined_instructions  # skip enrichment
+        state["rephrased_goal"] = combined_instructions
+        state["input_validated"] = True
+        state["analysis_instructions"] = combined_instructions
+        state["current_agent_idx"] = 0
+        state["preprocess_retry_count"] = 0
+        state["setup_retry_count"] = 0
+        state["hpc_retry_count"] = 0
+        state["analysis_retry_count"] = 0
+        state["reporter_retry_count"] = 0
+        state["errors"] = []
+        state["warnings"] = []
+        state["execution_path"] = []
+        state["preprocessing_issues"] = []
+        state["setup_issues"] = []
+
+        # Ensure basepath agent dirs exist
+        for sub in ("analysis", "reporter", "supervisor", "planner"):
+            Path(basepath, sub).mkdir(parents=True, exist_ok=True)
+
+        # State update preserves dir fields for combined (SecureFileManager will
+        # create them at basepath level when agents run)
+        state["analysis_dir"] = str(Path(basepath) / "analysis")
+        state["preprocess_dir"] = str(Path(basepath) / "preprocess")
+        state["simsetup_dir"] = str(Path(basepath) / "simsetup")
+        state["hpc_dir"] = str(Path(basepath) / "hpc")
+
+        # Route to planner so it creates a combined execution plan
+        state["next_node"] = "planner"
+        log_supervisor_routing(
+            state, "planner",
+            f"Multi-sim combined analysis: planning for {len(completed)} sims at {basepath}"
+        )
+        return state
+
+    def _handle_multi_sim_phase(self, state: MDState) -> MDState:
+        """Legacy shim — delegates to the appropriate method."""
+        phase = state.get("multi_sim_phase")
+        if phase == "executing_sims":
+            return self._start_next_sim(state)
+        elif phase == "combined_analysis":
+            return self._setup_combined_analysis(state)
+        else:
+            logger.error(f"SUPERVISOR [multi-sim]: Unknown phase '{phase}'")
             state["next_node"] = "final_report"
             return state
 
-        # Step 6: All tasks complete
-        logger.info("SUPERVISOR: All workflow tasks completed")
-        state["next_node"] = "final_report"
+    def _reset_state_for_new_sim(
+        self, state: MDState, new_goal: str, new_working_dir: str, raw_pdb: str
+    ) -> MDState:
+        """
+        Reset per-simulation fields while keeping multi-sim bookkeeping.
+
+        Preserved: is_multi_simulation, multi_sim_phase, sim_prompts,
+                   combined_analysis_plan, current_sim_index,
+                   completed_sim_states, sim_working_dirs, pdb_list,
+                   md_engine, force_field, water_model, human_in_loop,
+                   subtask_type, subtask_type_initialized, agent_list,
+                   required_inputs
+        """
+        # Fields to keep across simulations
+        preserved_keys = {
+            # Multi-sim bookkeeping
+            "is_multi_simulation", "multi_sim_phase", "sim_prompts",
+            "combined_analysis_plan", "current_sim_index",
+            "completed_sim_states", "sim_working_dirs", "pdb_list",
+            # Global config
+            "md_engine", "force_field", "water_model", "human_in_loop",
+            "subtask_type", "subtask_type_initialized", "agent_list",
+            "required_inputs",
+        }
+
+        # Save values to preserve
+        preserved = {k: state[k] for k in preserved_keys if k in state}
+
+        # Reset all per-sim fields to their defaults
+        state["user_goal"] = new_goal
+        state["raw_pdb"] = raw_pdb if os.path.isfile(raw_pdb) else None
+        state["working_directory"] = str(Path(new_working_dir).resolve())
+
+        # Create per-sim agent directories
+        wd = Path(state["working_directory"])
+        wd.mkdir(parents=True, exist_ok=True)
+        for subdir in ("preprocess", "simsetup", "hpc", "analysis",
+                        "reporter", "supervisor", "planner", "programmer"):
+            (wd / subdir).mkdir(parents=True, exist_ok=True)
+        state["preprocess_dir"] = str(wd / "preprocess")
+        state["simsetup_dir"] = str(wd / "simsetup")
+        state["hpc_dir"] = str(wd / "hpc")
+        state["analysis_dir"] = str(wd / "analysis")
+
+        # Clear all per-sim artifacts
+        per_sim_clear = [
+            "enriched_prompt", "rephrased_goal", "structured_prompt",
+            "input_validated", "pdb_analysis", "pdb_summary",
+            "component_selection", "system_info",
+            "cleaned_pdb", "preprocessing_report",
+            "ligand_files", "ligand_resnames", "ion_files", "ion_resnames",
+            "topology", "coordinates", "mdp_files", "setup_report",
+            "hpc_action", "hpc_output_directory", "job_script", "job_id",
+            "job_status", "trajectory_path", "energy_file", "hpc_report",
+            "analysis_action", "analysis_request", "analysis_results",
+            "figures", "conclusions", "analysis_directory",
+            "reporter_output", "reporter_plan", "reporter_instructions",
+            "reporter_file_info",
+            "execution_plan", "plan_executed",
+            "preprocessing_instructions", "setup_instructions",
+            "hpc_instructions", "analysis_instructions",
+            "final_report", "workflow_status",
+            "file_registry", "generated_files", "file_info",
+            "human_feedback", "human_recommendation", "error_triggered_hitl",
+        ]
+        for key in per_sim_clear:
+            if key in ("mdp_files",):
+                state[key] = {}
+            elif key in ("figures", "preprocessing_issues", "setup_issues"):
+                state[key] = []
+            elif key in ("file_registry", "generated_files", "component_selection"):
+                state[key] = {}
+            elif key in ("plan_executed",):
+                state[key] = False
+            elif key in ("error_triggered_hitl",):
+                state[key] = False
+            else:
+                state[key] = None
+
+        # Reset retry counters & agent index
+        state["current_agent_idx"] = 0
+        state["preprocess_retry_count"] = 0
+        state["setup_retry_count"] = 0
+        state["hpc_retry_count"] = 0
+        state["analysis_retry_count"] = 0
+        state["reporter_retry_count"] = 0
+        state["execution_path"] = []
+        state["errors"] = []
+        state["warnings"] = []
+        state["preprocessing_issues"] = []
+        state["setup_issues"] = []
+        state["next_node"] = None
+
+        # Restore preserved multi-sim and global fields
+        state.update(preserved)
+
+        logger.info(
+            f"SUPERVISOR [multi-sim]: State reset for new simulation "
+            f"(working_dir={state['working_directory']})"
+        )
+
+        # Redirect conversation log into the per-sim directory
+        sim_log = str(Path(state["working_directory"]) / "agent_conversation.log")
+        set_log_file(sim_log)
+        logger.info(f"SUPERVISOR [multi-sim]: Log file switched to {sim_log}")
+
         return state
+
+    def _save_sim_state(self, state: MDState, sim_index: int):
+        """Save a snapshot of the current per-sim state before resetting."""
+        completed = state.get("completed_sim_states") or []
+
+        # Collect the important per-sim outputs
+        snapshot = {
+            "sim_index": sim_index,
+            "label": (state.get("sim_prompts") or [{}])[sim_index].get("label", f"sim_{sim_index}"),
+            "working_directory": state.get("working_directory"),
+            "user_goal": state.get("user_goal"),
+            "analysis_results": state.get("analysis_results", {}),
+            "analysis_directory": state.get("analysis_directory") or state.get("analysis_dir"),
+            "trajectory_path": state.get("trajectory_path"),
+            "topology": state.get("topology"),
+            "energy_file": state.get("energy_file"),
+            "reporter_output": state.get("reporter_output"),
+            "figures": list(state.get("figures", [])),
+            "errors": list(state.get("errors", [])),
+            "warnings": list(state.get("warnings", [])),
+            "file_registry": dict(state.get("file_registry", {})),
+        }
+
+        completed.append(snapshot)
+        state["completed_sim_states"] = completed
+
+        # Also persist state.jsonl in per-sim supervisor/ directory
+        try:
+            sup_dir = Path(state["working_directory"]) / "supervisor"
+            sup_dir.mkdir(parents=True, exist_ok=True)
+            state_path = sup_dir / "state.jsonl"
+            serializable = {}
+            for k, v in state.items():
+                try:
+                    json.dumps(v, default=str)
+                    serializable[k] = v
+                except (TypeError, ValueError):
+                    serializable[k] = str(v)
+            state_path.write_text(
+                json.dumps({"sim_index": sim_index, "state": serializable}, indent=2, default=str) + "\n",
+                encoding="utf-8",
+            )
+            logger.info(f"Saved per-sim state to {state_path}")
+        except Exception as e:
+            logger.warning(f"Failed to save per-sim state: {e}")
+
+    # Old combined methods removed — _setup_combined_analysis handles both analysis + reporter
+
+    def _build_sim_data_summary(self, completed_sims: List[Dict[str, Any]]) -> str:
+        """Build a text summary of all completed simulation data paths for LLM context."""
+        lines = []
+        for sim in completed_sims:
+            label = sim.get("label", "unknown")
+            wd = sim.get("working_directory", "?")
+            analysis_dir = sim.get("analysis_directory", "?")
+            traj = sim.get("trajectory_path", "N/A")
+            topo = sim.get("topology", "N/A")
+            energy = sim.get("energy_file", "N/A")
+            n_figs = len(sim.get("figures", []))
+            n_errors = len(sim.get("errors", []))
+            lines.append(
+                f"### Simulation: {label}\n"
+                f"- Working directory: {wd}\n"
+                f"- Analysis directory: {analysis_dir}\n"
+                f"- Trajectory: {traj}\n"
+                f"- Topology: {topo}\n"
+                f"- Energy: {energy}\n"
+                f"- Figures generated: {n_figs}\n"
+                f"- Errors: {n_errors}\n"
+            )
+        return "\n".join(lines)
 
     def input_validation_node(self, state: MDState) -> MDState:
         """
@@ -378,6 +783,26 @@ class MDSupervisor:
             # All agents complete
             logger.info("FIELD_AGENT_ASSIGNMENT: All required agents completed")
             state["plan_executed"] = True
+
+            # Multi-sim: return to supervisor to advance to next sim or combined phase
+            if state.get("is_multi_simulation") and state.get("multi_sim_phase") == "executing_sims":
+                logger.info("FIELD_AGENT_ASSIGNMENT: Per-sim cycle done — returning to multi-sim loop")
+                state["next_node"] = "supervisor"
+                return state
+
+            # Multi-sim combined phases: transition to next phase
+            if state.get("multi_sim_phase") == "combined_analysis":
+                logger.info("FIELD_AGENT_ASSIGNMENT: Combined analysis done — transitioning to combined reporter")
+                state["multi_sim_phase"] = "combined_reporter"
+                state["next_node"] = "supervisor"
+                return state
+
+            if state.get("multi_sim_phase") == "combined_reporter":
+                logger.info("FIELD_AGENT_ASSIGNMENT: Combined reporter done — going to final report")
+                state["next_node"] = "final_report"
+                log_supervisor_routing(state, "final_report", "Multi-sim workflow complete")
+                return state
+
             state["next_node"] = "final_report"
             log_supervisor_routing(state, "final_report", "All workflow tasks complete")
             return state

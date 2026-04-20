@@ -400,10 +400,38 @@ class MDAnalysisAgent:
             else:
                 planner_instructions = rec_block
         
+        # Resolve topology path: prefer the hpc_dir copy over the simsetup
+        # original so the analysis agent always sees files from the same
+        # directory tree as the trajectory/energy outputs.
+        topology_file = state.get("topology")
+        hpc_dir = state.get("hpc_dir") or state.get("hpc_output_directory") or state.get("hpc_directory")
+        if hpc_dir:
+            hpc_dir_path = Path(hpc_dir)
+            # Check for topology files in hpc_dir by priority: .top > .tpr
+            for candidate_name in (
+                Path(topology_file).name if topology_file else None,
+                "topol.top",
+                "topology.top",
+            ):
+                if candidate_name:
+                    candidate = hpc_dir_path / candidate_name
+                    if candidate.exists():
+                        topology_file = str(candidate)
+                        logger.info(f"analysis: resolved topology to hpc copy: {topology_file}")
+                        break
+            # Also check results sub-directory (download_results destination)
+            if not (topology_file and Path(topology_file).exists()):
+                for candidate_name in ("topol.top", "topology.top"):
+                    candidate = hpc_dir_path / "results" / candidate_name
+                    if candidate.exists():
+                        topology_file = str(candidate)
+                        logger.info(f"analysis: resolved topology from hpc/results: {topology_file}")
+                        break
+
         return AnalysisAgentInput(
             working_directory=state.get("working_directory", "working_dir"),
             hpc_output_dir=state.get("hpc_output_directory", ""),
-            topology_file=state.get("topology"),
+            topology_file=topology_file,
             trajectory_file=state.get("trajectory_path"),
             energy_file=state.get("energy_file"),
             analyses=defaults.get("metrics", ["rmsd", "rmsf", "gyration"]),

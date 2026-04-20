@@ -144,3 +144,13 @@ class MDState(TypedDict):
     # Error & Warning tracking
     errors: List[str]                  # List of errors encountered during workflow
     warnings: List[str]                # List of warnings generated during workflow
+
+    # ── Multi-Simulation Mode ─────────────────────────────────────────────
+    is_multi_simulation: Optional[bool]          # True when running multiple PDBs
+    multi_sim_phase: Optional[str]               # "planning" | "executing_sims" | "combined_analysis" | "combined_reporter" | None
+    pdb_list: Optional[List[str]]                # Original PDB file paths from CLI / goal extraction
+    sim_prompts: Optional[List[Dict[str, Any]]]  # Per-sim prompts from master planner [{prompt, pdb, label, working_dir}, ...]
+    combined_analysis_plan: Optional[str]        # LLM plan text for cross-simulation analysis
+    current_sim_index: Optional[int]             # Index into sim_prompts (which sim is next)
+    completed_sim_states: Optional[List[Dict[str, Any]]]  # Saved state snapshots after each sim completes
+    sim_working_dirs: Optional[List[str]]        # Per-sim working directories (e.g., base_dir/1abc/)
