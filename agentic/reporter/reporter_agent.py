@@ -69,11 +69,20 @@ class ReporterAgent:
     def reporter_node(self, state: MDState) -> MDState:
         """
         Main reporter node - entry point from workflow.
-        Generates scientific reports from analysis summaries.
+
+        In multi-sim combined_analysis phase: generates a cross-simulation
+        comparison HTML report from combined analysis results.
+        Otherwise: runs the regular per-simulation LLM-guided reporter.
         """
         import sys
         import traceback
-        
+
+        # ── Combined multi-sim report ─────────────────────────────────────
+        # Support both initial combined analysis pass and resumed reporter pass.
+        if state.get("multi_sim_phase") in {"combined_analysis", "combined_reporter"}:
+            return self._run_combined_report(state)
+
+        # ── Regular per-sim report ────────────────────────────────────────
         # Extract input
         execution_plan = state.get("execution_plan") or {}
         has_planner_instructions = execution_plan.get("format") == "natural_language"
@@ -145,6 +154,75 @@ class ReporterAgent:
             state["errors"].append(f"Reporter error: {str(e)}")
             state["next_node"] = "supervisor"
         
+        return state
+
+    # ── Combined multi-sim report ─────────────────────────────────────────
+
+    def _run_combined_report(self, state: MDState) -> MDState:
+        """
+        Generate a combined comparison HTML report for all simulations.
+
+        Reads overlay plots from state["analysis_results"]["combined"] and
+        the per-sim analysis summaries, then writes a self-contained HTML to
+        ``{working_directory}/reporter/combined_report.html``.
+        """
+        from .tools import generate_combined_html_report
+
+        import traceback
+
+        working_dir = state.get("working_directory", "working_dir")
+        reporter_dir = str(Path(working_dir) / "reporter")
+        Path(reporter_dir).mkdir(parents=True, exist_ok=True)
+
+        # Resolve per-sim dirs and labels
+        completed = state.get("completed_sim_states") or []
+        sim_dirs = [s["working_directory"] for s in completed if s.get("working_directory")]
+        labels = [s.get("label", f"sim_{i}") for i, s in enumerate(completed)]
+
+        # Overlay plots produced by combined analysis
+        combined_info = (state.get("analysis_results") or {}).get("combined", {})
+        overlay_plots = combined_info.get("overlay_plots", [])
+
+        log_agent_start(
+            "reporter",
+            "Combined Multi-Simulation Report",
+            {
+                "sim_dirs": sim_dirs,
+                "labels": labels,
+                "overlay_plots": overlay_plots,
+                "output_dir": reporter_dir,
+            },
+        )
+
+        try:
+            result = generate_combined_html_report.func(
+                sim_dirs=sim_dirs,
+                labels=labels,
+                overlay_plots=overlay_plots,
+                working_dir=reporter_dir,
+                output_file="combined_report.html",
+                title="Multi-Simulation Comparison Report",
+                enriched_prompt=state.get("enriched_prompt"),
+            )
+
+            if result.get("success"):
+                report_path = result["output_path"]
+                state["reporter_output"] = report_path
+                log_agent_action(
+                    agent_name="reporter",
+                    action="Combined Report Generated",
+                    details={"report_path": report_path},
+                )
+                log_agent_completion("reporter", "Combined Multi-Simulation Report", state, True)
+            else:
+                state["errors"].append(f"Combined report failed: {result.get('error', 'unknown')}")
+                log_agent_completion("reporter", "Combined Multi-Simulation Report", state, False)
+
+        except Exception as exc:
+            logger.error(f"Combined report failed: {exc}\n{traceback.format_exc()}")
+            state["errors"].append(f"Combined reporter error: {exc}")
+
+        state["next_node"] = "supervisor"
         return state
     
     def _extract_agent_instructions(self, full_plan: str, agent_name: str) -> Optional[str]:

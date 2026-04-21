@@ -13,6 +13,7 @@ from src.reporter.literature_search import (
     search_biorxiv, search_uniprot,
 )
 from src.reporter.html_generator import generate_html_report
+from src.reporter.combined_reporter import generate_combined_html_report
 
 # Export tool functions for direct access
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "search_uniprot",
     "generate_literature_queries",
     "generate_html_report",
+    "generate_combined_html_report",
     "get_reporter_tools",
     "get_tool_metadata",
 ]
@@ -44,6 +46,7 @@ def get_reporter_tools() -> list:
         search_uniprot,
         generate_literature_queries,
         generate_html_report,
+        generate_combined_html_report,
     ]
 
 

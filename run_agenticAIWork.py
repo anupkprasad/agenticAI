@@ -1134,6 +1134,12 @@ def main(argv=None):
                        help=("Multiple PDB files for multi-simulation mode. "
                              "Each PDB gets its own pipeline in a separate directory. "
                              "Example: --pdb-list 1abc.pdb 2def.pdb 3ghi.pdb"))
+    parser.add_argument("--sim-dirs", default=None, nargs='+', metavar="DIR",
+                       help=("Per-simulation directories for multi-sim analysis of "
+                             "already-completed simulations. Each directory must "
+                             "contain an hpc/ sub-folder with trajectory data. "
+                             "The directory basename is used as the simulation label. "
+                             "Example: --sim-dirs pseudokin/p17612 pseudokin/p24941"))
     parser.add_argument("--subtask", default=None, nargs='+',
                        choices=["preprocess", "simsetup", "hpcjob", "analysis", "reporter"],
                        metavar="AGENT",
@@ -1256,6 +1262,25 @@ def main(argv=None):
     # Multi-simulation mode detection
     # ------------------------------------------------------------------
     pdb_list = getattr(args, 'pdb_list', None) or []
+
+    # --sim-dirs: convert per-sim directories into synthetic pdb_list entries
+    # so the existing multi-sim planner logic works unchanged.
+    # Each dir's basename becomes the simulation label.  E.g.:
+    #   --sim-dirs pseudokin/p17612 pseudokin/p24941
+    # produces a pdb_list of ["/abs/pseudokin/p17612/p17612.pdb", ...].
+    # The planner uses Path(pdb).stem as the label → "p17612",
+    # and builds sim_working_dir = {base_working_dir}/p17612/ which
+    # matches the existing directory layout.
+    sim_dirs_arg = getattr(args, 'sim_dirs', None) or []
+    if sim_dirs_arg and not pdb_list:
+        resolved_sim_dirs = [Path(sd).resolve() for sd in sim_dirs_arg]
+        # Synthetic PDB entries: {sim_dir}/{label}.pdb (file need not exist)
+        pdb_list = [str(d / f"{d.name}.pdb") for d in resolved_sim_dirs]
+        print(
+            f"\n--sim-dirs: activating multi-sim for {len(pdb_list)} directories",
+            flush=True,
+        )
+
     if not pdb_list:
         # Try extracting multiple PDBs from the goal text
         _goal_pdbs = _extract_pdb_paths_from_goal(goal)

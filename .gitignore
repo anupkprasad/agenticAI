@@ -17,6 +17,7 @@ work_dir_hl/
 work_dir_hl2/
 multi_run/
 multi_run_bckp/
+pseudokin/
 backup/
 tests/
 tmp/

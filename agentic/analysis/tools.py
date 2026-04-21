@@ -34,6 +34,12 @@ from src.analysis.summary_logger import initialize_summary_file, generate_summar
 from src.analysis.dssp_analyzer import analyze_secondary_structure
 from src.analysis.sasa_calculator import calculate_sasa, plot_sasa
 from src.analysis.com_distance_calculator import calculate_com_distance
+from src.analysis.combined_analysis import (
+    collect_metric_files,
+    plot_combined_overlay,
+    compute_comparison_table,
+    run_combined_analysis,
+)
 
 # Import dynamic tool loader for programmer-generated tools
 from agentic.utils import get_dynamic_tool_loader
@@ -55,6 +61,11 @@ __all__ = [
     "plot_md_data",
     "plot_md_multipanel",
     "calculate_com_distance",
+    # Combined (multi-sim) tools
+    "collect_metric_files",
+    "plot_combined_overlay",
+    "compute_comparison_table",
+    "run_combined_analysis",
     "AnalysisToolExecutor",
     "get_analysis_tools",
     "get_tool_metadata",
@@ -85,7 +96,12 @@ def get_analysis_tools() -> list:
         plot_md_data,
         plot_md_multipanel,
         plot_combined_data,
-        calculate_com_distance
+        calculate_com_distance,
+        # Combined (multi-sim) tools
+        collect_metric_files,
+        plot_combined_overlay,
+        compute_comparison_table,
+        run_combined_analysis,
     ]
 
 

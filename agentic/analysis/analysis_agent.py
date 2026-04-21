@@ -72,9 +72,16 @@ class MDAnalysisAgent:
     def analysis_node(self, state: MDState) -> MDState:
         """
         Main analysis node - entry point from workflow.
-        Orchestrates the entire analysis pipeline following simsetup pattern.
+
+        In multi-sim combined_analysis phase: runs cross-simulation overlay
+        analysis using dedicated combined tools.
+        Otherwise: runs the regular per-simulation LLM-guided analysis.
         """
-        # Check if we have planner instructions
+        # ── Combined multi-sim analysis ───────────────────────────────────
+        if state.get("multi_sim_phase") == "combined_analysis":
+            return self._run_combined_analysis(state)
+
+        # ── Regular per-sim analysis ──────────────────────────────────────
         execution_plan = state.get("execution_plan", {})
         has_planner_instructions = execution_plan.get("format") == "natural_language"
         
@@ -169,6 +176,93 @@ class MDAnalysisAgent:
             state["next_node"] = "human_analysis_check"
             state["error_triggered_hitl"] = True
         
+        return state
+
+    # ── Combined multi-sim analysis ───────────────────────────────────────
+
+    def _run_combined_analysis(self, state: MDState) -> MDState:
+        """
+        Run cross-simulation combined analysis.
+
+        Collects per-sim data files, produces overlay plots and stats CSVs
+        in ``{working_directory}/analysis/``, and stores the results in state
+        so the reporter can embed them in the combined report.
+        """
+        from .tools import run_combined_analysis, collect_metric_files
+
+        working_dir = state.get("working_directory", "working_dir")
+        analysis_dir = str(Path(working_dir) / "analysis")
+        Path(analysis_dir).mkdir(parents=True, exist_ok=True)
+        state["analysis_dir"] = analysis_dir
+        state["analysis_directory"] = analysis_dir
+
+        # Resolve per-sim directories and labels from completed_sim_states
+        completed = state.get("completed_sim_states") or []
+        sim_dirs = [s["working_directory"] for s in completed if s.get("working_directory")]
+        labels = [s.get("label", f"sim_{i}") for i, s in enumerate(completed)]
+
+        # Fall back to sim_working_dirs from planner if no completed states yet
+        if not sim_dirs:
+            sim_dirs = state.get("sim_working_dirs") or []
+            sim_prompts = state.get("sim_prompts") or []
+            labels = [p.get("label", f"sim_{i}") for i, p in enumerate(sim_prompts)]
+
+        log_agent_start(
+            "analysis",
+            "Combined Multi-Simulation Analysis",
+            {"sim_dirs": sim_dirs, "labels": labels, "output_dir": analysis_dir},
+        )
+
+        try:
+            result = run_combined_analysis.func(
+                sim_dirs=sim_dirs,
+                labels=labels,
+                working_dir=analysis_dir,
+                metrics=["rmsd", "rmsf", "rg", "energy"],
+            )
+
+            plots = result.get("plots", [])
+            tables = result.get("tables", [])
+            skipped = result.get("skipped", [])
+
+            log_agent_action(
+                agent_name="analysis",
+                action="Combined Analysis Complete",
+                details={
+                    "plots": plots,
+                    "tables": tables,
+                    "skipped": skipped,
+                    "summary": result.get("summary", ""),
+                },
+            )
+
+            # Store results in state for the reporter
+            analysis_results = state.get("analysis_results") or {}
+            analysis_results["combined"] = {
+                "sim_dirs": sim_dirs,
+                "labels": labels,
+                "overlay_plots": plots,
+                "stats_tables": tables,
+                "skipped_metrics": skipped,
+                "analysis_dir": analysis_dir,
+            }
+            state["analysis_results"] = analysis_results
+            state["figures"] = list(state.get("figures") or []) + plots
+
+            state["errors"] = [
+                e for e in state.get("errors", [])
+                if not (e.startswith("Analysis failed:") or e.startswith("Analysis error:"))
+            ]
+
+            log_agent_completion("analysis", "Combined Multi-Simulation Analysis", state, True)
+            state["next_node"] = "supervisor"
+
+        except Exception as exc:
+            import traceback
+            logger.error(f"Combined analysis failed: {exc}\n{traceback.format_exc()}")
+            state["errors"].append(f"Combined analysis error: {exc}")
+            state["next_node"] = "supervisor"   # Let supervisor decide what to do
+
         return state
 
     def _extract_agent_instructions(self, full_plan: str, agent_name: str) -> Optional[str]:

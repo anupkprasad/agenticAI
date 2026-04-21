@@ -396,11 +396,27 @@ class MDSupervisor:
         state["simsetup_dir"] = str(Path(basepath) / "simsetup")
         state["hpc_dir"] = str(Path(basepath) / "hpc")
 
-        # Route to planner so it creates a combined execution plan
-        state["next_node"] = "planner"
+        # Override subtask type so only analysis + reporter agents run
+        state["subtask_type"] = "analysis_only"
+        state["subtask_type_initialized"] = True
+
+        # Inject a minimal execution plan stub — bypasses the LLM planner
+        # entirely.  Analysis and reporter agents detect combined_analysis mode
+        # and run their deterministic combined-mode paths directly.
+        state["execution_plan"] = {
+            "format": "combined_analysis",
+            "title": "Combined Multi-Simulation Analysis",
+            "full_plan": combined_instructions,
+            "agent_plans": {},
+            "agent_sequence": ["analysis", "reporter"],
+        }
+        state["preprocessing_instructions"] = "N/A"  # skip step-4 extraction
+
+        # Route directly to analysis — no extra supervisor round-trip needed
+        state["next_node"] = "analysis"
         log_supervisor_routing(
-            state, "planner",
-            f"Multi-sim combined analysis: planning for {len(completed)} sims at {basepath}"
+            state, "analysis",
+            f"Multi-sim combined analysis: starting for {len(completed)} sims at {basepath}"
         )
         return state
 

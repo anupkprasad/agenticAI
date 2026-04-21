@@ -188,15 +188,43 @@ python run_agenticAIWork.py \
   --use-llm --no-human-loop \
   --subtask preprocess simsetup hpcjob analysis reporter
 ```
+How multi-sim activates (all three ways):
+
+Flag	When to use
+--pdb-list a.pdb b.pdb ...	You have the original PDB files and want fresh simulations
+--sim-dirs dir1 dir2 ...	(new) Simulations already done; directories with hpc/ data exist
+Auto-detect from --goal text	Goal contains multiple .pdb file paths
+Path resolution flow with --sim-dirs pseudokin/p17612:
+
+label → p17612
+per-sim working_directory → p17612
+hpc_dir → hpc ✓ (analysis agent scans here for .xtc)
+
 
 
 
 python run_agenticAIWork.py \
-  --goal "Simulation for 1A.pdb, 2B.pdb, 3C.pdb is already done for 50 ns and data is stored in the 1A, 2B and 3C repectively. Please do the analysis of trajectories and compare dynamics among them" \
+  --goal "Simulation for 1A.pdb, 2B.pdb, 3C.pdb is already done for 50 ns and data is stored in the subdirectory 1A, 2B and 3C repectively. Please do the analysis of trajectories and compare dynamics (RMSD, Rg) among them. The proteins simulated are pseudokinases" \
   --working-dir multi_run \
   --use-llm --no-human-loop \
   --subtask analysis reporter
 
+############### pseudokinase  #############
+python run_agenticAIWork.py \
+  --goal "MD Simulation for uniprotId p17612, p24941, p28482, q13418, q7z7a4, q8ivt5, q8ne28 are done and saved in their respective directory named with /pseudokin/{uniprotId}/hpc/ Please do the analysis of trajectories and compare dynamics (RMSD, Rg) among them. The simulated protein are pseudokinases. the name of pseudokinase in the uniprotid are p17612: KAPCA_HUMAN,  p24941: CDK2_HUMAN,  p28482:MK01_HUMAN,  q13418: ILK_HUMAN,  q7z7a4: PXK_HUMAN,  q8ivt5:KSR1_HUMAN, q8ne28: STKL1_HUMAN" \
+  --working-dir pseudokin \
+  --use-llm --no-human-loop \
+  --subtask analysis reporter
+
+
+python run_agenticAIWork.py \
+  --goal "MD Simulation for uniprotId p17612, p24941, p28482, q13418, q7z7a4, q8ivt5, q8ne28 are done and saved in their respective directory named with /pseudokin/{uniprotId}/hpc/ Please do the analysis of trajectories and compare dynamics (RMSD, Rg) among them. The simulated protein are pseudokinases. the name of pseudokinase in the uniprotid are p17612: KAPCA_HUMAN,  p24941: CDK2_HUMAN,  p28482:MK01_HUMAN,  q13418: ILK_HUMAN,  q7z7a4: PXK_HUMAN,  q8ivt5:KSR1_HUMAN, q8ne28: STKL1_HUMAN" \
+  --working-dir pseudokin \
+  --sim-dirs pseudokin/p17612 pseudokin/p24941 pseudokin/p28482 pseudokin/q13418 pseudokin/q7z7a4 pseudokin/q8ivt5 pseudokin/q8ne28 \
+  --subtask analysis reporter \
+  --use-llm --no-human-loop
+
+##############################################################
 
 ### Directory structure
 
