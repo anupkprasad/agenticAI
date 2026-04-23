@@ -225,6 +225,104 @@ class HumanCheckpoints:
         else:
             state["next_node"] = "human_analysis_check"
             return state
+
+    @staticmethod
+    def human_reporter_check(state: MDState) -> MDState:
+        """Human checkpoint after the reporter agent.
+
+        Behaves like all other checkpoints:
+        - Skipped automatically when human_in_loop=False (--no-human-loop).
+        - Pauses for interactive review when human_in_loop=True.
+
+        In HITL mode supports:
+            'done' / 'approved'               → proceed to final_report
+            'reporter [: instructions]'       → re-run reporter then review again
+            'analysis [: instructions]'       → re-run analysis + reporter then review again
+            'preprocess' / 'setup' / 'hpc'   → switch to that earlier HITL checkpoint
+        """
+        feedback = state.get("human_feedback", "")
+
+        # ── Non-interactive: auto-approve and continue to supervisor ──
+        if not state.get("human_in_loop") and not feedback:
+            state["next_node"] = "supervisor"
+            return state
+
+        # ── Interactive mode, waiting for input ───────────────────────
+        if not feedback:
+            state["next_node"] = "human_reporter_check"
+            return state
+
+        log_human_checkpoint("reporter", {}, feedback.lower(), feedback)
+        logger.info(f"Reporter checkpoint — human decision: {feedback}")
+        state.pop("human_feedback", None)
+
+        lower = feedback.lower().strip()
+
+        # ── done / exit ───────────────────────────────────────────────
+        if any(w in lower for w in ("done", "exit", "quit", "finish", "ok", "approved",
+                                     "good", "satisfied", "continue", "proceed")):
+            state["human_final_decision"] = "done"
+            state["next_node"] = "supervisor"
+            return state
+
+        # ── re-run reporter ────────────────────────────────────────────
+        if any(w in lower for w in ("reporter", "report", "regenerate report", "redo report")):
+            state["reporter_output"] = None
+            if ":" in feedback:
+                instructions = feedback.split(":", 1)[1].strip()
+                existing = state.get("reporter_instructions") or ""
+                state["reporter_instructions"] = (existing + "\n" + instructions).strip()
+            state.setdefault("warnings", []).append(
+                f"Human requested reporter re-run at reporter checkpoint: {feedback}"
+            )
+            state["human_final_decision"] = "rerun_reporter"
+            state["next_node"] = "reporter"
+            return state
+
+        # ── re-run analysis ────────────────────────────────────────────
+        if any(w in lower for w in ("analysis", "analyse", "analyze",
+                                     "rerun analysis", "redo analysis")):
+            state["analysis_results"] = {}
+            state["figures"] = []
+            state["conclusions"] = None
+            state["reporter_output"] = None
+            if ":" in feedback:
+                instructions = feedback.split(":", 1)[1].strip()
+                existing = state.get("analysis_instructions") or ""
+                state["analysis_instructions"] = (existing + "\n" + instructions).strip()
+            state.setdefault("warnings", []).append(
+                f"Human requested analysis re-run at reporter checkpoint: {feedback}"
+            )
+            state["human_final_decision"] = "rerun_analysis"
+            state["next_node"] = "analysis"
+            return state
+
+        # ── switch to earlier HITL checkpoint ─────────────────────────
+        _checkpoint_map = {
+            "preprocess": "human_preprocess_check",
+            "preprocessing": "human_preprocess_check",
+            "setup": "human_setup_check",
+            "simsetup": "human_setup_check",
+            "simulation setup": "human_setup_check",
+            "hpc": "human_hpc_check",
+            "job": "human_hpc_check",
+        }
+        for _kw, _target in _checkpoint_map.items():
+            if _kw in lower:
+                state.setdefault("warnings", []).append(
+                    f"Human switched to {_target} from reporter checkpoint: {feedback}"
+                )
+                state["human_final_decision"] = f"switch_{_target}"
+                state["next_node"] = _target
+                return state
+
+        # ── default: treat as approval + note ─────────────────────────
+        state["human_final_decision"] = "done"
+        state.setdefault("warnings", []).append(
+            f"Human note at reporter checkpoint: {feedback}"
+        )
+        state["next_node"] = "supervisor"
+        return state
     
     @staticmethod
     def get_checkpoint_summary(state: MDState, checkpoint_type: str) -> Dict[str, Any]:
@@ -341,5 +439,51 @@ class HumanCheckpoints:
                 "Use 'show <filename>' to inspect generated files",
                 "Use 'continue' to skip this agent and proceed",
             ] + summary["recommendations"]
-        
+
         return summary
+
+    @classmethod
+    def get_reporter_check_summary(cls, state: MDState) -> Dict[str, Any]:
+        """Build a summary dict for the reporter checkpoint."""
+        working_dir = state.get("working_directory", ".")
+        reporter_dir = Path(working_dir) / "reporter"
+
+        # Collect reporter output path(s)
+        reporter_output = state.get("reporter_output")
+        report_paths: List[str] = []
+        if isinstance(reporter_output, str):
+            report_paths = [reporter_output]
+        elif isinstance(reporter_output, dict):
+            report_paths = [v for v in reporter_output.values() if isinstance(v, str)]
+        # Scan reporter dir for any HTML files not already listed
+        if reporter_dir.is_dir():
+            for html in sorted(reporter_dir.glob("*.html")):
+                if str(html) not in report_paths:
+                    report_paths.append(str(html))
+
+        analysis_types = list((state.get("analysis_results") or {}).keys())
+        figures = [Path(f).name for f in (state.get("figures") or [])]
+
+        errors = state.get("errors", [])
+        warnings = [w for w in state.get("warnings", []) if "Human" not in w]
+
+        return {
+            "checkpoint_type": "reporter",
+            "error_triggered": False,
+            "current_state": {
+                "report_files": report_paths,
+                "analysis_types_completed": analysis_types,
+                "figures_generated": figures,
+                "errors": errors[-5:] if errors else [],
+                "warnings": warnings[-5:] if warnings else [],
+            },
+            "issues_found": [f"ERROR: {e}" for e in errors[-3:]] if errors else [],
+            "recommendations": [
+                "'done' / 'approved' — accept results and proceed",
+                "'reporter' — regenerate the HTML report (optionally: 'reporter: <instructions>')",
+                "'analysis: <instructions>' — re-run analysis with new instructions then re-report",
+                "'preprocess' / 'setup' / 'hpc' — switch to that agent's HITL checkpoint to iterate, then reporter re-runs automatically",
+                "'show <filename>' — inspect a file",
+                "'files' — list all generated files",
+            ],
+        }

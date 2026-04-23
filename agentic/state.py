@@ -24,6 +24,7 @@ class MDState(TypedDict):
     
     # User input
     user_goal: str
+    user_goal_original: Optional[str]  # The raw --goal text, preserved unchanged throughout
     
     # Metadata & Configuration
     md_engine: str                 # "gromacs"
@@ -106,6 +107,7 @@ class MDState(TypedDict):
     
     # Enriched / rephrased prompt (set once after input validation)
     enriched_prompt: Optional[str]     # Unified enriched goal used by planner and agents
+    master_enriched_prompt: Optional[str]  # Multi-sim: master supervisor enriched prompt (preserved across per-sim state resets)
 
     # Agent-specific output directories (hardcoded structure)
     preprocess_dir: Optional[str]      # working_dir/preprocess/
@@ -140,6 +142,7 @@ class MDState(TypedDict):
     # Final report
     final_report: Optional[str]        # LLM-generated or fallback workflow completion report
     workflow_status: Optional[str]     # "completed", "failed"
+    human_final_decision: Optional[str]  # "done" | "rerun_reporter" | "rerun_analysis"
     
     # Error & Warning tracking
     errors: List[str]                  # List of errors encountered during workflow

@@ -135,8 +135,8 @@ class ReporterAgent:
             # Update state with results
             self._update_state(state, agent_output)
             
-            # Set next node - return to supervisor for final routing
-            state["next_node"] = "supervisor"
+            # Route to reporter checkpoint so the human can inspect results.
+            state["next_node"] = "human_reporter_check"
             
             success = agent_output.success and len(agent_output.errors) == 0
             log_agent_completion("reporter", "Scientific Report Generation", state, success)
@@ -152,7 +152,7 @@ class ReporterAgent:
                 "traceback": tb
             })
             state["errors"].append(f"Reporter error: {str(e)}")
-            state["next_node"] = "supervisor"
+            state["next_node"] = "human_reporter_check"
         
         return state
 
@@ -194,15 +194,64 @@ class ReporterAgent:
             },
         )
 
+        # Resolve protein name and build label → name map from user_goal
+        # ---------------------------------------------------------------
+        # Parse any "uniprotId: ProteinName" table the user may have provided.
+        import re as _re2
+        _user_goal_text = state.get("user_goal", "") or ""
+        _enriched_text = state.get("enriched_prompt", "") or ""
+        _combined_text = f"{_user_goal_text} {_enriched_text}"
+        # Build raw label_name_map (will be used by combined_reporter internally)
+        _label_name_map: Dict[str, str] = {}
+        for _m in _re2.finditer(r'\b([A-Za-z0-9_\-]+)\s*:\s*([A-Za-z][A-Za-z0-9_\-]+)', _combined_text):
+            _k, _v = _m.group(1).strip().lower(), _m.group(2).strip()
+            if _v[0].isalpha() and len(_k) >= 3 and len(_v) >= 2:
+                _label_name_map[_k] = _v
+
+        # Apply name mapping: replace any UniProt-ID labels with human-readable
+        # protein names so all downstream use (plots, report sections) shows names.
+        if _label_name_map:
+            labels = [_label_name_map.get(lbl.lower(), lbl) for lbl in labels]
+
+        # Derive a human-readable protein name for the report title.
+        # For multi-sim: try to map all labels; for single: the usual logic.
+        protein_name: Optional[str] = None
+        sys_info = state.get("system_info") or {}
+        if isinstance(sys_info, dict):
+            protein_name = (
+                sys_info.get("protein_name")
+                or sys_info.get("system_name")
+            )
+        if not protein_name and labels:
+            # Use mapped names where available
+            mapped = [_label_name_map.get(lbl.lower(), lbl) for lbl in labels[:3]]
+            protein_name = ", ".join(mapped) if mapped else labels[0]
+
+        # Dynamic title: use mapped protein names
+        report_title = (
+            f"Multi-Simulation Comparison Report — {protein_name}"
+            if protein_name
+            else "Multi-Simulation Comparison Report"
+        )
+
         try:
+            # Prefer master_enriched_prompt (supervisor's unified rephrased goal)
+            # over enriched_prompt, which by the combined-analysis phase has been
+            # overwritten with the planner's combined_analysis_plan text.
+            _report_enriched = (
+                state.get("master_enriched_prompt")
+                or state.get("enriched_prompt")
+            )
             result = generate_combined_html_report.func(
                 sim_dirs=sim_dirs,
                 labels=labels,
                 overlay_plots=overlay_plots,
                 working_dir=reporter_dir,
                 output_file="combined_report.html",
-                title="Multi-Simulation Comparison Report",
-                enriched_prompt=state.get("enriched_prompt"),
+                title=report_title,
+                enriched_prompt=_report_enriched,
+                user_goal=state.get("user_goal_original") or _user_goal_text,
+                protein_name=protein_name,
             )
 
             if result.get("success"):
@@ -222,7 +271,8 @@ class ReporterAgent:
             logger.error(f"Combined report failed: {exc}\n{traceback.format_exc()}")
             state["errors"].append(f"Combined reporter error: {exc}")
 
-        state["next_node"] = "supervisor"
+        # Route to reporter checkpoint (not supervisor) so human can inspect
+        state["next_node"] = "human_reporter_check"
         return state
     
     def _extract_agent_instructions(self, full_plan: str, agent_name: str) -> Optional[str]:
@@ -545,17 +595,56 @@ No need to specify image paths in tool_params - they're extracted from the analy
 
             user_goal = state.get("enriched_prompt") or state.get("user_goal", "MD simulation analysis")
 
-            # Extract protein name from system_info
+            # ── Protein name extraction (best-effort, multiple sources) ──
             protein_name = None
             sys_info = state.get("system_info")
             if isinstance(sys_info, dict):
-                protein_name = sys_info.get("system_name") or sys_info.get("protein_name")
+                protein_name = (
+                    sys_info.get("system_name")
+                    or sys_info.get("protein_name")
+                    or sys_info.get("uniprot_id")
+                )
+            # Try PDB file stem if system_info didn't give a clean name
+            if not protein_name or len(protein_name) < 3:
+                for pdb_key in ("raw_pdb", "cleaned_pdb", "pdb_path"):
+                    pdb_val = state.get(pdb_key)
+                    if pdb_val and isinstance(pdb_val, str):
+                        import os
+                        stem = os.path.splitext(os.path.basename(pdb_val))[0]
+                        if len(stem) >= 3:
+                            protein_name = stem
+                            break
+            # Scan the user goal for the first capitalised word as protein name
+            if not protein_name and user_goal:
+                import re as _re
+                match = _re.search(r'\b([A-Z]{2,}[0-9]*[A-Z]*|[A-Z][a-z]*[0-9]+)\b', user_goal)
+                if match:
+                    protein_name = match.group(1)
+
+            # ── Collect analysis stats to drive result-specific queries ──
+            analysis_stats: Dict[str, Any] = {}
+            if isinstance(analysis_data, dict):
+                results = analysis_data.get("results") or analysis_data.get("analysis_results") or {}
+                if isinstance(results, dict):
+                    for atype, aval in results.items():
+                        if isinstance(aval, dict):
+                            # Grab any numeric mean/max values present
+                            astat = {}
+                            for k, v in aval.items():
+                                if any(x in k.lower() for x in ("mean", "max", "min", "avg")):
+                                    try:
+                                        astat[k] = float(v)
+                                    except (TypeError, ValueError):
+                                        pass
+                            if astat:
+                                analysis_stats[atype] = astat
 
             # --- Generate prioritised queries ---
             query_result = generate_literature_queries.invoke({
                 "analysis_types": analysis_types,
                 "user_goal": user_goal,
                 "protein_name": protein_name or "",
+                "analysis_stats": analysis_stats or None,
             })
             queries = {}
             resolved_name = ""

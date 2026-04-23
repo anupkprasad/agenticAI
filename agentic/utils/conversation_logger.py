@@ -244,6 +244,14 @@ class ConversationLogger:
         elif agent_name == "setup":
             # Setup produces topology, coordinates, and mdp files
             output_fields = ['topology', 'coordinates', 'mdp_files']
+        elif agent_name == "reporter":
+            # Reporter produces HTML/markdown reports
+            output_fields = ['reporter_output', 'final_report']
+        elif agent_name == "analysis":
+            # Analysis produces figures and analysis results
+            output_fields = ['analysis_results', 'figures', 'analysis_directory']
+        elif agent_name in ("hpc",):
+            output_fields = ['job_id', 'job_status', 'trajectory_path', 'energy_file']
         else:
             # Generic fields for other agents
             output_fields = ['cleaned_pdb', 'topology', 'coordinates', 'mdp_files', 'execution_log']

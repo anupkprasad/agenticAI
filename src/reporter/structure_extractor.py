@@ -60,8 +60,10 @@ def extract_first_frame_pdb(
         return None
 
     # --- locate trajectory (optional) -----------------------------------
+    # Prefer the PBC-wrapped trajectory when available (mdWrap.xtc),
+    # then fall back to the raw trajectory files.
     trajectory: Optional[Path] = None
-    for candidate in ("md.xtc", "md.trr"):
+    for candidate in ("mdWrap.xtc", "md.xtc", "md.trr"):
         p = hpc_dir / candidate
         if p.exists():
             trajectory = p
@@ -77,6 +79,20 @@ def extract_first_frame_pdb(
             u = mda.Universe(str(topology), str(trajectory))
         else:
             u = mda.Universe(str(topology))
+
+        # Align all frames to the first frame on Cα / backbone so that
+        # the 3D viewer shows a consistently oriented structure.
+        if trajectory and u.trajectory.n_frames > 1:
+            try:
+                from MDAnalysis.analysis import align as _mda_align
+                _ref = mda.Universe(str(topology), str(trajectory))
+                _ref.trajectory[0]
+                _align_sel = "backbone" if u.select_atoms("backbone").n_atoms > 0 else "name CA"
+                if u.select_atoms(_align_sel).n_atoms > 0:
+                    _mda_align.AlignTraj(u, _ref, select=_align_sel, in_memory=True).run()
+                    logger.debug("extract_first_frame_pdb: aligned trajectory on '%s'", _align_sel)
+            except Exception as _ae:
+                logger.debug("extract_first_frame_pdb: alignment skipped (%s)", _ae)
 
         # Go to first frame
         u.trajectory[0]
@@ -337,8 +353,10 @@ def extract_multi_frame_pdb(
         return {}
 
     # --- locate trajectory (optional) -----------------------------------
+    # Prefer the PBC-wrapped trajectory when available (mdWrap.xtc),
+    # then fall back to the raw trajectory files.
     trajectory: Optional[Path] = None
-    for candidate in ("md.xtc", "md.trr"):
+    for candidate in ("mdWrap.xtc", "md.xtc", "md.trr"):
         p = hpc_dir / candidate
         if p.exists():
             trajectory = p
@@ -363,6 +381,20 @@ def extract_multi_frame_pdb(
     except Exception as exc:
         logger.error("Failed to load universe: %s", exc)
         return {}
+
+    # Align all frames to frame 0 on backbone/Cα so that frames extracted
+    # at different time points are superimposed in the 3D viewer.
+    if u.trajectory.n_frames > 1:
+        try:
+            from MDAnalysis.analysis import align as _mda_align
+            _ref = mda.Universe(str(topology), str(trajectory))
+            _ref.trajectory[0]
+            _align_sel = "backbone" if u.select_atoms("backbone").n_atoms > 0 else "name CA"
+            if u.select_atoms(_align_sel).n_atoms > 0:
+                _mda_align.AlignTraj(u, _ref, select=_align_sel, in_memory=True).run()
+                logger.info("extract_multi_frame_pdb: aligned trajectory on '%s'", _align_sel)
+        except Exception as _ae:
+            logger.warning("extract_multi_frame_pdb: alignment skipped (%s)", _ae)
 
     total_time_ns = u.trajectory.totaltime / 1000.0  # ps → ns
 

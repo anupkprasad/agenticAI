@@ -34,6 +34,7 @@ from src.analysis.summary_logger import initialize_summary_file, generate_summar
 from src.analysis.dssp_analyzer import analyze_secondary_structure
 from src.analysis.sasa_calculator import calculate_sasa, plot_sasa
 from src.analysis.com_distance_calculator import calculate_com_distance
+from src.analysis.trajectory_wrapper import wrap_trajectory
 from src.analysis.combined_analysis import (
     collect_metric_files,
     plot_combined_overlay,
@@ -61,6 +62,7 @@ __all__ = [
     "plot_md_data",
     "plot_md_multipanel",
     "calculate_com_distance",
+    "wrap_trajectory",
     # Combined (multi-sim) tools
     "collect_metric_files",
     "plot_combined_overlay",
@@ -97,6 +99,7 @@ def get_analysis_tools() -> list:
         plot_md_multipanel,
         plot_combined_data,
         calculate_com_distance,
+        wrap_trajectory,
         # Combined (multi-sim) tools
         collect_metric_files,
         plot_combined_overlay,
@@ -215,7 +218,8 @@ class AnalysisToolExecutor:
             # backward-compat aliases
             "plot_md_data": plot_md_data,
             "plot_md_multipanel": plot_md_multipanel,
-            "calculate_com_distance": calculate_com_distance
+            "calculate_com_distance": calculate_com_distance,
+            "wrap_trajectory": wrap_trajectory,
         }
         
         # Record built-in tool names BEFORE loading programmer tools

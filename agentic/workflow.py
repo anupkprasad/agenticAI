@@ -100,6 +100,7 @@ class MDWorkflow:
         workflow.add_node("human_setup_check", self._wrap_node("human_setup_check", self.checkpoints.human_setup_check))
         workflow.add_node("human_hpc_check", self._wrap_node("human_hpc_check", self.checkpoints.human_hpc_check))
         workflow.add_node("human_analysis_check", self._wrap_node("human_analysis_check", self.checkpoints.human_analysis_check))
+        workflow.add_node("human_reporter_check", self._wrap_node("human_reporter_check", self.checkpoints.human_reporter_check))
         workflow.add_node("final_report", self._wrap_node("final_report", self._final_report_node))
         
         # Set entry point
@@ -118,6 +119,7 @@ class MDWorkflow:
                 "hpc": "hpc",
                 "analysis": "analysis",
                 "reporter": "reporter",
+                "human_reporter_check": "human_reporter_check",
                 "final_report": "final_report",
                 END: END
             }
@@ -224,11 +226,32 @@ class MDWorkflow:
         )
         
         # ========== FIELD AGENTS - REPORTER ==========
+        # Reporter routes to human_reporter_check (auto-skipped when --no-human-loop).
         workflow.add_conditional_edges(
             "reporter",
+            lambda state: state.get("next_node", "human_reporter_check"),
+            {
+                "supervisor": "supervisor",
+                "human_reporter_check": "human_reporter_check",
+            }
+        )
+
+        # ========== REPORTER CHECKPOINT ==========
+        # Skipped when --no-human-loop (routes supervisor → final_report).
+        # In HITL mode: supports reporter re-run, analysis re-run, checkpoint switching.
+        workflow.add_conditional_edges(
+            "human_reporter_check",
             lambda state: state.get("next_node", "supervisor"),
             {
-                "supervisor": "supervisor"
+                "supervisor": "supervisor",
+                "analysis": "analysis",
+                "reporter": "reporter",
+                "human_reporter_check": "human_reporter_check",  # waiting for input
+                # Earlier HITL checkpoints the user can switch to
+                "human_preprocess_check": "human_preprocess_check",
+                "human_setup_check": "human_setup_check",
+                "human_hpc_check": "human_hpc_check",
+                "human_analysis_check": "human_analysis_check",
             }
         )
         
@@ -247,7 +270,7 @@ class MDWorkflow:
         
         valid_nodes = [
             "input_validation", "planner", "preprocess", "setup", 
-            "hpc", "analysis", "reporter", "final_report"
+            "hpc", "analysis", "reporter", "human_reporter_check", "final_report"
         ]
         
         if next_node in valid_nodes:
@@ -606,6 +629,8 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "plan_executed": False,
             "rephrased_goal": None,
             "enriched_prompt": None,
+            "master_enriched_prompt": None,
+            "user_goal_original": None,
             "current_node": None,
             "file_registry": {},
             "generated_files": {},
@@ -663,6 +688,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             # Final report
             "final_report": None,
             "workflow_status": None,
+            "human_final_decision": None,
             # Human-in-the-loop
             "human_recommendation": None,
             "error_triggered_hitl": False,
@@ -736,7 +762,9 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 # Reporter outputs
                 "reporter_output",
                 # Enriched prompt / plan (avoid re-doing expensive LLM calls)
-                "rephrased_goal", "enriched_prompt", "execution_plan",
+                "rephrased_goal", "enriched_prompt", "master_enriched_prompt",
+                "user_goal_original",
+                "execution_plan",
                 "structured_prompt", "pdb_summary",
                 # Agent instructions
                 "preprocessing_instructions", "setup_instructions",
@@ -750,6 +778,10 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         
         # Ensure execution_path is always a list we control
         state["execution_path"] = list(state.get("execution_path", []))
+        # Always stamp the original user goal so the combined reporter can show it
+        # verbatim, regardless of later state mutations (enrichment, combined goals).
+        if not state.get("user_goal_original"):
+            state["user_goal_original"] = user_goal
         return state
 
     def run(self, user_goal: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -847,7 +879,8 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             elif current_node == "reporter":
                 state = self.reporter_agent.reporter_node(state)
                 self._save_progress(state, "reporter")
-                current_node = state.get("next_node", "supervisor")
+                # Route to reporter checkpoint for human review
+                current_node = state.get("next_node", "human_reporter_check")
 
             elif current_node == "human_preprocess_check":
                 feedback = self._collect_human_feedback(state, "preprocess", feedback_handler)
@@ -887,6 +920,16 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 state["human_feedback"] = feedback
                 state = self.checkpoints.human_analysis_check(state)
                 self._save_progress(state, "human_analysis_check")
+                current_node = state.get("next_node", "supervisor")
+
+            elif current_node == "human_reporter_check":
+                feedback = self._collect_human_feedback(state, "reporter", feedback_handler)
+                if self._should_stop(feedback, state, "reporter"):
+                    current_node = "final_report"
+                    continue
+                state["human_feedback"] = feedback
+                state = self.checkpoints.human_reporter_check(state)
+                self._save_progress(state, "human_reporter_check")
                 current_node = state.get("next_node", "supervisor")
 
             elif current_node == "final_report":

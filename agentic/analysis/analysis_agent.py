@@ -132,7 +132,11 @@ class MDAnalysisAgent:
             
             # Copy files from HPC output directory if needed (using secure file manager)
             self._copy_files_from_hpc_secure(state)
-            
+
+            # Wrap trajectory to fix PBC artefacts (runs by default; set
+            # skip_pbc_wrap=True in state to disable for pre-wrapped trajectories)
+            self._wrap_trajectory_pbc(state, analysis_dir)
+
             # Write PDB validation info to summary file if available from supervisor
             self._write_pdb_info_to_summary(state, analysis_dir)
             
@@ -206,6 +210,20 @@ class MDAnalysisAgent:
             sim_dirs = state.get("sim_working_dirs") or []
             sim_prompts = state.get("sim_prompts") or []
             labels = [p.get("label", f"sim_{i}") for i, p in enumerate(sim_prompts)]
+
+        # Apply protein name mapping from goal text (fallback for re-runs where
+        # labels may still be raw UniProt IDs from a prior planner run).
+        import re as _re_nm_a
+        _nm_text = (state.get("master_enriched_prompt") or "") + " " + (state.get("user_goal", "") or "")
+        _name_map_a: dict = {}
+        for _m in _re_nm_a.finditer(
+            r'\b([A-Za-z0-9]{4,12})\s*:\s*([A-Za-z][A-Za-z0-9_\-]{1,30})', _nm_text
+        ):
+            _k, _v = _m.group(1).lower(), _m.group(2).strip()
+            if any(c.isdigit() for c in _k) and _v[0].isupper():
+                _name_map_a[_k] = _v
+        if _name_map_a:
+            labels = [_name_map_a.get(lbl.lower(), lbl) for lbl in labels]
 
         log_agent_start(
             "analysis",
@@ -393,6 +411,92 @@ class MDAnalysisAgent:
         except Exception as e:
             logger.warning(f"Failed to format PDB info for LLM: {e}")
             return ""
+
+    def _wrap_trajectory_pbc(self, state: MDState, analysis_dir: str) -> None:
+        """
+        Wrap the trajectory to fix periodic boundary condition (PBC) artefacts.
+
+        Calls ``wrap_trajectory`` (gmx trjconv -pbc mol -center) and updates
+        ``state["trajectory_path"]`` with the wrapped output file so all
+        downstream tools use the corrected trajectory.
+
+        Skipped when:
+          - ``state["skip_pbc_wrap"]`` is True (caller opted out), or
+          - no trajectory file is available, or
+          - no TPR file is available (wrapping requires the run-input file).
+
+        The ligand name is taken from ``state["ligand_resnames"]`` (first entry)
+        or falls back to ``"LIG"``.  The output dt (ps) can be overridden via
+        ``state["wrap_dt_ps"]`` (default 100 ps).
+        """
+        if state.get("skip_pbc_wrap"):
+            logger.info("_wrap_trajectory_pbc: skip_pbc_wrap=True — skipping")
+            return
+
+        # Resolve trajectory
+        traj = state.get("trajectory_path")
+        if not traj or not Path(traj).exists():
+            logger.info("_wrap_trajectory_pbc: no trajectory available — skipping")
+            return
+
+        # Resolve TPR (required for gmx trjconv -s)
+        tpr = (
+            state.get("tpr_file")
+            or state.get("hpc_dir") and self._find_tpr(state.get("hpc_dir", ""))
+            or self._find_tpr(state.get("working_directory", ""))
+        )
+        if not tpr or not Path(tpr).exists():
+            logger.warning(
+                "_wrap_trajectory_pbc: no TPR file found — cannot wrap trajectory. "
+                "Set state['tpr_file'] or place md.tpr in the hpc/ directory."
+            )
+            return
+
+        # Ligand name
+        ligand_resnames = state.get("ligand_resnames") or []
+        ligand = ligand_resnames[0] if ligand_resnames else "LIG"
+
+        # Output dt
+        dt = int(state.get("wrap_dt_ps", 100))
+
+        logger.info(
+            f"_wrap_trajectory_pbc: wrapping {Path(traj).name} "
+            f"(ligand={ligand}, dt={dt} ps) …"
+        )
+
+        from src.analysis.trajectory_wrapper import _wrap_trajectory_impl
+
+        # Save wrapped trajectory into hpc_dir so it lives alongside the
+        # original simulation data and the reporter can find it there.
+        hpc_dir = state.get("hpc_dir") or str(Path(state.get("working_directory", "working_dir")) / "hpc")
+
+        result = _wrap_trajectory_impl(
+            tpr_file=str(tpr),
+            trajectory_file=str(traj),
+            output_file="mdWrap.xtc",
+            ligand=ligand,
+            dt=dt,
+            working_dir=hpc_dir,
+            skip=False,
+        )
+
+        if result.get("success"):
+            wrapped = result["wrapped_trajectory"]
+            state["trajectory_path"] = wrapped
+            logger.info(f"_wrap_trajectory_pbc: trajectory updated → {wrapped}")
+        else:
+            logger.warning(
+                f"_wrap_trajectory_pbc: wrapping failed — continuing with "
+                f"original trajectory. Error: {result.get('error', 'unknown')}"
+            )
+
+    def _find_tpr(self, directory: str) -> Optional[str]:
+        """Return the first .tpr file found in *directory* or its sub-dirs."""
+        if not directory:
+            return None
+        for candidate in Path(directory).rglob("*.tpr"):
+            return str(candidate.resolve())
+        return None
 
     def _write_pdb_info_to_summary(self, state: MDState, analysis_dir: str) -> None:
         """

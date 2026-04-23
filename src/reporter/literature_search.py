@@ -354,31 +354,38 @@ def search_uniprot(
 def generate_literature_queries(
     analysis_types: List[str],
     user_goal: Optional[str] = None,
-    protein_name: Optional[str] = None
+    protein_name: Optional[str] = None,
+    analysis_stats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Generate PubMed search queries prioritising the protein and its
-    functional context, then the analysis methods used.
+    functional context, then the analysis methods, then the user hypothesis.
 
     Query priority order:
-      1. Protein name + functional context (structure, function, dynamics)
+      1. Protein name + MD simulation / structure-function
       2. Protein name + specific analysis method
-      3. Generic analysis method queries (fallback)
+      3. Protein name + analysis results (e.g. "high RMSD", "flexible loop")
+      4. Protein name + user hypothesis / objective extracted from user_goal
+      5. Generic analysis method queries (last resort fallback)
 
     Args:
         analysis_types: List of analysis types performed (e.g., ["RMSD", "RMSF"])
-        user_goal: User's original goal/question (helps extract protein context)
-        protein_name: Explicit protein / system name (e.g. "pseudokinase")
+        user_goal: User's original goal/question (hypothesis extraction)
+        protein_name: Explicit protein / system name (e.g. "CDK2", "TP53").
+                      Must be the actual protein name, NOT a UniProt accession.
+        analysis_stats: Optional dict mapping analysis_type → {"mean": ..., "max": ...}
+                        Used to build context-aware result queries.
 
     Returns:
         Dict with generated queries keyed by priority label
     """
-    # --- 1. Resolve protein name and functional keywords -----------------
+    # ── 1. Resolve protein name ───────────────────────────────────────────
+    # Use the provided protein_name as-is.  Do NOT replace it with a
+    # generic functional keyword — that strips out the specific protein.
+    # Functional context is added as an *additional* search term.
     _raw_name = (protein_name or "").strip()
 
-    # Known functional-context keywords that commonly appear next to a
-    # protein name in the user goal (case-insensitive matching).
-    # These are ALSO valid PubMed search terms (correctly spelled).
+    # Known functional-context keywords that add biological specificity
     _FUNC_KEYWORDS = [
         "kinase", "pseudokinase", "protease", "receptor", "channel",
         "transporter", "enzyme", "inhibitor", "ligand", "antibody",
@@ -386,29 +393,23 @@ def generate_literature_queries(
         "dehydrogenase", "hydrolase", "lyase", "isomerase", "polymerase",
     ]
 
-    # Scan user_goal for functional keywords (these are reliable, correctly spelled)
-    func_context = []
+    # Collect functional context words from both protein_name and goal
     goal_lower = (user_goal or "").lower()
-    for kw in _FUNC_KEYWORDS:
-        if kw in goal_lower:
-            func_context.append(kw)
-    # Also check _raw_name for functional keywords
     name_lower = _raw_name.lower()
+    func_context = []
     for kw in _FUNC_KEYWORDS:
-        if kw in name_lower and kw not in func_context:
+        if kw in name_lower or kw in goal_lower:
             func_context.append(kw)
     func_context = list(dict.fromkeys(func_context))
 
-    # Build the primary search name:
-    # Prefer the most specific functional keyword found (correctly spelled)
-    # over the raw system_name which may contain typos.
-    if func_context:
-        # Use the most specific (longest) keyword as the primary name
-        _name = max(func_context, key=len)
-    elif _raw_name:
+    # Decide the primary search name: prefer the given protein_name.
+    # If missing, fall back to the most specific functional keyword found,
+    # then try extracting a meaningful word from the user goal.
+    if _raw_name:
         _name = _raw_name
+    elif func_context:
+        _name = max(func_context, key=len)
     elif user_goal:
-        # Fallback: extract first domain word from user_goal
         _STOP = {
             "analysis", "please", "could", "would", "should", "compute",
             "calculate", "analyse", "analyze", "trajectory", "simulation",
@@ -427,18 +428,20 @@ def generate_literature_queries(
     else:
         _name = ""
 
-    # --- 2. Build queries in priority order ------------------------------
+    # ── 2. Build queries in priority order ───────────────────────────────
     queries = {}  # Ordered dict (Python 3.7+)
 
     if _name:
-        # Priority 1a: protein + structure/function
+        # Priority 1a: protein name + MD simulation
         queries["protein_dynamics"] = f"{_name} molecular dynamics simulation"
+        # Priority 1b: protein name + structure/function
         queries["protein_function"] = f"{_name} structure function"
+        # Priority 1c: protein name + functional context (if available)
         if func_context:
             fc = " ".join(func_context[:2])
             queries["protein_context"] = f"{_name} {fc} molecular dynamics"
 
-    # Priority 2: protein + analysis methods
+    # ── 3. Protein + analysis method queries ─────────────────────────────
     _METHOD_TEMPLATES = {
         "RMSD": "RMSD stability molecular dynamics",
         "RMSF": "RMSF residue flexibility dynamics",
@@ -458,13 +461,80 @@ def generate_literature_queries(
         if method_terms is None:
             method_terms = f"{atype} molecular dynamics"
 
-        # Method queries stay broad (no protein name) so they return results
-        queries[f"method_{atype}"] = f"protein {method_terms}"
+        if _name:
+            # Protein-specific method query (most relevant)
+            queries[f"method_{atype}"] = f"{_name} {method_terms}"
+        else:
+            queries[f"method_{atype}"] = f"protein {method_terms}"
 
-    # Priority 3: generic fallbacks (only used if everything above fails)
+    # ── 4. Analysis-result–driven queries ────────────────────────────────
+    # Build queries that reflect the *actual* simulation findings so papers
+    # address the observed behaviour, not just the method.
+    if analysis_stats and _name:
+        stats = analysis_stats  # mapping atype → {"mean": ..., "max": ..., "min": ...}
+
+        # RMSD: high values → instability; low → stable
+        for key in stats:
+            if "rmsd" in key.lower():
+                mean_rmsd = stats[key].get("mean_rmsd_angstrom") or stats[key].get("mean", 0)
+                if mean_rmsd and float(mean_rmsd) > 3.0:
+                    queries["result_rmsd_instability"] = (
+                        f"{_name} conformational instability RMSD molecular dynamics"
+                    )
+                else:
+                    queries["result_rmsd_stability"] = (
+                        f"{_name} conformational stability RMSD molecular dynamics"
+                    )
+                break
+
+        # RMSF: high values → flexible regions / loops
+        for key in stats:
+            if "rmsf" in key.lower():
+                mean_rmsf = stats[key].get("mean_rmsf_angstrom") or stats[key].get("mean", 0)
+                if mean_rmsf and float(mean_rmsf) > 2.0:
+                    queries["result_rmsf_flexibility"] = (
+                        f"{_name} flexible loop region dynamics"
+                    )
+                break
+
+        # Rg: high → expanded; low → compact
+        for key in stats:
+            if "rg" in key.lower() or "gyration" in key.lower():
+                mean_rg = stats[key].get("mean_rg_angstrom") or stats[key].get("mean", 0)
+                if mean_rg and float(mean_rg) > 25.0:
+                    queries["result_rg_expanded"] = (
+                        f"{_name} expanded conformation unfolding molecular dynamics"
+                    )
+                elif mean_rg and float(mean_rg) < 15.0:
+                    queries["result_rg_compact"] = (
+                        f"{_name} compact folded structure dynamics"
+                    )
+                break
+
+    # ── 5. Hypothesis / objective queries from user goal ─────────────────
+    # Extract action phrases that reveal the scientific question
+    if user_goal and _name:
+        _HYP_TRIGGERS = [
+            "inhibit", "bind", "interact", "affect", "role", "function",
+            "mechanism", "pathway", "stability", "flexibility", "alloster",
+            "mutation", "mutant", "drug", "therapeutic", "disease", "cancer",
+            "activate", "deactivate", "phosphorylat", "fold", "unfold",
+            "aggregate", "dimer", "oligomer", "signaling",
+        ]
+        goal_lower = (user_goal or "").lower()
+        hyp_terms = [t for t in _HYP_TRIGGERS if t in goal_lower]
+        if hyp_terms:
+            # Use up to 2 hypothesis terms with the protein name
+            hyp_str = " ".join(hyp_terms[:2])
+            queries["hypothesis_objective"] = f"{_name} {hyp_str} molecular dynamics"
+
+    # ── 6. Generic fallback ───────────────────────────────────────────────
     queries["_fallback_general"] = "molecular dynamics protein stability review"
 
-    logger.info("Generated %d literature queries (protein=%s)", len(queries), _name or "unknown")
+    logger.info(
+        "Generated %d literature queries (protein=%r, func_context=%s)",
+        len(queries), _name or "unknown", func_context,
+    )
 
     return {
         "success": True,

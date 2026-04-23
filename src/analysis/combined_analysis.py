@@ -42,43 +42,81 @@ except ImportError:
 
 def _find_metric_file(directory: str, filename_pattern: str) -> Optional[str]:
     """
-    Search *directory* recursively for the first file whose name matches
-    *filename_pattern* (case-insensitive substring match).
+    Search *directory* recursively for the first file whose stem starts with
+    *filename_pattern* (case-insensitive).
+
+    Using a stem-prefix match (``stem.startswith``) instead of a substring
+    match prevents false hits where a pattern is embedded inside a longer
+    filename.  For example, ``"rg"`` must NOT match ``energy_output.xvg``
+    even though the substring "rg" appears inside "ene**rg**y".
 
     Returns the full path or None.
     """
     d = Path(directory)
     if not d.is_dir():
         return None
+    pat = filename_pattern.lower()
     for p in sorted(d.rglob("*")):
-        if p.is_file() and filename_pattern.lower() in p.name.lower():
+        if p.is_file() and p.stem.lower().startswith(pat):
             return str(p)
     return None
 
 
-def _read_two_column_file(filepath: str) -> Tuple[List[float], List[float]]:
+def _read_two_column_file(
+    filepath: str,
+    y_col: int = 1,
+) -> Tuple[List[float], List[float]]:
     """
-    Read a whitespace-or-comma-separated two-column data file.
+    Read a whitespace-or-comma-separated data file.
 
-    Lines starting with '#' are treated as comments.
+    Lines starting with '#' or '@' are treated as comments / metadata.
     Returns (x_values, y_values) as lists of floats.
+
+    Time-unit auto-conversion
+    -------------------------
+    If the comment header (lines starting with ``#``) mentions ``"(ps)"``
+    or ``"label \"Time (ps)\""`` (GROMACS xvg style), the first column
+    is divided by 1000 to convert ps → ns so all combined plots share the
+    same x-axis unit.
+
+    y_col: index of the column to use as y (default 1 = second column).
+           Energy xvg files have columns [time, Potential, Kinetic, Temp];
+           use y_col=1 to get Potential.
+
     Raises ValueError when the file cannot be parsed.
     """
     xs, ys = [], []
+    convert_x_to_ns = False  # will be set True when header says ps
+
     with open(filepath, encoding="utf-8", errors="replace") as fh:
         for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#") or line.startswith("@"):
+            raw = line.strip()
+            if not raw:
                 continue
-            parts = line.replace(",", " ").split()
-            if len(parts) >= 2:
+
+            # ── Header / metadata lines ───────────────────────────────
+            if raw.startswith("#") or raw.startswith("@"):
+                low = raw.lower()
+                # Detect ps time axis from comment or xvg @xaxis label
+                if "(ps)" in low or 'label "time (ps)"' in low or "time(ps)" in low:
+                    convert_x_to_ns = True
+                continue
+
+            # ── Data lines ────────────────────────────────────────────
+            parts = raw.replace(",", " ").split()
+            if len(parts) >= y_col + 1:
                 try:
                     xs.append(float(parts[0]))
-                    ys.append(float(parts[1]))
+                    ys.append(float(parts[y_col]))
                 except ValueError:
                     continue
+
     if not xs:
         raise ValueError(f"No numeric data found in {filepath}")
+
+    if convert_x_to_ns:
+        xs = [x / 1000.0 for x in xs]
+
     return xs, ys
 
 

@@ -166,11 +166,29 @@ class MDSupervisor:
             enriched = enrich_prompt_unified(state, self.llm, self.supervisor_config)
             state["enriched_prompt"] = enriched
             state["rephrased_goal"] = enriched
+            # For multi-sim: save master prompt once so it survives per-sim state resets.
+            # The combined reporter uses this to show the user's actual goal, not the
+            # combined_analysis_plan dump.
+            if state.get("is_multi_simulation") and not state.get("master_enriched_prompt"):
+                state["master_enriched_prompt"] = enriched
             logger.info(f"SUPERVISOR: Enrichment complete ({len(enriched)} chars)")
 
-        # ── Multi-sim: master plan returned (sim_prompts set, no exec plan) ──
-        # Planner returned with sim_prompts but WITHOUT an execution_plan,
-        # signalling that master planning is complete and per-sim loop should start.
+        # ── Step 2.5: Multi-sim master planning (supervisor-side, no tools context) ─
+        # Build sim_prompts + combined_analysis_plan right after enrichment and
+        # before routing to the planner.  Replaces the old planner-side
+        # _create_multi_sim_master_plan which exposed the full tools context to
+        # the LLM unnecessarily.
+        if (state.get("is_multi_simulation")
+                and state.get("enriched_prompt")
+                and not state.get("sim_prompts")
+                and multi_sim_phase is None):
+            logger.info("SUPERVISOR [multi-sim]: Building master plan (per-sim prompts + combined plan)")
+            state = self._create_multi_sim_master_plan(state)
+            # Fall through to the detection block below which will start the per-sim loop.
+
+        # ── Multi-sim: master plan present (sim_prompts set, no exec plan) ─
+        # Either just built above or restored from a checkpoint — start the
+        # per-sim loop when we have sim_prompts but no execution_plan yet.
         if (state.get("is_multi_simulation")
                 and state.get("sim_prompts")
                 and not state.get("execution_plan")
@@ -328,6 +346,10 @@ class MDSupervisor:
             "md_engine", "force_field", "water_model", "human_in_loop",
             "subtask_type", "subtask_type_initialized", "agent_list",
             "required_inputs",
+            # Master prompt — preserved so combined reporter shows supervisor's rephrased goal
+            "master_enriched_prompt",
+            # Original --goal text — shown verbatim in the combined report
+            "user_goal_original",
         }
         preserved = {k: state[k] for k in preserved_keys if k in state}
 
@@ -455,6 +477,10 @@ class MDSupervisor:
             "md_engine", "force_field", "water_model", "human_in_loop",
             "subtask_type", "subtask_type_initialized", "agent_list",
             "required_inputs",
+            # Master prompt — preserved so combined reporter shows supervisor's rephrased goal
+            "master_enriched_prompt",
+            # Original --goal text — shown verbatim in the combined report
+            "user_goal_original",
         }
 
         # Save values to preserve
@@ -586,6 +612,182 @@ class MDSupervisor:
             logger.warning(f"Failed to save per-sim state: {e}")
 
     # Old combined methods removed — _setup_combined_analysis handles both analysis + reporter
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Multi-simulation master planning (moved from planner — no tools context)
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _create_multi_sim_master_plan(self, state: MDState) -> MDState:
+        """Build per-sim prompts and combined analysis plan in the supervisor.
+
+        Called from ``supervisor_node`` right after prompt enrichment, before
+        routing to the planner.  The LLM gets the enriched goal, the PDB list,
+        and the agent list but NO tools context — decomposition is purely
+        goal/agent-aware, not tool-aware.
+        """
+        import json as _json
+        import re as _re_nm
+        from pathlib import Path as _Path
+
+        enriched_prompt = state.get("enriched_prompt") or state.get("user_goal", "")
+        pdb_list = state.get("pdb_list", [])
+        base_working_dir = state.get("working_directory", "working_dir")
+        agent_list = state.get("agent_list") or []
+
+        if not pdb_list:
+            logger.warning("SUPERVISOR [multi-sim]: No pdb_list — cannot create master plan")
+            return state
+
+        # Build per-sim working directories
+        sim_working_dirs = []
+        for pdb in pdb_list:
+            uid = _Path(pdb).stem
+            sim_dir = str((_Path(base_working_dir) / uid).resolve())
+            sim_working_dirs.append(sim_dir)
+        state["sim_working_dirs"] = sim_working_dirs
+
+        # Parse protein ID → human-readable name mappings from the enriched goal
+        # Matches e.g. "p24941: CDK2" or "q13418: ILK"
+        _protein_name_map: Dict[str, str] = {}
+        for _m in _re_nm.finditer(
+            r'\b([A-Za-z0-9]{4,12})\s*:\s*([A-Za-z][A-Za-z0-9_\-]{1,30})',
+            enriched_prompt,
+        ):
+            _k, _v = _m.group(1).lower(), _m.group(2).strip()
+            # Key must contain a digit (looks like an ID) and value must start uppercase
+            if any(c.isdigit() for c in _k) and _v[0].isupper():
+                _protein_name_map[_k] = _v
+        if _protein_name_map:
+            logger.info(f"SUPERVISOR [multi-sim]: Protein name map: {_protein_name_map}")
+
+        # Describe which agents will run (from --subtask / agent_list)
+        agents_desc = (
+            " → ".join(agent_list) if agent_list
+            else (state.get("subtask_type") or "full pipeline")
+        )
+
+        pdb_names = [_Path(p).name for p in pdb_list]
+        _name_map_lines = ""
+        if _protein_name_map:
+            _name_map_lines = (
+                "PROTEIN NAME MAPPING (use protein names, not IDs):\n"
+                + "\n".join(f"  {uid}: {name}" for uid, name in _protein_name_map.items())
+                + "\n\n"
+            )
+
+        decomposition_prompt = (
+            f"You are planning a multi-simulation MD workflow.\n\n"
+            f"OVERALL GOAL:\n{enriched_prompt}\n\n"
+            f"SIMULATIONS ({len(pdb_list)}):\n"
+            + "\n".join(f"  {i+1}. {name}" for i, name in enumerate(pdb_names))
+            + "\n\n"
+            + _name_map_lines
+            + f"WORKFLOW AGENTS: {agents_desc}\n\n"
+            "TASK: Produce a JSON object with exactly two keys:\n"
+            f'  "sim_prompts": list of {len(pdb_list)} strings — one self-contained goal per '
+            "simulation. Use the protein's human-readable name from the mapping (if provided). "
+            "Include only the agents listed in WORKFLOW AGENTS in each goal.\n"
+            '  "combined_analysis_plan": a multi-paragraph string for cross-simulation '
+            "analysis after all individual sims complete (comparative overlay plots, "
+            "statistical summary, and markdown narrative report).\n\n"
+            "Return ONLY the JSON object, no other text."
+        )
+
+        sim_prompts_list = None
+        combined_plan = None
+        try:
+            response = self.llm.prompt(decomposition_prompt, temperature=0.2, max_tokens=2000)
+            from ..utils import log_llm_interaction
+            log_llm_interaction("supervisor.multi_sim_master", decomposition_prompt, response)
+            parsed = self._extract_json_from_response(response)
+            if parsed and "sim_prompts" in parsed:
+                sim_prompts_list = parsed["sim_prompts"]
+                combined_plan = parsed.get("combined_analysis_plan", "")
+                logger.info(
+                    f"SUPERVISOR [multi-sim]: LLM generated {len(sim_prompts_list)} per-sim prompts"
+                )
+        except Exception as e:
+            logger.warning(f"SUPERVISOR [multi-sim]: LLM decomposition failed: {e}")
+
+        # Fallback: deterministic split
+        if not sim_prompts_list or len(sim_prompts_list) != len(pdb_list):
+            logger.info("SUPERVISOR [multi-sim]: Using deterministic prompt decomposition")
+            sim_prompts_list = []
+            for pdb in pdb_list:
+                uid = _Path(pdb).stem.lower()
+                prot_name = _protein_name_map.get(uid, "")
+                pdb_name = _Path(pdb).name
+                per_sim = enriched_prompt
+                for other in pdb_list:
+                    if other != pdb:
+                        per_sim = per_sim.replace(_Path(other).name, "").replace(other, "")
+                if pdb_name not in per_sim:
+                    prefix = (
+                        f"Process {prot_name} ({pdb_name})." if prot_name
+                        else f"Process {pdb_name}."
+                    )
+                    per_sim = prefix + " " + per_sim
+                elif prot_name and prot_name not in per_sim:
+                    per_sim = f"Protein: {prot_name}. " + per_sim
+                sim_prompts_list.append(per_sim.strip())
+            combined_plan = (
+                "Perform combined cross-simulation analysis:\n"
+                "1. Comparative overlay plots (RMSD, RMSF, Rg).\n"
+                "2. Statistical summary table (mean, std, min, max).\n"
+                "3. Cross-simulation PCA on C-alpha coordinates if trajectories available.\n"
+                "4. Markdown narrative report with per-sim highlights and cross-simulation trends."
+            )
+
+        # Build structured sim_prompts with protein-name labels
+        sim_prompts = []
+        for i, (pdb, prompt_text) in enumerate(zip(pdb_list, sim_prompts_list)):
+            uid = _Path(pdb).stem
+            label = _protein_name_map.get(uid.lower(), uid)
+            sim_prompts.append({
+                "pdb": str(_Path(pdb).resolve()) if _Path(pdb).exists() else pdb,
+                "label": label,
+                "prompt": prompt_text,
+                "working_dir": sim_working_dirs[i],
+            })
+
+        state["sim_prompts"] = sim_prompts
+        state["combined_analysis_plan"] = combined_plan
+
+        logger.info(
+            f"SUPERVISOR [multi-sim]: Master plan ready — {len(sim_prompts)} simulations, "
+            f"labels: {[s['label'] for s in sim_prompts]}"
+        )
+        log_agent_action(
+            agent_name="supervisor",
+            action="Generated Multi-Simulation Master Plan",
+            details={
+                "num_simulations": len(sim_prompts),
+                "labels": [s["label"] for s in sim_prompts],
+                "agents": agents_desc,
+                "combined_plan_preview": (combined_plan or "")[:300],
+            },
+        )
+        return state
+
+    def _extract_json_from_response(self, response: str) -> Optional[Dict[str, Any]]:
+        """Extract the first JSON object from an LLM response using brace counting."""
+        import json as _json
+
+        start = response.find("{")
+        if start == -1:
+            return None
+        depth = 0
+        for i, ch in enumerate(response[start:], start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return _json.loads(response[start : i + 1])
+                    except _json.JSONDecodeError:
+                        return None
+        return None
 
     def _build_sim_data_summary(self, completed_sims: List[Dict[str, Any]]) -> str:
         """Build a text summary of all completed simulation data paths for LLM context."""

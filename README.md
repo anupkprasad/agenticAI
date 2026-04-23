@@ -218,12 +218,20 @@ python run_agenticAIWork.py \
 
 
 python run_agenticAIWork.py \
-  --goal "MD Simulation for uniprotId p17612, p24941, p28482, q13418, q7z7a4, q8ivt5, q8ne28 are done and saved in their respective directory named with /pseudokin/{uniprotId}/hpc/ Please do the analysis of trajectories and compare dynamics (RMSD, Rg) among them. The simulated protein are pseudokinases. the name of pseudokinase in the uniprotid are p17612: KAPCA_HUMAN,  p24941: CDK2_HUMAN,  p28482:MK01_HUMAN,  q13418: ILK_HUMAN,  q7z7a4: PXK_HUMAN,  q8ivt5:KSR1_HUMAN, q8ne28: STKL1_HUMAN" \
+  --goal "MD Simulation for uniprotId p17612, p24941, p28482, q13418, q7z7a4, q8ivt5, q8ne28 are done and saved in their respective directory named with /pseudokin/{uniprotId}/hpc/ Please do the analysis of trajectories and compare dynamics (RMSD, Rg and RMSF) among them. The simulated protein are human pseudokinases. the name of pseudokinase in the uniprotid are p17612: KAPCA,  p24941: CDK2,  p28482:MK01,  q13418: ILK,  q7z7a4: PXK,  q8ivt5:KSR1, q8ne28: STKL1. Please find the relevant literatures of these pseudokinase focus on the related dynamics coming from simulation analysis" \
   --working-dir pseudokin \
   --sim-dirs pseudokin/p17612 pseudokin/p24941 pseudokin/p28482 pseudokin/q13418 pseudokin/q7z7a4 pseudokin/q8ivt5 pseudokin/q8ne28 \
   --subtask analysis reporter \
   --use-llm --no-human-loop
 
+
+
+python run_agenticAIWork.py \
+  --goal "MD Simulation for uniprotId p17612, p24941, p28482 are done and saved in their respective directory named with /pseudokin/{uniprotId}/hpc/ Please do not do simulation preprocess, setup. Directly do the analysis of trajectories and compare dynamics (RMSD, Rg and RMSF) among them. The simulated protein are human pseudokinases. the name of pseudokinase in the uniprotid are p17612: KAPCA,  p24941: CDK2,  p28482:MK01. Please find the relevant literatures of these pseudokinase that focus on the related dynamics coming from simulation analysis." \
+  --working-dir pseudokin \
+  --sim-dirs pseudokin/p17612 pseudokin/p24941 pseudokin/p28482 \
+  --subtask analysis reporter \
+  --use-llm --no-human-loop
 ##############################################################
 
 ### Directory structure
@@ -316,9 +324,9 @@ python run_agenticAIWork.py \
 # 5.2b. Run analysis + reporter together (multi-agent pipeline)
 # Multiple agents are run in order: analysis first, then reporter
 python run_agenticAIWork.py \
-  --goal "The simulation of initial structure 2_h.pdb is already done. Simulation trajectory is in work_di_hl/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM and secondary structure for protein only and plot those data. There is also ligand ATP, please calculate and plot the distance the center of mass of ATP to COM of protein. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is human psedukinase JAK1, please find the kinase and pseudokinase related literatures that correlate dynamics. Based on literature and results make comments on in report" \
+  --goal "The simulation of initial structure 2B.pdb is already done. Simulation trajectory is in /multi_run/2B/hpc/. Please analyse the trajectory to calculate RMSD, RMSF, COM and secondary structure for protein only and plot those data. There is also ligand ATP, please calculate and plot the distance the center of mass of ATP to COM of protein. Once the analysis is finised then generate a scientific report by reporter agent. The given protein is human psedukinase JAK1, please find the kinase and pseudokinase related literatures that correlate dynamics. Based on literature and results make comments on in report" \
   --subtask analysis reporter \
-  --working-dir work_dir_hl \
+  --working-dir multi_run/2B/ \
   --use-llm \
   --llm-base-url http://127.0.0.1:11434 \
   --llm-model gpt-oss:20b \

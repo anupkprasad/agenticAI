@@ -64,15 +64,51 @@ def _read_jsonl(path: str) -> List[Dict[str, Any]]:
     return [r for r in records if r.get("analysis_type")]
 
 
-def _collect_sim_summaries(sim_dirs: List[str], labels: List[str]) -> List[Dict[str, Any]]:
+def _parse_label_name_map(text: str) -> Dict[str, str]:
+    """Extract a {label: protein_name} mapping from free text.
+
+    Handles patterns like:
+      "p17612: KAPCA, p24941: CDK2"
+      "p17612:KAPCA_HUMAN  p24941:CDK2_HUMAN"
+
+    Keys are lowercased labels; values are the protein names exactly as given.
+    Silently returns {} if nothing is found.
+    """
+    mapping: Dict[str, str] = {}
+    if not text:
+        return mapping
+    # Pattern: <word_id><optional_space>:<optional_space><protein_name>
+    # Both the id and name may contain letters, digits, underscores, hyphens.
+    for m in re.finditer(
+        r'\b([A-Za-z0-9_\-]+)\s*:\s*([A-Za-z][A-Za-z0-9_\-]+)',
+        text
+    ):
+        key, val = m.group(1).strip(), m.group(2).strip()
+        # Skip overly generic pairs that aren't ID→name mappings
+        # (e.g. "RMSD: 2.5" — value must start with a letter)
+        if val[0].isalpha() and len(key) >= 3 and len(val) >= 2:
+            mapping[key.lower()] = val
+    return mapping
+
+
+def _collect_sim_summaries(
+    sim_dirs: List[str],
+    labels: List[str],
+    label_name_map: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
     """
     Read analysis_summary.jsonl from each per-sim analysis directory.
 
     Returns a list of dicts, one per simulation, with keys:
         label, analysis_dir, records (list of JSONL records)
+
+    If *label_name_map* is provided it is used to replace raw labels (e.g.
+    UniProt IDs) with human-readable protein names.
     """
+    _lmap = {k.lower(): v for k, v in (label_name_map or {}).items()}
     sims = []
     for sim_dir, label in zip(sim_dirs, labels):
+        display_label = _lmap.get(label.lower(), label)
         analysis_dir = Path(sim_dir) / "analysis"
         jsonl = analysis_dir / "analysis_summary.jsonl"
         records: List[Dict[str, Any]] = []
@@ -81,7 +117,7 @@ def _collect_sim_summaries(sim_dirs: List[str], labels: List[str]) -> List[Dict[
         else:
             logger.warning(f"No analysis_summary.jsonl in {analysis_dir}")
         sims.append({
-            "label": label,
+            "label": display_label,
             "analysis_dir": str(analysis_dir),
             "records": records,
         })
@@ -114,12 +150,18 @@ def _parse_timepoint(filename: str) -> str:
     return "0 ns"
 
 
-def _collect_per_sim_resources(sim_dirs: List[str], labels: List[str]) -> List[Dict[str, Any]]:
+def _collect_per_sim_resources(
+    sim_dirs: List[str],
+    labels: List[str],
+    label_name_map: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
     """Read comprehensive_summary.json and execution_plan.json for each sim."""
+    _lmap = {k.lower(): v for k, v in (label_name_map or {}).items()}
     resources = []
     for sim_dir, label in zip(sim_dirs, labels):
+        display_label = _lmap.get(label.lower(), label)
         res: Dict[str, Any] = {
-            "label": label,
+            "label": display_label,
             "sim_dir": sim_dir,
             "report_focus": "",
             "reasoning": "",
@@ -299,28 +341,77 @@ def _score_ref_relevance(
 def _aggregate_literature(
     sim_resources: List[Dict[str, Any]],
     max_refs: int = 10,
+    hypothesis_text: Optional[str] = None,
+    protein_name: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Collect, deduplicate, and rank literature refs from all per-sim HTML reports.
 
-    Refs are ranked by relevance to (a) protein/system terms found in the per-sim
-    report_focus / literature_queries and (b) analysis method terms (RMSD, RMSF, etc.).
+    Refs are ranked by relevance to:
+      (a) protein/system names derived from simulation labels
+      (b) analysis method terms (RMSD, RMSF, etc.)
+      (c) hypothesis / objective keywords from the user goal
+
     Returns at most *max_refs* references.
+
+    Args:
+        sim_resources: Per-simulation resource dicts with "label", "html_report_path", etc.
+        max_refs: Maximum references to return.
+        hypothesis_text: Optional free-text goal/hypothesis from the user to boost
+                         papers that match the research objective.
     """
-    # Build relevance terms from per-sim resources
+    # ── Build protein/system term list ───────────────────────────────────
+    # Sim labels are the most reliable protein identifiers (derived from PDB stems).
     protein_terms: List[str] = []
+    _GENERIC = {"rmsd", "rmsf", "protein", "simulation", "analysis",
+                "molecular", "dynamics", "with", "without", "versus", "and"}
     for res in sim_resources:
+        lbl = res.get("label", "")
+        if lbl:
+            # Split on underscores, hyphens, spaces — each part may be meaningful
+            for part in re.split(r"[_\-\s]+", lbl):
+                if len(part) >= 3 and part.lower() not in _GENERIC:
+                    protein_terms.append(part)
+
+        # Also harvest words from existing query strings
         for q in res.get("literature_queries", []):
-            # Extract meaningful words (length > 3, not generic MD terms)
             words = [w for w in re.split(r"\s+", q) if len(w) > 3
-                     and w.lower() not in ("rmsd", "rmsf", "protein", "simulation",
-                                           "analysis", "molecular", "dynamics")]
+                     and w.lower() not in _GENERIC]
             protein_terms.extend(words)
+
         foci = res.get("report_focus", [])
         if isinstance(foci, list):
             for f in foci:
                 protein_terms.extend(w for w in re.split(r"\s+", str(f)) if len(w) > 4)
         elif isinstance(foci, str) and foci:
             protein_terms.extend(w for w in re.split(r"\s+", foci) if len(w) > 4)
+
+    # ── Build hypothesis/objective terms ─────────────────────────────────
+    hyp_terms: List[str] = []
+    _HYP_TRIGGERS = {
+        "inhibit", "bind", "interact", "affect", "role", "function",
+        "mechanism", "pathway", "stability", "flexibility", "alloster",
+        "mutation", "mutant", "drug", "therapeutic", "disease", "cancer",
+        "activate", "deactivate", "phosphorylat", "fold", "unfold",
+        "aggregate", "dimer", "oligomer",
+    }
+    if hypothesis_text:
+        htl = hypothesis_text.lower()
+        for trig in _HYP_TRIGGERS:
+            if trig in htl:
+                hyp_terms.append(trig)
+        # Also include meaningful non-stop words from the goal
+        _STOP = {"please", "could", "would", "should", "compute", "calculate",
+                 "trajectory", "simulation", "report", "generate", "agent"}
+        for w in re.split(r"\W+", htl):
+            if len(w) > 4 and w not in _STOP and w not in hyp_terms:
+                hyp_terms.append(w)
+
+    # ── Inject explicit protein name with boosted weight ─────────────────
+    # Repeat the protein_name 3× so that any ref mentioning it scores high.
+    if protein_name:
+        for _part in re.split(r"[_\-\s]+", protein_name):
+            if len(_part) >= 2:
+                protein_terms.extend([_part] * 3)
 
     analysis_terms = ["RMSD", "RMSF", "radius of gyration", "molecular dynamics",
                       "MD simulation", "protein", "trajectory", "secondary structure"]
@@ -352,7 +443,9 @@ def _aggregate_literature(
                 seen_titles.add(title_key)
 
             ref["source"] = res["label"]
-            ref["_relevance"] = _score_ref_relevance(ref, protein_terms, analysis_terms)
+            # Combine protein, analysis, and hypothesis terms for scoring
+            all_score_terms = protein_terms + analysis_terms + hyp_terms
+            ref["_relevance"] = _score_ref_relevance(ref, all_score_terms, [])
             all_refs.append(ref)
 
     # Sort by relevance descending, then cap
@@ -485,14 +578,18 @@ def _build_combined_final_impression(
 def _build_task_description_html(
     enriched_prompt: str,
     sim_resources: Optional[List[Dict[str, Any]]] = None,
+    user_goal: Optional[str] = None,
+    protein_name: Optional[str] = None,
 ) -> str:
     """Render a structured task description card.
 
-    Shows: (1) the original/enriched user prompt as the overall goal, and
-    (2) a collapsible per-simulation analysis objectives section drawn from
-    each sim's execution_plan reasoning + report_focus.
+    Layout:
+      - Protein / System badge (if protein_name provided)
+      - Overall Goal: the original user_goal text (clean, concise)
+      - Detailed Technical Objectives: collapsible block with enriched_prompt
+      - Per-Simulation Analysis Objectives: table from per-sim reasoning / report_focus
     """
-    if not enriched_prompt and not sim_resources:
+    if not enriched_prompt and not user_goal and not sim_resources:
         return ""
 
     parts: List[str] = []
@@ -500,23 +597,49 @@ def _build_task_description_html(
     parts.append('<div class="task-box-header">&#128203; Study Objectives &amp; Task Description</div>')
     parts.append('<div class="task-box-body">')
 
-    # --- Overall goal (original / enriched prompt) ---
-    if enriched_prompt:
+    # ── Protein / System badge ────────────────────────────────────────────
+    if protein_name:
+        parts.append(
+            f'<div style="display:inline-block;background:#ede9fe;color:#5b21b6;'
+            f'border:1px solid #c4b5fd;border-radius:16px;padding:4px 14px;'
+            f'font-size:13px;font-weight:700;margin-bottom:12px;">'
+            f'&#129516; Protein / System:&nbsp;<span style="color:#7c3aed;">'
+            f'{_html_mod.escape(protein_name)}</span></div>'
+        )
+
+    # ── Overall Goal — supervisor's enriched/rephrased goal ──────────────
+    # Show enriched_prompt as the primary authoritative goal statement.
+    # If no enriched prompt, fall back to user_goal.
+    primary_goal = (enriched_prompt or user_goal or "").strip()
+    if primary_goal:
         parts.append('<div style="margin-bottom:14px;">')
         parts.append('<strong style="color:#5b21b6;">&#128269; Overall Goal</strong><br>')
-        # Split into bullet sentences
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", enriched_prompt.strip())
-                     if len(s.strip()) > 20]
-        if sentences:
-            parts.append("<ul>")
-            for s in sentences[:6]:
-                parts.append(f"<li>{_html_mod.escape(s)}</li>")
-            parts.append("</ul>")
-        else:
-            parts.append(f"<p>{_html_mod.escape(enriched_prompt)}</p>")
-        parts.append("</div>")
+        parts.append(
+            f'<p style="margin:6px 0 0 0;line-height:1.6;color:#1e1b4b;">'
+            f'{_html_mod.escape(primary_goal)}</p>'
+        )
+        parts.append('</div>')
 
-    # --- Per-simulation analysis objectives (from execution_plan / comprehensive_summary) ---
+    # ── Original User Request (collapsible) ──────────────────────────────
+    # Show the raw user_goal in a collapsible so it's accessible but not
+    # dominant.  Only render when it differs from the enriched version.
+    if user_goal and user_goal.strip() != primary_goal:
+        parts.append(
+            '<details style="margin-bottom:14px;">'
+            '<summary style="cursor:pointer;color:#7c3aed;font-weight:600;'
+            'list-style:none;user-select:none;">&#128221; Original User Request '
+            '<span style="font-size:11px;font-weight:400;color:#9ca3af;">'
+            '(click to expand)</span></summary>'
+        )
+        parts.append('<div style="margin-top:8px;padding:10px 14px;background:#faf9ff;'
+                     'border-left:3px solid #c4b5fd;border-radius:4px;">')
+        parts.append(
+            f'<p style="margin:0;line-height:1.6;color:#374151;font-size:13px;">'
+            f'{_html_mod.escape(user_goal.strip())}</p>'
+        )
+        parts.append('</div></details>')
+
+    # ── Per-simulation analysis objectives (from execution_plan / reasoning) ──
     if sim_resources:
         parts.append('<hr style="border:none;border-top:1px dashed #c4b5fd;margin:10px 0;">')
         parts.append(
@@ -528,12 +651,11 @@ def _build_task_description_html(
         parts.append('<th style="padding:6px 10px;text-align:left;color:#5b21b6;">Analysis Goals</th>')
         parts.append('</tr>')
 
-        for res in sim_resources:
+        for idx, res in enumerate(sim_resources):
             label = res.get("label", "?")
             foci = res.get("report_focus", [])
             reasoning = res.get("reasoning", "")
 
-            # Prefer report_focus list items; fall back to first 2 sentences of reasoning
             if isinstance(foci, list) and foci:
                 focus_items = foci[:4]
             elif isinstance(foci, str) and foci:
@@ -551,7 +673,7 @@ def _build_task_description_html(
             else:
                 cell_html = "<em style='color:#9ca3af;'>No objectives recorded</em>"
 
-            row_bg = "background:#faf9ff;" if sim_resources.index(res) % 2 == 0 else "background:#f5f3ff;"
+            row_bg = "background:#faf9ff;" if idx % 2 == 0 else "background:#f5f3ff;"
             parts.append(f'<tr style="{row_bg}">')
             parts.append(f'<td style="padding:7px 10px;font-weight:700;color:#7c3aed;white-space:nowrap;">{_html_mod.escape(label)}</td>')
             parts.append(f'<td style="padding:7px 10px;">{cell_html}</td>')
@@ -878,6 +1000,8 @@ def generate_combined_html_report(
     output_file: str = "combined_report.html",
     title: str = "Multi-Simulation Comparison Report",
     enriched_prompt: Optional[str] = None,
+    user_goal: Optional[str] = None,
+    protein_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generate a rich comparison HTML report spanning multiple MD simulations.
@@ -896,8 +1020,12 @@ def generate_combined_html_report(
         working_dir: Directory where the HTML report is written.
         output_file: Output filename (default ``"combined_report.html"``).
         title: Report title shown in the browser tab and header.
-        enriched_prompt: Optional task description from the supervisor to
-            include as a structured objectives panel.
+        enriched_prompt: LLM-enriched technical task description used as
+            detailed objectives (shown in a collapsible panel).
+        user_goal: Original user goal text — shown prominently as the
+            high-level Overall Goal in the objectives section.
+        protein_name: Protein / system name (e.g. "CDK2") used in the
+            report header, objectives section, and literature relevance ranking.
 
     Returns:
         Dict with ``success`` and ``output_path``.
@@ -905,9 +1033,19 @@ def generate_combined_html_report(
     Path(working_dir).mkdir(parents=True, exist_ok=True)
     output_path = str(Path(working_dir) / output_file)
 
+    # ---- Build label → protein name map from user_goal + protein_name ------
+    # Merge: explicit protein_name overrides nothing; user_goal text has the
+    # full "uniprotId: ProteinName" table the user typed.
+    _combined_text = " ".join(filter(None, [user_goal, enriched_prompt, protein_name]))
+    label_name_map = _parse_label_name_map(_combined_text)
+    # Also fold in any "(label) ProteinName" style from enriched_prompt if we
+    # didn't already find the label there.
+    if label_name_map:
+        logger.info("Label → protein name map: %s", label_name_map)
+
     # ---- Collect data -------------------------------------------------------
-    sims_summary = _collect_sim_summaries(sim_dirs, labels)
-    sim_resources = _collect_per_sim_resources(sim_dirs, labels)
+    sims_summary = _collect_sim_summaries(sim_dirs, labels, label_name_map)
+    sim_resources = _collect_per_sim_resources(sim_dirs, labels, label_name_map)
 
     stats_html = _build_stats_section(sims_summary)
     plots_html = _build_plots_section(overlay_plots)
@@ -917,7 +1055,12 @@ def generate_combined_html_report(
     viewer_html = _build_3d_viewer_html(pdb_frames) if pdb_frames else ""
 
     # Literature: aggregate from per-sim HTML reports (deduplicated)
-    agg_refs = _aggregate_literature(sim_resources, max_refs=10)
+    agg_refs = _aggregate_literature(
+        sim_resources,
+        max_refs=10,
+        hypothesis_text=enriched_prompt,
+        protein_name=protein_name,
+    )
     literature_html = _build_literature_html(agg_refs)
 
     # Final impression: synthesise cross-sim stats
@@ -925,11 +1068,24 @@ def generate_combined_html_report(
     final_html = _build_final_impression_html(final_text, agg_refs)
 
     # Task description (original prompt + per-sim objectives)
-    task_html = _build_task_description_html(enriched_prompt or "", sim_resources)
+    task_html = _build_task_description_html(
+        enriched_prompt=enriched_prompt or "",
+        sim_resources=sim_resources,
+        user_goal=user_goal,
+        protein_name=protein_name,
+    )
 
     # ---- Metadata header ----------------------------------------------------
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     sims_list_html = ", ".join(f"<b>{_html_mod.escape(s['label'])}</b>" for s in sims_summary)
+    # Build a protein name display: use unique labels (already resolved to names)
+    _unique_names = list(dict.fromkeys(s["label"] for s in sims_summary))
+    _names_display = ", ".join(_html_mod.escape(n) for n in _unique_names)
+    protein_meta_html = (
+        f'\n  <p><strong>&#129516; Protein / System:</strong> '
+        f'<span style="font-weight:700;color:#7c3aed;">{_names_display}</span></p>'
+        if _unique_names else ""
+    )
 
     # ---- Simulations overview table (enhanced) ------------------------------
     sim_overview_rows = ""
@@ -978,7 +1134,7 @@ def generate_combined_html_report(
 <h1>&#129516; {_html_mod.escape(title)}</h1>
 <div class="header-meta">
   <p><strong>&#128197; Generated:</strong> {now}</p>
-  <p><strong>&#128202; Simulations:</strong> {sims_list_html}</p>
+  <p><strong>&#128202; Simulations:</strong> {sims_list_html}</p>{protein_meta_html}
   <p><strong>&#128296; Total analyses:</strong> {sum(len(s['records']) for s in sims_summary)}</p>
   <p><strong>&#129366; PDB structures in viewer:</strong> {len(pdb_frames)}</p>
   <p><strong>&#128218; Literature references:</strong> {len(agg_refs)}</p>
