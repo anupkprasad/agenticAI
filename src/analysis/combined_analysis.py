@@ -519,3 +519,111 @@ def run_combined_analysis(
             f"{len(tables)} tables, {len(skipped)} metrics skipped."
         ),
     }
+
+
+@tool
+def run_combined_dccm_analysis(
+    sim_dirs: List[str],
+    labels: List[str],
+    working_dir: str,
+    output_file: str = "dccm_comparison.png",
+    vmin: float = -1.0,
+    vmax: float = 1.0,
+    dpi: int = 200,
+) -> Dict[str, Any]:
+    """
+    Collect per-simulation DCCM CSV files and generate a side-by-side
+    comparison heatmap for multi-simulation reports.
+
+    Searches each simulation's ``analysis/`` sub-directory for a file whose
+    name starts with ``"dccm"`` and ends with ``".csv"``.  The found CSV files
+    are passed to ``plot_dccm_comparison`` to produce a single figure
+    comparing the correlation matrices across all simulations.
+
+    Args:
+        sim_dirs: List of per-simulation root directories (same order as
+            *labels*).
+        labels: Human-readable labels for each simulation (one per sim_dir).
+        working_dir: Output directory where the comparison figure is saved.
+        output_file: Filename for the comparison PNG (default:
+            ``"dccm_comparison.png"``).
+        vmin: Colour scale minimum (default: −1.0).
+        vmax: Colour scale maximum (default: +1.0).
+        dpi: Image resolution (default: 200).
+
+    Returns:
+        Dict with ``success``, ``output_path``, ``found_files``,
+        ``missing_sims``, and ``message``.
+    """
+    from src.analysis.dccm_calculator import plot_dccm_comparison as _plot_dccm
+
+    Path(working_dir).mkdir(parents=True, exist_ok=True)
+
+    found_files: List[str] = []
+    found_labels: List[str] = []
+    missing_sims: List[str] = []
+
+    for sim_dir, label in zip(sim_dirs, labels):
+        analysis_dir = Path(sim_dir) / "analysis"
+        hit = None
+        # Search analysis/ first, then the full sim_dir tree
+        for search_root in [str(analysis_dir), sim_dir]:
+            for p in sorted(Path(search_root).rglob("dccm*.csv")):
+                hit = str(p)
+                break
+            if hit:
+                break
+        if hit:
+            found_files.append(hit)
+            found_labels.append(label)
+        else:
+            missing_sims.append(sim_dir)
+            logger.warning(f"run_combined_dccm_analysis: no dccm CSV in {sim_dir}")
+
+    if len(found_files) < 2:
+        msg = (
+            f"Not enough DCCM CSV files found "
+            f"(need ≥2, found {len(found_files)}). "
+            f"Missing: {missing_sims}"
+        )
+        logger.warning(msg)
+        return {
+            "success": False,
+            "found_files": found_files,
+            "missing_sims": missing_sims,
+            "message": msg,
+        }
+
+    result = _plot_dccm.func(
+        dccm_files=found_files,
+        labels=found_labels,
+        output_file=output_file,
+        working_dir=working_dir,
+        vmin=vmin,
+        vmax=vmax,
+        dpi=dpi,
+    )
+
+    # Write to analysis_summary.jsonl
+    try:
+        from src.analysis.summary_logger import append_analysis_summary
+        append_analysis_summary(
+            working_dir=working_dir,
+            analysis_type="Combined_DCCM",
+            statistics={"n_simulations_compared": len(found_files)},
+            files={
+                "comparison_figure": result.get("output_path", ""),
+                "dccm_csv_files": found_files,
+            },
+            metadata={
+                "simulations": found_labels,
+                "missing_simulations": missing_sims,
+            },
+        )
+    except Exception as se:
+        logger.warning(f"run_combined_dccm_analysis: could not write summary: {se}")
+
+    result["found_files"] = found_files
+    result["missing_sims"] = missing_sims
+    return result
+

@@ -158,6 +158,107 @@ class ReporterAgent:
 
     # ── Combined multi-sim report ─────────────────────────────────────────
 
+    @staticmethod
+    def _generate_dssp_comparison_chart(
+        sim_dirs: List[str],
+        labels: List[str],
+        output_dir: str,
+    ) -> Optional[str]:
+        """Generate a grouped bar chart comparing helix/sheet/coil% across sims.
+
+        Reads DSSP statistics from each sim's analysis_summary.jsonl.
+        Returns the absolute path to the saved PNG, or None if data is missing.
+        """
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import numpy as np
+            from src.analysis.summary_logger import read_summary_file
+        except ImportError as exc:
+            logger.warning(f"_generate_dssp_comparison_chart: missing dependency {exc}")
+            return None
+
+        helix_vals, sheet_vals, coil_vals, plot_labels = [], [], [], []
+
+        _DSSP_TYPES = {"dssp", "dssp_secondarystructure", "secondary_structure",
+                       "secondarystructure"}
+        _KEY_HELIX = ("avg_helix_percent", "helix_percent", "helix", "percent_helix")
+        _KEY_SHEET = ("avg_sheet_percent", "sheet_percent", "sheet", "beta_sheet",
+                      "percent_sheet", "beta_percent")
+        _KEY_COIL  = ("avg_coil_percent",  "coil_percent",  "coil", "percent_coil")
+
+        def _pick(stats: dict, keys: tuple):
+            for k in keys:
+                v = stats.get(k)
+                if isinstance(v, (int, float)):
+                    return float(v)
+            return None
+
+        for sim_dir, label in zip(sim_dirs, labels):
+            analysis_dir = Path(sim_dir) / "analysis"
+            try:
+                records = read_summary_file(str(analysis_dir))
+            except Exception:
+                records = []
+                jsonl = analysis_dir / "analysis_summary.jsonl"
+                if jsonl.exists():
+                    import json as _json
+                    for line in jsonl.read_text(encoding="utf-8").splitlines():
+                        line = line.strip()
+                        if line and not line.startswith("---"):
+                            try:
+                                records.append(_json.loads(line))
+                            except Exception:
+                                pass
+
+            for rec in records:
+                atype = rec.get("analysis_type", "").lower().replace(" ", "_")
+                if any(t in atype for t in _DSSP_TYPES):
+                    stats = rec.get("statistics", {})
+                    h = _pick(stats, _KEY_HELIX)
+                    s = _pick(stats, _KEY_SHEET)
+                    c = _pick(stats, _KEY_COIL)
+                    if h is not None and s is not None:
+                        helix_vals.append(h)
+                        sheet_vals.append(s)
+                        coil_vals.append(c if c is not None else 100.0 - h - s)
+                        plot_labels.append(label)
+                        break   # one DSSP record per sim is enough
+
+        if len(plot_labels) < 2:
+            logger.info("_generate_dssp_comparison_chart: not enough DSSP data (need ≥2 sims)")
+            return None
+
+        x = np.arange(len(plot_labels))
+        width = 0.25
+        fig, ax = plt.subplots(figsize=(max(6, len(plot_labels) * 1.4), 5), dpi=120)
+        ax.bar(x - width, helix_vals, width, label="α-Helix", color="#e74c3c", alpha=0.85)
+        ax.bar(x,         sheet_vals, width, label="β-Sheet",  color="#3498db", alpha=0.85)
+        ax.bar(x + width, coil_vals,  width, label="Coil/Loop", color="#95a5a6", alpha=0.85)
+
+        ax.set_xlabel("Simulation", fontsize=12)
+        ax.set_ylabel("Secondary Structure Content (%)", fontsize=12)
+        ax.set_title("Secondary Structure Comparison Across Simulations", fontsize=13, fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels(plot_labels, rotation=20, ha="right", fontsize=10)
+        ax.legend(fontsize=10)
+        ax.set_ylim(0, max(max(helix_vals), max(sheet_vals), max(coil_vals)) * 1.2)
+        ax.yaxis.grid(True, linestyle="--", alpha=0.5)
+        ax.set_axisbelow(True)
+        plt.tight_layout()
+
+        out_path = str(Path(output_dir) / "dssp_comparison.png")
+        try:
+            plt.savefig(out_path, dpi=120, bbox_inches="tight")
+            plt.close(fig)
+            logger.info(f"DSSP comparison chart saved → {out_path}")
+            return out_path
+        except Exception as exc:
+            logger.warning(f"Could not save DSSP comparison chart: {exc}")
+            plt.close(fig)
+            return None
+
     def _run_combined_report(self, state: MDState) -> MDState:
         """
         Generate a combined comparison HTML report for all simulations.
@@ -181,7 +282,49 @@ class ReporterAgent:
 
         # Overlay plots produced by combined analysis
         combined_info = (state.get("analysis_results") or {}).get("combined", {})
-        overlay_plots = combined_info.get("overlay_plots", [])
+        overlay_plots = list(combined_info.get("overlay_plots", []))
+
+        # ── Figure curation ──────────────────────────────────────────────
+        _goal_lower = (_user_goal_text + " " + _enriched_text).lower()
+
+        # 1. Remove energy overlay by default; include only if user mentions it.
+        _want_energy = any(kw in _goal_lower for kw in
+                           ("energy", "potential", "temperature", "enthalpy", "kinetic"))
+        overlay_plots = [
+            p for p in overlay_plots
+            if _want_energy or "energy" not in Path(p).name.lower()
+        ]
+
+        # 2. Always add per-sim ligand COM distance plots if they exist.
+        _LIGAND_PLOT_NAMES = ("ligand_pocket_distance.png", "com_distance.png")
+        for s_dir in sim_dirs:
+            for _name in _LIGAND_PLOT_NAMES:
+                _p = Path(s_dir) / "analysis" / _name
+                if _p.exists() and str(_p) not in overlay_plots:
+                    overlay_plots.append(str(_p))
+
+        # 3. Generate and add DSSP (secondary structure) comparison chart.
+        _dssp_chart = self._generate_dssp_comparison_chart(sim_dirs, labels, reporter_dir)
+        if _dssp_chart and _dssp_chart not in overlay_plots:
+            overlay_plots.append(_dssp_chart)
+
+        # 4. Add any per-sim figure type that the user explicitly requested.
+        _USER_PLOT_KEYWORDS: Dict[str, tuple] = {
+            "dccm":   ("dccm_heatmap.png",),
+            "sasa":   ("sasa.png",),
+            "hbond":  ("hbond.png",),
+            "dssp":   ("dssp_heatmap.png",),
+            "rmsd":   ("rmsd.png",),
+            "rmsf":   ("rmsf.png",),
+            "rg":     ("rg.png",),
+        }
+        for keyword, filenames in _USER_PLOT_KEYWORDS.items():
+            if keyword in _goal_lower:
+                for s_dir in sim_dirs:
+                    for _fname in filenames:
+                        _p = Path(s_dir) / "analysis" / _fname
+                        if _p.exists() and str(_p) not in overlay_plots:
+                            overlay_plots.append(str(_p))
 
         log_agent_start(
             "reporter",
@@ -604,22 +747,82 @@ No need to specify image paths in tool_params - they're extracted from the analy
                     or sys_info.get("protein_name")
                     or sys_info.get("uniprot_id")
                 )
+            # Try explicit uniprot_id / sim_label state fields
+            if not protein_name or len(protein_name) < 3:
+                protein_name = (
+                    state.get("uniprot_id")
+                    or state.get("sim_label")
+                    or protein_name
+                )
             # Try PDB file stem if system_info didn't give a clean name
             if not protein_name or len(protein_name) < 3:
                 for pdb_key in ("raw_pdb", "cleaned_pdb", "pdb_path"):
                     pdb_val = state.get(pdb_key)
                     if pdb_val and isinstance(pdb_val, str):
-                        import os
-                        stem = os.path.splitext(os.path.basename(pdb_val))[0]
-                        if len(stem) >= 3:
+                        import os as _os_lit
+                        stem = _os_lit.path.splitext(_os_lit.path.basename(pdb_val))[0]
+                        # Ignore generic stems that don't identify the protein
+                        _GENERIC_STEMS = {
+                            "protein", "structure", "input", "system", "md",
+                            "protein_md", "cleaned", "prepared", "model",
+                        }
+                        if len(stem) >= 4 and stem.lower() not in _GENERIC_STEMS:
                             protein_name = stem
                             break
-            # Scan the user goal for the first capitalised word as protein name
+            # Try working_directory path: last non-generic component often
+            # is the UniProt accession (e.g., "p17612" from "pseudokin/p17612").
+            if not protein_name or len(protein_name) < 4:
+                import re as _re_wd
+                workdir = state.get("working_directory", "")
+                if workdir:
+                    _SKIP_DIRS = {
+                        "analysis", "reporter", "hpc", "preprocess", "simsetup",
+                        "supervisor", "planner", "programmer", "working_dir",
+                        "work_dir", "tmp", "output", "results",
+                    }
+                    from pathlib import Path as _Path_lit
+                    for part in reversed(_Path_lit(workdir).parts):
+                        if len(part) >= 4 and part.lower() not in _SKIP_DIRS:
+                            protein_name = part
+                            break
+            # If protein_name looks like a UniProt accession (e.g., p17612, Q13418),
+            # attempt a UniProt lookup to resolve it to the actual gene/protein name.
+            import re as _re_lit
+            if protein_name and _re_lit.match(r'^[A-Za-z][0-9]{4,}[0-9A-Za-z]*$', protein_name):
+                try:
+                    uni_resolve = search_uniprot.invoke({
+                        "query": protein_name,
+                        "max_results": 1,
+                    })
+                    if isinstance(uni_resolve, dict) and uni_resolve.get("success"):
+                        entries = uni_resolve.get("entries", [])
+                        if entries:
+                            entry = entries[0]
+                            gene = (
+                                entry.get("gene_name")
+                                or entry.get("protein_name")
+                                or entry.get("entry_name", "")
+                            )
+                            # Keep the resolved gene name only if it looks meaningful
+                            if gene and len(gene) >= 3 and gene.lower() != protein_name.lower():
+                                logger.info(
+                                    "Literature search: resolved accession %s → %s",
+                                    protein_name, gene
+                                )
+                                protein_name = gene
+                except Exception as _uni_err:
+                    logger.debug("UniProt accession lookup failed (non-fatal): %s", _uni_err)
+            # Scan the user goal for the first capitalised word as final fallback
             if not protein_name and user_goal:
                 import re as _re
                 match = _re.search(r'\b([A-Z]{2,}[0-9]*[A-Z]*|[A-Z][a-z]*[0-9]+)\b', user_goal)
                 if match:
-                    protein_name = match.group(1)
+                    _candidate = match.group(1)
+                    # Avoid generic acronyms that are not protein names
+                    _GENERIC_WORDS = {"MD", "PDB", "HPC", "RNA", "DNA", "ATP", "COM", "II"}
+                    if _candidate.upper() not in _GENERIC_WORDS:
+                        protein_name = _candidate
+            logger.info("Literature search: using protein_name=%r", protein_name)
 
             # ── Collect analysis stats to drive result-specific queries ──
             analysis_stats: Dict[str, Any] = {}

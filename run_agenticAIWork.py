@@ -1325,7 +1325,17 @@ def main(argv=None):
 
             # Print summary
             completed_sims = final_state.get("completed_sim_states") or []
-            n_ok = sum(1 for s in completed_sims if not s.get("errors"))
+            # Use explicit 'success' flag saved in snapshot; fall back to
+            # checking key outputs for snapshots from older runs.
+            def _sim_succeeded(s):
+                if "success" in s:
+                    return s["success"]
+                return bool(
+                    s.get("job_id") or s.get("trajectory_path")
+                    or s.get("topology") or s.get("coordinates")
+                    or s.get("analysis_results") or s.get("reporter_output")
+                )
+            n_ok = sum(1 for s in completed_sims if _sim_succeeded(s))
             n_fail = len(completed_sims) - n_ok
             print(f"\n{'='*60}")
             print("MULTI-SIMULATION WORKFLOW COMPLETED")

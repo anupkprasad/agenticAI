@@ -20,7 +20,7 @@ agent:
   
   # Execution settings
   max_tool_retries: 2  # Max retries per tool on failure
-  max_total_steps: 15  # Max total analysis steps
+  max_total_steps: 25  # Max total analysis steps (raised to accommodate plot steps)
   fail_fast: false  # Continue on failures to complete other analyses
 
 # Analysis workflow defaults
@@ -164,17 +164,41 @@ llm:
       "recommendations": ["Best practice 1", "Best practice 2"]
     }}
 
-    **Example Steps for Standard Protein Analysis:**
-    1. calculate_rmsd (assess structural stability)
+    **MANDATORY PLOTTING RULE:**
+    - After EVERY calculate_* or analyze_* step that writes a data file, you MUST add a plot_md_data step
+      that reads that data file and saves a PNG plot.  NO EXCEPTIONS.
+    - Every plot step must reference the output_file from the preceding calculation step as its data_files input.
+
+    **Example Steps for Standard Protein Analysis (WITH REQUIRED PLOTS):**
+    1. calculate_rmsd
        - tool_params: {{"topology_file": "md.gro", "trajectory_file": "md.xtc", "selection": "protein and name CA", "output_file": "rmsd.dat"}}
-    2. calculate_rmsf (identify flexible regions)
+    2. plot_md_data  ← REQUIRED after calculate_rmsd
+       - tool_params: {{"data_files": ["rmsd.dat"], "output_file": "rmsd.png", "xlabel": "Time (ns)", "ylabel": "RMSD (Å)"}}
+    3. calculate_rmsf
        - tool_params: {{"topology_file": "md.gro", "trajectory_file": "md.xtc", "selection": "protein and name CA", "output_file": "rmsf.dat"}}
-    3. calculate_radius_of_gyration (monitor compactness)
+    4. plot_md_data  ← REQUIRED after calculate_rmsf
+       - tool_params: {{"data_files": ["rmsf.dat"], "output_file": "rmsf.png", "xlabel": "Residue", "ylabel": "RMSF (Å)"}}
+    5. calculate_radius_of_gyration
        - tool_params: {{"topology_file": "md.gro", "trajectory_file": "md.xtc", "selection": "protein", "output_file": "gyration.dat"}}
-    4. analyze_energy (check equilibration)
+    6. plot_md_data  ← REQUIRED after calculate_radius_of_gyration
+       - tool_params: {{"data_files": ["gyration.dat"], "output_file": "gyration.png", "xlabel": "Time (ns)", "ylabel": "Rg (Å)"}}
+    7. analyze_energy
        - tool_params: {{"energy_file": "md.edr", "terms": ["Potential", "Temperature", "Pressure"], "output_file": "energy.dat"}}
-    5. extract_trajectory_metrics (get trajectory info)
+    8. plot_md_data  ← REQUIRED after analyze_energy
+       - tool_params: {{"data_files": ["energy.dat"], "output_file": "energy.png", "xlabel": "Time (ns)", "ylabel": "Energy (kJ/mol)"}}
+    9. extract_trajectory_metrics (no plot needed — gives trajectory metadata)
        - tool_params: {{"trajectory_file": "md.xtc", "topology_file": "md.gro"}}
+
+    **Ligand Pocket Distance (include when user mentions ligand/ATP/inhibitor/distance):**
+    10. calculate_ligand_pocket_distance
+        - tool_params: {{"topology_file": "md.gro", "trajectory_file": "md.xtc", "ligand_selection": "resname ATP", "cutoff": 5.0, "output_file": "ligand_pocket_distance.csv"}}
+    11. plot_md_data  ← REQUIRED plot for ligand pocket distance
+        - tool_params: {{"data_files": ["ligand_pocket_distance.csv"], "output_file": "ligand_pocket_distance.png", "xlabel": "Time (ns)", "ylabel": "COM Distance (Å)"}}
+
+    **DCCM (include when user mentions correlation, DCCM, allosteric, cross-correlation, coupled motions, pseudokinase):**
+    12. calculate_dccm
+        - tool_params: {{"topology_file": "md.gro", "trajectory_file": "md.xtc", "selection": "protein and name CA", "output_prefix": "dccm", "frame_interval": 5, "save_matrix_csv": true, "create_heatmap": true}}
+        (note: no separate plot step needed — calculate_dccm produces its own heatmap PNG internally)
 
     **Analysis Interpretation Guidelines:**
     - RMSD < 2.0 Å: Stable structure

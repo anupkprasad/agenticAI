@@ -261,9 +261,19 @@ def plot_data(
             # Parse data
             data_columns, column_names = parse_data_file(abs_file)
             
-            # Resolve column indices (default: 0 for x, 1 for y)
-            xi = x_col if x_col is not None else 0
-            yi = y_col if y_col is not None else 1
+            # Resolve column indices (default: 0 for x, 1 for y).
+            # Auto-skip a leading integer "frame" index column so that CSVs
+            # with the format  frame,time_ns,value  are plotted as
+            # time vs value rather than frame vs time.
+            if x_col is None and y_col is None and len(data_columns) >= 3:
+                first_name = column_names[0].strip().lower() if column_names else ""
+                if first_name in ("frame", "frames", "frame_index", "index"):
+                    xi, yi = 1, 2
+                else:
+                    xi, yi = 0, 1
+            else:
+                xi = x_col if x_col is not None else 0
+                yi = y_col if y_col is not None else 1
             
             if len(data_columns) <= max(xi, yi):
                 logger.warning(f"Insufficient data columns in {rel_file} (need columns {xi},{yi}, have {len(data_columns)}), skipping")

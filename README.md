@@ -217,10 +217,35 @@ python run_agenticAIWork.py \
   --subtask analysis reporter
 
 
+
+
+########################################   Demo   ##########################
+
 python run_agenticAIWork.py \
-  --goal "MD Simulation for uniprotId p17612, p24941, p28482, q13418, q7z7a4, q8ivt5, q8ne28 are done and saved in their respective directory named with /pseudokin/{uniprotId}/hpc/ Please do the analysis of trajectories and compare dynamics (RMSD, Rg and RMSF) among them. The simulated protein are human pseudokinases. the name of pseudokinase in the uniprotid are p17612: KAPCA,  p24941: CDK2,  p28482:MK01,  q13418: ILK,  q7z7a4: PXK,  q8ivt5:KSR1, q8ne28: STKL1. Please find the relevant literatures of these pseudokinase focus on the related dynamics coming from simulation analysis" \
+  --goal "Please preprocess and setup MD Simulation for 50 ns of list of Pdbs p17612.pdb, p24941.pdb, p28482.pdb which are in /pseudokin1/ Please do simulation preprocess, setup. Once the simulation setups are done please submit the job in HPC. The simulated protein are human pseudokinases. the name of pseudokinase in the uniprotid are p17612: KAPCA,  p24941: CDK2,  p28482: MK01. " \
+  --working-dir pseudokin1 \
+  --subtask preprocess simsetup hpcjob \
+  --use-llm --no-human-loop
+
+
+python run_agenticAIWork.py \
+  --goal "MD simulations for UniProt IDs p17612, p24941, p28482 are done and stored in /pseudokin/{uniprotId}/hpc/. Skip preprocessing, setup, and simulation steps — proceed directly to trajectory analysis and cross-simulation comparison. For each system compute: (1) backbone RMSD over time to assess structural stability, (2) per-residue RMSF to identify flexible and rigid regions, (3) radius of gyration to monitor compactness, (4) center-of-mass distance between the bound ATP ligand and the catalytic pocket (pocket defined as all protein atoms within 5 Å of ATP at frame 0) to track binding-site stability, (5) Dynamic Cross-Correlation Matrix (DCCM) of Cα fluctuations to reveal correlated and anti-correlated residue motions and allosteric communication networks, and (6) secondary structure (DSSP) time evolution to quantify αC-helix and activation-loop dynamics. After per-simulation analysis, generate comparative overlay plots and statistical tables across all six pseudokinases. The proteins are human pseudokinases: p17612=KAPCA, p24941=CDK2, p28482=MK01. For the reporter, retrieve relevant literature for each pseudokinase with its given name focusing on activation-loop conformations, allosteric regulation, and dynamics from MD simulations. Correlate the simulation findings with literature in the final report." \
   --working-dir pseudokin \
-  --sim-dirs pseudokin/p17612 pseudokin/p24941 pseudokin/p28482 pseudokin/q13418 pseudokin/q7z7a4 pseudokin/q8ivt5 pseudokin/q8ne28 \
+  --sim-dirs pseudokin/p17612 pseudokin/p24941 pseudokin/p28482 \
+  --subtask analysis reporter \
+  --use-llm --no-human-loop
+
+
+
+
+
+#########################################################################################
+
+
+python run_agenticAIWork.py \
+  --goal "MD simulations for UniProt IDs p17612, p24941, p28482, q13418, q8ivt5, q8ne28 are complete and stored in /pseudokin/{uniprotId}/hpc/. Skip preprocessing, setup, and simulation steps — proceed directly to trajectory analysis and cross-simulation comparison. For each system compute: (1) backbone RMSD over time to assess structural stability, (2) per-residue RMSF to identify flexible and rigid regions, (3) radius of gyration to monitor compactness, (4) center-of-mass distance between the bound ATP ligand and the catalytic pocket (pocket defined as all protein atoms within 5 Å of ATP at frame 0) to track binding-site stability, (5) Dynamic Cross-Correlation Matrix (DCCM) of Cα fluctuations to reveal correlated and anti-correlated residue motions and allosteric communication networks, and (6) secondary structure (DSSP) time evolution to quantify αC-helix and activation-loop dynamics. After per-simulation analysis, generate comparative overlay plots and statistical tables across all six pseudokinases. The proteins are human pseudokinases: p17612=KAPCA, p24941=CDK2, p28482=MK01, q13418=ILK, q8ivt5=KSR1, q8ne28=STKL1. For the reporter, retrieve relevant literature for each pseudokinase with its given name focusing on activation-loop conformations, allosteric regulation, and dynamics from MD simulations. Correlate the simulation findings with literature in the final report." \
+  --working-dir pseudokin \
+  --sim-dirs pseudokin/p17612 pseudokin/p24941 pseudokin/p28482 pseudokin/q13418 pseudokin/q8ivt5 pseudokin/q8ne28 \
   --subtask analysis reporter \
   --use-llm --no-human-loop
 

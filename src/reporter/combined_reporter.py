@@ -919,6 +919,64 @@ footer {
     text-align: center; padding: 20px; font-size: 13px; color: #9ca3af;
     margin-top: 40px; border-top: 1px solid #e5e7eb;
 }
+/* ---- Comparative Dynamics Summary panels ---- */
+.dyn-panel-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin: 20px 0;
+}
+.dyn-panel {
+    border: 1px solid #e0e7ff;
+    border-top: 4px solid #6366f1;
+    border-radius: 8px;
+    overflow: hidden;
+    background: white;
+    box-shadow: 0 2px 8px rgba(99,102,241,0.07);
+}
+.dyn-panel.panel-full {
+    grid-column: 1 / -1;
+}
+.panel-header {
+    background: linear-gradient(135deg, #eef2ff 0%, #e0e7ff 100%);
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.panel-badge {
+    background: #6366f1;
+    color: white;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 9px;
+    border-radius: 10px;
+    white-space: nowrap;
+}
+.panel-title {
+    font-weight: 700;
+    color: #312e81;
+    font-size: 14px;
+}
+.panel-subtitle {
+    font-size: 12px;
+    color: #6b7280;
+    padding: 4px 16px 6px;
+    background: #fafaff;
+    border-bottom: 1px solid #e0e7ff;
+    font-style: italic;
+}
+.panel-body {
+    padding: 14px 16px;
+    min-height: 80px;
+}
+.panel-missing {
+    text-align: center;
+    color: #9ca3af;
+    font-size: 13px;
+    padding: 30px 20px;
+    font-style: italic;
+}
 """
 
 
@@ -988,6 +1046,451 @@ def _build_plots_section(overlay_plots: List[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Comparative Dynamics Summary — multi-panel helpers
+# ---------------------------------------------------------------------------
+
+def _find_overlay_by_type(overlay_plots: List[str], keyword: str) -> Optional[str]:
+    """Return the first overlay plot path whose filename contains *keyword*."""
+    kl = keyword.lower()
+    for p in overlay_plots:
+        if kl in Path(p).name.lower():
+            return p
+    return None
+
+
+def _find_per_sim_plots(
+    sim_dirs: List[str],
+    labels: List[str],
+    keyword: str,
+) -> List[Tuple[str, str]]:
+    """Search each sim's analysis directory for a plot matching *keyword*.
+
+    Returns a list of (label, filepath) pairs, at most one per simulation.
+    """
+    kl = keyword.lower()
+    results: List[Tuple[str, str]] = []
+    for sim_dir, label in zip(sim_dirs, labels):
+        analysis_dir = Path(sim_dir) / "analysis"
+        if not analysis_dir.exists():
+            continue
+        for png in sorted(analysis_dir.glob("*.png")):
+            if kl in png.name.lower():
+                results.append((label, str(png)))
+                break
+    return results
+
+
+def _build_summary_bar_chart_svg(sims_summary: List[Dict[str, Any]]) -> str:
+    """Generate an inline SVG grouped bar chart for stability/flexibility ranking (Panel F)."""
+    # Collect per-sim metric means
+    sim_data: List[Dict[str, Any]] = []
+    for s in sims_summary:
+        st = _extract_stats(s["records"])
+        rmsd_val = rmsf_val = rg_val = None
+        for atype, vals in st.items():
+            alow = atype.lower()
+            v = _extract_mean_value(vals, alow)
+            if v is None:
+                continue
+            if "rmsd" in alow and rmsd_val is None:
+                rmsd_val = v
+            elif "rmsf" in alow and rmsf_val is None:
+                rmsf_val = v
+            elif ("radius" in alow or "gyration" in alow or alow == "rg") and rg_val is None:
+                rg_val = v
+        sim_data.append({"label": s["label"], "rmsd": rmsd_val, "rmsf": rmsf_val, "rg": rg_val})
+
+    metrics = []
+    if any(d["rmsd"] is not None for d in sim_data):
+        metrics.append(("RMSD (\u00c5)", "rmsd", "#3b82f6", "Stability"))
+    if any(d["rmsf"] is not None for d in sim_data):
+        metrics.append(("RMSF (\u00c5)", "rmsf", "#ef4444", "Flexibility"))
+    if any(d["rg"] is not None for d in sim_data):
+        metrics.append(("Rg (\u00c5)", "rg", "#10b981", "Compactness"))
+
+    if not metrics:
+        return ""
+
+    n_sims = len(sim_data)
+    n_metrics = len(metrics)
+
+    # SVG layout constants
+    svgw = 760
+    ml, mr, mt, mb = 72, 20, 50, 90
+    pw = svgw - ml - mr
+    ph = 230
+
+    svgh = mt + ph + mb
+    group_w = pw / max(n_sims, 1)
+    bar_pad = 8
+    bar_total = group_w - bar_pad * 2
+    bw = max((bar_total / max(n_metrics, 1)) - 4, 4)
+
+    # Y-axis scale
+    all_vals = [d[k] for d in sim_data for _, k, _, _ in metrics if d.get(k) is not None]
+    ymax = (max(all_vals) * 1.18) if all_vals else 1.0
+    if ymax == 0:
+        ymax = 1.0
+
+    def val_to_y(v: float) -> float:
+        return ph - (v / ymax) * ph + mt
+
+    def val_to_h(v: float) -> float:
+        return (v / ymax) * ph
+
+    lines: List[str] = []
+    lines.append(
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svgw} {svgh}" '
+        f'style="width:100%;max-width:{svgw}px;height:auto;display:block;margin:auto;">'
+    )
+    lines.append(f'<rect width="{svgw}" height="{svgh}" fill="white" rx="4"/>')
+    lines.append(
+        f'<text x="{svgw // 2}" y="22" text-anchor="middle" font-size="13" '
+        f'font-weight="700" fill="#1e3a8a" font-family="Segoe UI,Arial,sans-serif">'
+        f'Panel F \u2014 Stability &amp; Flexibility Summary Ranking</text>'
+    )
+
+    # Y-axis gridlines + labels
+    for i in range(6):
+        yval = ymax * i / 5
+        ypos = val_to_y(yval)
+        lines.append(
+            f'<line x1="{ml}" y1="{ypos:.1f}" x2="{ml + pw}" y2="{ypos:.1f}" '
+            f'stroke="#e5e7eb" stroke-width="1"/>'
+        )
+        lines.append(
+            f'<text x="{ml - 6}" y="{ypos + 4:.1f}" text-anchor="end" font-size="10" '
+            f'fill="#6b7280" font-family="Segoe UI,Arial,sans-serif">{yval:.2f}</text>'
+        )
+
+    # Axes
+    lines.append(f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt + ph}" stroke="#9ca3af" stroke-width="1.5"/>')
+    lines.append(f'<line x1="{ml}" y1="{mt + ph}" x2="{ml + pw}" y2="{mt + ph}" stroke="#9ca3af" stroke-width="1.5"/>')
+
+    # Y-axis unit label
+    mid_y = mt + ph // 2
+    lines.append(
+        f'<text x="14" y="{mid_y}" text-anchor="middle" '
+        f'transform="rotate(-90,14,{mid_y})" font-size="11" fill="#374151" '
+        f'font-family="Segoe UI,Arial,sans-serif">Value (\u00c5)</text>'
+    )
+
+    # Bars
+    for si, d in enumerate(sim_data):
+        gx = ml + si * group_w + bar_pad
+        for mi, (metric_label, key, color, _role) in enumerate(metrics):
+            v = d.get(key)
+            if v is None or v < 0:
+                continue
+            bx = gx + mi * (bw + 4)
+            by = val_to_y(v)
+            bh = val_to_h(v)
+            safe_lbl = _html_mod.escape(d["label"])
+            safe_metric = _html_mod.escape(metric_label)
+            lines.append(
+                f'<rect x="{bx:.1f}" y="{by:.1f}" width="{bw:.1f}" height="{bh:.1f}" '
+                f'fill="{color}" rx="2" opacity="0.85">'
+                f'<title>{safe_lbl} {safe_metric}: {v:.3f}</title></rect>'
+            )
+            label_y = by - 3
+            if label_y < mt + 12:
+                label_y = by + 12
+            lines.append(
+                f'<text x="{bx + bw / 2:.1f}" y="{label_y:.1f}" text-anchor="middle" '
+                f'font-size="8" fill="{color}" font-weight="600" '
+                f'font-family="Segoe UI,Arial,sans-serif">{v:.2f}</text>'
+            )
+
+        # X-axis sim label (rotated)
+        lx = ml + si * group_w + group_w / 2
+        ly = mt + ph + 14
+        safe_sim = _html_mod.escape(d["label"])
+        lines.append(
+            f'<text x="{lx:.1f}" y="{ly:.1f}" text-anchor="end" '
+            f'transform="rotate(-40,{lx:.1f},{ly:.1f})" font-size="11" '
+            f'fill="#1f2937" font-weight="600" '
+            f'font-family="Segoe UI,Arial,sans-serif">{safe_sim}</text>'
+        )
+
+    # Legend
+    legend_y = mt + ph + 64
+    for mi, (metric_label, _key, color, role) in enumerate(metrics):
+        lx = ml + mi * 170
+        lines.append(f'<rect x="{lx}" y="{legend_y}" width="14" height="14" fill="{color}" rx="2"/>')
+        lines.append(
+            f'<text x="{lx + 18}" y="{legend_y + 11}" font-size="11" fill="#374151" '
+            f'font-family="Segoe UI,Arial,sans-serif">'
+            f'{_html_mod.escape(metric_label)} ({role})</text>'
+        )
+
+    lines.append('</svg>')
+    return "\n".join(lines)
+
+
+def _build_ranking_summary_table(sims_summary: List[Dict[str, Any]]) -> str:
+    """Generate a concise dynamics ranking summary table below the panel grid."""
+    rows_data: List[Dict[str, Any]] = []
+    for s in sims_summary:
+        st = _extract_stats(s["records"])
+        rmsd_val = rmsf_val = rg_val = None
+        for atype, vals in st.items():
+            alow = atype.lower()
+            v = _extract_mean_value(vals, alow)
+            if v is None:
+                continue
+            if "rmsd" in alow and rmsd_val is None:
+                rmsd_val = v
+            elif "rmsf" in alow and rmsf_val is None:
+                rmsf_val = v
+            elif ("radius" in alow or "gyration" in alow or alow == "rg") and rg_val is None:
+                rg_val = v
+        rows_data.append({"label": s["label"], "rmsd": rmsd_val, "rmsf": rmsf_val, "rg": rg_val})
+
+    if not any(r["rmsd"] is not None or r["rmsf"] is not None for r in rows_data):
+        return ""
+
+    def rank_asc(key: str) -> Dict[str, int]:
+        """Rank simulations by *key* ascending (lower = rank 1)."""
+        valid = sorted(
+            [(r["label"], r[key]) for r in rows_data if r.get(key) is not None],
+            key=lambda x: x[1],
+        )
+        return {lbl: i + 1 for i, (lbl, _) in enumerate(valid)}
+
+    def rank_desc(key: str) -> Dict[str, int]:
+        """Rank simulations by *key* descending (higher = rank 1)."""
+        valid = sorted(
+            [(r["label"], r[key]) for r in rows_data if r.get(key) is not None],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        return {lbl: i + 1 for i, (lbl, _) in enumerate(valid)}
+
+    rmsd_rank = rank_asc("rmsd")    # lower RMSD → more stable
+    rmsf_rank = rank_desc("rmsf")   # higher RMSF → more flexible
+    rg_rank = rank_asc("rg")        # lower Rg → more compact
+
+    medals: Dict[int, str] = {1: "&#129351;", 2: "&#129352;", 3: "&#129353;"}
+
+    def medal(r: int) -> str:
+        return medals.get(r, f"&nbsp;#{r}")
+
+    table_rows = ""
+    for r in rows_data:
+        lbl = r["label"]
+        rmsd_c = (
+            f'{r["rmsd"]:.3f}&thinsp;\u00c5 <small style="color:#6b7280;">'
+            f'{medal(rmsd_rank.get(lbl, 99))}</small>'
+            if r["rmsd"] is not None else "\u2014"
+        )
+        rmsf_c = (
+            f'{r["rmsf"]:.3f}&thinsp;\u00c5 <small style="color:#6b7280;">'
+            f'{medal(rmsf_rank.get(lbl, 99))}</small>'
+            if r["rmsf"] is not None else "\u2014"
+        )
+        rg_c = (
+            f'{r["rg"]:.3f}&thinsp;\u00c5 <small style="color:#6b7280;">'
+            f'{medal(rg_rank.get(lbl, 99))}</small>'
+            if r["rg"] is not None else "\u2014"
+        )
+        if r["rmsd"] is not None and rmsd_rank.get(lbl) == 1:
+            verdict = '<span style="color:#059669;font-weight:700;">Most Stable</span>'
+        elif r["rmsf"] is not None and rmsf_rank.get(lbl) == 1:
+            verdict = '<span style="color:#f59e0b;font-weight:700;">Most Flexible</span>'
+        elif r["rg"] is not None and rg_rank.get(lbl) == 1:
+            verdict = '<span style="color:#6366f1;font-weight:700;">Most Compact</span>'
+        else:
+            verdict = "\u2014"
+        table_rows += (
+            f"<tr>"
+            f"<td><strong>{_html_mod.escape(lbl)}</strong></td>"
+            f"<td>{rmsd_c}</td>"
+            f"<td>{rmsf_c}</td>"
+            f"<td>{rg_c}</td>"
+            f"<td>{verdict}</td>"
+            f"</tr>\n"
+        )
+
+    return (
+        '<h3>&#127942; Dynamics Ranking Summary</h3>\n'
+        '<table style="font-size:13.5px;">\n'
+        '<tr><th>Simulation</th>'
+        '<th>Mean RMSD&nbsp;&#8595; (stability)</th>'
+        '<th>Mean RMSF&nbsp;&#8593; (flexibility)</th>'
+        '<th>Mean Rg&nbsp;&#8595; (compactness)</th>'
+        '<th>Verdict</th></tr>\n'
+        + table_rows
+        + '</table>\n'
+    )
+
+
+def _build_comparative_dynamics_section(
+    overlay_plots: List[str],
+    sims_summary: List[Dict[str, Any]],
+    sim_dirs: List[str],
+    labels: List[str],
+) -> str:
+    """Build the Comparative Dynamics Summary multi-panel HTML section.
+
+    Panel A — RMSD overlay (structural stability over time)
+    Panel B — RMSF overlay (per-residue backbone flexibility)
+    Panel C — Rg comparison (structural compactness over time)
+    Panel D — ATP/ligand pocket distance (active-site geometry)
+    Panel E — DCCM representative heatmaps (collective motions, one per sim)
+    Panel F — Summary bar chart generated from per-sim statistics
+    """
+
+    def _panel(
+        panel_id: str,
+        title: str,
+        subtitle: str,
+        body: str,
+        full_width: bool = False,
+    ) -> str:
+        cls = ' class="dyn-panel panel-full"' if full_width else ' class="dyn-panel"'
+        return (
+            f'<div{cls}>'
+            f'<div class="panel-header">'
+            f'<span class="panel-badge">Panel {_html_mod.escape(panel_id)}</span>'
+            f'<span class="panel-title">{_html_mod.escape(title)}</span>'
+            f'</div>'
+            f'<div class="panel-subtitle">{subtitle}</div>'
+            f'<div class="panel-body">{body}</div>'
+            f'</div>'
+        )
+
+    def _img(fpath: str, alt: str) -> str:
+        uri = _encode_image(fpath)
+        if uri is None:
+            return f'<p class="panel-missing">Image not available: {_html_mod.escape(Path(fpath).name)}</p>'
+        return (
+            f'<img src="{uri}" alt="{_html_mod.escape(alt)}" loading="lazy" '
+            f'style="width:100%;height:auto;border-radius:4px;">'
+        )
+
+    def _missing(msg: str = "No data available") -> str:
+        return f'<div class="panel-missing"><span>&#128202;</span><br>{_html_mod.escape(msg)}</div>'
+
+    # ── Panel A: RMSD overlay ────────────────────────────────────────────
+    rmsd_path = _find_overlay_by_type(overlay_plots, "rmsd")
+    panel_a = _panel(
+        "A", "RMSD Overlay",
+        "Root-mean-square deviation from reference structure across all simulations",
+        _img(rmsd_path, "RMSD overlay") if rmsd_path else _missing("No RMSD overlay found"),
+    )
+
+    # ── Panel B: RMSF overlay ────────────────────────────────────────────
+    rmsf_path = _find_overlay_by_type(overlay_plots, "rmsf")
+    panel_b = _panel(
+        "B", "RMSF Overlay",
+        "Per-residue C\u03b1 backbone flexibility across all simulations",
+        _img(rmsf_path, "RMSF overlay") if rmsf_path else _missing("No RMSF overlay found"),
+    )
+
+    # ── Panel C: Rg comparison ───────────────────────────────────────────
+    rg_path = _find_overlay_by_type(overlay_plots, "rg")
+    if not rg_path:
+        rg_path = _find_overlay_by_type(overlay_plots, "gyration")
+    panel_c = _panel(
+        "C", "Radius of Gyration (Rg)",
+        "Structural compactness over simulation time — all simulations",
+        _img(rg_path, "Rg overlay") if rg_path else _missing("No Rg overlay found"),
+    )
+
+    # ── Panel D: ATP/ligand pocket distance ──────────────────────────────
+    pocket_plots = _find_per_sim_plots(sim_dirs, labels, "pocket_distance")
+    if not pocket_plots:
+        pocket_plots = _find_per_sim_plots(sim_dirs, labels, "ligand_pocket")
+    if not pocket_plots:
+        pocket_plots = _find_per_sim_plots(sim_dirs, labels, "atp_distance")
+    if not pocket_plots:
+        pocket_plots = _find_per_sim_plots(sim_dirs, labels, "distance")
+
+    if pocket_plots:
+        rep_label, rep_path = pocket_plots[0]
+        pocket_body = (
+            f'<p style="font-size:12px;color:#6b7280;margin:0 0 6px 0;">'
+            f'Representative: <strong>{_html_mod.escape(rep_label)}</strong></p>'
+            + _img(rep_path, f"Pocket distance {rep_label}")
+        )
+        if len(pocket_plots) > 1:
+            pocket_body += '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">'
+            for lbl, pth in pocket_plots[1:]:
+                uri = _encode_image(pth)
+                if uri:
+                    pocket_body += (
+                        f'<div style="flex:1 1 110px;text-align:center;">'
+                        f'<img src="{uri}" alt="{_html_mod.escape(lbl)}" '
+                        f'style="width:100%;border-radius:3px;">'
+                        f'<p style="font-size:10px;color:#6b7280;margin:2px 0;">'
+                        f'{_html_mod.escape(lbl)}</p></div>'
+                    )
+            pocket_body += '</div>'
+    else:
+        pocket_body = _missing("No pocket distance data found")
+
+    panel_d = _panel(
+        "D", "ATP Pocket / Active Site Distance",
+        "Key inter-residue distances in the nucleotide or ligand binding pocket",
+        pocket_body,
+    )
+
+    # ── Panel E: DCCM representative heatmaps ────────────────────────────
+    dccm_plots = _find_per_sim_plots(sim_dirs, labels, "dccm")
+    if not dccm_plots:
+        # fall back to any combined dccm overlay
+        dccm_ov = _find_overlay_by_type(overlay_plots, "dccm")
+        dccm_body = _img(dccm_ov, "DCCM heatmap") if dccm_ov else _missing("No DCCM heatmaps found")
+    else:
+        dccm_body = '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">'
+        for lbl, dpath in dccm_plots:
+            uri = _encode_image(dpath)
+            if uri:
+                dccm_body += (
+                    f'<div style="flex:1 1 180px;max-width:260px;text-align:center;">'
+                    f'<img src="{uri}" alt="DCCM {_html_mod.escape(lbl)}" '
+                    f'style="width:100%;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,0.12);">'
+                    f'<p style="font-size:11px;font-weight:700;color:#1e40af;margin:5px 0 0;">'
+                    f'{_html_mod.escape(lbl)}</p></div>'
+                )
+        dccm_body += '</div>'
+
+    panel_e = _panel(
+        "E", "DCCM Heatmaps",
+        "Dynamic cross-correlation matrix \u2014 representative heatmap per simulation",
+        dccm_body,
+        full_width=True,
+    )
+
+    # ── Panel F: Summary bar chart ────────────────────────────────────────
+    bar_svg = _build_summary_bar_chart_svg(sims_summary)
+    panel_f = _panel(
+        "F", "Summary Bar Chart",
+        "Stability (RMSD \u2193), flexibility (RMSF \u2191), and compactness (Rg \u2193) rankings",
+        bar_svg if bar_svg else _missing("Insufficient statistics for bar chart"),
+        full_width=True,
+    )
+
+    # ── Ranking table ─────────────────────────────────────────────────────
+    ranking_table = _build_ranking_summary_table(sims_summary)
+
+    return (
+        '<h2>&#128202; Comparative Dynamics Summary</h2>\n'
+        '<p>Multi-panel comparison of structural dynamics across all simulations. '
+        'Each panel highlights a distinct aspect of molecular behaviour.</p>\n'
+        '<div class="dyn-panel-grid">\n'
+        + panel_a + "\n"
+        + panel_b + "\n"
+        + panel_c + "\n"
+        + panel_d + "\n"
+        + panel_e + "\n"
+        + panel_f + "\n"
+        + '</div>\n'
+        + ranking_table
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public @tool
 # ---------------------------------------------------------------------------
 
@@ -1049,6 +1552,11 @@ def generate_combined_html_report(
 
     stats_html = _build_stats_section(sims_summary)
     plots_html = _build_plots_section(overlay_plots)
+
+    # Comparative Dynamics Summary — multi-panel figure (Panels A–F)
+    comparative_html = _build_comparative_dynamics_section(
+        overlay_plots, sims_summary, sim_dirs, labels
+    )
 
     # 3D viewer: pick one representative PDB per sim (max 5)
     pdb_frames = _select_representative_pdbs(sim_dirs, labels, max_pdbs=5)
@@ -1153,9 +1661,7 @@ def generate_combined_html_report(
 
 {"<div class='section-divider'></div>" if viewer_html else ""}
 
-<h2>&#128200; Overlay Plots</h2>
-<p>Cross-simulation comparison of structural dynamics metrics:</p>
-{plots_html}
+{comparative_html}
 
 <div class="section-divider"></div>
 

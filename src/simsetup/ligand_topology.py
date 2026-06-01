@@ -62,8 +62,13 @@ class LigandTopologyGenerator:
             "-c", charge_method
         ]
         
+        # Guard: treat empty string / non-integer as auto-detect
         if net_charge is not None:
-            cmd.extend(["-n", str(net_charge)])
+            try:
+                net_charge = int(net_charge)
+                cmd.extend(["-n", str(net_charge)])
+            except (ValueError, TypeError):
+                pass  # auto-detect
         
         try:
             result = subprocess.run(
@@ -176,8 +181,13 @@ class LigandTopologyGenerator:
             "-pf", "y"
         ]
         
+        # Guard: treat empty string / non-integer as auto-detect
         if net_charge is not None:
-            cmd_ante.extend(["-nc", str(net_charge)])
+            try:
+                net_charge = int(net_charge)
+                cmd_ante.extend(["-nc", str(net_charge)])
+            except (ValueError, TypeError):
+                pass  # auto-detect
         
         try:
             result_ante = subprocess.run(
@@ -325,6 +335,13 @@ def generate_ligand_parameters(
     if not output_dir or (isinstance(output_dir, str) and output_dir.strip() == ""):
         output_dir = str(Path(ligand_pdb).parent)
     
+    # Sanitize net_charge: empty string or non-integer means auto-detect (None)
+    if net_charge is not None:
+        try:
+            net_charge = int(net_charge) if str(net_charge).strip() != "" else None
+        except (ValueError, TypeError):
+            net_charge = None
+
     result = generator.generate_ligand_topology(
         ligand_pdb=ligand_pdb,
         output_dir=output_dir,

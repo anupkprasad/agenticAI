@@ -729,15 +729,50 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             state["hpc_dir"] = str(Path(working_dir) / "hpc")
             state["analysis_dir"] = str(Path(working_dir) / "analysis")
         else:
-            # Single-sim: create standard agent directories at working_dir level
+            # Single-sim: set all dir state fields unconditionally (agents may read them)
             state["preprocess_dir"] = str(Path(working_dir) / "preprocess")
             state["simsetup_dir"] = str(Path(working_dir) / "simsetup")
             state["hpc_dir"] = str(Path(working_dir) / "hpc")
             state["analysis_dir"] = str(Path(working_dir) / "analysis")
-            for agent_dir in [state["preprocess_dir"], state["simsetup_dir"],
-                             state["hpc_dir"], state["analysis_dir"],
-                             str(Path(working_dir) / "reporter"),
-                             str(Path(working_dir) / "supervisor")]:
+
+            # Determine which agent directories to actually create on disk.
+            # Only create directories for agents that will run in this subtask so
+            # the working directory stays clean and unambiguous.
+            _AGENT_DIR_MAP = {
+                "preprocess": state["preprocess_dir"],
+                "simsetup":   state["simsetup_dir"],
+                "hpc":        state["hpc_dir"],
+                "analysis":   state["analysis_dir"],
+                "reporter":   str(Path(working_dir) / "reporter"),
+            }
+            _SUBTASK_AGENTS = {
+                "preprocess_only": ["preprocess"],
+                "setup_only":      ["simsetup"],
+                "hpc_only":        ["hpc"],
+                "analysis_only":   ["analysis"],
+                "reporter_only":   ["reporter"],
+                "full_task":       list(_AGENT_DIR_MAP.keys()),
+            }
+            # CLI agent name → directory key mapping for multi_agent mode
+            _CLI_TO_DIR_KEY = {
+                "preprocess": "preprocess",
+                "simsetup":   "simsetup",
+                "hpcjob":     "hpc",
+                "analysis":   "analysis",
+                "reporter":   "reporter",
+            }
+
+            subtask_type = state.get("subtask_type") or "full_task"
+            if subtask_type == "multi_agent":
+                agent_list = state.get("agent_list") or []
+                agents_needed = [_CLI_TO_DIR_KEY[a] for a in agent_list if a in _CLI_TO_DIR_KEY]
+            else:
+                agents_needed = _SUBTASK_AGENTS.get(subtask_type, list(_AGENT_DIR_MAP.keys()))
+
+            # supervisor is always needed (stores execution reports / state)
+            dirs_to_create = [_AGENT_DIR_MAP[a] for a in agents_needed] + \
+                             [str(Path(working_dir) / "supervisor")]
+            for agent_dir in dirs_to_create:
                 Path(agent_dir).mkdir(parents=True, exist_ok=True)
         
         # Check for saved workflow state from a previous run

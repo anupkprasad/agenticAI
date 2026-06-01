@@ -571,19 +571,35 @@ class MDSupervisor:
         completed = state.get("completed_sim_states") or []
 
         # Collect the important per-sim outputs
+        _errors = list(state.get("errors", []))
+        # A simulation is considered successful when at least one key workflow
+        # artifact was produced.  Non-fatal errors (e.g. validation warnings
+        # that were recovered) do NOT mark a sim as failed.
+        _success = bool(
+            state.get("job_id")
+            or state.get("trajectory_path")
+            or state.get("topology")
+            or state.get("coordinates")
+            or state.get("analysis_results")
+            or state.get("reporter_output")
+        )
         snapshot = {
             "sim_index": sim_index,
             "label": (state.get("sim_prompts") or [{}])[sim_index].get("label", f"sim_{sim_index}"),
             "working_directory": state.get("working_directory"),
             "user_goal": state.get("user_goal"),
+            "success": _success,
+            "job_id": state.get("job_id"),
+            "job_status": state.get("job_status"),
             "analysis_results": state.get("analysis_results", {}),
             "analysis_directory": state.get("analysis_directory") or state.get("analysis_dir"),
             "trajectory_path": state.get("trajectory_path"),
             "topology": state.get("topology"),
+            "coordinates": state.get("coordinates"),
             "energy_file": state.get("energy_file"),
             "reporter_output": state.get("reporter_output"),
             "figures": list(state.get("figures", [])),
-            "errors": list(state.get("errors", [])),
+            "errors": _errors,
             "warnings": list(state.get("warnings", [])),
             "file_registry": dict(state.get("file_registry", {})),
         }

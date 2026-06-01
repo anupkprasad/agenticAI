@@ -355,7 +355,15 @@ class MDHPCAgent:
         # Get configuration
         ssh_config = self.config.get("ssh", {})
         has_ssh = bool(ssh_config.get("host") and ssh_config.get("user"))
-        
+
+        # Resolve concrete directory paths so the LLM never has to guess them
+        working_dir = state.get("working_directory", "working_dir")
+        simsetup_dir = state.get("simsetup_dir", str(Path(working_dir) / "simsetup"))
+        hpc_dir_path = state.get("hpc_dir", str(Path(working_dir) / "hpc"))
+
+        # Derive a unique job name from the PDB file or working directory
+        job_name = self._derive_job_name(state)
+
         prompt = f"""You are an HPC job submission and monitoring expert executing a detailed plan from the workflow planner.
 
 **System Information:**
@@ -365,6 +373,11 @@ class MDHPCAgent:
 - Force Field: {state.get("force_field")}
 - Water Model: {state.get("water_model")}
 - MDP Files: {list(mdp_files.keys())}
+- SLURM Job Name (use this EXACT value for job_name): {job_name}
+
+**Working Directories (use these EXACT absolute paths — do NOT invent or modify):**
+- Simsetup source directory (copy FROM): {simsetup_dir}
+- HPC working directory (copy TO / run in): {hpc_dir_path}
 
 **HPC Configuration:**
 - Remote Access: {"SSH configured" if has_ssh else "Local submission only"}
@@ -388,15 +401,18 @@ class MDHPCAgent:
 **CRITICAL INSTRUCTIONS:**
 - You MUST ONLY use the tools listed above
 - Every "tool_name" must match exactly one of the tool names listed
+- For copy_simulation_files: source_dir MUST be "{simsetup_dir}", dest_dir MUST be "{hpc_dir_path}"
+- For create_slurm_script: job_name MUST be "{job_name}", working_dir MUST be "{hpc_dir_path}"
+- For submit_job: remote_dir MUST be "{hpc_dir_path}"
 - Tool execution order matters: copy files → estimate time → create script → submit → monitor → download
 - Maximum 2 job submission attempts (if first fails, retry once)
 - Monitor job hourly until completion
 - Only download results after job completes successfully
 
 **Your task:** Create a detailed execution plan that:
-1. Copies simulation files from simsetup to working_dir/hpc
+1. Copies simulation files from {simsetup_dir} → {hpc_dir_path}
 2. Estimates simulation time based on system size and production length
-3. Creates SLURM submission script with appropriate time limit
+3. Creates SLURM submission script with appropriate time limit (working_dir = {hpc_dir_path})
 4. Submits job to HPC (with retry logic if needed)
 5. Monitors job status periodically
 6. Downloads results when job completes
@@ -548,6 +564,29 @@ Output as JSON with this structure:
         except Exception:
             return None
 
+    def _derive_job_name(self, state: MDState) -> str:
+        """Derive a unique SLURM job name from the PDB file or working directory."""
+        import re
+        # Priority 1: raw_pdb stem (e.g. "p28482" from p28482.pdb)
+        for key in ("raw_pdb", "cleaned_pdb", "topology", "coordinates"):
+            val = state.get(key)
+            if val:
+                stem = Path(val).stem
+                # Strip common suffixes added during processing
+                stem = re.sub(r'(_h|_clean|_processed|_solvated|_ions)$', '', stem, flags=re.IGNORECASE)
+                if stem:
+                    # SLURM job names: max 15 chars, alphanumeric + underscore/hyphen
+                    safe = re.sub(r'[^A-Za-z0-9_\-]', '_', stem)[:15]
+                    return safe
+        # Priority 2: basename of working directory
+        working_dir = state.get("working_directory", "")
+        if working_dir:
+            stem = Path(working_dir).name
+            safe = re.sub(r'[^A-Za-z0-9_\-]', '_', stem)[:15]
+            if safe:
+                return safe
+        return "md_simulation"
+
     def _estimate_system_size(self, coordinates_file: Optional[str]) -> int:
         """Estimate number of atoms from coordinate file"""
         if not coordinates_file or not Path(coordinates_file).exists():
@@ -592,7 +631,7 @@ Output as JSON with this structure:
                     "name": "Create SLURM script",
                     "tool_name": "create_slurm_script",
                     "tool_params": {
-                        "job_name": "md_simulation",
+                        "job_name": self._derive_job_name(state),
                         "working_dir": hpc_dir
                     },
                     "reason": "Generate submission script"
@@ -612,13 +651,42 @@ Output as JSON with this structure:
         """Execute the HPC plan steps"""
         steps = plan.get("steps", [])
         success = True
-        
+
+        # Resolve correct paths once so every step shares them
+        working_dir = state.get("working_directory", "working_dir")
+        correct_simsetup = state.get("simsetup_dir", str(Path(working_dir) / "simsetup"))
+        correct_hpc_dir  = hpc_dir or state.get("hpc_dir", str(Path(working_dir) / "hpc"))
+
         log_agent_action("hpc", "Generated HPC plan", {"steps": len(steps)})
         
         for i, step in enumerate(steps, 1):
             step_name = step.get("name", f"Step {i}")
             tool_name = step.get("tool_name")
             tool_params = step.get("tool_params", {})
+
+            # Correct any hallucinated directory paths the LLM may have generated
+            if tool_name == "copy_simulation_files":
+                if tool_params.get("source_dir") != correct_simsetup:
+                    logger.warning(
+                        f"Correcting LLM-generated source_dir "
+                        f"'{tool_params.get('source_dir')}' → '{correct_simsetup}'"
+                    )
+                    tool_params["source_dir"] = correct_simsetup
+                if tool_params.get("dest_dir") != correct_hpc_dir:
+                    logger.warning(
+                        f"Correcting LLM-generated dest_dir "
+                        f"'{tool_params.get('dest_dir')}' → '{correct_hpc_dir}'"
+                    )
+                    tool_params["dest_dir"] = correct_hpc_dir
+            elif tool_name in ("create_slurm_script", "submit_job", "download_results"):
+                # working_dir / remote_dir should always point at hpc_dir
+                for key in ("working_dir", "remote_dir"):
+                    if key in tool_params and tool_params[key] != correct_hpc_dir:
+                        logger.warning(
+                            f"Correcting LLM-generated {key} "
+                            f"'{tool_params[key]}' → '{correct_hpc_dir}'"
+                        )
+                        tool_params[key] = correct_hpc_dir
             max_retries = max(step.get("max_retries", 1), 1)
             retry_on_failure = step.get("retry_on_failure", False)
             
@@ -741,7 +809,11 @@ Output as JSON with this structure:
             for key, value in defaults.items():
                 if key not in enriched:
                     enriched[key] = value
-            
+
+            # Always override job_name with the PDB-derived name so every
+            # simulation gets a unique, identifiable SLURM job name.
+            enriched["job_name"] = self._derive_job_name(state)
+
             # Add email if available in state
             if "email" not in enriched and state.get("user_email"):
                 enriched["email"] = state["user_email"]
