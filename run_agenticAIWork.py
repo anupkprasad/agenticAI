@@ -633,7 +633,8 @@ def _load_agent_domain_tools(checkpoint_type: str, working_dir: str = "") -> Tup
             metadata = _get_meta_r()
 
     except Exception as e:
-        logger.warning(f"Could not load domain tools for {checkpoint_type}: {e}")
+        # Use print instead of logger since this is a utility function
+        print(f"Warning: Could not load domain tools for {checkpoint_type}: {e}", file=sys.stderr)
         return {}, ""
 
     if not metadata:
@@ -1140,6 +1141,11 @@ def main(argv=None):
                              "contain an hpc/ sub-folder with trajectory data. "
                              "The directory basename is used as the simulation label. "
                              "Example: --sim-dirs pseudokin/p17612 pseudokin/p24941"))
+    parser.add_argument("--simtype", default="singlesim", 
+                       choices=["singlesim", "multisim"],
+                       help=("Simulation type: 'singlesim' for single PDB or 'multisim' for "
+                             "multiple PDbs. Default: singlesim. If not provided, framework "
+                             "will auto-detect from --pdb-list, --sim-dirs, or user goal."))
     parser.add_argument("--subtask", default=None, nargs='+',
                        choices=["preprocess", "simsetup", "hpcjob", "analysis", "reporter"],
                        metavar="AGENT",
@@ -1262,6 +1268,7 @@ def main(argv=None):
     # Multi-simulation mode detection
     # ------------------------------------------------------------------
     pdb_list = getattr(args, 'pdb_list', None) or []
+    simtype = getattr(args, 'simtype', 'singlesim')
 
     # --sim-dirs: convert per-sim directories into synthetic pdb_list entries
     # so the existing multi-sim planner logic works unchanged.
@@ -1281,15 +1288,72 @@ def main(argv=None):
             flush=True,
         )
 
+    # Auto-detect PDbs from goal if not already provided via --pdb-list or --sim-dirs
+    # This works for both explicit --simtype multisim and auto-detection mode
     if not pdb_list:
-        # Try extracting multiple PDBs from the goal text
         _goal_pdbs = _extract_pdb_paths_from_goal(goal)
-        if len(_goal_pdbs) > 1:
+        if len(_goal_pdbs) > 0:
             pdb_list = _goal_pdbs
+            if len(_goal_pdbs) > 1:
+                print(
+                    f"\n  Auto-detected {len(pdb_list)} PDBs from goal: {', '.join(pdb_list)}",
+                    flush=True,
+                )
+            elif simtype == 'multisim' and len(_goal_pdbs) == 1:
+                # User specified --simtype multisim but only one PDB found in goal
+                print(
+                    f"\n  Warning: --simtype multisim specified but only 1 PDB found in goal: {_goal_pdbs[0]}",
+                    flush=True,
+                )
 
-    if len(pdb_list) > 1:
+    # Determine if multi-simulation mode should be activated
+    # Priority: 1) explicit --simtype flag, 2) multiple PDbs detected
+    is_multi_sim = (
+        simtype == 'multisim' or 
+        len(pdb_list) > 1 or 
+        bool(sim_dirs_arg)
+    )
+
+    if is_multi_sim:
+        # Validate that we have PDbs for multi-simulation mode
+        if not pdb_list:
+            print(
+                "\n❌ ERROR: Multi-simulation mode activated but no PDB files found!",
+                file=sys.stderr, flush=True
+            )
+            print(
+                "   Please provide PDbs via:",
+                file=sys.stderr, flush=True
+            )
+            print(
+                "   - --pdb-list file1.pdb file2.pdb ...",
+                file=sys.stderr, flush=True
+            )
+            print(
+                "   - --sim-dirs dir1 dir2 ...",
+                file=sys.stderr, flush=True
+            )
+            print(
+                "   - Or mention multiple .pdb files in your --goal",
+                file=sys.stderr, flush=True
+            )
+            return 1
+        
         # ---- MULTI-SIMULATION (in-graph) ----
-        print(f"\nDetected multi-simulation mode with {len(pdb_list)} PDBs", flush=True)
+        num_sims = len(pdb_list)
+        print(f"\nMulti-simulation mode activated ({num_sims} simulations)", flush=True)
+        if simtype == 'multisim':
+            print(f"  Mode: Explicit (--simtype multisim)", flush=True)
+        elif sim_dirs_arg:
+            print(f"  Mode: Auto-detected (--sim-dirs)", flush=True)
+        else:
+            print(f"  Mode: Auto-detected ({len(pdb_list)} PDbs)", flush=True)
+        
+        # Print detected PDbs
+        print(f"  PDbs to process:", flush=True)
+        for i, pdb in enumerate(pdb_list, 1):
+            print(f"    {i}. {Path(pdb).name}", flush=True)
+        
         log_user_prompt(goal, config)
 
         # Set multi-sim flags in config so _initialize_state picks them up
@@ -1337,12 +1401,30 @@ def main(argv=None):
                 )
             n_ok = sum(1 for s in completed_sims if _sim_succeeded(s))
             n_fail = len(completed_sims) - n_ok
+            
+            # Fallback: if completed_sim_states is missing/empty but per-sim dirs exist,
+            # infer status from directory structure
+            if not completed_sims and len(pdb_list) > 0:
+                sim_dirs = final_state.get("sim_working_dirs", [])
+                if sim_dirs:
+                    n_ok = sum(1 for d in sim_dirs if Path(d).exists())
+                    n_fail = len(sim_dirs) - n_ok
+                else:
+                    # Last resort: count subdirectories in working_dir
+                    subdirs = [d for d in Path(working_dir).iterdir() if d.is_dir() and d.name not in 
+                              ["planner", "programmer", "supervisor", "analysis", "reporter", 
+                               "preprocess", "simsetup", "hpc", "combinedAnalysis"]]
+                    n_ok = len(subdirs)  # Assume existence = success
+                    n_fail = len(pdb_list) - n_ok
+            
             print(f"\n{'='*60}")
             print("MULTI-SIMULATION WORKFLOW COMPLETED")
             print(f"{'='*60}")
             print(f"  Total: {len(pdb_list)}")
             print(f"  Completed: {n_ok}")
             print(f"  Failed: {n_fail}")
+            if completed_sims and (n_ok + n_fail != len(pdb_list)):
+                print(f"  ⚠️  Warning: Count mismatch detected (state may be incomplete)")
             combined_dir = str(Path(working_dir) / "combinedAnalysis")
             if Path(combined_dir).exists():
                 print(f"  Combined analysis: {combined_dir}")

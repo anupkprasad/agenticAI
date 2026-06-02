@@ -472,7 +472,10 @@ class MDSupervisor:
             # Multi-sim bookkeeping
             "is_multi_simulation", "multi_sim_phase", "sim_prompts",
             "combined_analysis_plan", "current_sim_index",
-            "completed_sim_states", "sim_working_dirs", "pdb_list",
+            "completed_sim_states", "sim_working_dirs",
+            # NOTE: pdb_list and all_pdb_analyses are NOT preserved - each per-sim
+            # iteration should only see its own PDB via raw_pdb, not the full list.
+            # This prevents input validation from treating per-sim as multi-sim.
             # Global config
             "md_engine", "force_field", "water_model", "human_in_loop",
             "subtask_type", "subtask_type_initialized", "agent_list",
@@ -506,6 +509,7 @@ class MDSupervisor:
         per_sim_clear = [
             "enriched_prompt", "rephrased_goal", "structured_prompt",
             "input_validated", "pdb_analysis", "pdb_summary",
+            "all_pdb_analyses",  # Clear multi-sim master planning data
             "component_selection", "system_info",
             "cleaned_pdb", "preprocessing_report",
             "ligand_files", "ligand_resnames", "ion_files", "ion_resnames",
@@ -676,43 +680,91 @@ class MDSupervisor:
         if _protein_name_map:
             logger.info(f"SUPERVISOR [multi-sim]: Protein name map: {_protein_name_map}")
 
+        # Get PDB analyses for additional context
+        all_pdb_analyses = state.get("all_pdb_analyses", [])
+        
+        # Build per-PDB context strings with system information
+        pdb_context_lines = []
+        for idx, pdb in enumerate(pdb_list):
+            uid = _Path(pdb).stem.lower()
+            prot_name = _protein_name_map.get(uid, uid.upper())
+            pdb_name = _Path(pdb).name
+            
+            context_line = f"  {idx+1}. {pdb_name}"
+            if prot_name != uid.upper():
+                context_line += f" ({prot_name})"
+            
+            # Add system details if available from PDB analysis
+            if idx < len(all_pdb_analyses):
+                analysis = all_pdb_analyses[idx]
+                n_atoms = analysis.get("total_atoms", 0)
+                n_residues = analysis.get("total_residues", 0)
+                components = analysis.get("components_available", {})
+                
+                comp_desc = []
+                if components.get("protein"):
+                    comp_desc.append("protein")
+                if components.get("ligand"):
+                    ligands = analysis.get("ligand", {}).get("residue_names", [])
+                    if ligands:
+                        comp_desc.append(f"ligand({','.join(ligands[:2])})")
+                    else:
+                        comp_desc.append("ligand")
+                if components.get("ions"):
+                    comp_desc.append("ions")
+                
+                if n_atoms > 0:
+                    context_line += f" — {n_atoms} atoms, {', '.join(comp_desc)}"
+            
+            pdb_context_lines.append(context_line)
+
         # Describe which agents will run (from --subtask / agent_list)
         agents_desc = (
             " → ".join(agent_list) if agent_list
             else (state.get("subtask_type") or "full pipeline")
         )
 
-        pdb_names = [_Path(p).name for p in pdb_list]
         _name_map_lines = ""
         if _protein_name_map:
             _name_map_lines = (
-                "PROTEIN NAME MAPPING (use protein names, not IDs):\n"
+                "PROTEIN MAPPINGS:\n"
                 + "\n".join(f"  {uid}: {name}" for uid, name in _protein_name_map.items())
                 + "\n\n"
             )
 
         decomposition_prompt = (
-            f"You are planning a multi-simulation MD workflow.\n\n"
-            f"OVERALL GOAL:\n{enriched_prompt}\n\n"
+            f"You are an expert MD simulation planner creating NATURAL, VARIED per-simulation goals.\n\n"
+            f"OVERALL PROJECT:\n{enriched_prompt}\n\n"
             f"SIMULATIONS ({len(pdb_list)}):\n"
-            + "\n".join(f"  {i+1}. {name}" for i, name in enumerate(pdb_names))
+            + "\n".join(pdb_context_lines)
             + "\n\n"
             + _name_map_lines
-            + f"WORKFLOW AGENTS: {agents_desc}\n\n"
-            "TASK: Produce a JSON object with exactly two keys:\n"
-            f'  "sim_prompts": list of {len(pdb_list)} strings — one self-contained goal per '
-            "simulation. Use the protein's human-readable name from the mapping (if provided). "
-            "Include only the agents listed in WORKFLOW AGENTS in each goal.\n"
-            '  "combined_analysis_plan": a multi-paragraph string for cross-simulation '
-            "analysis after all individual sims complete (comparative overlay plots, "
-            "statistical summary, and markdown narrative report).\n\n"
-            "Return ONLY the JSON object, no other text."
+            + f"WORKFLOW PIPELINE: {agents_desc}\n\n"
+            "TASK: Create a JSON object with two keys:\n\n"
+            f'1. "sim_prompts": List of {len(pdb_list)} DISTINCT, NATURAL-LANGUAGE goals—one per simulation.\n'
+            "   REQUIREMENTS:\n"
+            "   • Use protein names (not IDs) when available\n"
+            "   • Write each goal with VARIED phrasing—avoid repetitive templates\n"
+            "   • Make goals self-contained (don't reference other proteins)\n"
+            "   • Include system-specific details (ligands, ions, atom counts)\n"
+            f"   • Mention ONLY the workflow steps: {agents_desc}\n"
+            "   • Keep each goal concise (2-4 sentences)\n\n"
+            '2. "combined_analysis_plan": Multi-paragraph string describing cross-simulation\n'
+            "   analysis AFTER all individual workflows complete (comparative plots,\n"
+            "   statistical summaries, PCA, markdown report).\n\n"
+            "EXAMPLES of GOOD sim_prompts (varied and natural):\n"
+            '  ["For the KAPCA structure with ATP and Mg²⁺, preprocess to isolate...",\n'
+            '   "Process CDK2 (p24941.pdb): extract the protein-ligand complex...",\n'
+            '   "Prepare MK01 for simulation by running preprocessing and setup..."]\n\n'
+            "EXAMPLES of BAD sim_prompts (too repetitive):\n"
+            '  ["For X, run preprocess...", "For Y, run preprocess...", "For Z, run preprocess..."]\n\n'
+            "Return ONLY valid JSON, no markdown formatting or explanations."
         )
 
         sim_prompts_list = None
         combined_plan = None
         try:
-            response = self.llm.prompt(decomposition_prompt, temperature=0.2, max_tokens=2000)
+            response = self.llm.prompt(decomposition_prompt, temperature=0.4, max_tokens=3000)
             from ..utils import log_llm_interaction
             log_llm_interaction("supervisor.multi_sim_master", decomposition_prompt, response)
             parsed = self._extract_json_from_response(response)

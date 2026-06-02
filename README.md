@@ -165,6 +165,31 @@ own pipeline (preprocess → setup → hpc → analysis) in a separate directory
 all simulations complete, a combined analysis generates comparative plots,
 statistical summaries, cross-simulation PCA, and an LLM-generated report.
 
+### Activation Methods
+
+Multi-simulation mode can be activated in four ways:
+
+| Method | When to Use | Example |
+|--------|-------------|---------|
+| `--simtype multisim` | **Explicit** mode selection | Always runs in multi-sim mode |
+| `--pdb-list a.pdb b.pdb` | You have original PDB files | Fresh simulations from PDbs |
+| `--sim-dirs dir1 dir2` | Simulations already done | Analysis of existing data |
+| Auto-detect from `--goal` | Multiple PDbs in goal text | Convenient, auto-detected |
+
+**Default**: `--simtype singlesim` (single simulation mode)
+
+### Using --simtype Flag
+
+```bash
+# Explicit multi-simulation mode
+python run_agenticAIWork.py \
+  --goal "Preprocess and setup MD simulations for pseudokinases" \
+  --pdb-list p17612.pdb p24941.pdb p28482.pdb \
+  --simtype multisim \
+  --working-dir pseudokin2 \
+  --use-llm --no-human-loop
+```
+
 ### Using --pdb-list
 
 ```bash
@@ -188,13 +213,10 @@ python run_agenticAIWork.py \
   --use-llm --no-human-loop \
   --subtask preprocess simsetup hpcjob analysis reporter
 ```
-How multi-sim activates (all three ways):
 
-Flag	When to use
---pdb-list a.pdb b.pdb ...	You have the original PDB files and want fresh simulations
---sim-dirs dir1 dir2 ...	(new) Simulations already done; directories with hpc/ data exist
-Auto-detect from --goal text	Goal contains multiple .pdb file paths
-Path resolution flow with --sim-dirs pseudokin/p17612:
+**Note**: With `--simtype singlesim` (default), only the first PDB would be processed even if multiple are mentioned in the goal.
+
+### Path Resolution
 
 label → p17612
 per-sim working_directory → p17612
@@ -222,8 +244,8 @@ python run_agenticAIWork.py \
 ########################################   Demo   ##########################
 
 python run_agenticAIWork.py \
-  --goal "Please preprocess and setup MD Simulation for 50 ns of list of Pdbs p17612.pdb, p24941.pdb, p28482.pdb which are in /pseudokin1/ Please do simulation preprocess, setup. Once the simulation setups are done please submit the job in HPC. The simulated protein are human pseudokinases. the name of pseudokinase in the uniprotid are p17612: KAPCA,  p24941: CDK2,  p28482: MK01. " \
-  --working-dir pseudokin1 \
+  --goal "Please preprocess and setup MD Simulation for 50 ns of list of Pdbs p17612.pdb, p24941.pdb, p28482.pdb which are in /pseudokin2/ Please do simulation preprocess, setup. Once the simulation setups are done please submit the job in HPC. The simulated protein are human pseudokinases. the name of pseudokinase in the uniprotid are p17612: KAPCA,  p24941: CDK2,  p28482: MK01. " \
+  --working-dir pseudokin2 \
   --subtask preprocess simsetup hpcjob \
   --use-llm --no-human-loop
 
@@ -250,13 +272,30 @@ python run_agenticAIWork.py \
   --use-llm --no-human-loop
 
 
-
 python run_agenticAIWork.py \
   --goal "MD Simulation for uniprotId p17612, p24941, p28482 are done and saved in their respective directory named with /pseudokin/{uniprotId}/hpc/ Please do not do simulation preprocess, setup. Directly do the analysis of trajectories and compare dynamics (RMSD, Rg and RMSF) among them. The simulated protein are human pseudokinases. the name of pseudokinase in the uniprotid are p17612: KAPCA,  p24941: CDK2,  p28482:MK01. Please find the relevant literatures of these pseudokinase that focus on the related dynamics coming from simulation analysis." \
   --working-dir pseudokin \
   --sim-dirs pseudokin/p17612 pseudokin/p24941 pseudokin/p28482 \
   --subtask analysis reporter \
   --use-llm --no-human-loop
+
+
+########### with flag --simtype    #################
+
+python run_agenticAIWork.py \
+  --goal "Please preprocess and setup MD Simulation for 50 ns of list of Pdbs p17612.pdb, p24941.pdb, p28482.pdb which are in /pseudokin2/ Please do simulation preprocess, setup. Once the simulation setups are done please submit the job in HPC. The simulated protein are human pseudokinases. the name of pseudokinase in the uniprotid are p17612: KAPCA,  p24941: CDK2,  p28482: MK01." \
+  --working-dir pseudokin2 \
+  --subtask preprocess simsetup hpcjob \
+  --simtype multisim \
+  --use-llm --no-human-loop
+
+
+
+
+
+
+
+
 ##############################################################
 
 ### Directory structure

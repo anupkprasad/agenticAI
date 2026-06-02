@@ -19,6 +19,7 @@ multi_run/
 multi_run_bckp/
 pseudokin/
 pseudokin1/
+pseudokin2/
 *_bckp/
 backup/
 tests/

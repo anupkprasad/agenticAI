@@ -80,10 +80,96 @@ def _analyze_pdb_if_available(
     Extracts PDB filename from user goal and analyzes structure if available.
     Stores comprehensive PDB analysis in state for all agents to use.
     
+    For multi-simulation MASTER PLANNING (pdb_list present + not in per-sim phase),
+    analyzes ALL PDbs for creating varied sim_prompts.
+    
+    For per-sim execution or single-sim mode, analyzes only the current PDB.
+    
     If no PDB file is found, continues gracefully (state will have no pdb_analysis).
     """
     from agentic.utils import log_agent_action
     
+    # Check if we're in multi-simulation MASTER PLANNING phase (not per-sim execution)
+    # During per-sim execution, pdb_list is intentionally cleared from state so each
+    # simulation only sees its own PDB via raw_pdb.
+    pdb_list = state.get("pdb_list", [])
+    multi_sim_phase = state.get("multi_sim_phase")
+    is_multi_sim_master_planning = len(pdb_list) > 1 and multi_sim_phase != "executing_sims"
+    
+    if is_multi_sim_master_planning:
+        # Multi-simulation MASTER PLANNING: analyze ALL PDbs in the list
+        # This only happens once before per-sim loops start
+        logger.info(f"INPUT_VALIDATION [MULTI-SIM MASTER]: Analyzing {len(pdb_list)} PDB files for planning")
+        
+        pdb_analyses = []
+        for idx, pdb_path in enumerate(pdb_list):
+            from pathlib import Path
+            pdb_file = Path(pdb_path)
+            
+            # Validate file exists
+            if not pdb_file.exists():
+                logger.warning(f"INPUT_VALIDATION: PDB file not found: {pdb_path}")
+                state["warnings"].append(f"PDB file not found: {pdb_path}")
+                continue
+            
+            logger.info(f"INPUT_VALIDATION: Analyzing PDB {idx+1}/{len(pdb_list)}: {pdb_file.name}")
+            
+            pdb_analysis_result = analyze_pdb_tool.invoke({"pdb_file": str(pdb_file)})
+            
+            if not pdb_analysis_result.get("success"):
+                logger.warning(f"INPUT_VALIDATION: PDB analysis failed for {pdb_file.name}")
+                state["warnings"].append(f"PDB analysis failed: {pdb_file.name}")
+                continue
+            
+            # Store analysis with PDB path reference
+            analysis_data = pdb_analysis_result.get("analysis", {})
+            analysis_data["pdb_file"] = str(pdb_file)
+            analysis_data["pdb_name"] = pdb_file.name
+            pdb_analyses.append(analysis_data)
+            
+            # Log detailed analysis for this PDB
+            protein_sequences = {}
+            if analysis_data.get("protein", {}).get("present"):
+                chains_info = analysis_data.get("protein", {}).get("chains", {})
+                for chain_id, chain_data in chains_info.items():
+                    sequence = chain_data.get("sequence", "")
+                    if sequence:
+                        protein_sequences[chain_id] = sequence
+            
+            details = {
+                "file": str(pdb_file),
+                "total_atoms": analysis_data.get("total_atoms", 0),
+                "total_residues": analysis_data.get("total_residues", 0),
+                "components_available": analysis_data.get("components_available", {})
+            }
+            if protein_sequences:
+                details["protein_sequences"] = protein_sequences
+            
+            log_agent_action(
+                agent_name="supervisor.input_validation",
+                action="PDB Structure Analysis",
+                details=details
+            )
+        
+        # Store all analyses in state
+        if pdb_analyses:
+            # Use first PDB for primary analysis (backward compatibility)
+            state["pdb_analysis"] = pdb_analyses[0]
+            state["raw_pdb"] = pdb_analyses[0]["pdb_file"]
+            # Store all analyses for multi-sim planning
+            state["all_pdb_analyses"] = pdb_analyses
+            logger.info(
+                f"INPUT_VALIDATION [MULTI-SIM MASTER]: Successfully analyzed "
+                f"{len(pdb_analyses)} PDB files for planning"
+            )
+        else:
+            logger.error("INPUT_VALIDATION [MULTI-SIM MASTER]: No PDbs could be analyzed")
+            state["errors"].append("Failed to analyze any PDB files in multi-simulation mode")
+        
+        return state
+    
+    # Per-sim or single-simulation mode: extract and analyze only current PDB from goal or working_dir
+    # In per-sim mode, the PDB has been copied to working_directory and raw_pdb points to it
     # Step 1: Extract PDB filename from user goal
     pdb_pattern = r'([\w\-]+\.pdb)'
     match = re.search(pdb_pattern, user_goal, re.IGNORECASE)
@@ -96,7 +182,12 @@ def _analyze_pdb_if_available(
     pdb_filename = match.group(1)
     pdb_path = os.path.join(working_directory, pdb_filename)
     state["raw_pdb"] = pdb_path
-    logger.info(f"INPUT_VALIDATION: Extracted PDB filename: {pdb_filename}")
+    
+    # Check if we're in per-sim execution
+    if multi_sim_phase == "executing_sims":
+        logger.info(f"INPUT_VALIDATION [PER-SIM]: Analyzing current simulation PDB: {pdb_filename}")
+    else:
+        logger.info(f"INPUT_VALIDATION: Extracted PDB filename: {pdb_filename}")
     logger.info(f"INPUT_VALIDATION: Using working directory: {working_directory}")
 
     # Validate file exists
