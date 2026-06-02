@@ -310,13 +310,14 @@ gen_vel         = no        ; velocities from NVT
         tc_grps, n_groups = self._determine_tc_groups(has_ligand, has_ions)
         tau_t = " ".join([f"{0.1}" for _ in range(n_groups)])
         ref_t = " ".join([f"{temperature}" for _ in range(n_groups)])
+        duration_ns = (nsteps * dt) / 1000.0
         
         mdp_content = f"""; Production MD run
 title           = production run
 
 ; Run parameters
 integrator      = md        ; leap-frog integrator
-nsteps          = {nsteps}  ; 100000000 = 200 ns (at dt=0.002)
+nsteps          = {nsteps}  ; {nsteps} = {duration_ns:.3f} ns (at dt={dt})
 dt              = {dt}      ; unit in gromacs is ps so it is 2 fs
 comm-mode       = Linear
 

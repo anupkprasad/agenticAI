@@ -565,9 +565,34 @@ Output as JSON with this structure:
             return None
 
     def _derive_job_name(self, state: MDState) -> str:
-        """Derive a unique SLURM job name from the PDB file or working directory."""
+        """Derive a unique SLURM job name for each simulation instance.
+
+        Multi-simulation priority:
+        1) current sim label from sim_prompts[current_sim_index] (e.g. p21860_ATP_MG)
+        2) basename of per-sim working directory (e.g. p21860_ATP_MG)
+        3) source structure stem (single-sim fallback)
+        """
         import re
-        # Priority 1: raw_pdb stem (e.g. "p28482" from p28482.pdb)
+        # Priority 1: explicit per-sim label from master planner
+        sim_prompts = state.get("sim_prompts") or []
+        current_idx = state.get("current_sim_index")
+        if isinstance(current_idx, int) and 0 <= current_idx < len(sim_prompts):
+            label = (sim_prompts[current_idx] or {}).get("label")
+            if label:
+                safe = re.sub(r'[^A-Za-z0-9_\-]', '_', str(label))[:40]
+                if safe:
+                    return safe
+
+        # Priority 2: basename of working directory (usually per-sim label)
+        working_dir = state.get("working_directory", "")
+        if working_dir:
+            stem = Path(working_dir).name
+            if stem and stem.lower() not in {"working_dir", "workdir", "tmp"}:
+                safe = re.sub(r'[^A-Za-z0-9_\-]', '_', stem)[:40]
+                if safe:
+                    return safe
+
+        # Priority 3: raw_pdb/cleaned/topology stem (single-sim fallback)
         for key in ("raw_pdb", "cleaned_pdb", "topology", "coordinates"):
             val = state.get(key)
             if val:
@@ -575,16 +600,8 @@ Output as JSON with this structure:
                 # Strip common suffixes added during processing
                 stem = re.sub(r'(_h|_clean|_processed|_solvated|_ions)$', '', stem, flags=re.IGNORECASE)
                 if stem:
-                    # SLURM job names: max 15 chars, alphanumeric + underscore/hyphen
-                    safe = re.sub(r'[^A-Za-z0-9_\-]', '_', stem)[:15]
+                    safe = re.sub(r'[^A-Za-z0-9_\-]', '_', stem)[:40]
                     return safe
-        # Priority 2: basename of working directory
-        working_dir = state.get("working_directory", "")
-        if working_dir:
-            stem = Path(working_dir).name
-            safe = re.sub(r'[^A-Za-z0-9_\-]', '_', stem)[:15]
-            if safe:
-                return safe
         return "md_simulation"
 
     def _estimate_system_size(self, coordinates_file: Optional[str]) -> int:

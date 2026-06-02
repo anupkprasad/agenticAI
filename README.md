@@ -290,10 +290,39 @@ python run_agenticAIWork.py \
   --use-llm --no-human-loop
 
 
+python run_agenticAIWork.py \
+  --goal "Please preprocess and setup MD Simulation for 50 ns of list of Pdbs p21860.pdb, q8iv63.pdb, q8nb16.pdb, q8wz42.pdb which are in /pseudokin/ directory. Please do simulation preprocess, setup. Once the simulation setups are done please submit the job in HPC. The simulated protein are human pseudokinases. the name of pseudokinase in the uniprotid are p21860: ERBB3, q8iv63: VRK3, q8nb16: MLKL, q8wz42: TITIN." \
+  --working-dir pseudokin \
+  --subtask preprocess simsetup hpcjob \
+  --simtype multisim \
+  --use-llm --no-human-loop
 
 
 
+python run_agenticAIWork.py \
+  --goal "I want to study the effect of ATP binding in protein dynamics of these four PDBs p21860.pdb, q8iv63.pdb, q8nb16.pdb, q8wz42.pdb which are available in /pseudokin/ directory. Each pdb file has protein + ATP + MG. Please preprocess and setup MD Simulation for 100 ns of all Pdbs with two different cases: 1. Protein only, 2. Protein + ATP + MG therefore total 8 simulations. Once the simulation setups are done please submit the job in HPC. The simulated protein are human pseudokinases and the name of pseudokinase in the uniprotid are p21860: ERBB3, q8iv63: VRK3, q8nb16: MLKL, q8wz42: TITIN." \
+  --working-dir pseudokin \
+  --subtask preprocess simsetup hpcjob \
+  --simtype multisim \
+  --use-llm --no-human-loop
 
+
+### Component-Case Expansion from the Same PDB
+
+You can request multiple simulation cases from the same input PDB in a single goal.
+For example:
+- Case 1: protein only
+- Case 2: protein + ATP + MG
+
+When your goal includes this pattern (for example "two different cases: 1. Protein only, 2. Protein + ATP + MG"), the supervisor master planner expands each PDB into separate simulations and creates separate directories automatically.
+
+For 4 PDB files and 2 cases, total simulations = 8.
+
+Directory labels are generated as:
+- `p21860` for protein-only case
+- `p21860_ATP_MG` for protein+ATP+MG case
+
+The same source PDB is reused for each case, but each per-simulation prompt explicitly instructs preprocessing/setup which components to keep or remove.
 
 
 ##############################################################

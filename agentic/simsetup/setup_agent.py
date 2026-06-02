@@ -7,6 +7,7 @@ import json
 import yaml
 import os
 import shutil
+import re
 from typing import Dict, Any, Optional
 from pathlib import Path
 
@@ -294,6 +295,32 @@ class SimulationSetupAgent:
     def _prepare_agent_input(self, state: MDState) -> SimSetupAgentInput:
         """Prepare structured input for setup from workflow state"""
         defaults = self.config.get("defaults", {})
+
+        def _extract_production_ns(*texts: Optional[str]) -> Optional[float]:
+            """Extract production duration in ns from user/planner text."""
+            patterns = [
+                # "simulation for 100 ns", "production run of 50 ns"
+                re.compile(
+                    r'(?:production|simulation|run)\s*(?:time|length|duration|run)?\s*(?:is|of|for|=|:)?\s*(\d+(?:\.\d+)?)\s*ns\b',
+                    re.I,
+                ),
+                # fallback: any explicit "NN ns"
+                re.compile(r'\b(\d+(?:\.\d+)?)\s*ns\b', re.I),
+            ]
+
+            for txt in texts:
+                if not txt:
+                    continue
+                for pat in patterns:
+                    m = pat.search(txt)
+                    if m:
+                        try:
+                            val = float(m.group(1))
+                            if val > 0:
+                                return val
+                        except (TypeError, ValueError):
+                            continue
+            return None
         
         # Check if planner provided detailed instructions for this agent
         # Prefer pre-extracted instructions from supervisor
@@ -317,6 +344,22 @@ class SimulationSetupAgent:
                 planner_instructions += rec_block
             else:
                 planner_instructions = rec_block
+
+        # Determine production duration preference (priority: state key -> extracted text -> config default)
+        production_ns = state.get("production_ns")
+        if production_ns is None:
+            production_ns = _extract_production_ns(
+                state.get("user_goal", ""),
+                planner_instructions,
+                state.get("enriched_prompt", ""),
+            )
+        if production_ns is None:
+            production_ns = defaults.get("production_ns")
+        if production_ns is not None:
+            try:
+                production_ns = float(production_ns)
+            except (TypeError, ValueError):
+                production_ns = None
             
         return SimSetupAgentInput(
             cleaned_pdb=state.get("cleaned_pdb", ""),
@@ -325,6 +368,7 @@ class SimulationSetupAgent:
             water_model=state.get("water_model", defaults.get("water_model", "tip3p")),
             temperature=state.get("temperature", defaults.get("temperature", 300.0)),
             pressure=state.get("pressure", defaults.get("pressure", 1.0)),
+            production_ns=production_ns,
             user_goal=state.get("user_goal", ""),
             additional_instructions=planner_instructions,
             component_selection=state.get("component_selection")
@@ -1092,6 +1136,13 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         
         # Get simsetup directory
         simsetup_dir = state.get("simsetup_directory", self.tool_executor.working_dir)
+
+        requested_production_ns = None
+        if getattr(agent_input, "production_ns", None):
+            try:
+                requested_production_ns = float(agent_input.production_ns)
+            except (TypeError, ValueError):
+                requested_production_ns = None
         
         try:
             # Enforce max steps limit
@@ -1174,6 +1225,13 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 # regardless of what the LLM plan suggests — prevents file leaks
                 tool_params["output_dir"] = simsetup_dir
                 tool_params["working_dir"] = simsetup_dir
+
+                # Ensure production time from user goal is propagated to setup tools
+                # if the LLM plan omitted it.
+                if requested_production_ns and step.tool_name in {
+                    "generate_mdp_files", "build_simulation_system", "solvate_system"
+                }:
+                    tool_params.setdefault("production_ns", requested_production_ns)
                 
                 # Tool-specific default output filenames (relative paths)
                 if step.tool_name == "generate_ligand_parameters":
@@ -1212,6 +1270,8 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         tool_params["temperature"] = 300.0
                     if "pressure" not in tool_params:
                         tool_params["pressure"] = 1.0
+                    if requested_production_ns and "production_ns" not in tool_params:
+                        tool_params["production_ns"] = requested_production_ns
                     
                     # Execute the tool (will generate all MDP files: minim, nvt, npt, md, ions)
                     mdp_result = self.tool_executor.execute_tool("generate_mdp_files", tool_params)

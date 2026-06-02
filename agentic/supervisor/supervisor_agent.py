@@ -637,15 +637,73 @@ class MDSupervisor:
     # Multi-simulation master planning (moved from planner — no tools context)
     # ──────────────────────────────────────────────────────────────────────
 
+    def _detect_component_cases(self, prompt: str) -> List[Dict[str, str]]:
+        """Infer component-specific simulation cases from user goal text."""
+        p = (prompt or "").lower()
+        # Normalize common unicode variants from LLM responses.
+        p = (
+            p.replace("\u2011", "-")
+            .replace("\u2012", "-")
+            .replace("\u2013", "-")
+            .replace("\u2014", "-")
+            .replace("\u2212", "-")
+        )
+
+        has_protein_only = bool(re.search(r"\bprotein[\s\-]*(only|alone)\b", p))
+        has_atp = "atp" in p
+        has_holo = "holo" in p
+        has_mg = bool(re.search(r"\bmg(?:2\+?|\u00b2\+?)?\b", p))
+        has_case_language = bool(
+            re.search(
+                r"two\s+different\s+cases?|two\s+systems\s+per\s+file|"
+                r"case\s*[:\-]|\bcase\s*1\b|\bcase\s*2\b|"
+                r"\(\s*1\s*\)|\(\s*2\s*\)|\b1\.\b|\b2\.\b",
+                p,
+            )
+        )
+
+        # Common request pattern: same PDB run in multiple component conditions.
+        if has_case_language and has_protein_only and (has_atp or has_holo):
+            full_suffix = "ATP_MG" if has_mg else "ATP"
+            full_desc = "protein + ATP + MG" if has_mg else "protein + ATP"
+            full_directive = (
+                "Keep protein with ATP ligand and Mg ions from the source PDB."
+                if has_mg else
+                "Keep protein with ATP ligand from the source PDB."
+            )
+            return [
+                {
+                    "case_id": "protein_only",
+                    "suffix": "",
+                    "description": "protein only",
+                    "directive": "Use protein-only system. Remove ATP, ligands, and non-essential ions.",
+                },
+                {
+                    "case_id": "protein_with_ligand",
+                    "suffix": full_suffix,
+                    "description": full_desc,
+                    "directive": full_directive,
+                },
+            ]
+
+        # Default behavior: one simulation per PDB using full detected system.
+        return [
+            {
+                "case_id": "default",
+                "suffix": "",
+                "description": "default system from input PDB",
+                "directive": "Use the full biologically relevant system present in the input PDB.",
+            }
+        ]
+
     def _create_multi_sim_master_plan(self, state: MDState) -> MDState:
         """Build per-sim prompts and combined analysis plan in the supervisor.
 
         Called from ``supervisor_node`` right after prompt enrichment, before
-        routing to the planner.  The LLM gets the enriched goal, the PDB list,
-        and the agent list but NO tools context — decomposition is purely
-        goal/agent-aware, not tool-aware.
+        routing to the planner. The master plan can expand each PDB into
+        multiple component-specific simulations (for example protein-only and
+        protein+ATP+MG), each with its own directory and prompt.
         """
-        import json as _json
         import re as _re_nm
         from pathlib import Path as _Path
 
@@ -655,116 +713,112 @@ class MDSupervisor:
         agent_list = state.get("agent_list") or []
 
         if not pdb_list:
-            logger.warning("SUPERVISOR [multi-sim]: No pdb_list — cannot create master plan")
+            logger.warning("SUPERVISOR [multi-sim]: No pdb_list - cannot create master plan")
             return state
 
-        # Build per-sim working directories
-        sim_working_dirs = []
-        for pdb in pdb_list:
-            uid = _Path(pdb).stem
-            sim_dir = str((_Path(base_working_dir) / uid).resolve())
-            sim_working_dirs.append(sim_dir)
-        state["sim_working_dirs"] = sim_working_dirs
-
-        # Parse protein ID → human-readable name mappings from the enriched goal
-        # Matches e.g. "p24941: CDK2" or "q13418: ILK"
+        # Parse protein ID -> human-readable name mappings from goal text.
         _protein_name_map: Dict[str, str] = {}
         for _m in _re_nm.finditer(
             r'\b([A-Za-z0-9]{4,12})\s*:\s*([A-Za-z][A-Za-z0-9_\-]{1,30})',
             enriched_prompt,
         ):
             _k, _v = _m.group(1).lower(), _m.group(2).strip()
-            # Key must contain a digit (looks like an ID) and value must start uppercase
             if any(c.isdigit() for c in _k) and _v[0].isupper():
                 _protein_name_map[_k] = _v
         if _protein_name_map:
             logger.info(f"SUPERVISOR [multi-sim]: Protein name map: {_protein_name_map}")
 
-        # Get PDB analyses for additional context
-        all_pdb_analyses = state.get("all_pdb_analyses", [])
-        
-        # Build per-PDB context strings with system information
-        pdb_context_lines = []
-        for idx, pdb in enumerate(pdb_list):
-            uid = _Path(pdb).stem.lower()
-            prot_name = _protein_name_map.get(uid, uid.upper())
-            pdb_name = _Path(pdb).name
-            
-            context_line = f"  {idx+1}. {pdb_name}"
-            if prot_name != uid.upper():
-                context_line += f" ({prot_name})"
-            
-            # Add system details if available from PDB analysis
-            if idx < len(all_pdb_analyses):
-                analysis = all_pdb_analyses[idx]
-                n_atoms = analysis.get("total_atoms", 0)
-                n_residues = analysis.get("total_residues", 0)
-                components = analysis.get("components_available", {})
-                
-                comp_desc = []
-                if components.get("protein"):
-                    comp_desc.append("protein")
-                if components.get("ligand"):
-                    ligands = analysis.get("ligand", {}).get("residue_names", [])
-                    if ligands:
-                        comp_desc.append(f"ligand({','.join(ligands[:2])})")
-                    else:
-                        comp_desc.append("ligand")
-                if components.get("ions"):
-                    comp_desc.append("ions")
-                
-                if n_atoms > 0:
-                    context_line += f" — {n_atoms} atoms, {', '.join(comp_desc)}"
-            
-            pdb_context_lines.append(context_line)
+        # Expand each PDB into one or more component-specific simulation cases.
+        component_cases = self._detect_component_cases(enriched_prompt)
+        expanded_entries: List[Dict[str, Any]] = []
+        for pdb in pdb_list:
+            uid = _Path(pdb).stem
+            uid_l = uid.lower()
+            prot_name = _protein_name_map.get(uid_l, uid.upper())
+            for case in component_cases:
+                suffix = case.get("suffix", "")
+                sim_label = f"{uid}_{suffix}" if suffix else uid
+                sim_dir = str((_Path(base_working_dir) / sim_label).resolve())
+                expanded_entries.append(
+                    {
+                        "pdb": pdb,
+                        "uid": uid,
+                        "protein_name": prot_name,
+                        "label": sim_label,
+                        "working_dir": sim_dir,
+                        "case_description": case.get("description", "default system"),
+                        "case_directive": case.get("directive", "Use full system from PDB."),
+                    }
+                )
 
-        # Describe which agents will run (from --subtask / agent_list)
+        state["sim_working_dirs"] = [e["working_dir"] for e in expanded_entries]
+
+        # Build simulation context lines.
+        all_pdb_analyses = state.get("all_pdb_analyses", [])
+        pdb_analysis_map: Dict[str, Dict[str, Any]] = {}
+        for idx, pdb in enumerate(pdb_list):
+            if idx < len(all_pdb_analyses):
+                pdb_analysis_map[_Path(pdb).name] = all_pdb_analyses[idx]
+
+        sim_context_lines: List[str] = []
+        for i, e in enumerate(expanded_entries, 1):
+            pdb_name = _Path(e["pdb"]).name
+            line = (
+                f"  {i}. label={e['label']} | source={pdb_name} | "
+                f"case={e['case_description']} | dir={e['working_dir']}"
+            )
+            analysis = pdb_analysis_map.get(pdb_name)
+            if analysis:
+                n_atoms = analysis.get("total_atoms", 0)
+                comps = analysis.get("components_available", {})
+                comp_desc = []
+                if comps.get("protein"):
+                    comp_desc.append("protein")
+                if comps.get("ligand"):
+                    ligands = analysis.get("ligand", {}).get("residue_names", [])
+                    comp_desc.append(f"ligand({','.join(ligands[:2])})" if ligands else "ligand")
+                if comps.get("ions"):
+                    comp_desc.append("ions")
+                if n_atoms:
+                    line += f" | source_components={','.join(comp_desc)} | atoms={n_atoms}"
+            sim_context_lines.append(line)
+
         agents_desc = (
-            " → ".join(agent_list) if agent_list
+            " -> ".join(agent_list) if agent_list
             else (state.get("subtask_type") or "full pipeline")
         )
 
-        _name_map_lines = ""
+        name_map_lines = ""
         if _protein_name_map:
-            _name_map_lines = (
+            name_map_lines = (
                 "PROTEIN MAPPINGS:\n"
                 + "\n".join(f"  {uid}: {name}" for uid, name in _protein_name_map.items())
                 + "\n\n"
             )
 
         decomposition_prompt = (
-            f"You are an expert MD simulation planner creating NATURAL, VARIED per-simulation goals.\n\n"
+            "You are an expert MD simulation planner creating natural, varied per-simulation goals.\n\n"
             f"OVERALL PROJECT:\n{enriched_prompt}\n\n"
-            f"SIMULATIONS ({len(pdb_list)}):\n"
-            + "\n".join(pdb_context_lines)
+            f"SIMULATION ENTRIES ({len(expanded_entries)} total):\n"
+            + "\n".join(sim_context_lines)
             + "\n\n"
-            + _name_map_lines
+            + name_map_lines
             + f"WORKFLOW PIPELINE: {agents_desc}\n\n"
-            "TASK: Create a JSON object with two keys:\n\n"
-            f'1. "sim_prompts": List of {len(pdb_list)} DISTINCT, NATURAL-LANGUAGE goals—one per simulation.\n'
-            "   REQUIREMENTS:\n"
-            "   • Use protein names (not IDs) when available\n"
-            "   • Write each goal with VARIED phrasing—avoid repetitive templates\n"
-            "   • Make goals self-contained (don't reference other proteins)\n"
-            "   • Include system-specific details (ligands, ions, atom counts)\n"
-            f"   • Mention ONLY the workflow steps: {agents_desc}\n"
-            "   • Keep each goal concise (2-4 sentences)\n\n"
-            '2. "combined_analysis_plan": Multi-paragraph string describing cross-simulation\n'
-            "   analysis AFTER all individual workflows complete (comparative plots,\n"
-            "   statistical summaries, PCA, markdown report).\n\n"
-            "EXAMPLES of GOOD sim_prompts (varied and natural):\n"
-            '  ["For the KAPCA structure with ATP and Mg²⁺, preprocess to isolate...",\n'
-            '   "Process CDK2 (p24941.pdb): extract the protein-ligand complex...",\n'
-            '   "Prepare MK01 for simulation by running preprocessing and setup..."]\n\n'
-            "EXAMPLES of BAD sim_prompts (too repetitive):\n"
-            '  ["For X, run preprocess...", "For Y, run preprocess...", "For Z, run preprocess..."]\n\n'
-            "Return ONLY valid JSON, no markdown formatting or explanations."
+            "TASK: Return JSON with keys:\n"
+            f"1) sim_prompts: list of {len(expanded_entries)} prompts, same order as entries.\n"
+            "2) combined_analysis_plan: comparative analysis plan across all entries.\n\n"
+            "Prompt requirements:\n"
+            "- Mention source PDB and target label directory context.\n"
+            "- Enforce the case objective (for example protein only vs protein+ATP+MG).\n"
+            "- Keep each prompt concise and not repetitive.\n"
+            f"- Mention only these workflow steps: {agents_desc}.\n\n"
+            "Return only valid JSON."
         )
 
         sim_prompts_list = None
         combined_plan = None
         try:
-            response = self.llm.prompt(decomposition_prompt, temperature=0.4, max_tokens=3000)
+            response = self.llm.prompt(decomposition_prompt, temperature=0.4, max_tokens=3200)
             from ..utils import log_llm_interaction
             log_llm_interaction("supervisor.multi_sim_master", decomposition_prompt, response)
             parsed = self._extract_json_from_response(response)
@@ -774,55 +828,69 @@ class MDSupervisor:
                 logger.info(
                     f"SUPERVISOR [multi-sim]: LLM generated {len(sim_prompts_list)} per-sim prompts"
                 )
+
+                # Detect near-template outputs (same sentence with only path/PDB swapped).
+                if len(sim_prompts_list) > 1:
+                    _keys = []
+                    for _txt in sim_prompts_list:
+                        _k = (_txt or "").lower()
+                        _k = re.sub(r"/[\w./\-]+", "<path>", _k)
+                        _k = re.sub(r"\b[\w\-]+\.pdb\b", "<pdb>", _k)
+                        _k = re.sub(r"\b[a-z0-9]{4,12}\b", "<tok>", _k)
+                        _k = re.sub(r"\b\d+\s*ns\b", "<time>", _k)
+                        _k = re.sub(r"\s+", " ", _k).strip()
+                        _keys.append(_k)
+                    if len(set(_keys)) <= max(1, len(_keys) // 3):
+                        logger.warning(
+                            "SUPERVISOR [multi-sim]: LLM sim_prompts are repetitive; "
+                            "switching to deterministic per-entry prompts"
+                        )
+                        sim_prompts_list = None
         except Exception as e:
             logger.warning(f"SUPERVISOR [multi-sim]: LLM decomposition failed: {e}")
 
-        # Fallback: deterministic split
-        if not sim_prompts_list or len(sim_prompts_list) != len(pdb_list):
+        # Fallback: deterministic prompts per expanded entry.
+        if not sim_prompts_list or len(sim_prompts_list) != len(expanded_entries):
             logger.info("SUPERVISOR [multi-sim]: Using deterministic prompt decomposition")
             sim_prompts_list = []
-            for pdb in pdb_list:
-                uid = _Path(pdb).stem.lower()
-                prot_name = _protein_name_map.get(uid, "")
-                pdb_name = _Path(pdb).name
-                per_sim = enriched_prompt
-                for other in pdb_list:
-                    if other != pdb:
-                        per_sim = per_sim.replace(_Path(other).name, "").replace(other, "")
-                if pdb_name not in per_sim:
-                    prefix = (
-                        f"Process {prot_name} ({pdb_name})." if prot_name
-                        else f"Process {pdb_name}."
-                    )
-                    per_sim = prefix + " " + per_sim
-                elif prot_name and prot_name not in per_sim:
-                    per_sim = f"Protein: {prot_name}. " + per_sim
-                sim_prompts_list.append(per_sim.strip())
+            _styles = ["Prepare", "Process", "Set up", "Generate setup for"]
+            for i, e in enumerate(expanded_entries):
+                pdb_name = _Path(e["pdb"]).name
+                name = e["protein_name"]
+                lead = _styles[i % len(_styles)]
+                sim_prompts_list.append(
+                    (
+                        f"{lead} simulation for {name} using source structure {pdb_name}. "
+                        f"Simulation label is {e['label']} under {e['working_dir']}. "
+                        f"Case requirement: {e['case_description']}. {e['case_directive']} "
+                        f"Run workflow steps: {agents_desc}."
+                    ).strip()
+                )
             combined_plan = (
-                "Perform combined cross-simulation analysis:\n"
-                "1. Comparative overlay plots (RMSD, RMSF, Rg).\n"
-                "2. Statistical summary table (mean, std, min, max).\n"
-                "3. Cross-simulation PCA on C-alpha coordinates if trajectories available.\n"
-                "4. Markdown narrative report with per-sim highlights and cross-simulation trends."
+                "Perform combined cross-simulation analysis grouped by protein and component case.\n"
+                "1. Compare metrics between case variants (for example protein-only vs ATP-bound).\n"
+                "2. Produce cross-protein overlays (RMSD, RMSF, Rg) and summary statistics.\n"
+                "3. Generate a consolidated markdown report with case-specific insights."
             )
 
-        # Build structured sim_prompts with protein-name labels
         sim_prompts = []
-        for i, (pdb, prompt_text) in enumerate(zip(pdb_list, sim_prompts_list)):
-            uid = _Path(pdb).stem
-            label = _protein_name_map.get(uid.lower(), uid)
-            sim_prompts.append({
-                "pdb": str(_Path(pdb).resolve()) if _Path(pdb).exists() else pdb,
-                "label": label,
-                "prompt": prompt_text,
-                "working_dir": sim_working_dirs[i],
-            })
+        for entry, prompt_text in zip(expanded_entries, sim_prompts_list):
+            pdb = entry["pdb"]
+            sim_prompts.append(
+                {
+                    "pdb": str(_Path(pdb).resolve()) if _Path(pdb).exists() else pdb,
+                    "label": entry["label"],
+                    "prompt": prompt_text,
+                    "working_dir": entry["working_dir"],
+                    "case_description": entry["case_description"],
+                }
+            )
 
         state["sim_prompts"] = sim_prompts
         state["combined_analysis_plan"] = combined_plan
 
         logger.info(
-            f"SUPERVISOR [multi-sim]: Master plan ready — {len(sim_prompts)} simulations, "
+            f"SUPERVISOR [multi-sim]: Master plan ready - {len(sim_prompts)} simulations, "
             f"labels: {[s['label'] for s in sim_prompts]}"
         )
         log_agent_action(
@@ -831,6 +899,7 @@ class MDSupervisor:
             details={
                 "num_simulations": len(sim_prompts),
                 "labels": [s["label"] for s in sim_prompts],
+                "component_cases": [c.get("description") for c in component_cases],
                 "agents": agents_desc,
                 "combined_plan_preview": (combined_plan or "")[:300],
             },
