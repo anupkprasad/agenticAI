@@ -22,6 +22,34 @@ class LigandTopologyGenerator:
             "acpype": self.acpype_available,
             "antechamber": self.antechamber_available
         }
+
+    def _sanitize_ligand_pdb(self, ligand_pdb: str, output_dir: Path) -> str:
+        """
+        Create a sanitized PDB for Amber-family tools.
+
+        Some extracted ligand PDBs contain nonstandard altLoc values (e.g. "1")
+        which can cause ACPYPE/antechamber parsing failures. This method keeps
+        coordinates unchanged while normalizing problematic record columns.
+        """
+        src = Path(ligand_pdb)
+        sanitized = output_dir / f"{src.stem}_acpype_input.pdb"
+
+        with src.open("r", encoding="utf-8", errors="ignore") as fin, sanitized.open("w", encoding="utf-8") as fout:
+            for line in fin:
+                if line.startswith(("ATOM", "HETATM")) and len(line) >= 17:
+                    chars = list(line.rstrip("\n"))
+                    # Ensure minimum width before positional edits.
+                    if len(chars) < 80:
+                        chars.extend([" "] * (80 - len(chars)))
+                    # altLoc is column 17 (index 16). Keep letters; clear digits/other tokens.
+                    altloc = chars[16]
+                    if altloc not in (" ",) and not altloc.isalpha():
+                        chars[16] = " "
+                    fout.write("".join(chars).rstrip() + "\n")
+                else:
+                    fout.write(line)
+
+        return str(sanitized)
     
     def generate_with_acpype(
         self,
@@ -51,9 +79,16 @@ class LigandTopologyGenerator:
             output_dir = Path(output_dir)
         
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        ligand_input_path = Path(ligand_pdb)
+        # Normalize PDB formatting quirks before running ACPYPE.
+        if ligand_input_path.suffix.lower() == ".pdb":
+            ligand_input = self._sanitize_ligand_pdb(str(ligand_input_path), output_dir)
+        else:
+            ligand_input = str(ligand_input_path)
         
         # Resolve ligand_pdb to absolute path (acpype runs from output_dir)
-        ligand_pdb_abs = str(Path(ligand_pdb).resolve())
+        ligand_pdb_abs = str(Path(ligand_input).resolve())
         
         cmd = [
             "acpype",
@@ -135,6 +170,104 @@ class LigandTopologyGenerator:
                 "success": False,
                 "error": f"Unexpected error: {str(e)}"
             }
+
+    def _generate_with_acpype_fallbacks(
+        self,
+        ligand_pdb: str,
+        output_dir: str,
+        charge_method: str = "bcc",
+        net_charge: Optional[int] = None,
+        atom_type: str = "gaff2"
+    ) -> Dict[str, Any]:
+        """
+        Try ACPYPE with progressively safer options.
+
+        Rationale: some ligands (notably nucleotide-like molecules) can fail
+        with specific atom type / charge combinations. Retrying with alternate
+        ACPYPE options often succeeds without requiring user intervention.
+        """
+        attempts = []
+        # Try requested settings first, then conservative fallbacks.
+        candidates = [
+            (atom_type, charge_method),
+            ("gaff", charge_method),
+            (atom_type, "gas"),
+            ("gaff", "gas"),
+        ]
+
+        seen = set()
+        unique_candidates = []
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            unique_candidates.append(candidate)
+
+        for atype, cmethod in unique_candidates:
+            res = self.generate_with_acpype(
+                ligand_pdb=ligand_pdb,
+                output_dir=output_dir,
+                charge_method=cmethod,
+                net_charge=net_charge,
+                atom_type=atype,
+            )
+            attempts.append({
+                "atom_type": atype,
+                "charge_method": cmethod,
+                "success": bool(res.get("success")),
+                "error": res.get("error", ""),
+            })
+            if res.get("success"):
+                # Keep traceability when fallback options were needed.
+                if atype != atom_type or cmethod != charge_method:
+                    res["warning"] = (
+                        f"ACPYPE fallback succeeded with atom_type={atype}, "
+                        f"charge_method={cmethod}"
+                    )
+                res["attempts"] = attempts
+                return res
+
+        # Final fallback: PDB -> MOL2 via antechamber, then retry ACPYPE on MOL2.
+        # This often helps when direct ACPYPE parsing of PDB fails.
+        if self.antechamber_available:
+            ante = self.generate_with_antechamber(
+                ligand_pdb=ligand_pdb,
+                output_dir=output_dir,
+                charge_method=charge_method,
+                net_charge=net_charge,
+                atom_type=atom_type,
+            )
+            mol2_file = ante.get("mol2_file") if ante.get("success") else None
+            if mol2_file and Path(mol2_file).exists():
+                for atype, cmethod in unique_candidates:
+                    res = self.generate_with_acpype(
+                        ligand_pdb=mol2_file,
+                        output_dir=output_dir,
+                        charge_method=cmethod,
+                        net_charge=net_charge,
+                        atom_type=atype,
+                    )
+                    attempts.append({
+                        "atom_type": atype,
+                        "charge_method": cmethod,
+                        "success": bool(res.get("success")),
+                        "error": res.get("error", ""),
+                        "input": "mol2-preconvert",
+                    })
+                    if res.get("success"):
+                        res["warning"] = (
+                            "ACPYPE direct PDB input failed; succeeded after "
+                            "antechamber MOL2 pre-conversion."
+                        )
+                        res["attempts"] = attempts
+                        return res
+
+        last_error = attempts[-1]["error"] if attempts else "Unknown ACPYPE failure"
+        return {
+            "success": False,
+            "error": f"All ACPYPE attempts failed. Last error: {last_error}",
+            "attempts": attempts,
+        }
     
     def generate_with_antechamber(
         self,
@@ -164,6 +297,9 @@ class LigandTopologyGenerator:
             output_dir = Path(output_dir)
         
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Normalize PDB formatting quirks before running antechamber.
+        ligand_input = self._sanitize_ligand_pdb(ligand_pdb, output_dir)
         
         ligand_name = Path(ligand_pdb).stem
         mol2_file = output_dir / f"{ligand_name}.mol2"
@@ -172,7 +308,7 @@ class LigandTopologyGenerator:
         # Step 1: Run antechamber
         cmd_ante = [
             "antechamber",
-            "-i", str(ligand_pdb),
+            "-i", str(ligand_input),
             "-fi", "pdb",
             "-o", str(mol2_file),
             "-fo", "mol2",
@@ -278,9 +414,11 @@ class LigandTopologyGenerator:
         
         # Try preferred tool first
         if preferred_tool == "acpype" and deps["acpype"]:
-            return self.generate_with_acpype(
+            acpype_result = self._generate_with_acpype_fallbacks(
                 ligand_pdb, output_dir, charge_method, net_charge, atom_type
             )
+            return acpype_result
+
         elif preferred_tool == "antechamber" and deps["antechamber"]:
             return self.generate_with_antechamber(
                 ligand_pdb, output_dir, charge_method, net_charge, atom_type
@@ -288,7 +426,7 @@ class LigandTopologyGenerator:
         
         # Fallback to available tool
         if deps["acpype"]:
-            return self.generate_with_acpype(
+            return self._generate_with_acpype_fallbacks(
                 ligand_pdb, output_dir, charge_method, net_charge, atom_type
             )
         else:
