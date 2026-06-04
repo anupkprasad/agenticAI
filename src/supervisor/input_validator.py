@@ -531,7 +531,22 @@ def _validate_multi_agent_inputs(
         state = _analyze_pdb_if_available(state, user_goal, working_directory, analyze_pdb_tool, logger)
         state = _validate_pdb_based_task(state, user_goal, working_directory, logger)
     elif first_agent in _TRAJ_REQUIRING:
-        state = _validate_analysis_files(state, user_goal, working_directory, logger)
+        # Multi-sim analysis/reporter stage starts from the base directory and
+        # then enters per-simulation loops where each sim has its own hpc/
+        # folder. Root-level hpc/ may not exist and should not be treated as
+        # a hard error at this stage.
+        is_multi_sim_master = (
+            bool(state.get("is_multi_simulation"))
+            and state.get("multi_sim_phase") != "executing_sims"
+            and len(state.get("pdb_list") or []) > 1
+        )
+        if is_multi_sim_master:
+            logger.info(
+                "INPUT_VALIDATION: Multi-sim analysis master stage detected; "
+                "deferring trajectory/topology validation to per-sim execution"
+            )
+        else:
+            state = _validate_analysis_files(state, user_goal, working_directory, logger)
     elif first_agent in _REPORT_REQUIRING:
         state = _validate_reporter_files(state, user_goal, working_directory, logger)
 

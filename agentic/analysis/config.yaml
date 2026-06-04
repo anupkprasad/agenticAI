@@ -200,6 +200,15 @@ llm:
         - tool_params: {{"topology_file": "md.gro", "trajectory_file": "md.xtc", "selection": "protein and name CA", "output_prefix": "dccm", "frame_interval": 5, "save_matrix_csv": true, "create_heatmap": true}}
         (note: no separate plot step needed — calculate_dccm produces its own heatmap PNG internally)
 
+    **DCCM difference (protein-only vs protein+ligand / ATP effect on dynamics):**
+    Run calculate_dccm on EACH simulation first (same selection: "protein and name CA"), then:
+    13. plot_dccm_difference
+        - tool_params: {{"reference_dccm_file": "path/to/protein_only/analysis/dccm.csv", "compare_dccm_file": "path/to/protein_atp/analysis/dccm.csv", "reference_label": "Protein only", "compare_label": "Protein + ATP", "output_prefix": "dccm_difference", "plot_mode": "difference_only"}}
+        (ΔC_ij = compare − reference; positive = stronger correlation with ligand, negative = weaker)
+    Or for two completed sim directories:
+    13b. run_combined_dccm_difference
+        - tool_params: {{"reference_sim_dir": "...", "compare_sim_dir": "...", "reference_label": "Protein only", "compare_label": "Protein + ATP", "working_dir": "combined_analysis"}}
+
     **Analysis Interpretation Guidelines:**
     - RMSD < 2.0 Å: Stable structure
     - RMSD 2.0-5.0 Å: Moderate drift

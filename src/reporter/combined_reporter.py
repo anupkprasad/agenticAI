@@ -1435,29 +1435,66 @@ def _build_comparative_dynamics_section(
         pocket_body,
     )
 
-    # ── Panel E: DCCM representative heatmaps ────────────────────────────
-    dccm_plots = _find_per_sim_plots(sim_dirs, labels, "dccm")
-    if not dccm_plots:
-        # fall back to any combined dccm overlay
+    # ── Panel E: DCCM heatmaps (per-sim) + comparison/difference (combined) ─
+    dccm_per_sim = _find_per_sim_plots(sim_dirs, labels, "dccm_heatmap")
+    if not dccm_per_sim:
+        dccm_per_sim = _find_per_sim_plots(sim_dirs, labels, "dccm")
+
+    # Separate combined DCCM plots (comparison / difference) from overlay list
+    _dccm_combined_plots = [
+        p for p in overlay_plots
+        if "dccm" in Path(p).name.lower()
+        and Path(p).name not in {Path(pp).name for _, pp in dccm_per_sim}
+    ]
+
+    if not dccm_per_sim and not _dccm_combined_plots:
+        # Last fallback: any dccm overlay
         dccm_ov = _find_overlay_by_type(overlay_plots, "dccm")
         dccm_body = _img(dccm_ov, "DCCM heatmap") if dccm_ov else _missing("No DCCM heatmaps found")
     else:
-        dccm_body = '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">'
-        for lbl, dpath in dccm_plots:
-            uri = _encode_image(dpath)
-            if uri:
-                dccm_body += (
-                    f'<div style="flex:1 1 180px;max-width:260px;text-align:center;">'
-                    f'<img src="{uri}" alt="DCCM {_html_mod.escape(lbl)}" '
-                    f'style="width:100%;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,0.12);">'
-                    f'<p style="font-size:11px;font-weight:700;color:#1e40af;margin:5px 0 0;">'
-                    f'{_html_mod.escape(lbl)}</p></div>'
-                )
-        dccm_body += '</div>'
+        dccm_body = ""
+        # Per-sim individual heatmaps
+        if dccm_per_sim:
+            dccm_body += (
+                '<p style="font-weight:700;color:#1e40af;margin:0 0 8px;">Individual Simulations</p>'
+                '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">'
+            )
+            for lbl, dpath in dccm_per_sim:
+                uri = _encode_image(dpath)
+                if uri:
+                    dccm_body += (
+                        f'<div style="flex:1 1 180px;max-width:260px;text-align:center;">'
+                        f'<img src="{uri}" alt="DCCM {_html_mod.escape(lbl)}" '
+                        f'style="width:100%;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,0.12);">'
+                        f'<p style="font-size:11px;font-weight:700;color:#1e40af;margin:5px 0 0;">'
+                        f'{_html_mod.escape(lbl)}</p></div>'
+                    )
+            dccm_body += '</div>'
+        # Combined DCCM comparison / difference plots
+        if _dccm_combined_plots:
+            if dccm_per_sim:
+                dccm_body += '<hr style="border:none;border-top:1px dashed #bfdbfe;margin:14px 0 10px;">'
+            dccm_body += (
+                '<p style="font-weight:700;color:#1e40af;margin:0 0 8px;">'
+                'Comparison &amp; Difference (Apo vs Holo)</p>'
+                '<div style="display:flex;flex-wrap:wrap;gap:12px;justify-content:center;">'
+            )
+            for _cp in _dccm_combined_plots:
+                uri = _encode_image(_cp)
+                if uri:
+                    _fname = Path(_cp).stem.replace("_", " ").title()
+                    dccm_body += (
+                        f'<div style="flex:1 1 320px;text-align:center;">'
+                        f'<img src="{uri}" alt="{_html_mod.escape(_fname)}" '
+                        f'style="width:100%;border-radius:4px;box-shadow:0 1px 6px rgba(0,0,0,0.15);">'
+                        f'<p style="font-size:11px;color:#6b7280;margin:5px 0 0;">'
+                        f'{_html_mod.escape(_fname)}</p></div>'
+                    )
+            dccm_body += '</div>'
 
     panel_e = _panel(
-        "E", "DCCM Heatmaps",
-        "Dynamic cross-correlation matrix \u2014 representative heatmap per simulation",
+        "E", "DCCM Heatmaps & Difference",
+        "Dynamic cross-correlation matrix \u2014 per-simulation heatmaps and apo\u2013holo \u0394DCCM",
         dccm_body,
         full_width=True,
     )

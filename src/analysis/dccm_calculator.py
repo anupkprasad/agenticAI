@@ -14,15 +14,16 @@ position.  Values range from −1 (perfectly anti-correlated) to +1
 domains; negative blocks reveal breathing or hinge motions that are
 particularly informative for pseudokinase comparisons.
 
-Two public @tool functions are provided:
-  1. calculate_dccm   — per-simulation DCCM + heatmap
-  2. plot_dccm_comparison — side-by-side heatmaps for multiple simulations
+Public @tool functions:
+  1. calculate_dccm        — per-simulation DCCM + heatmap
+  2. plot_dccm_comparison  — side-by-side heatmaps (+ optional Δ panel for 2 sims)
+  3. plot_dccm_difference  — Δ DCCM heatmap (e.g. protein+ATP minus protein-only)
 """
 import os
 import csv
 import logging
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from langchain.tools import tool
 from .summary_logger import append_analysis_summary
@@ -129,6 +130,62 @@ def _plot_dccm_heatmap(
     plt.tight_layout()
     plt.savefig(output_path, dpi=dpi)
     plt.close(fig)
+
+
+def _align_dccm_pair(
+    matrix_a: "np.ndarray",
+    residue_ids_a: List[int],
+    matrix_b: "np.ndarray",
+    residue_ids_b: List[int],
+) -> Tuple["np.ndarray", "np.ndarray", List[int]]:
+    """
+    Reindex two DCCM matrices onto the intersection of residue IDs (sorted).
+
+    Use this when comparing protein-only vs protein+ligand trajectories so
+    axes match by residue number, not matrix truncation.
+    """
+    common = sorted(set(residue_ids_a) & set(residue_ids_b))
+    if len(common) < 2:
+        raise ValueError(
+            f"Fewer than 2 common residues between DCCM matrices "
+            f"({len(common)} shared IDs)"
+        )
+    idx_a = {r: i for i, r in enumerate(residue_ids_a)}
+    idx_b = {r: i for i, r in enumerate(residue_ids_b)}
+    n = len(common)
+    aligned_a = np.zeros((n, n), dtype=np.float64)
+    aligned_b = np.zeros((n, n), dtype=np.float64)
+    for i, ri in enumerate(common):
+        for j, rj in enumerate(common):
+            aligned_a[i, j] = matrix_a[idx_a[ri], idx_a[rj]]
+            aligned_b[i, j] = matrix_b[idx_b[ri], idx_b[rj]]
+    return aligned_a, aligned_b, common
+
+
+def _align_dccm_matrices(
+    matrices: List["np.ndarray"],
+    residue_sets: List[List[int]],
+) -> Tuple[List["np.ndarray"], List[int]]:
+    """Align multiple DCCM matrices to the intersection of all residue IDs."""
+    if not matrices:
+        raise ValueError("No DCCM matrices to align")
+    common = sorted(set(residue_sets[0]))
+    for res in residue_sets[1:]:
+        common = sorted(set(common) & set(res))
+    if len(common) < 2:
+        raise ValueError(
+            f"Fewer than 2 common residues across DCCM matrices ({len(common)} shared)"
+        )
+    aligned: List[np.ndarray] = []
+    for mat, res_ids in zip(matrices, residue_sets):
+        idx_map = {r: i for i, r in enumerate(res_ids)}
+        n = len(common)
+        out = np.zeros((n, n), dtype=np.float64)
+        for i, ri in enumerate(common):
+            for j, rj in enumerate(common):
+                out[i, j] = mat[idx_map[ri], idx_map[rj]]
+        aligned.append(out)
+    return aligned, common
 
 
 def _save_dccm_csv(
@@ -399,11 +456,12 @@ def plot_dccm_comparison(
             return {"success": False,
                     "error": f"Failed to read {fpath}: {e}"}
 
-    # ── Determine common residue range for aligned axes ──────────────────────
-    # Use the smallest set so all panels can be shown at the same scale
-    n_residues = min(m.shape[0] for m in matrices)
-    matrices = [m[:n_residues, :n_residues] for m in matrices]
-    residue_ids = residue_sets[0][:n_residues]
+    # ── Align all matrices by common residue IDs ─────────────────────────────
+    try:
+        matrices, residue_ids = _align_dccm_matrices(matrices, residue_sets)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    n_residues = len(residue_ids)
 
     add_diff = (len(matrices) == 2)
     n_panels = len(matrices) + (1 if add_diff else 0)
@@ -469,8 +527,227 @@ def plot_dccm_comparison(
         "success": True,
         "output_path": output_path,
         "n_panels": n_panels,
+        "n_residues_aligned": n_residues,
         "message": (
-            f"DCCM comparison figure ({n_panels} panels) saved to {output_path}"
+            f"DCCM comparison figure ({n_panels} panels, {n_residues} residues) "
+            f"saved to {output_path}"
+        ),
+    }
+
+
+@tool
+def plot_dccm_difference(
+    reference_dccm_file: str,
+    compare_dccm_file: str,
+    reference_label: str = "Reference",
+    compare_label: str = "Compare",
+    output_prefix: str = "dccm_difference",
+    working_dir: Optional[str] = None,
+    plot_mode: str = "difference_only",
+    diff_threshold: float = 0.3,
+    max_top_pairs: int = 50,
+    dpi: int = 200,
+    cmap_diff: str = "bwr",
+) -> Dict[str, Any]:
+    """
+    Compute and plot the difference between two DCCM matrices (ΔC = compare − reference).
+
+    Typical use: quantify how ATP (or another ligand) changes protein correlated
+    motions by comparing DCCM from ``protein only`` vs ``protein + ATP`` simulations.
+    Run ``calculate_dccm`` on each trajectory first (same ``selection``, e.g.
+    ``"protein and name CA"``), then pass the two CSV files here.
+
+    Residue axes are aligned on the **intersection** of residue IDs in both CSVs,
+    so protein-only and protein+ligand systems match by residue number.
+
+    Args:
+        reference_dccm_file: Baseline DCCM CSV (e.g. protein-only ``dccm.csv``).
+        compare_dccm_file: Perturbed DCCM CSV (e.g. protein+ATP ``dccm.csv``).
+        reference_label: Label for baseline (plots / legend).
+        compare_label: Label for perturbed system.
+        output_prefix: Prefix for outputs: ``<prefix>.csv``, ``<prefix>_heatmap.png``,
+            and (if ``plot_mode="with_matrices"``) ``<prefix>_panels.png``.
+        working_dir: Directory for output files.
+        plot_mode: ``"difference_only"`` (default) — single Δ heatmap;
+            ``"with_matrices"`` — reference, compare, and Δ in one figure.
+        diff_threshold: Report residue pairs with |ΔC| above this (default: 0.3).
+        max_top_pairs: Cap on reported pairs (default: 50).
+        dpi: PNG resolution.
+
+    Returns:
+        Dict with ``success``, ``delta_matrix_stats``, ``top_changed_pairs``,
+        ``output_files``, ``n_residues_aligned``, ``message``.
+    """
+    if not HAS_NUMPY:
+        return {"success": False, "error": "NumPy not available"}
+    if not HAS_MATPLOTLIB:
+        return {"success": False, "error": "matplotlib not available"}
+
+    if plot_mode not in ("difference_only", "with_matrices"):
+        return {
+            "success": False,
+            "error": "plot_mode must be 'difference_only' or 'with_matrices'",
+        }
+
+    if working_dir:
+        Path(working_dir).mkdir(parents=True, exist_ok=True)
+        reference_dccm_file = _resolve_path(reference_dccm_file, working_dir)
+        compare_dccm_file = _resolve_path(compare_dccm_file, working_dir)
+
+    for fpath, name in [
+        (reference_dccm_file, "reference_dccm_file"),
+        (compare_dccm_file, "compare_dccm_file"),
+    ]:
+        if not os.path.exists(fpath):
+            return {"success": False, "error": f"{name} not found: {fpath}"}
+
+    try:
+        mat_ref, res_ref = _load_dccm_csv(reference_dccm_file)
+        mat_cmp, res_cmp = _load_dccm_csv(compare_dccm_file)
+        mat_ref, mat_cmp, residue_ids = _align_dccm_pair(
+            mat_ref, res_ref, mat_cmp, res_cmp
+        )
+        diff = mat_cmp - mat_ref
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+    n_residues = len(residue_ids)
+    off_diag = diff[np.triu_indices(n_residues, k=1)]
+    delta_stats = {
+        "mean_abs_delta": round(float(np.abs(off_diag).mean()), 4),
+        "max_delta": round(float(off_diag.max()), 4),
+        "min_delta": round(float(off_diag.min()), 4),
+    }
+
+    top_pairs: List[Dict[str, Any]] = []
+    for i in range(n_residues):
+        for j in range(i + 1, n_residues):
+            v = float(diff[i, j])
+            if abs(v) >= diff_threshold:
+                top_pairs.append({
+                    "residue_i": residue_ids[i],
+                    "residue_j": residue_ids[j],
+                    "delta_correlation": round(v, 4),
+                })
+    top_pairs.sort(key=lambda x: abs(x["delta_correlation"]), reverse=True)
+    top_pairs = top_pairs[:max_top_pairs]
+
+    prefix = output_prefix or "dccm_difference"
+    output_files: Dict[str, str] = {}
+
+    if working_dir:
+        csv_path = str(Path(working_dir) / f"{prefix}.csv")
+        heatmap_path = str(Path(working_dir) / f"{prefix}_heatmap.png")
+    else:
+        csv_path = f"{prefix}.csv"
+        heatmap_path = f"{prefix}_heatmap.png"
+
+    _save_dccm_csv(diff, residue_ids, csv_path)
+    output_files["delta_csv"] = csv_path
+
+    diff_max = max(abs(float(diff.min())), abs(float(diff.max()))) or 1.0
+    diff_title = f"Δ DCCM ({compare_label} − {reference_label})"
+
+    if plot_mode == "with_matrices":
+        panels_path = (
+            str(Path(working_dir) / f"{prefix}_panels.png")
+            if working_dir
+            else f"{prefix}_panels.png"
+        )
+        fig, axes = plt.subplots(
+            1, 3, figsize=(16, 5.5),
+        )
+        vmin_corr, vmax_corr = -1.0, 1.0
+        n = n_residues
+        step = max(1, n // 8)
+        tick_pos = list(range(0, n, step))
+        tick_labels = [str(residue_ids[i]) for i in tick_pos]
+
+        for ax, mat, title in zip(
+            axes[:2],
+            [mat_ref, mat_cmp],
+            [reference_label, compare_label],
+        ):
+            ax.imshow(
+                mat, cmap="RdBu_r", vmin=vmin_corr, vmax=vmax_corr,
+                aspect="auto", interpolation="nearest", origin="lower",
+            )
+            ax.set_title(title, fontsize=10, fontweight="bold")
+            ax.set_xticks(tick_pos)
+            ax.set_xticklabels(tick_labels, fontsize=6, rotation=45, ha="right")
+            ax.set_yticks(tick_pos)
+            ax.set_yticklabels(tick_labels, fontsize=6)
+            ax.set_xlabel("Residue", fontsize=8)
+            ax.set_ylabel("Residue", fontsize=8)
+
+        ax_diff = axes[2]
+        im_diff = ax_diff.imshow(
+            diff, cmap=cmap_diff, vmin=-diff_max, vmax=diff_max,
+            aspect="auto", interpolation="nearest", origin="lower",
+        )
+        ax_diff.set_title(diff_title, fontsize=10, fontweight="bold")
+        ax_diff.set_xticks(tick_pos)
+        ax_diff.set_xticklabels(tick_labels, fontsize=6, rotation=45, ha="right")
+        ax_diff.set_yticks(tick_pos)
+        ax_diff.set_yticklabels(tick_labels, fontsize=6)
+        ax_diff.set_xlabel("Residue", fontsize=8)
+        fig.colorbar(im_diff, ax=ax_diff, fraction=0.046, pad=0.04).set_label(
+            "ΔC$_{ij}$", fontsize=9
+        )
+        fig.suptitle(
+            "DCCM difference — ligand / condition effect on dynamics",
+            fontsize=12, fontweight="bold", y=1.02,
+        )
+        plt.tight_layout()
+        plt.savefig(panels_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+        output_files["panels"] = panels_path
+
+    _plot_dccm_heatmap(
+        diff, residue_ids, heatmap_path,
+        title=diff_title,
+        vmin=-diff_max, vmax=diff_max,
+        cmap=cmap_diff,
+        figsize=(8, 7),
+        dpi=dpi,
+    )
+    output_files["heatmap"] = heatmap_path
+
+    if working_dir:
+        append_analysis_summary(
+            working_dir=working_dir,
+            analysis_type="DCCM_Difference",
+            statistics={
+                "n_residues_aligned": n_residues,
+                **delta_stats,
+                "n_pairs_above_threshold": len(top_pairs),
+            },
+            files={
+                "reference_dccm_csv": reference_dccm_file,
+                "compare_dccm_csv": compare_dccm_file,
+                "delta_csv": csv_path,
+                "heatmap_file": heatmap_path,
+            },
+            metadata={
+                "reference_label": reference_label,
+                "compare_label": compare_label,
+                "diff_threshold": diff_threshold,
+                "top_changed_pairs": top_pairs[:10],
+            },
+        )
+
+    return {
+        "success": True,
+        "n_residues_aligned": n_residues,
+        "residue_id_range": [residue_ids[0], residue_ids[-1]] if residue_ids else [],
+        "delta_matrix_stats": delta_stats,
+        "top_changed_pairs": top_pairs,
+        "output_files": output_files,
+        "message": (
+            f"DCCM difference ({compare_label} − {reference_label}) for "
+            f"{n_residues} aligned residues. "
+            f"Mean |ΔC| = {delta_stats['mean_abs_delta']:.3f}. "
+            f"{len(top_pairs)} pairs with |ΔC| ≥ {diff_threshold}."
         ),
     }
 

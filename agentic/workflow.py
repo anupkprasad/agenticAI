@@ -573,6 +573,21 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             
             # Overwrite with a single entry so the file is always the latest state
             state_path.write_text(json.dumps(entry, indent=2, default=str) + "\n", encoding="utf-8")
+
+            # In multi-simulation mode, mirror the latest state at the base
+            # working directory as a resume checkpoint for subsequent reruns.
+            multi_base_dir = state.get("multi_sim_base_dir")
+            if state.get("is_multi_simulation") and multi_base_dir:
+                base_dir = Path(str(multi_base_dir)).resolve()
+                current_dir = Path(str(working_dir)).resolve()
+                if base_dir != current_dir:
+                    base_supervisor_dir = base_dir / "supervisor"
+                    base_supervisor_dir.mkdir(parents=True, exist_ok=True)
+                    base_state_path = base_supervisor_dir / "state.jsonl"
+                    base_state_path.write_text(
+                        json.dumps(entry, indent=2, default=str) + "\n",
+                        encoding="utf-8"
+                    )
             
             logger.info(f"Workflow state saved to {state_path}")
             
@@ -595,6 +610,9 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             entry = json.loads(content)
             saved_state = entry.get("state")
             if saved_state:
+                # Expose save metadata to restore policy in _initialize_state.
+                saved_state["_saved_workflow_status"] = entry.get("workflow_status")
+                saved_state["_saved_timestamp"] = entry.get("timestamp")
                 logger.info(
                     f"Loaded previous workflow state from {state_path} "
                     f"(status={entry.get('workflow_status')}, ts={entry.get('timestamp')})"
@@ -613,6 +631,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "md_engine": "gromacs",
             "force_field": "amber99sb-ildn",
             "water_model": "tip3p",
+            "production_ns": None,
             "human_in_loop": False,
             "preprocessing_issues": [],
             "setup_issues": [],
@@ -701,6 +720,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "current_sim_index": 0,
             "completed_sim_states": None,
             "sim_working_dirs": None,
+            "multi_sim_base_dir": None,
         }
 
         if config:
@@ -778,6 +798,18 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         # Check for saved workflow state from a previous run
         saved_state = self._load_workflow_state(working_dir)
         if saved_state:
+            saved_subtask = saved_state.get("subtask_type")
+            current_subtask = state.get("subtask_type")
+            saved_agents = saved_state.get("agent_list")
+            current_agents = state.get("agent_list")
+            saved_status = saved_state.get("_saved_workflow_status")
+
+            same_subtask_signature = (
+                saved_subtask == current_subtask
+                and list(saved_agents or []) == list(current_agents or [])
+            )
+            is_completed_snapshot = str(saved_status).startswith("completed")
+
             # Restore artifact paths and completed-stage outputs so agents
             # can skip already-finished work.  Control-flow and retry counters
             # are intentionally NOT restored — the workflow re-evaluates routing
@@ -805,9 +837,66 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 "preprocessing_instructions", "setup_instructions",
                 "hpc_instructions", "analysis_instructions", "reporter_instructions",
             ]
+
+            # Multi-simulation progress bookkeeping must be restored so reruns
+            # continue from remaining simulations instead of restarting.
+            if state.get("is_multi_simulation"):
+                restore_keys.extend([
+                    "multi_sim_phase",
+                    "sim_prompts",
+                    "combined_analysis_plan",
+                    "current_sim_index",
+                    "completed_sim_states",
+                    "sim_working_dirs",
+                    "multi_sim_base_dir",
+                    "master_enriched_prompt",
+                    "all_pdb_analyses",
+                ])
+
+            # For a completed snapshot or a different subtask signature,
+            # avoid restoring stale planning/results that can short-circuit
+            # routing in subsequent stage runs (for example stage-2 analysis).
+            if is_completed_snapshot or not same_subtask_signature:
+                skip_stale_keys = {
+                    "execution_plan",
+                    "analysis_results",
+                    "reporter_output",
+                    "rephrased_goal",
+                    "enriched_prompt",
+                    "master_enriched_prompt",
+                    "user_goal_original",
+                    "structured_prompt",
+                    "preprocessing_instructions",
+                    "setup_instructions",
+                    "hpc_instructions",
+                    "analysis_instructions",
+                    "reporter_instructions",
+                    "sim_prompts",
+                    "combined_analysis_plan",
+                    "multi_sim_phase",
+                    "current_sim_index",
+                    "completed_sim_states",
+                    "all_pdb_analyses",
+                }
+                restore_keys = [k for k in restore_keys if k not in skip_stale_keys]
+                logger.info(
+                    "Restore policy: skipping stale planning/results keys "
+                    f"(completed={is_completed_snapshot}, same_signature={same_subtask_signature})"
+                )
+
             for key in restore_keys:
                 if key in saved_state and saved_state[key] is not None:
                     state[key] = saved_state[key]
+
+            if state.get("is_multi_simulation") and (is_completed_snapshot or not same_subtask_signature):
+                state["multi_sim_phase"] = None
+                state["current_sim_index"] = 0
+                state["completed_sim_states"] = None
+                state["sim_prompts"] = None
+                state["combined_analysis_plan"] = None
+                state["master_enriched_prompt"] = None
+                state["user_goal_original"] = None
+                state["all_pdb_analyses"] = None
             
             logger.info("Restored previous workflow state — supervisor will skip completed stages")
         

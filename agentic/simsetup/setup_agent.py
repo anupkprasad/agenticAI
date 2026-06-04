@@ -266,7 +266,7 @@ class SimulationSetupAgent:
                         copied_files.add(filename)
                         
                         # Update cleaned_pdb if this is the protein component
-                        if metadata.get("component") == "protein":
+                        if metadata.get("component") == "protein" or metadata.get("type") == "protein":
                             state["cleaned_pdb"] = new_path
                             logger.info(f"Updated cleaned_pdb to: {new_path}")
                         
@@ -510,6 +510,12 @@ class SimulationSetupAgent:
             
             # Parse LLM response into structured plan
             plan_dict = self._extract_plan_json(content)
+
+            # Avoid false-success loops when LLM output is malformed and no
+            # executable steps are parsed.
+            if not isinstance(plan_dict.get("steps"), list) or not plan_dict.get("steps"):
+                logger.warning("LLM setup plan had no executable steps; falling back to deterministic plan")
+                return self._create_fallback_plan(agent_input, analysis)
             
             return SimSetupPlan(
                 reasoning=plan_dict.get("reasoning", content[:500]),
@@ -763,24 +769,34 @@ class SimulationSetupAgent:
         
         tools_list_str = "\n".join(tools_list)
         
-        # Format analysis
+        comp_sel = agent_input.component_selection or {}
+        include_ligand = comp_sel.get('ligand', analysis.get('has_ligand', False)) is not False
+        include_ions = comp_sel.get('ions', analysis.get('has_ions', False)) is not False
+
+        # Format analysis, suppressing excluded component details so the planner
+        # is not distracted by source-PDB ligands/ions for protein-only cases.
         analysis_lines = [
             f"- System Type: {analysis.get('system_type', 'unknown')}",
             f"- Estimated Atoms: {analysis.get('estimated_atoms', 0)}",
-            f"- Has Ligand: {analysis.get('has_ligand', False)}",
-            f"- Ligand Residues: {analysis.get('ligand_resnames', [])}",
-            f"- Has Ions: {analysis.get('has_ions', False)}",
-            f"- Ion Residues: {analysis.get('ion_resnames', [])}",
         ]
-        if analysis.get('ligand_params_available'):
-            for resname, path in analysis['ligand_params_available'].items():
-                analysis_lines.append(f"- Pre-built params for {resname}: AVAILABLE (no need to generate)")
-        for resname in analysis.get('ligand_params_missing', []):
-            analysis_lines.append(f"- Pre-built params for {resname}: MISSING (must use generate_ligand_parameters)")
+        if include_ligand:
+            analysis_lines.extend([
+                f"- Has Ligand: {analysis.get('has_ligand', False)}",
+                f"- Ligand Residues: {analysis.get('ligand_resnames', [])}",
+            ])
+            if analysis.get('ligand_params_available'):
+                for resname, path in analysis['ligand_params_available'].items():
+                    analysis_lines.append(f"- Pre-built params for {resname}: AVAILABLE (no need to generate)")
+            for resname in analysis.get('ligand_params_missing', []):
+                analysis_lines.append(f"- Pre-built params for {resname}: MISSING (must use generate_ligand_parameters)")
+        if include_ions:
+            analysis_lines.extend([
+                f"- Has Ions: {analysis.get('has_ions', False)}",
+                f"- Ion Residues: {analysis.get('ion_resnames', [])}",
+            ])
         analysis_str = "\n".join(analysis_lines)
         
         # Format component selection context
-        comp_sel = agent_input.component_selection or {}
         if comp_sel:
             comp_lines = [
                 f"- Include Protein: {comp_sel.get('protein', True)}",
@@ -809,6 +825,12 @@ class SimulationSetupAgent:
                 filename = Path(file_path).name
                 file_type = metadata.get("type", "unknown")
                 description = metadata.get("description", "")
+                file_type_l = str(file_type).lower()
+                desc_l = str(description).lower()
+                if not include_ligand and (file_type_l == "ligand" or "ligand" in desc_l or "atp" in desc_l):
+                    continue
+                if not include_ions and (file_type_l == "ion" or "ion" in desc_l or "mg" in desc_l):
+                    continue
                 registry_str += f"- {filename} (type: {file_type}) - {description}\n"
         else:
             registry_str = "\n**Files Available from Preprocessing:** None registered\n"
@@ -821,6 +843,7 @@ class SimulationSetupAgent:
 - Water Model: {agent_input.water_model}
 - Temperature: {agent_input.temperature} K
 - Pressure: {agent_input.pressure} bar
+- Production Length: {agent_input.production_ns if agent_input.production_ns is not None else 'not specified'} ns
 
 **System Analysis:**
 {analysis_str}
@@ -900,20 +923,30 @@ Output as JSON with this structure:
         
         tools_list_str = "\n".join(tools_list)
         
-        # Format analysis for prompt
+        comp_sel = agent_input.component_selection or {}
+        include_ligand = comp_sel.get('ligand', analysis.get('has_ligand', False)) is not False
+        include_ions = comp_sel.get('ions', analysis.get('has_ions', False)) is not False
+
+        # Format analysis for prompt and suppress excluded source-PDB components.
         analysis_lines = [
             f"- System Type: {analysis.get('system_type', 'unknown')}",
             f"- Estimated Atoms: {analysis.get('estimated_atoms', 0)}",
-            f"- Has Ligand: {analysis.get('has_ligand', False)}",
-            f"- Ligand Residues: {analysis.get('ligand_resnames', [])}",
-            f"- Has Ions: {analysis.get('has_ions', False)}",
-            f"- Ion Residues: {analysis.get('ion_resnames', [])}",
         ]
-        if analysis.get('ligand_params_available'):
-            for resname, path in analysis['ligand_params_available'].items():
-                analysis_lines.append(f"- Pre-built params for {resname}: AVAILABLE (no need to generate)")
-        for resname in analysis.get('ligand_params_missing', []):
-            analysis_lines.append(f"- Pre-built params for {resname}: MISSING (must use generate_ligand_parameters)")
+        if include_ligand:
+            analysis_lines.extend([
+                f"- Has Ligand: {analysis.get('has_ligand', False)}",
+                f"- Ligand Residues: {analysis.get('ligand_resnames', [])}",
+            ])
+            if analysis.get('ligand_params_available'):
+                for resname, path in analysis['ligand_params_available'].items():
+                    analysis_lines.append(f"- Pre-built params for {resname}: AVAILABLE (no need to generate)")
+            for resname in analysis.get('ligand_params_missing', []):
+                analysis_lines.append(f"- Pre-built params for {resname}: MISSING (must use generate_ligand_parameters)")
+        if include_ions:
+            analysis_lines.extend([
+                f"- Has Ions: {analysis.get('has_ions', False)}",
+                f"- Ion Residues: {analysis.get('ion_resnames', [])}",
+            ])
         analysis_str = "\n".join(analysis_lines)
         
         # Use template or build basic prompt
@@ -925,6 +958,7 @@ Output as JSON with this structure:
                 water_model=agent_input.water_model,
                 temperature=agent_input.temperature,
                 pressure=agent_input.pressure,
+                production_ns=(agent_input.production_ns if agent_input.production_ns is not None else "not specified"),
                 analysis=analysis_str,
                 tools_list=tools_list_str
             )
@@ -935,6 +969,7 @@ You are a GROMACS molecular dynamics simulation expert. Create a setup plan for:
 
 System: {agent_input.cleaned_pdb}
 Goal: {agent_input.user_goal}
+Production Length: {agent_input.production_ns if agent_input.production_ns is not None else 'not specified'} ns
 Analysis: {analysis_str}
 
 Available tools:
@@ -1145,6 +1180,16 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 requested_production_ns = None
         
         try:
+            if not plan.steps:
+                return SimSetupResult(
+                    success=False,
+                    report="Setup failed: planning produced no executable steps",
+                    issues=["No executable setup steps were generated"],
+                    warnings=warnings,
+                    generated_files=generated_files,
+                    execution_log="No setup steps available to execute"
+                )
+
             # Enforce max steps limit
             if len(plan.steps) > max_steps:
                 warnings.append(f"Plan has {len(plan.steps)} steps, limiting to {max_steps}")
@@ -1505,6 +1550,14 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         break
             
             execution_log_str = "\n".join(execution_log)
+
+            # Treat missing primary artifacts as setup failure even if tools did
+            # not return explicit errors.
+            if len(issues) == 0:
+                if not current_gro:
+                    issues.append("Setup did not produce coordinates (.gro) output")
+                if not topology_file:
+                    issues.append("Setup did not produce topology (.top) output")
             
             return SimSetupResult(
                 success=len(issues) == 0,

@@ -1,16 +1,18 @@
 # AgenticAI — Enhanced LLM-Powered MD Workflow
 
-This repository provides an advanced, LLM-powered agentic AI system for molecular dynamics simulation workflows. The system uses intelligent reasoning to understand complex user requests and dynamically orchestrate MD simulation preparation, execution, and analysis with human-in-the-loop capabilities.
+This repository provides an advanced, LLM-powered agentic AI system for molecular dynamics (MD) simulation workflows. The system uses intelligent reasoning to understand complex user requests and dynamically orchestrate MD simulation preparation, execution, and analysis with human-in-the-loop capabilities.
 
 ## 🚀 Enhanced Features
 
 ### 🧠 **LLM-Powered Supervisor**
+
 - **Natural Language Understanding**: Interprets complex requests like "PDB already preprocessed" or "analyze existing trajectories"
 - **Intelligent Routing**: Makes dynamic decisions about which agents to call and when to skip steps
 - **Reasoning Transparency**: Provides clear explanations for all routing decisions
 - **Fallback Compatibility**: Gracefully falls back to heuristic routing when LLM unavailable
 
-### 🎯 **Smart Workflow Orchestration** 
+### 🎯 **Smart Workflow Orchestration**
+
 - **Automatic Step Skipping**: Skips preprocessing if user indicates data is already clean
 - **Context-Aware Routing**: Routes based on user intent, current state, and agent capabilities
 - **Enhanced Error Handling**: Intelligent troubleshooting and recovery suggestions
@@ -21,6 +23,7 @@ This repository provides an advanced, LLM-powered agentic AI system for molecula
 ### Enhanced Workflow Features
 
 #### **🧠 LLM-Powered Supervisor (`agentic/supervisor.py`)**
+
 - **Natural Language Understanding**: Interprets complex requests like "PDB already preprocessed"
 - **Intelligent Routing**: Dynamic decisions about which agents to call and when to skip steps  
 - **Enhanced Input Validation**: Extracts PDB paths, parameters, and requirements from natural language
@@ -28,6 +31,7 @@ This repository provides an advanced, LLM-powered agentic AI system for molecula
 - **Fallback Compatibility**: Graceful fallback to heuristic routing when LLM unavailable
 
 #### **🎯 Smart Workflow Orchestration (`agentic/workflow.py`)**
+
 - **Automatic Step Skipping**: Skips preprocessing if user indicates data is already clean
 - **Context-Aware Routing**: Routes based on user intent, current state, and agent capabilities
 - **Enhanced Final Reports**: LLM-generated comprehensive workflow summaries
@@ -45,6 +49,7 @@ This repository provides an advanced, LLM-powered agentic AI system for molecula
 ✅ **Configuration-driven agent registry**
 
 ### Agent Framework (Modular Design)
+
 - `agentic/preprocess/` — Preprocessing Agent: PDB cleaning, water removal, hydrogen addition
 - `agentic/simsetup/` — Setup Agent: Topology and MDP file generation
 - `agentic/hpc/` — HPC Agent: Job submission, monitoring, and downloads
@@ -54,15 +59,18 @@ This repository provides an advanced, LLM-powered agentic AI system for molecula
 - `agentic/utils/` — Shared utilities: logging, visualization, helper functions
 
 ### Custom Analysis Tools
+
 - `src/python/analysis/` — MD analysis utilities (RMSD, motif analysis, charge calculations)
 - `src/python/setup/` — Simulation setup tools
 - `src/python/utilities/` — Protein utilities and helper functions
 - `src/tcl/` — VMD TCL scripts for visualization
 
 ### Main Entry Point
+
 - `run_agenticAIWork.py` — Main CLI interface for executing workflows
 
 ### Documentation & Configuration
+
 - `requirements.txt` — Python dependencies including LangGraph
 - `setup.py` — Package installation configuration
 - `docs/` — User guides and workflow documentation
@@ -78,13 +86,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-2. **Run a basic workflow (test mode):**
+1. **Run a basic workflow (test mode):**
 
 ```bash
 python run_agenticAIWork.py --goal "I need to run an MD simulation of protein my_project/protein.pdb in water with 150mM NaCl" --no-human-loop --working-dir /path/to/my_project
 ```
 
-3. **Run with LLM planning enabled (with Ollama server):**
+1. **Run with LLM planning enabled (with Ollama server):**
 
 ```bash
 # First, make sure Ollama server is running with a model (e.g., on HPC)
@@ -100,7 +108,7 @@ python run_agenticAIWork.py \
   --working-dir working_dir/ATP.pdb/
 ```
 
-4. **Run with human checkpoints:**
+1. **Run with human checkpoints:**
 
 ```bash
 python run_agenticAIWork.py \
@@ -122,6 +130,7 @@ The workflow uses a clean LangGraph StateGraph with the following nodes:
 ### State Management
 
 The workflow maintains a single `MDState` TypedDict containing:
+
 - Input files and user goals
 - Preprocessing results and cleaned structures
 - Simulation setup parameters and generated files
@@ -131,6 +140,7 @@ The workflow maintains a single `MDState` TypedDict containing:
 ## Configuration Options
 
 The workflow provides sensible GROMACS defaults:
+
 - **Force Field**: AMBER99SB-ILDN
 - **Water Model**: TIP3P  
 - **Human-in-the-Loop**: Configurable checkpoints
@@ -169,12 +179,14 @@ statistical summaries, cross-simulation PCA, and an LLM-generated report.
 
 Multi-simulation mode can be activated in four ways:
 
-| Method | When to Use | Example |
-|--------|-------------|---------|
-| `--simtype multisim` | **Explicit** mode selection | Always runs in multi-sim mode |
-| `--pdb-list a.pdb b.pdb` | You have original PDB files | Fresh simulations from PDbs |
-| `--sim-dirs dir1 dir2` | Simulations already done | Analysis of existing data |
-| Auto-detect from `--goal` | Multiple PDbs in goal text | Convenient, auto-detected |
+
+| Method                    | When to Use                 | Example                       |
+| ------------------------- | --------------------------- | ----------------------------- |
+| `--simtype multisim`      | **Explicit** mode selection | Always runs in multi-sim mode |
+| `--pdb-list a.pdb b.pdb`  | You have original PDB files | Fresh simulations from PDbs   |
+| `--sim-dirs dir1 dir2`    | Simulations already done    | Analysis of existing data     |
+| Auto-detect from `--goal` | Multiple PDbs in goal text  | Convenient, auto-detected     |
+
 
 **Default**: `--simtype singlesim` (single simulation mode)
 
@@ -218,37 +230,36 @@ python run_agenticAIWork.py \
 
 ### Path Resolution
 
-label → p17612
-per-sim working_directory → p17612
-hpc_dir → hpc ✓ (analysis agent scans here for .xtc)
+- `label` → `p17612`
+- per-sim `working_directory` → `p17612`
+- `hpc_dir` → `hpc` (analysis agent scans here for `.xtc`)
 
-
-
-
+```bash
 python run_agenticAIWork.py \
   --goal "Simulation for 1A.pdb, 2B.pdb, 3C.pdb is already done for 50 ns and data is stored in the subdirectory 1A, 2B and 3C repectively. Please do the analysis of trajectories and compare dynamics (RMSD, Rg) among them. The proteins simulated are pseudokinases" \
   --working-dir multi_run \
   --use-llm --no-human-loop \
   --subtask analysis reporter
+```
 
-############### pseudokinase  #############
+### Pseudokinase examples
+
+```bash
 python run_agenticAIWork.py \
   --goal "MD Simulation for uniprotId p17612, p24941, p28482, q13418, q7z7a4, q8ivt5, q8ne28 are done and saved in their respective directory named with /pseudokin/{uniprotId}/hpc/ Please do the analysis of trajectories and compare dynamics (RMSD, Rg) among them. The simulated protein are pseudokinases. the name of pseudokinase in the uniprotid are p17612: KAPCA_HUMAN,  p24941: CDK2_HUMAN,  p28482:MK01_HUMAN,  q13418: ILK_HUMAN,  q7z7a4: PXK_HUMAN,  q8ivt5:KSR1_HUMAN, q8ne28: STKL1_HUMAN" \
   --working-dir pseudokin \
   --use-llm --no-human-loop \
   --subtask analysis reporter
+```
 
+### Demo workflows
 
-
-
-########################################   Demo   ##########################
-
+```bash
 python run_agenticAIWork.py \
   --goal "Please preprocess and setup MD Simulation for 50 ns of list of Pdbs p17612.pdb, p24941.pdb, p28482.pdb which are in /pseudokin2/ Please do simulation preprocess, setup. Once the simulation setups are done please submit the job in HPC. The simulated protein are human pseudokinases. the name of pseudokinase in the uniprotid are p17612: KAPCA,  p24941: CDK2,  p28482: MK01. " \
   --working-dir pseudokin2 \
   --subtask preprocess simsetup hpcjob \
   --use-llm --no-human-loop
-
 
 python run_agenticAIWork.py \
   --goal "MD simulations for UniProt IDs p17612, p24941, p28482 are done and stored in /pseudokin/{uniprotId}/hpc/. Skip preprocessing, setup, and simulation steps — proceed directly to trajectory analysis and cross-simulation comparison. For each system compute: (1) backbone RMSD over time to assess structural stability, (2) per-residue RMSF to identify flexible and rigid regions, (3) radius of gyration to monitor compactness, (4) center-of-mass distance between the bound ATP ligand and the catalytic pocket (pocket defined as all protein atoms within 5 Å of ATP at frame 0) to track binding-site stability, (5) Dynamic Cross-Correlation Matrix (DCCM) of Cα fluctuations to reveal correlated and anti-correlated residue motions and allosteric communication networks, and (6) secondary structure (DSSP) time evolution to quantify αC-helix and activation-loop dynamics. After per-simulation analysis, generate comparative overlay plots and statistical tables across all six pseudokinases. The proteins are human pseudokinases: p17612=KAPCA, p24941=CDK2, p28482=MK01. For the reporter, retrieve relevant literature for each pseudokinase with its given name focusing on activation-loop conformations, allosteric regulation, and dynamics from MD simulations. Correlate the simulation findings with literature in the final report." \
@@ -257,13 +268,6 @@ python run_agenticAIWork.py \
   --subtask analysis reporter \
   --use-llm --no-human-loop
 
-
-
-
-
-#########################################################################################
-
-
 python run_agenticAIWork.py \
   --goal "MD simulations for UniProt IDs p17612, p24941, p28482, q13418, q8ivt5, q8ne28 are complete and stored in /pseudokin/{uniprotId}/hpc/. Skip preprocessing, setup, and simulation steps — proceed directly to trajectory analysis and cross-simulation comparison. For each system compute: (1) backbone RMSD over time to assess structural stability, (2) per-residue RMSF to identify flexible and rigid regions, (3) radius of gyration to monitor compactness, (4) center-of-mass distance between the bound ATP ligand and the catalytic pocket (pocket defined as all protein atoms within 5 Å of ATP at frame 0) to track binding-site stability, (5) Dynamic Cross-Correlation Matrix (DCCM) of Cα fluctuations to reveal correlated and anti-correlated residue motions and allosteric communication networks, and (6) secondary structure (DSSP) time evolution to quantify αC-helix and activation-loop dynamics. After per-simulation analysis, generate comparative overlay plots and statistical tables across all six pseudokinases. The proteins are human pseudokinases: p17612=KAPCA, p24941=CDK2, p28482=MK01, q13418=ILK, q8ivt5=KSR1, q8ne28=STKL1. For the reporter, retrieve relevant literature for each pseudokinase with its given name focusing on activation-loop conformations, allosteric regulation, and dynamics from MD simulations. Correlate the simulation findings with literature in the final report." \
   --working-dir pseudokin \
@@ -271,24 +275,23 @@ python run_agenticAIWork.py \
   --subtask analysis reporter \
   --use-llm --no-human-loop
 
-
 python run_agenticAIWork.py \
   --goal "MD Simulation for uniprotId p17612, p24941, p28482 are done and saved in their respective directory named with /pseudokin/{uniprotId}/hpc/ Please do not do simulation preprocess, setup. Directly do the analysis of trajectories and compare dynamics (RMSD, Rg and RMSF) among them. The simulated protein are human pseudokinases. the name of pseudokinase in the uniprotid are p17612: KAPCA,  p24941: CDK2,  p28482:MK01. Please find the relevant literatures of these pseudokinase that focus on the related dynamics coming from simulation analysis." \
   --working-dir pseudokin \
   --sim-dirs pseudokin/p17612 pseudokin/p24941 pseudokin/p28482 \
   --subtask analysis reporter \
   --use-llm --no-human-loop
+```
 
+### With `--simtype multisim`
 
-########### with flag --simtype    #################
-
+```bash
 python run_agenticAIWork.py \
   --goal "Please preprocess and setup MD Simulation for 50 ns of list of Pdbs p17612.pdb, p24941.pdb, p28482.pdb which are in /pseudokin2/ Please do simulation preprocess, setup. Once the simulation setups are done please submit the job in HPC. The simulated protein are human pseudokinases. the name of pseudokinase in the uniprotid are p17612: KAPCA,  p24941: CDK2,  p28482: MK01." \
   --working-dir pseudokin2 \
   --subtask preprocess simsetup hpcjob \
   --simtype multisim \
   --use-llm --no-human-loop
-
 
 python run_agenticAIWork.py \
   --goal "Please preprocess and setup MD Simulation for 50 ns of list of Pdbs p21860.pdb, q8iv63.pdb, q8nb16.pdb, q8wz42.pdb which are in /pseudokin/ directory. Please do simulation preprocess, setup. Once the simulation setups are done please submit the job in HPC. The simulated protein are human pseudokinases. the name of pseudokinase in the uniprotid are p21860: ERBB3, q8iv63: VRK3, q8nb16: MLKL, q8wz42: TITIN." \
@@ -297,8 +300,6 @@ python run_agenticAIWork.py \
   --simtype multisim \
   --use-llm --no-human-loop
 
-
-
 python run_agenticAIWork.py \
   --goal "I want to study the effect of ATP binding in protein dynamics of these four PDBs p21860.pdb, q8iv63.pdb, q8nb16.pdb, q8wz42.pdb which are available in /pseudokin/ directory. Each pdb file has protein + ATP + MG. Please preprocess and setup MD Simulation for 100 ns of all Pdbs with two different cases: 1. Protein only, 2. Protein + ATP + MG therefore total 8 simulations. Once the simulation setups are done please submit the job in HPC. The simulated protein are human pseudokinases and the name of pseudokinase in the uniprotid are p21860: ERBB3, q8iv63: VRK3, q8nb16: MLKL, q8wz42: TITIN." \
   --working-dir pseudokin \
@@ -306,11 +307,28 @@ python run_agenticAIWork.py \
   --simtype multisim \
   --use-llm --no-human-loop
 
+python run_agenticAIWork.py \
+  --goal "I want to study the effect of ATP binding in protein dynamics of these four PDBs p21860.pdb, q8iv63.pdb, q8nb16.pdb, q8wz42.pdb which are available in /pseudo/ directory. Each pdb file has protein + ATP + MG. Please preprocess and setup MD Simulation for 100 ns of all Pdbs with two different cases: 1. Protein only, 2. Protein + ATP + MG therefore total 8 simulations. Once the simulation setups are done please submit the job in HPC. The simulated protein are human pseudokinases and the name of pseudokinase in the uniprotid are p21860: ERBB3, q8iv63: VRK3, q8nb16: MLKL, q8wz42: TITIN.For each system compute: (1) backbone RMSD over time to assess structural stability, (2) per-residue RMSF to identify flexible and rigid regions, (3) radius of gyration to monitor compactness, (4) center-of-mass distance between the bound ATP ligand and the catalytic pocket (pocket defined as all protein atoms within 5 Å of ATP at frame 0) to track binding-site stability, (5) Dynamic Cross-Correlation Matrix (DCCM) of Cα fluctuations to reveal correlated and anti-correlated residue motions and allosteric communication networks, and (6) secondary structure (DSSP) time evolution to quantify αC-helix and activation-loop dynamics. After per-simulation analysis, generate comparative overlay plots and statistical tables across all six pseudokinases. For the reporter agent, retrieve relevant literature for each pseudokinase with its given name focusing on activation-loop conformations, allosteric regulation, and dynamics from MD simulations. Correlate the simulation findings with literature in the final report." \
+  --working-dir pseudo \
+  --subtask analysis reporter \
+  --simtype multisim \
+  --use-llm --no-human-loop
+
+python run_agenticAIWork.py \
+  --goal "I want to study the effect of ATP binding in protein dynamics of PDB: p21860.pdb which is available in /pseudo/ directory. The pdb file has protein + ATP + MG. Please preprocess and setup MD Simulation for 1 ns of all Pdbs with two different cases: 1. Protein only, 2. Protein + ATP + MG therefore total 8 simulations. Once the simulation setups are done please submit the job in HPC. The simulated protein are human pseudokinases and the name of pseudokinase in the uniprotid are p21860: ERBB3.For each system compute: (1) backbone RMSD over time to assess structural stability, (2) per-residue RMSF to identify flexible and rigid regions, (3) radius of gyration to monitor compactness, (4) center-of-mass distance between the bound ATP ligand and the catalytic pocket (pocket defined as all protein atoms within 5 Å of ATP at frame 0) to track binding-site stability, (5) Dynamic Cross-Correlation Matrix (DCCM) of Cα fluctuations to reveal correlated and anti-correlated residue motions and allosteric communication networks (6) calculate the DCCM difference of of protein and protein_ATP system, and (7) secondary structure (DSSP) time evolution to quantify αC-helix and activation-loop dynamics. After per-simulation analysis, generate comparative overlay plots and statistical tables for both pseudokinases. For the reporter agent, retrieve relevant literature for each pseudokinase with its given name focusing on activation-loop conformations, allosteric regulation, and dynamics from MD simulations. Correlate the simulation findings with literature in the final report." \
+  --working-dir pseudo \
+  --subtask analysis reporter \
+  --simtype multisim \
+  --use-llm --no-human-loop
+```
+
+Valid `--subtask` values: `preprocess`, `simsetup`, `hpcjob`, `analysis`, `reporter`
 
 ### Component-Case Expansion from the Same PDB
 
 You can request multiple simulation cases from the same input PDB in a single goal.
 For example:
+
 - Case 1: protein only
 - Case 2: protein + ATP + MG
 
@@ -319,11 +337,11 @@ When your goal includes this pattern (for example "two different cases: 1. Prote
 For 4 PDB files and 2 cases, total simulations = 8.
 
 Directory labels are generated as:
+
 - `p21860` for protein-only case
 - `p21860_ATP_MG` for protein+ATP+MG case
 
 The same source PDB is reused for each case, but each per-simulation prompt explicitly instructs preprocessing/setup which components to keep or remove.
-
 
 ##############################################################
 
@@ -463,13 +481,13 @@ python run_agenticAIWork.py \
 
 The `src/` directory structure is organized for different workflow stages:
 
-- **`src/preprocess/`** — Add PDB preprocessing and ligand tools here
-- **`src/simsetup/`** — Add custom simulation setup utilities  
-- **`src/hpc/`** — Add HPC job management and monitoring tools
-- **`src/analysis/`** — Add post-simulation analysis tools
-- **`src/python/analysis/`** — Your existing MD analysis tools
-- **`src/python/setup/`** — Your existing simulation setup utilities
-- **`src/tcl/`** — VMD scripts and TCL utilities
+- `**src/preprocess/**` — Add PDB preprocessing and ligand tools here
+- `**src/simsetup/**` — Add custom simulation setup utilities  
+- `**src/hpc/**` — Add HPC job management and monitoring tools
+- `**src/analysis/**` — Add post-simulation analysis tools
+- `**src/python/analysis/**` — Your existing MD analysis tools
+- `**src/python/setup/**` — Your existing simulation setup utilities
+- `**src/tcl/**` — VMD scripts and TCL utilities
 
 The LangGraph workflow can be extended to call your custom tools by modifying the agent nodes.
 

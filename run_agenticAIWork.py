@@ -238,18 +238,19 @@ def _replan_with_guidance(
     state["human_recommendation"] = user_input
     state["execution_plan"] = exec_plan
 
-    # Apply parameter overrides (force_field, water_model, temperature, pressure)
+    # Apply parameter overrides (force_field, water_model, temperature, pressure, production_ns)
     _param_patterns = [
         (re.compile(r'\b(?:force.?field|ff)\s*[:=]?\s*([\w-]+)', re.I), "force_field"),
         (re.compile(r'\bwater.?model\s*[:=]?\s*(\w+)', re.I), "water_model"),
         (re.compile(r'\btemperature\s*[:=]?\s*(\d+(?:\.\d+)?)\s*k?\b', re.I), "temperature"),
         (re.compile(r'\bpressure\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(?:bar)?\b', re.I), "pressure"),
+        (re.compile(r'(?:simulation\s*(?:time|length|duration|ns)|production(?:\s*run)?|run\s*(?:time|length)?)\s*[:=of]?\s*(\d+(?:\.\d+)?)\s*(?:ns|nanoseconds?)?\b|\b(\d+(?:\.\d+)?)\s*(?:ns|nanoseconds?)\b', re.I), "production_ns"),
     ]
     for pattern, key in _param_patterns:
         m = pattern.search(user_input)
         if m:
-            val = m.group(1)
-            if key in ("temperature", "pressure"):
+            val = next((g for g in m.groups() if g is not None), None)
+            if key in ("temperature", "pressure", "production_ns"):
                 try:
                     val = float(val)
                 except ValueError:
@@ -1125,6 +1126,32 @@ def _extract_pdb_paths_from_goal(goal: str) -> list:
     return _re.findall(r'[\w./\\-]+\.pdb', goal, _re.IGNORECASE)
 
 
+def _extract_production_ns_from_goal(goal: str) -> float | None:
+    """Extract requested production duration in nanoseconds from goal text."""
+    import re as _re
+    patterns = [
+        _re.compile(
+            r'(?:simulation\s*(?:time|length|duration|ns)|production(?:\s*run)?|run\s*(?:time|length)?)'
+            r'\s*[:=of]?\s*(\d+(?:\.\d+)?)\s*(?:ns|nanoseconds?)?\b',
+            _re.IGNORECASE,
+        ),
+        _re.compile(r'\b(\d+(?:\.\d+)?)\s*(?:ns|nanoseconds?)\b', _re.IGNORECASE),
+    ]
+    for pattern in patterns:
+        match = pattern.search(goal or "")
+        if match:
+            raw = next((g for g in match.groups() if g is not None), None)
+            if raw is None:
+                continue
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if val > 0:
+                return val
+    return None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="LangGraph-based MD Simulation Workflow"
@@ -1251,6 +1278,9 @@ def main(argv=None):
             config["agent_list"] = args.subtask
     
     goal = args.goal
+    production_ns = _extract_production_ns_from_goal(goal)
+    if production_ns is not None:
+        config["production_ns"] = production_ns
     
     # Resolve working directory (same logic as workflow._initialize_state)
     working_dir = args.working_dir

@@ -166,6 +166,7 @@ defaults:
   water_model: "tip3p"
   temperature: 300.0  # K
   pressure: 1.0  # bar
+  production_ns: 200.0  # ns
   salt_concentration: 0.15  # M
 
 # LLM-powered planning configuration
@@ -180,6 +181,7 @@ llm:
     - Water Model: {water_model}
     - Temperature: {temperature} K
     - Pressure: {pressure} bar
+    - Production Length: {production_ns} ns
 
     **System Analysis:**
     {analysis}

@@ -22,6 +22,15 @@ def parse_component_selection(user_goal: str, analysis: Dict[str, Any]) -> Dict[
         Dict with protein, ligand, water, ions, specific_chains selections
     """
     goal_lower = user_goal.lower()
+    # Normalize common unicode hyphens so phrase matching is robust.
+    goal_lower = (
+        goal_lower
+        .replace("\u2011", "-")
+        .replace("\u2012", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+    )
     explicit = {component: None for component in ["protein", "ligand", "water", "ions", "specific_chains"]}
     
     # ── Detect compound component phrases (e.g. "protein-ligand-ions") ───────
@@ -60,7 +69,9 @@ def parse_component_selection(user_goal: str, analysis: Dict[str, Any]) -> Dict[
     
     # ── Single-component "only" / "just" requests ───────────────────────────
     # These override compound detection because the user is being very specific.
-    elif any(p in goal_lower for p in ["only protein", "just protein", "protein only", "extract protein"]):
+    elif any(p in goal_lower for p in [
+        "only protein", "just protein", "protein only", "protein-only", "protein alone", "extract protein"
+    ]):
         explicit.update({"protein": True, "ligand": False, "ions": False, "water": False})
     elif any(p in goal_lower for p in ["only ligand", "just ligand", "ligand only", "extract ligand"]):
         explicit.update({"protein": False, "ligand": True, "ions": False, "water": False})
@@ -68,19 +79,33 @@ def parse_component_selection(user_goal: str, analysis: Dict[str, Any]) -> Dict[
         explicit.update({"protein": True, "ligand": True})
     
     # ── Explicit inclusion overrides ─────────────────────────────────────────
-    if any(p in goal_lower for p in ["with ligand", "include ligand", "retaining ligand", "retain ligand", "keeping ligand", "keep ligand"]):
+    if any(p in goal_lower for p in [
+        "with ligand", "with ligands", "include ligand", "include ligands",
+        "retaining ligand", "retaining ligands", "retain ligand", "retain ligands",
+        "keeping ligand", "keeping ligands", "keep ligand", "keep ligands"
+    ]):
         explicit["ligand"] = True
     if any(p in goal_lower for p in ["with water", "include water", "keep water", "retaining water", "retain water"]):
         explicit["water"] = True
-    if any(p in goal_lower for p in ["with ions", "include ions", "retaining ions", "retain ions", "keeping ions", "keep ions"]):
+    if any(p in goal_lower for p in [
+        "with ion", "with ions", "include ion", "include ions",
+        "retaining ion", "retaining ions", "retain ion", "retain ions",
+        "keeping ion", "keeping ions", "keep ion", "keep ions"
+    ]):
         explicit["ions"] = True
     
     # ── Explicit exclusion overrides ─────────────────────────────────────────
-    if any(p in goal_lower for p in ["without ligand", "remove ligand", "no ligand"]):
+    if any(p in goal_lower for p in [
+        "without ligand", "without ligands", "remove ligand", "remove ligands", "no ligand", "no ligands",
+        "remove atp", "without atp", "exclude atp", "drop atp"
+    ]):
         explicit["ligand"] = False
     if any(p in goal_lower for p in ["without water", "remove water", "no water"]):
         explicit["water"] = False
-    if any(p in goal_lower for p in ["without ions", "remove ions", "no ions"]):
+    if any(p in goal_lower for p in [
+        "without ion", "without ions", "remove ion", "remove ions", "no ion", "no ions",
+        "remove mg", "without mg", "exclude mg", "drop mg"
+    ]):
         explicit["ions"] = False
     
     # ── Check specific chains ────────────────────────────────────────────────

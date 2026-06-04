@@ -114,44 +114,72 @@ class LigandTopologyGenerator:
                 cwd=str(output_dir)
             )
             
-            # Acpype creates subdirectory with ligand name
+            # ACPYPE may derive output names from sanitized inputs. Probe both
+            # expected directories and fallback to any recent *.acpype directory.
             ligand_name = Path(ligand_pdb).stem
-            acpype_dir = output_dir / f"{ligand_name}.acpype"
-            
+            input_name = Path(ligand_input).stem
+            acpype_dirs = []
+            for candidate in [
+                output_dir / f"{ligand_name}.acpype",
+                output_dir / f"{input_name}.acpype",
+            ]:
+                if candidate not in acpype_dirs:
+                    acpype_dirs.append(candidate)
+            for candidate in sorted(output_dir.glob("*.acpype"), key=lambda p: p.stat().st_mtime, reverse=True):
+                if candidate not in acpype_dirs:
+                    acpype_dirs.append(candidate)
+
             # Check for output files regardless of exit code —
             # acpype can return non-zero even on success (e.g. warnings)
-            if acpype_dir.exists():
-                topology_file = acpype_dir / f"{ligand_name}_GMX.itp"
-                coordinate_file = acpype_dir / f"{ligand_name}_GMX.gro"
-                
-                if topology_file.exists():
-                    # Copy output files to output_dir so callers get clean paths
-                    # without the confusing .acpype suffix in the directory name
-                    dest_itp = output_dir / topology_file.name
-                    dest_gro = output_dir / coordinate_file.name if coordinate_file.exists() else None
-                    shutil.copy2(str(topology_file), str(dest_itp))
-                    if dest_gro:
-                        shutil.copy2(str(coordinate_file), str(dest_gro))
-                    # Copy position-restraint files (posre_<RESNAME>.itp) — needed
-                    # by topol.top #ifdef POSRES_LIG blocks during NPT/NVT/MD runs
-                    posre_files = []
-                    for posre in acpype_dir.glob("posre_*.itp"):
-                        dest_posre = output_dir / posre.name
-                        shutil.copy2(str(posre), str(dest_posre))
-                        posre_files.append(str(dest_posre))
-                    return {
-                        "success": True,
-                        "topology": str(dest_itp),
-                        "coordinates": str(dest_gro) if dest_gro else None,
-                        "posre_files": posre_files,
-                        "output_dir": str(output_dir),
-                        "acpype_dir": str(acpype_dir),
-                        "method": "acpype",
-                        "atom_type": atom_type,
-                        "charge_method": charge_method,
-                        "stdout": result.stdout[-500:] if result.stdout else "",
-                        "stderr": result.stderr[-500:] if result.stderr else ""
-                    }
+            for acpype_dir in acpype_dirs:
+                if not acpype_dir.exists():
+                    continue
+
+                topology_file = None
+                for stem in [ligand_name, input_name]:
+                    candidate = acpype_dir / f"{stem}_GMX.itp"
+                    if candidate.exists():
+                        topology_file = candidate
+                        break
+                if topology_file is None:
+                    itp_candidates = sorted(acpype_dir.glob("*_GMX.itp"))
+                    topology_file = itp_candidates[0] if itp_candidates else None
+                if topology_file is None:
+                    continue
+
+                coordinate_file = topology_file.with_suffix(".gro")
+                if not coordinate_file.exists():
+                    gro_candidates = sorted(acpype_dir.glob("*_GMX.gro"))
+                    coordinate_file = gro_candidates[0] if gro_candidates else None
+
+                # Copy output files to output_dir using canonical ligand-based names
+                # so downstream tools do not depend on ACPYPE internal naming.
+                dest_itp = output_dir / f"{ligand_name}_GMX.itp"
+                dest_gro = output_dir / f"{ligand_name}_GMX.gro" if coordinate_file else None
+                shutil.copy2(str(topology_file), str(dest_itp))
+                if dest_gro and coordinate_file:
+                    shutil.copy2(str(coordinate_file), str(dest_gro))
+
+                # Copy position-restraint files (posre_<RESNAME>.itp) — needed
+                # by topol.top #ifdef POSRES_LIG blocks during NPT/NVT/MD runs
+                posre_files = []
+                for posre in acpype_dir.glob("posre_*.itp"):
+                    dest_posre = output_dir / posre.name
+                    shutil.copy2(str(posre), str(dest_posre))
+                    posre_files.append(str(dest_posre))
+                return {
+                    "success": True,
+                    "topology": str(dest_itp),
+                    "coordinates": str(dest_gro) if dest_gro else None,
+                    "posre_files": posre_files,
+                    "output_dir": str(output_dir),
+                    "acpype_dir": str(acpype_dir),
+                    "method": "acpype",
+                    "atom_type": atom_type,
+                    "charge_method": charge_method,
+                    "stdout": result.stdout[-500:] if result.stdout else "",
+                    "stderr": result.stderr[-500:] if result.stderr else ""
+                }
             
             # If we get here, acpype didn't produce expected output
             combined_output = (result.stdout or "") + "\n" + (result.stderr or "")

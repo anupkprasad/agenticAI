@@ -18,8 +18,11 @@ work_dir_hl2/
 multi_run/
 multi_run_bckp/
 pseudokin/
+pseudokin_june3bckp/
 pseudokin1/
 pseudokin2/
+README copy.md/
+pseudo/
 *_bckp/
 backup/
 tests/

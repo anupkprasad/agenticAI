@@ -253,6 +253,9 @@ class MDSupervisor:
         Reset state for the current sim_index and route to input_validation.
         Called when starting (or restarting) a per-sim pipeline.
         """
+        if not state.get("multi_sim_base_dir"):
+            state["multi_sim_base_dir"] = state.get("working_directory")
+
         sim_prompts = state.get("sim_prompts", [])
         current_idx = state.get("current_sim_index", 0)
 
@@ -473,6 +476,7 @@ class MDSupervisor:
             "is_multi_simulation", "multi_sim_phase", "sim_prompts",
             "combined_analysis_plan", "current_sim_index",
             "completed_sim_states", "sim_working_dirs",
+            "multi_sim_base_dir",
             # NOTE: pdb_list and all_pdb_analyses are NOT preserved - each per-sim
             # iteration should only see its own PDB via raw_pdb, not the full list.
             # This prevents input validation from treating per-sim as multi-sim.
@@ -1195,6 +1199,29 @@ class MDSupervisor:
             # Check retry limit
             retry_count = state.get("setup_retry_count", 0)
             if retry_count >= 3:
+                if state.get("is_multi_simulation") and state.get("multi_sim_phase") == "executing_sims":
+                    sim_label = "unknown"
+                    sim_idx = state.get("current_sim_index", 0)
+                    sim_prompts = state.get("sim_prompts") or []
+                    if isinstance(sim_prompts, list) and 0 <= sim_idx < len(sim_prompts):
+                        sim_label = sim_prompts[sim_idx].get("label", sim_label)
+
+                    state["errors"].append(
+                        f"SimSetup failed after 3 retries for {sim_label} — continuing with next simulation"
+                    )
+                    state["plan_executed"] = True
+                    state["next_node"] = "supervisor"
+                    logger.warning(
+                        "SimSetup exhausted 3 retries for multi-sim case %s — advancing to next simulation",
+                        sim_label,
+                    )
+                    log_supervisor_routing(
+                        state,
+                        "supervisor",
+                        f"SimSetup failed after 3 retries for {sim_label}; advancing multi-sim loop",
+                    )
+                    return state
+
                 state["errors"].append("SimSetup failed after 3 retries — skipping HPC submission")
                 state["next_node"] = "final_report"
                 logger.warning("SimSetup exhausted 3 retries — aborting workflow (no HPC submission)")

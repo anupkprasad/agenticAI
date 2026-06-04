@@ -30,6 +30,7 @@ class MDState(TypedDict):
     md_engine: str                 # "gromacs"
     force_field: str               # "amber99sb-ildn"
     water_model: str               # "tip3p"
+    production_ns: Optional[float] # Requested production simulation length (ns)
     human_in_loop: bool
     
     # Subtask-specific workflow
@@ -157,3 +158,4 @@ class MDState(TypedDict):
     current_sim_index: Optional[int]             # Index into sim_prompts (which sim is next)
     completed_sim_states: Optional[List[Dict[str, Any]]]  # Saved state snapshots after each sim completes
     sim_working_dirs: Optional[List[str]]        # Per-sim working directories (e.g., base_dir/1abc/)
+    multi_sim_base_dir: Optional[str]            # Base directory for multi-simulation checkpoint mirroring

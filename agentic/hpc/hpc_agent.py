@@ -843,10 +843,23 @@ Output as JSON with this structure:
                     script_path = Path(state["job_script"]).resolve()
                     enriched["script_path"] = str(script_path)
                 else:
-                    # Fallback: look for default script in hpc_dir
-                    default_script = Path(hpc_dir) / "md_simulation_run.sh"
-                    if default_script.exists():
-                        enriched["script_path"] = str(default_script.resolve())
+                    # Fallback: look for the generated script in hpc_dir.
+                    # The script creator defaults to <job_name>_run.sh, so
+                    # prefer that naming pattern and only then try any .sh file.
+                    job_name = self._derive_job_name(state)
+                    candidate_scripts = [
+                        Path(hpc_dir) / f"{job_name}_run.sh",
+                        Path(hpc_dir) / f"{job_name}.sh",
+                        Path(hpc_dir) / "md_simulation_run.sh",
+                    ]
+                    for candidate in candidate_scripts:
+                        if candidate.exists():
+                            enriched["script_path"] = str(candidate.resolve())
+                            break
+                    else:
+                        sh_files = sorted(Path(hpc_dir).glob("*.sh"))
+                        if sh_files:
+                            enriched["script_path"] = str(sh_files[0].resolve())
             
             remote_dir = self.config.get("paths", {}).get("remote_work_dir", "~/md_jobs")
             if "remote_dir" not in enriched:
@@ -899,7 +912,11 @@ Output as JSON with this structure:
                     )
         
         elif tool_name == "create_slurm_script":
-            state["job_script"] = result.get("script_path")
+            script_path = result.get("script_path")
+            state["job_script"] = script_path
+            if script_path:
+                script_name = Path(script_path).name
+                state["job_script_name"] = script_name
             log_file_operation("hpc", "create", state["job_script"], True, "SLURM submission script")
         
         elif tool_name == "submit_job":

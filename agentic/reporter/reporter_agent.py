@@ -285,6 +285,8 @@ class ReporterAgent:
         overlay_plots = list(combined_info.get("overlay_plots", []))
 
         # ── Figure curation ──────────────────────────────────────────────
+        _user_goal_text = state.get("user_goal", "")
+        _enriched_text = state.get("master_enriched_prompt") or state.get("enriched_prompt", "")
         _goal_lower = (_user_goal_text + " " + _enriched_text).lower()
 
         # 1. Remove energy overlay by default; include only if user mentions it.
@@ -325,6 +327,15 @@ class ReporterAgent:
                         _p = Path(s_dir) / "analysis" / _fname
                         if _p.exists() and str(_p) not in overlay_plots:
                             overlay_plots.append(str(_p))
+
+        # 5. Add combined DCCM comparison + difference plots produced by
+        #    _run_combined_analysis (stored in analysis_results["combined"]["dccm_plots"]).
+        #    These are placed in the combined analysis dir and are not per-sim files,
+        #    so they must be added here explicitly.
+        for _dccm_plot in combined_info.get("dccm_plots", []):
+            _p = Path(_dccm_plot)
+            if _p.exists() and str(_p) not in overlay_plots:
+                overlay_plots.append(str(_p))
 
         log_agent_start(
             "reporter",

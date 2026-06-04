@@ -627,3 +627,96 @@ def run_combined_dccm_analysis(
     result["missing_sims"] = missing_sims
     return result
 
+
+@tool
+def run_combined_dccm_difference(
+    reference_sim_dir: str,
+    compare_sim_dir: str,
+    reference_label: str,
+    compare_label: str,
+    working_dir: str,
+    output_prefix: str = "dccm_difference",
+    plot_mode: str = "difference_only",
+    diff_threshold: float = 0.3,
+    dpi: int = 200,
+) -> Dict[str, Any]:
+    """
+    Build a DCCM difference map between two simulations (e.g. protein-only vs protein+ATP).
+
+    Locates ``dccm*.csv`` under each simulation's ``analysis/`` folder (from
+    ``calculate_dccm``), then calls ``plot_dccm_difference`` with
+    Δ = compare − reference.
+
+    Args:
+        reference_sim_dir: Baseline simulation root (protein-only).
+        compare_sim_dir: Perturbed simulation root (e.g. protein + ATP + Mg).
+        reference_label: Plot label for baseline.
+        compare_label: Plot label for perturbed system.
+        working_dir: Where difference CSV/PNG are written.
+        output_prefix: Output filename prefix (default: ``dccm_difference``).
+        plot_mode: ``difference_only`` or ``with_matrices``.
+        diff_threshold: |ΔC| cutoff for reporting changed pairs.
+        dpi: Figure resolution.
+
+    Returns:
+        Dict from ``plot_dccm_difference`` plus ``reference_csv`` / ``compare_csv`` paths.
+    """
+    from src.analysis.dccm_calculator import plot_dccm_difference as _plot_diff
+
+    Path(working_dir).mkdir(parents=True, exist_ok=True)
+
+    def _find_dccm_csv(sim_dir: str) -> Optional[str]:
+        analysis_dir = Path(sim_dir) / "analysis"
+        for search_root in [str(analysis_dir), sim_dir]:
+            for p in sorted(Path(search_root).rglob("dccm*.csv")):
+                return str(p)
+        return None
+
+    ref_csv = _find_dccm_csv(reference_sim_dir)
+    cmp_csv = _find_dccm_csv(compare_sim_dir)
+    if not ref_csv:
+        return {
+            "success": False,
+            "message": f"No dccm CSV in reference sim: {reference_sim_dir}",
+        }
+    if not cmp_csv:
+        return {
+            "success": False,
+            "message": f"No dccm CSV in compare sim: {compare_sim_dir}",
+        }
+
+    result = _plot_diff.func(
+        reference_dccm_file=ref_csv,
+        compare_dccm_file=cmp_csv,
+        reference_label=reference_label,
+        compare_label=compare_label,
+        output_prefix=output_prefix,
+        working_dir=working_dir,
+        plot_mode=plot_mode,
+        diff_threshold=diff_threshold,
+        dpi=dpi,
+    )
+    result["reference_csv"] = ref_csv
+    result["compare_csv"] = cmp_csv
+
+    try:
+        from src.analysis.summary_logger import append_analysis_summary
+        append_analysis_summary(
+            working_dir=working_dir,
+            analysis_type="Combined_DCCM_Difference",
+            statistics=result.get("delta_matrix_stats", {}),
+            files=result.get("output_files", {}),
+            metadata={
+                "reference_sim_dir": reference_sim_dir,
+                "compare_sim_dir": compare_sim_dir,
+                "reference_label": reference_label,
+                "compare_label": compare_label,
+                "reference_csv": ref_csv,
+                "compare_csv": cmp_csv,
+            },
+        )
+    except Exception as se:
+        logger.warning(f"run_combined_dccm_difference: summary log failed: {se}")
+
+    return result
+

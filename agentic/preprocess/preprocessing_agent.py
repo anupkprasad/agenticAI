@@ -293,6 +293,11 @@ class PreprocessingAgent:
             
             # Step 2: Execute plan using tool executor
             result = self._execute_plan(agent_input, plan, state)
+
+            ligand_paths = set(result.ligand_files or [])
+            ion_paths = set(result.ion_files or [])
+            ligand_resnames = {res.lower() for res in (result.ligand_resnames or [])}
+            ion_resnames = {res.lower() for res in (result.ion_resnames or [])}
             
             # Step 3: Register all created files using SecureFileManager
             # Register protein file
@@ -308,15 +313,15 @@ class PreprocessingAgent:
                 if file_path == result.cleaned_pdb:
                     continue  # Already registered above
                 
-                filename = Path(file_path).name
-                # Determine component type from filename
-                if "ligand" in filename.lower():
+                stem = Path(file_path).stem.lower()
+                description_l = (description or "").lower()
+                if file_path in ligand_paths or stem in ligand_resnames or description_l.startswith("ligand"):
                     self.file_manager.register_external_file(
                         file_path=file_path,
                         file_type="ligand",
                         description=description or "Preprocessed ligand structure"
                     )
-                elif "ion" in filename.lower():
+                elif file_path in ion_paths or stem in ion_resnames or description_l.startswith("ion"):
                     self.file_manager.register_external_file(
                         file_path=file_path,
                         file_type="ion",
@@ -387,6 +392,11 @@ class PreprocessingAgent:
             
             # Parse LLM response into structured plan
             plan_dict = self._extract_plan_json(content)
+
+            # Avoid accepting malformed LLM output as a valid no-op run.
+            if not isinstance(plan_dict.get("steps"), list) or not plan_dict.get("steps"):
+                logger.warning("LLM preprocessing plan had no executable steps; using fallback plan")
+                return self._create_fallback_plan(agent_input, analysis)
             
             return PreprocessingPlan(
                 reasoning=plan_dict.get("reasoning", content[:500]),
@@ -770,6 +780,20 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         tool_retry_counts = {}
         
         try:
+            if not plan.steps:
+                return PreprocessingResult(
+                    success=False,
+                    report="Preprocessing failed: planning produced no executable steps",
+                    issues=["No executable preprocessing steps were generated"],
+                    warnings=warnings,
+                    generated_files=generated_files,
+                    ligand_files=ligand_files,
+                    ligand_resnames=sorted(set(ligand_resnames)),
+                    ion_files=ion_files,
+                    ion_resnames=sorted(set(ion_resnames)),
+                    execution_log="No preprocessing steps available to execute"
+                )
+
             # Enforce max steps limit
             if len(plan.steps) > max_steps:
                 warnings.append(f"Plan has {len(plan.steps)} steps, limiting to {max_steps}")
@@ -980,6 +1004,15 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             # Preprocessing complete - no topology verification needed
             # Topology generation is handled by simulation setup agent
             execution_log_str = "\n".join(execution_log)
+
+            comp_sel = agent_input.component_selection or {}
+            if len(issues) == 0:
+                if not current_pdb or Path(current_pdb).resolve() == Path(agent_input.pdb_path).resolve():
+                    issues.append("Preprocessing did not produce a processed protein output in preprocess/")
+                if comp_sel.get("ligand") and not ligand_files:
+                    issues.append("Preprocessing did not produce ligand component output")
+                if comp_sel.get("ions") and not ion_files:
+                    issues.append("Preprocessing did not produce ion component output")
             
             return PreprocessingResult(
                 success=len(issues) == 0,

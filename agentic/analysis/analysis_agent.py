@@ -232,6 +232,8 @@ class MDAnalysisAgent:
         )
 
         try:
+            from .tools import run_combined_dccm_analysis, run_combined_dccm_difference
+
             result = run_combined_analysis.func(
                 sim_dirs=sim_dirs,
                 labels=labels,
@@ -254,6 +256,87 @@ class MDAnalysisAgent:
                 },
             )
 
+            # ── DCCM combined comparison & difference ─────────────────────
+            dccm_plots: list = []
+
+            # 1. Side-by-side heatmap for all simulations
+            try:
+                dccm_cmp = run_combined_dccm_analysis.func(
+                    sim_dirs=sim_dirs,
+                    labels=labels,
+                    working_dir=analysis_dir,
+                    output_file="dccm_comparison.png",
+                )
+                if dccm_cmp.get("success"):
+                    dccm_plots.append(dccm_cmp["output_path"])
+                    log_agent_action("analysis", "DCCM comparison generated",
+                                     {"output": dccm_cmp.get("output_path")})
+                else:
+                    logger.warning(f"DCCM comparison: {dccm_cmp.get('message')}")
+            except Exception as _exc:
+                logger.warning(f"DCCM comparison failed: {_exc}")
+
+            # 2. DCCM difference (apo vs holo): detect reference / compare pair.
+            #    Holo = sim dir/label containing ATP, MG, ligand, holo, bound, adp keywords.
+            #    Apo  = sim dir/label containing apo, protein_only, noligand keywords.
+            #    Fallback: if only one holo found, everything else becomes reference.
+            _HOLO_KW = {"holo", "atp", "mg", "adp", "ligand", "bound", "_atp_", "_mg_"}
+            _APO_KW  = {"apo", "protein_only", "protein-only", "noligand", "no_ligand", "_apo_"}
+
+            ref_idx: Optional[int] = None
+            cmp_idx: Optional[int] = None
+            for _i, (_sd, _lb) in enumerate(zip(sim_dirs, labels)):
+                _key = _sd.lower() + " " + _lb.lower()
+                if any(_kw in _key for _kw in _HOLO_KW) and cmp_idx is None:
+                    cmp_idx = _i
+                elif any(_kw in _key for _kw in _APO_KW) and ref_idx is None:
+                    ref_idx = _i
+
+            # Fallbacks when keywords are insufficient
+            if ref_idx is None and cmp_idx is None and len(sim_dirs) >= 2:
+                ref_idx, cmp_idx = 0, 1
+            elif ref_idx is None and cmp_idx is not None:
+                ref_idx = next((j for j in range(len(sim_dirs)) if j != cmp_idx), None)
+            elif cmp_idx is None and ref_idx is not None:
+                cmp_idx = next((j for j in range(len(sim_dirs)) if j != ref_idx), None)
+
+            if ref_idx is not None and cmp_idx is not None and ref_idx != cmp_idx:
+                try:
+                    dccm_diff = run_combined_dccm_difference.func(
+                        reference_sim_dir=sim_dirs[ref_idx],
+                        compare_sim_dir=sim_dirs[cmp_idx],
+                        reference_label=labels[ref_idx],
+                        compare_label=labels[cmp_idx],
+                        working_dir=analysis_dir,
+                        output_prefix="dccm_difference",
+                        plot_mode="with_matrices",
+                    )
+                    if dccm_diff.get("success"):
+                        for _f in dccm_diff.get("output_files", {}).values():
+                            if _f and _f not in dccm_plots:
+                                dccm_plots.append(_f)
+                        log_agent_action(
+                            "analysis", "DCCM difference computed",
+                            {
+                                "reference": labels[ref_idx],
+                                "compare":   labels[cmp_idx],
+                                "outputs":   dccm_diff.get("output_files", {}),
+                                "mean_abs_delta": dccm_diff.get(
+                                    "delta_matrix_stats", {}).get("mean_abs_delta"),
+                            },
+                        )
+                    else:
+                        logger.warning(
+                            f"DCCM difference failed: {dccm_diff.get('message')}"
+                        )
+                except Exception as _exc:
+                    logger.warning(f"DCCM difference failed: {_exc}")
+            else:
+                logger.info(
+                    "_run_combined_analysis: DCCM difference skipped "
+                    f"(ref_idx={ref_idx}, cmp_idx={cmp_idx})"
+                )
+
             # Store results in state for the reporter
             analysis_results = state.get("analysis_results") or {}
             analysis_results["combined"] = {
@@ -262,10 +345,11 @@ class MDAnalysisAgent:
                 "overlay_plots": plots,
                 "stats_tables": tables,
                 "skipped_metrics": skipped,
+                "dccm_plots": dccm_plots,
                 "analysis_dir": analysis_dir,
             }
             state["analysis_results"] = analysis_results
-            state["figures"] = list(state.get("figures") or []) + plots
+            state["figures"] = list(state.get("figures") or []) + plots + dccm_plots
 
             state["errors"] = [
                 e for e in state.get("errors", [])
@@ -955,6 +1039,8 @@ class MDAnalysisAgent:
                 "dccm", "cross-correlation", "cross correlation",
                 "correlated motion", "allosteric", "coupled motion",
                 "dynamics variation", "pseudokinase",
+                "dccm difference", "dccm diff", "effect of atp",
+                "ligand effect", "protein only", "protein+atp",
             ]
             needs_dccm = any(kw in user_goal_lower for kw in dccm_keywords)
 
