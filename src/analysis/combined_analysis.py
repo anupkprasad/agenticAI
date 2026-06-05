@@ -41,26 +41,41 @@ except ImportError:
 # Helpers
 # ---------------------------------------------------------------------------
 
+_DATA_EXTS = {".xvg", ".dat", ".csv", ".txt", ".xmgr", ".edr", ".xlsx"}
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf", ".webp"}
+
+
 def _find_metric_file(directory: str, filename_pattern: str) -> Optional[str]:
     """
-    Search *directory* recursively for the first file whose stem starts with
+    Search *directory* recursively for the best file whose stem starts with
     *filename_pattern* (case-insensitive).
 
-    Using a stem-prefix match (``stem.startswith``) instead of a substring
-    match prevents false hits where a pattern is embedded inside a longer
-    filename.  For example, ``"rg"`` must NOT match ``energy_output.xvg``
-    even though the substring "rg" appears inside "ene**rg**y".
-
-    Returns the full path or None.
+    Prefers numeric data files (``.xvg``, ``.dat``, …) over plot images
+    (``.png``) so ``energy.xvg`` wins over ``energy.png`` for overlays.
     """
     d = Path(directory)
     if not d.is_dir():
         return None
     pat = filename_pattern.lower()
-    for p in sorted(d.rglob("*")):
+    matches: List[Path] = []
+    for p in d.rglob("*"):
         if p.is_file() and p.stem.lower().startswith(pat):
-            return str(p)
-    return None
+            matches.append(p)
+    if not matches:
+        return None
+
+    def _priority(p: Path) -> Tuple[int, str]:
+        ext = p.suffix.lower()
+        if ext in _DATA_EXTS:
+            tier = 0
+        elif ext in _IMAGE_EXTS:
+            tier = 2
+        else:
+            tier = 1
+        return (tier, str(p))
+
+    matches.sort(key=_priority)
+    return str(matches[0])
 
 
 def _read_two_column_file(
@@ -262,6 +277,14 @@ def plot_combined_overlay(
         except Exception as exc:
             errors.append(f"{label}: {exc}")
             logger.warning(f"plot_combined_overlay: skipping {fpath}: {exc}")
+
+    if not per_file_stats:
+        plt.close(fig)
+        return {
+            "success": False,
+            "error": "No plottable data in any input file",
+            "errors": errors,
+        }
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)

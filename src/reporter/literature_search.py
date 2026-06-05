@@ -1,13 +1,241 @@
 """Literature search functionality for scientific reports"""
 import logging
 import json
-from typing import Dict, Any, List, Optional
+import re
+from typing import Dict, Any, List, Optional, Tuple
 from urllib.request import urlopen, Request
 from urllib.parse import quote_plus, urlencode
 from urllib.error import URLError
 from langchain.tools import tool
 
 logger = logging.getLogger(__name__)
+
+# Terms that signal dynamics / MD relevance in abstracts and titles
+_DYNAMICS_TERMS = (
+    "molecular dynamics", "md simulation", "conformational", "flexibility",
+    "rmsd", "rmsf", "alloster", "cross-correlation", "dccm", "dynamics",
+    "trajectory", "activation loop", "pseudokinase", "kinase",
+)
+
+_LIGAND_TERMS = ("atp", "ligand", "binding", "holo", "apo", "nucleotide")
+
+_REGION_RE = re.compile(
+    r"(?:resid(?:ue)?s?\s*)?(\d+)\s*(?:to|-)\s*(\d+)",
+    re.IGNORECASE,
+)
+_PROTEIN_MAP_RE = re.compile(
+    r'\b([A-Za-z0-9_\-]+)\s*:\s*([A-Za-z][A-Za-z0-9_\-]+)',
+)
+
+
+def extract_research_context(
+    user_goal: Optional[str] = None,
+    protein_name: Optional[str] = None,
+    analysis_types: Optional[List[str]] = None,
+    analysis_stats: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Extract structured research context from the user goal and analysis outputs."""
+    goal = (user_goal or "").strip()
+    goal_lower = goal.lower()
+    context: Dict[str, Any] = {
+        "user_goal": goal,
+        "protein_names": [],
+        "protein_ids": [],
+        "ligand_terms": [],
+        "region_terms": [],
+        "hypothesis_terms": [],
+        "analysis_types": list(analysis_types or []),
+        "finding_phrases": [],
+    }
+
+    if protein_name:
+        for part in re.split(r"[,;/\s]+", protein_name):
+            part = part.strip()
+            if len(part) >= 2:
+                context["protein_names"].append(part)
+
+    for match in _PROTEIN_MAP_RE.finditer(goal):
+        pid, pname = match.group(1).strip(), match.group(2).strip()
+        if len(pid) >= 3 and pname[0].isalpha():
+            context["protein_ids"].append(pid)
+            if pname not in context["protein_names"]:
+                context["protein_names"].append(pname)
+
+    for term in _LIGAND_TERMS:
+        if term in goal_lower:
+            context["ligand_terms"].append(term)
+
+    for match in _REGION_RE.finditer(goal):
+        context["region_terms"].append(f"residues {match.group(1)}-{match.group(2)}")
+
+    _HYP_TRIGGERS = (
+        "inhibit", "bind", "interact", "affect", "role", "function", "mechanism",
+        "pathway", "stability", "flexibility", "alloster", "mutation", "mutant",
+        "drug", "therapeutic", "disease", "cancer", "activate", "deactivate",
+        "phosphorylat", "fold", "unfold", "aggregate", "dimer", "oligomer",
+        "signaling", "effect of", "compare", "versus", "apo", "holo",
+    )
+    for trig in _HYP_TRIGGERS:
+        if trig in goal_lower:
+            context["hypothesis_terms"].append(trig)
+
+    if analysis_stats:
+        for atype, stats in analysis_stats.items():
+            if not isinstance(stats, dict):
+                continue
+            alow = str(atype).lower()
+            if "rmsd" in alow:
+                mean = stats.get("mean_rmsd_angstrom") or stats.get("mean")
+                if mean is not None:
+                    try:
+                        val = float(mean)
+                        phrase = (
+                            "conformational instability"
+                            if val > 3.0
+                            else "structural stability"
+                        )
+                        context["finding_phrases"].append(
+                            f"{phrase} (mean RMSD {val:.2f} Å)"
+                        )
+                    except (TypeError, ValueError):
+                        pass
+            if "rmsf" in alow:
+                mean = stats.get("mean_rmsf_angstrom") or stats.get("mean")
+                if mean is not None:
+                    try:
+                        val = float(mean)
+                        if val > 2.0:
+                            context["finding_phrases"].append(
+                                f"elevated backbone flexibility (mean RMSF {val:.2f} Å)"
+                            )
+                    except (TypeError, ValueError):
+                        pass
+            if "dccm" in alow or "correlation" in alow:
+                context["finding_phrases"].append("correlated residue motions / allosteric coupling")
+
+    # Deduplicate while preserving order
+    for key in ("protein_names", "protein_ids", "ligand_terms", "region_terms",
+                "hypothesis_terms", "finding_phrases"):
+        seen: set = set()
+        deduped = []
+        for item in context[key]:
+            low = str(item).lower()
+            if low not in seen:
+                seen.add(low)
+                deduped.append(item)
+        context[key] = deduped
+
+    return context
+
+
+def build_analysis_summary_text(
+    analysis_data: Optional[Dict[str, Any]] = None,
+    analysis_stats: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Build a concise text summary of simulation analysis for LLM prompts."""
+    lines: List[str] = []
+    stats_map = dict(analysis_stats or {})
+
+    if analysis_data and isinstance(analysis_data, dict):
+        for entry in analysis_data.get("entries", []):
+            atype = entry.get("analysis_type", "Unknown")
+            stats = entry.get("statistics", {})
+            if isinstance(stats, dict) and stats:
+                stats_map.setdefault(atype, stats)
+
+    for atype, stats in stats_map.items():
+        if not isinstance(stats, dict):
+            continue
+        numeric = {
+            k: v for k, v in stats.items()
+            if isinstance(v, (int, float)) and not k.startswith("_")
+        }
+        if numeric:
+            stat_line = ", ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
+                                  for k, v in list(numeric.items())[:8])
+            lines.append(f"- {atype}: {stat_line}")
+        else:
+            lines.append(f"- {atype}: completed")
+
+    return "\n".join(lines) if lines else "No quantitative analysis statistics available."
+
+
+def rank_literature_refs(
+    refs: List[Dict[str, Any]],
+    context: Dict[str, Any],
+    max_refs: int = 15,
+) -> List[Dict[str, Any]]:
+    """Re-rank literature by relevance to protein, user goal, and simulation findings."""
+    protein_names = context.get("protein_names") or []
+    hypothesis_terms = context.get("hypothesis_terms") or []
+    ligand_terms = context.get("ligand_terms") or []
+    region_terms = context.get("region_terms") or []
+    finding_phrases = context.get("finding_phrases") or []
+    analysis_types = [str(a).lower() for a in (context.get("analysis_types") or [])]
+
+    scored: List[Tuple[int, Dict[str, Any]]] = []
+    for ref in refs:
+        haystack = " ".join(filter(None, [
+            ref.get("title", ""),
+            ref.get("abstract", "") or "",
+            ref.get("journal", ""),
+            " ".join(ref.get("authors") or []),
+        ])).lower()
+
+        score = 0
+        for name in protein_names:
+            if name.lower() in haystack:
+                score += 8
+
+        for term in hypothesis_terms + ligand_terms:
+            if term.lower() in haystack:
+                score += 4
+
+        for term in _DYNAMICS_TERMS:
+            if term in haystack:
+                score += 2
+
+        for atype in analysis_types:
+            if atype and atype in haystack:
+                score += 2
+
+        for region in region_terms:
+            if region.lower() in haystack:
+                score += 3
+
+        for finding in finding_phrases:
+            for word in finding.lower().split():
+                if len(word) > 5 and word in haystack:
+                    score += 1
+                    break
+
+        if ref.get("abstract"):
+            score += 2  # prefer papers where we have abstract text for review
+
+        ref_copy = dict(ref)
+        ref_copy["_relevance_score"] = score
+        scored.append((score, ref_copy))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    ranked = [r for _, r in scored[:max_refs]]
+    for r in ranked:
+        r.pop("_relevance_score", None)
+    return ranked
+
+
+def extract_analysis_stats_from_entries(
+    analysis_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Pull analysis_type → statistics mapping from analysis_summary entries."""
+    stats_map: Dict[str, Any] = {}
+    if not isinstance(analysis_data, dict):
+        return stats_map
+    for entry in analysis_data.get("entries", []):
+        atype = entry.get("analysis_type")
+        stats = entry.get("statistics")
+        if atype and isinstance(stats, dict) and stats:
+            stats_map[atype] = stats
+    return stats_map
 
 
 @tool
@@ -379,11 +607,17 @@ def generate_literature_queries(
     Returns:
         Dict with generated queries keyed by priority label
     """
+    context = extract_research_context(
+        user_goal=user_goal,
+        protein_name=protein_name,
+        analysis_types=analysis_types,
+        analysis_stats=analysis_stats,
+    )
+
     # ── 1. Resolve protein name ───────────────────────────────────────────
-    # Use the provided protein_name as-is.  Do NOT replace it with a
-    # generic functional keyword — that strips out the specific protein.
-    # Functional context is added as an *additional* search term.
     _raw_name = (protein_name or "").strip()
+    if not _raw_name and context["protein_names"]:
+        _raw_name = context["protein_names"][0]
 
     # Known functional-context keywords that add biological specificity
     _FUNC_KEYWORDS = [
@@ -403,8 +637,6 @@ def generate_literature_queries(
     func_context = list(dict.fromkeys(func_context))
 
     # Decide the primary search name: prefer the given protein_name.
-    # If missing, fall back to the most specific functional keyword found,
-    # then try extracting a meaningful word from the user goal.
     if _raw_name:
         _name = _raw_name
     elif func_context:
@@ -431,6 +663,14 @@ def generate_literature_queries(
     # ── 2. Build queries in priority order ───────────────────────────────
     queries = {}  # Ordered dict (Python 3.7+)
 
+    # Multi-protein names from user goal (e.g. ERBB3, VRK3)
+    for idx, pname in enumerate(context["protein_names"][:4]):
+        queries[f"protein_{idx}_dynamics"] = f"{pname} protein dynamics molecular dynamics"
+        if func_context:
+            queries[f"protein_{idx}_function"] = (
+                f"{pname} {' '.join(func_context[:2])} structure dynamics"
+            )
+
     if _name:
         # Priority 1a: protein name + MD simulation
         queries["protein_dynamics"] = f"{_name} molecular dynamics simulation"
@@ -440,6 +680,24 @@ def generate_literature_queries(
         if func_context:
             fc = " ".join(func_context[:2])
             queries["protein_context"] = f"{_name} {fc} molecular dynamics"
+
+    # Ligand / ATP effect queries from user goal
+    if context["ligand_terms"] and _name:
+        lig = context["ligand_terms"][0]
+        queries["ligand_effect"] = f"{_name} {lig} binding protein dynamics simulation"
+
+    # Region-specific queries (e.g. activation loop residues 150-190)
+    if context["region_terms"] and _name:
+        region = context["region_terms"][0]
+        queries["region_dynamics"] = f"{_name} {region} flexibility dynamics"
+
+    # DCCM / allosteric when requested or computed
+    if any("dccm" in a.lower() or "correlation" in a.lower()
+           for a in (analysis_types or [])) or "dccm" in goal_lower:
+        if _name:
+            queries["allosteric_dccm"] = (
+                f"{_name} allosteric communication correlated motion molecular dynamics"
+            )
 
     # ── 3. Protein + analysis method queries ─────────────────────────────
     _METHOD_TEMPLATES = {
@@ -468,10 +726,8 @@ def generate_literature_queries(
             queries[f"method_{atype}"] = f"protein {method_terms}"
 
     # ── 4. Analysis-result–driven queries ────────────────────────────────
-    # Build queries that reflect the *actual* simulation findings so papers
-    # address the observed behaviour, not just the method.
-    if analysis_stats and _name:
-        stats = analysis_stats  # mapping atype → {"mean": ..., "max": ..., "min": ...}
+    stats = analysis_stats or {}
+    if stats and _name:
 
         # RMSD: high values → instability; low → stable
         for key in stats:
@@ -512,20 +768,10 @@ def generate_literature_queries(
                 break
 
     # ── 5. Hypothesis / objective queries from user goal ─────────────────
-    # Extract action phrases that reveal the scientific question
     if user_goal and _name:
-        _HYP_TRIGGERS = [
-            "inhibit", "bind", "interact", "affect", "role", "function",
-            "mechanism", "pathway", "stability", "flexibility", "alloster",
-            "mutation", "mutant", "drug", "therapeutic", "disease", "cancer",
-            "activate", "deactivate", "phosphorylat", "fold", "unfold",
-            "aggregate", "dimer", "oligomer", "signaling",
-        ]
-        goal_lower = (user_goal or "").lower()
-        hyp_terms = [t for t in _HYP_TRIGGERS if t in goal_lower]
+        hyp_terms = context.get("hypothesis_terms") or []
         if hyp_terms:
-            # Use up to 2 hypothesis terms with the protein name
-            hyp_str = " ".join(hyp_terms[:2])
+            hyp_str = " ".join(hyp_terms[:3])
             queries["hypothesis_objective"] = f"{_name} {hyp_str} molecular dynamics"
 
     # ── 6. Generic fallback ───────────────────────────────────────────────
@@ -541,4 +787,5 @@ def generate_literature_queries(
         "queries": queries,
         "total": len(queries),
         "protein_name": _name or None,
+        "research_context": context,
     }

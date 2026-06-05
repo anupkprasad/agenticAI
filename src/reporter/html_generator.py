@@ -20,7 +20,8 @@ def generate_html_report(
     system_info: Optional[Dict[str, Any]] = None,
     final_impression: Optional[str] = None,
     pdb_data: Optional[Any] = None,
-    enriched_prompt: Optional[str] = None
+    enriched_prompt: Optional[str] = None,
+    literature_review: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generate HTML report from analysis data and literature.
@@ -70,7 +71,8 @@ def generate_html_report(
             system_info=system_info,
             final_impression=final_impression,
             pdb_data=pdb_frames,
-            enriched_prompt=enriched_prompt
+            enriched_prompt=enriched_prompt,
+            literature_review=literature_review,
         )
         
         # Write to file
@@ -148,7 +150,8 @@ def build_html_content(
     system_info: Optional[Dict[str, Any]] = None,
     final_impression: Optional[str] = None,
     pdb_data: Optional[Union[str, Dict[str, str]]] = None,
-    enriched_prompt: Optional[str] = None
+    enriched_prompt: Optional[str] = None,
+    literature_review: Optional[str] = None,
 ) -> str:
     """Build HTML content for report (not a @tool, internal helper)"""
 
@@ -384,6 +387,22 @@ def build_html_content(
             background-color: #f9fafb;
             border-left: 4px solid #6b7280;
             border-radius: 6px;
+        }
+        .literature-review {
+            background: #f0fdf4;
+            border-left: 4px solid #22c55e;
+            padding: 18px 22px;
+            border-radius: 8px;
+            margin: 12px 0 20px;
+            line-height: 1.75;
+        }
+        .literature-review sup { color: #15803d; font-weight: 700; }
+        .reference-abstract {
+            font-size: 0.9em;
+            color: #4b5563;
+            margin-top: 6px;
+            line-height: 1.5;
+            font-style: italic;
         }
         .reference-title {
             font-weight: 700;
@@ -752,61 +771,86 @@ def build_html_content(
         html_parts.append('</div>')
         html_parts.append('<div class="section-divider"></div>')
     
-    # Literature references
-    if literature_refs:
-        display_refs = literature_refs[:10]  # Max 10 references
-        html_parts.append("<h2>📚 Literature</h2>")
-        html_parts.append(f'<p>Found {len(literature_refs)} relevant publications (showing top {len(display_refs)}):</p>')
-        
-        for idx, ref in enumerate(display_refs, 1):
-            import html as _html_mod
-            title = _html_mod.escape(ref.get("title", "Unknown"))
-            doi = ref.get("doi")
-            pmid = ref.get("pmid")
+    # Literature review and references
+    if literature_review or literature_refs:
+        import html as _html_mod
+        import re as _re_lit
 
-            html_parts.append('<div class="reference">')
+        html_parts.append("<h2>📚 Literature Review</h2>")
 
-            # Title — linked to DOI if available, otherwise PubMed, otherwise url
-            url = ref.get("url")
-            source_tag = ref.get("source", "")
-            if doi:
-                html_parts.append(f'<div class="reference-title">[{idx}] <a href="https://doi.org/{_html_mod.escape(doi)}" target="_blank">{title}</a></div>')
-            elif pmid:
-                html_parts.append(f'<div class="reference-title">[{idx}] <a href="https://pubmed.ncbi.nlm.nih.gov/{_html_mod.escape(pmid)}/" target="_blank">{title}</a></div>')
-            elif url:
-                html_parts.append(f'<div class="reference-title">[{idx}] <a href="{_html_mod.escape(url)}" target="_blank">{title}</a></div>')
-            else:
-                html_parts.append(f'<div class="reference-title">[{idx}] {title}</div>')
+        if literature_review:
+            html_parts.append('<div class="literature-review">')
+            for paragraph in literature_review.split("\n\n"):
+                paragraph = paragraph.strip()
+                if paragraph:
+                    paragraph = _re_lit.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", paragraph)
+                    paragraph = _re_lit.sub(
+                        r"\[(\d+)\]",
+                        r'<sup>[\1]</sup>',
+                        paragraph,
+                    )
+                    html_parts.append(f"<p>{paragraph}</p>")
+            html_parts.append("</div>")
 
-            # Authors
-            authors = ref.get("authors", [])
-            if authors:
-                author_str = ", ".join(authors[:5])
-                if len(authors) > 5:
-                    author_str += " et al."
-                html_parts.append(f'<div class="reference-authors">{_html_mod.escape(author_str)}</div>')
+        if literature_refs:
+            display_refs = literature_refs[:10]
+            html_parts.append(
+                f"<h3>References</h3>"
+                f"<p>{len(literature_refs)} relevant publications identified "
+                f"(showing top {len(display_refs)} by relevance to your study):</p>"
+            )
 
-            # Journal, year (single compact line)
-            journal = ref.get("journal", "")
-            year = ref.get("year", "")
-            if journal or year or source_tag:
-                meta = f'<span class="journal">{_html_mod.escape(journal)}</span>'
-                if year:
-                    meta += f' ({year})'
-                if source_tag and source_tag not in ("PubMed", ""):
-                    meta += f' <span style="background:#e0e7ff;color:#3730a3;padding:1px 6px;border-radius:4px;font-size:0.75em;margin-left:4px;">{_html_mod.escape(source_tag)}</span>'
-                html_parts.append(f'<div class="reference-meta">{meta}</div>')
+            for idx, ref in enumerate(display_refs, 1):
+                title = _html_mod.escape(ref.get("title", "Unknown"))
+                doi = ref.get("doi")
+                pmid = ref.get("pmid")
 
-            # DOI and PMID on one line
-            id_parts = []
-            if doi:
-                id_parts.append(f'DOI: <a href="https://doi.org/{_html_mod.escape(doi)}" target="_blank">{_html_mod.escape(doi)}</a>')
-            if pmid:
-                id_parts.append(f'PMID: <a href="https://pubmed.ncbi.nlm.nih.gov/{_html_mod.escape(pmid)}/" target="_blank">{_html_mod.escape(pmid)}</a>')
-            if id_parts:
-                html_parts.append(f'<div class="reference-doi">{", ".join(id_parts)}</div>')
+                html_parts.append('<div class="reference">')
 
-            html_parts.append('</div>')
+                url = ref.get("url")
+                source_tag = ref.get("source", "")
+                if doi:
+                    html_parts.append(f'<div class="reference-title">[{idx}] <a href="https://doi.org/{_html_mod.escape(doi)}" target="_blank">{title}</a></div>')
+                elif pmid:
+                    html_parts.append(f'<div class="reference-title">[{idx}] <a href="https://pubmed.ncbi.nlm.nih.gov/{_html_mod.escape(pmid)}/" target="_blank">{title}</a></div>')
+                elif url:
+                    html_parts.append(f'<div class="reference-title">[{idx}] <a href="{_html_mod.escape(url)}" target="_blank">{title}</a></div>')
+                else:
+                    html_parts.append(f'<div class="reference-title">[{idx}] {title}</div>')
+
+                authors = ref.get("authors", [])
+                if authors:
+                    author_str = ", ".join(authors[:5])
+                    if len(authors) > 5:
+                        author_str += " et al."
+                    html_parts.append(f'<div class="reference-authors">{_html_mod.escape(author_str)}</div>')
+
+                journal = ref.get("journal", "")
+                year = ref.get("year", "")
+                if journal or year or source_tag:
+                    meta = f'<span class="journal">{_html_mod.escape(journal)}</span>'
+                    if year:
+                        meta += f' ({year})'
+                    if source_tag and source_tag not in ("PubMed", ""):
+                        meta += f' <span style="background:#e0e7ff;color:#3730a3;padding:1px 6px;border-radius:4px;font-size:0.75em;margin-left:4px;">{_html_mod.escape(source_tag)}</span>'
+                    html_parts.append(f'<div class="reference-meta">{meta}</div>')
+
+                id_parts = []
+                if doi:
+                    id_parts.append(f'DOI: <a href="https://doi.org/{_html_mod.escape(doi)}" target="_blank">{_html_mod.escape(doi)}</a>')
+                if pmid:
+                    id_parts.append(f'PMID: <a href="https://pubmed.ncbi.nlm.nih.gov/{_html_mod.escape(pmid)}/" target="_blank">{_html_mod.escape(pmid)}</a>')
+                if id_parts:
+                    html_parts.append(f'<div class="reference-doi">{", ".join(id_parts)}</div>')
+
+                abstract = ref.get("abstract") or ""
+                if abstract:
+                    snippet = abstract[:500] + ("…" if len(abstract) > 500 else "")
+                    html_parts.append(
+                        f'<div class="reference-abstract">{_html_mod.escape(snippet)}</div>'
+                    )
+
+                html_parts.append('</div>')
     
     # Final Impression section
     if final_impression:

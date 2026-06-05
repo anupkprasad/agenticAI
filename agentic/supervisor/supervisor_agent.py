@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from ..state import MDState
 from ..utils import log_supervisor_routing, log_agent_action
+from ..utils.plan_persistence import save_plan_artifacts
 from ..utils.conversation_logger import set_log_file
 from ..llm import LLMClient
 from ..planner import MDPlanner
@@ -908,7 +909,82 @@ class MDSupervisor:
                 "combined_plan_preview": (combined_plan or "")[:300],
             },
         )
+        self._save_multi_sim_master_plan(
+            base_working_dir=base_working_dir,
+            sim_prompts=sim_prompts,
+            combined_plan=combined_plan or "",
+            enriched_prompt=enriched_prompt,
+            agents_desc=agents_desc,
+        )
         return state
+
+    def _save_multi_sim_master_plan(
+        self,
+        *,
+        base_working_dir: str,
+        sim_prompts: List[Dict[str, Any]],
+        combined_plan: str,
+        enriched_prompt: str,
+        agents_desc: str,
+    ) -> None:
+        """Persist overall multi-simulation master plan to {base}/planner/."""
+        from datetime import datetime
+
+        plan_data = {
+            "title": "Multi-Simulation Master Plan",
+            "format": "master_plan",
+            "phase": "master",
+            "workflow_pipeline": agents_desc,
+            "enriched_prompt": enriched_prompt,
+            "sim_prompts": sim_prompts,
+            "combined_analysis_plan": combined_plan,
+            "num_simulations": len(sim_prompts),
+            "labels": [s.get("label") for s in sim_prompts],
+        }
+
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        md_lines = [
+            "# Multi-Simulation Master Plan",
+            "",
+            f"**Generated:** {ts}",
+            f"**Simulations:** {len(sim_prompts)}",
+            f"**Pipeline:** {agents_desc}",
+            "",
+            "## Overall Goal",
+            "",
+            enriched_prompt or "_N/A_",
+            "",
+            "## Per-Simulation Prompts",
+            "",
+        ]
+        for idx, sim in enumerate(sim_prompts, 1):
+            md_lines += [
+                f"### {idx}. {sim.get('label', f'sim_{idx}')}",
+                "",
+                f"- **PDB:** {sim.get('pdb', 'N/A')}",
+                f"- **Directory:** {sim.get('working_dir', 'N/A')}",
+                f"- **Case:** {sim.get('case_description', 'N/A')}",
+                "",
+                sim.get("prompt", "_No prompt text._"),
+                "",
+            ]
+        md_lines += [
+            "## Combined Analysis Plan",
+            "",
+            combined_plan or "_No combined analysis plan._",
+        ]
+
+        save_plan_artifacts(
+            base_working_dir,
+            "planner",
+            json_filename="master_plan.json",
+            md_filename="master_plan.md",
+            history_filename="execution_plans.jsonl",
+            plan_data=plan_data,
+            md_content="\n".join(md_lines),
+            phase="master",
+            label="overall",
+        )
 
     def _extract_json_from_response(self, response: str) -> Optional[Dict[str, Any]]:
         """Extract the first JSON object from an LLM response using brace counting."""

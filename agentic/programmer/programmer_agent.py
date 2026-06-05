@@ -10,6 +10,7 @@ import os
 import re
 import json
 import logging
+from datetime import datetime
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from ..utils import (
     log_agent_action, log_file_operation, log_agent_completion, log_error,
     SecureFileManager
 )
+from ..utils.plan_persistence import save_plan_artifacts, ensure_agent_dir
 from .schemas import (
     ProgrammerPlan, ProgrammerStep, ProgrammerResult,
     ProgrammerExecutionResult, ProgrammerAgentInput, ProgrammerAgentOutput,
@@ -376,6 +378,8 @@ class MDProgrammer:
                     "reasoning": plan.reasoning[:100] if plan.reasoning else "N/A"
                 }
             )
+
+            self._save_programmer_plan(plan, agent_input, state)
             
             print(f"DEBUG: Calling _execute_programmer_plan...", file=sys.stderr)
             
@@ -386,6 +390,8 @@ class MDProgrammer:
             print(f"DEBUG: Result success: {result.success}", file=sys.stderr)
             print(f"DEBUG: Result issues: {result.issues}", file=sys.stderr)
             
+            self._save_execution_report(plan, result, agent_input, state)
+
             # Step 3: Create final output
             output = ProgrammerAgentOutput(
                 success=result.success and len(result.issues) == 0,
@@ -1164,6 +1170,125 @@ metadata={{{{
             }
         )
     
+    def _save_programmer_plan(
+        self,
+        plan: ProgrammerPlan,
+        agent_input: ProgrammerAgentInput,
+        state: MDState,
+    ) -> None:
+        """Persist programmer LLM plan under {working_directory}/programmer/."""
+        working_dir = agent_input.working_directory or state.get("working_directory", "working_dir")
+        phase = self._resolve_plan_phase(state)
+        label = self._resolve_plan_label(state)
+
+        plan_data = {
+            "title": "Programmer Tool Generation Plan",
+            "reasoning": plan.reasoning,
+            "overview": plan.overview,
+            "estimated_complexity": plan.estimated_complexity,
+            "potential_issues": plan.potential_issues,
+            "recommendations": plan.recommendations,
+            "planner_instructions": agent_input.planner_instructions,
+            "tool_specifications": agent_input.tool_specifications,
+            "steps": [
+                {
+                    "name": step.name,
+                    "description": step.description,
+                    "tool_name": step.tool_name,
+                    "tool_params": step.tool_params,
+                    "reason": step.reason,
+                }
+                for step in plan.steps
+            ],
+            "is_multi_simulation": state.get("is_multi_simulation", False),
+            "multi_sim_phase": state.get("multi_sim_phase"),
+            "multi_sim_base_dir": state.get("multi_sim_base_dir"),
+        }
+
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        md_lines = [
+            "# Programmer Plan",
+            "",
+            f"**Generated:** {ts}",
+            f"**Phase:** {phase or 'single'}",
+        ]
+        if label:
+            md_lines.append(f"**Simulation:** {label}")
+        md_lines += [
+            "",
+            "## Reasoning",
+            "",
+            plan.reasoning or "_N/A_",
+            "",
+            "## Overview",
+            "",
+            plan.overview or "_N/A_",
+            "",
+            f"## Steps ({len(plan.steps)})",
+            "",
+        ]
+        for idx, step in enumerate(plan.steps, 1):
+            md_lines += [
+                f"### Step {idx}: {step.name}",
+                "",
+                f"**Tool:** `{step.tool_name}`",
+                "",
+                f"**Description:** {step.description}",
+                "",
+                f"**Reason:** {step.reason}",
+                "",
+            ]
+
+        save_plan_artifacts(
+            working_dir,
+            "programmer",
+            json_filename="programmer_plan.json",
+            md_filename="programmer_plan.md",
+            history_filename="programmer_plans.jsonl",
+            plan_data=plan_data,
+            md_content="\n".join(md_lines),
+            phase=phase,
+            label=label,
+        )
+
+    def _save_execution_report(
+        self,
+        plan: ProgrammerPlan,
+        result: ProgrammerExecutionResult,
+        agent_input: ProgrammerAgentInput,
+        state: MDState,
+    ) -> None:
+        """Save tool-generation execution report to programmer/execution_report.md."""
+        try:
+            working_dir = agent_input.working_directory or state.get("working_directory", "working_dir")
+            agent_dir = ensure_agent_dir(working_dir, "programmer")
+            report_path = agent_dir / "execution_report.md"
+            report_path.write_text(result.report or "", encoding="utf-8")
+            logger.info(f"Saved programmer execution report to {report_path}")
+        except Exception as exc:
+            logger.warning(f"Failed to save programmer execution report: {exc}")
+
+    def _resolve_plan_phase(self, state: MDState) -> Optional[str]:
+        if not state.get("is_multi_simulation"):
+            return "single"
+        multi_phase = state.get("multi_sim_phase")
+        if multi_phase == "combined_analysis":
+            return "combined_analysis"
+        if multi_phase == "executing_sims":
+            return "per_simulation"
+        return "per_simulation"
+
+    def _resolve_plan_label(self, state: MDState) -> Optional[str]:
+        if not state.get("is_multi_simulation"):
+            return None
+        if state.get("multi_sim_phase") == "combined_analysis":
+            return "combined"
+        sim_prompts = state.get("sim_prompts") or []
+        current_idx = state.get("current_sim_index", 0)
+        if 0 <= current_idx < len(sim_prompts):
+            return sim_prompts[current_idx].get("label")
+        return Path(state.get("working_directory", "")).name or None
+
     def _update_state(self, state: MDState, output: ProgrammerAgentOutput) -> None:
         """Update workflow state with programmer results"""
         

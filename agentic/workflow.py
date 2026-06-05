@@ -789,9 +789,9 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             else:
                 agents_needed = _SUBTASK_AGENTS.get(subtask_type, list(_AGENT_DIR_MAP.keys()))
 
-            # supervisor is always needed (stores execution reports / state)
+            # supervisor/planner/programmer always needed (state, plans, generated tools)
             dirs_to_create = [_AGENT_DIR_MAP[a] for a in agents_needed] + \
-                             [str(Path(working_dir) / "supervisor")]
+                             [str(Path(working_dir) / d) for d in ("supervisor", "planner", "programmer")]
             for agent_dir in dirs_to_create:
                 Path(agent_dir).mkdir(parents=True, exist_ok=True)
         

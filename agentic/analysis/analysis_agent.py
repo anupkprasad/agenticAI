@@ -213,17 +213,11 @@ class MDAnalysisAgent:
 
         # Apply protein name mapping from goal text (fallback for re-runs where
         # labels may still be raw UniProt IDs from a prior planner run).
-        import re as _re_nm_a
+        from src.reporter.combined_reporter import _parse_label_name_map, apply_label_name_map
         _nm_text = (state.get("master_enriched_prompt") or "") + " " + (state.get("user_goal", "") or "")
-        _name_map_a: dict = {}
-        for _m in _re_nm_a.finditer(
-            r'\b([A-Za-z0-9]{4,12})\s*:\s*([A-Za-z][A-Za-z0-9_\-]{1,30})', _nm_text
-        ):
-            _k, _v = _m.group(1).lower(), _m.group(2).strip()
-            if any(c.isdigit() for c in _k) and _v[0].isupper():
-                _name_map_a[_k] = _v
+        _name_map_a = _parse_label_name_map(_nm_text)
         if _name_map_a:
-            labels = [_name_map_a.get(lbl.lower(), lbl) for lbl in labels]
+            labels = apply_label_name_map(labels, _name_map_a)
 
         log_agent_start(
             "analysis",

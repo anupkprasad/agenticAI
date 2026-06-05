@@ -65,30 +65,60 @@ def _read_jsonl(path: str) -> List[Dict[str, Any]]:
 
 
 def _parse_label_name_map(text: str) -> Dict[str, str]:
-    """Extract a {label: protein_name} mapping from free text.
+    """Extract a {uniprot_id: protein_name} mapping from free text.
 
     Handles patterns like:
       "p17612: KAPCA, p24941: CDK2"
-      "p17612:KAPCA_HUMAN  p24941:CDK2_HUMAN"
+      "p21860: ERBB3"
 
-    Keys are lowercased labels; values are the protein names exactly as given.
-    Silently returns {} if nothing is found.
+    Keys are lowercased UniProt-style IDs; values are protein names as given.
     """
     mapping: Dict[str, str] = {}
     if not text:
         return mapping
-    # Pattern: <word_id><optional_space>:<optional_space><protein_name>
-    # Both the id and name may contain letters, digits, underscores, hyphens.
     for m in re.finditer(
         r'\b([A-Za-z0-9_\-]+)\s*:\s*([A-Za-z][A-Za-z0-9_\-]+)',
         text
     ):
         key, val = m.group(1).strip(), m.group(2).strip()
-        # Skip overly generic pairs that aren't ID→name mappings
-        # (e.g. "RMSD: 2.5" — value must start with a letter)
         if val[0].isalpha() and len(key) >= 3 and len(val) >= 2:
             mapping[key.lower()] = val
     return mapping
+
+
+def resolve_display_label(label: str, name_map: Optional[Dict[str, str]] = None) -> str:
+    """Map simulation directory labels to protein-based display names.
+
+    Examples (map ``p21860`` → ``ERBB3``):
+      ``p21860``           → ``ERBB3``
+      ``p21860_ATP_MG``    → ``ERBB3_ATP_MG``
+      ``p21860-protein``   → ``ERBB3-protein``
+    """
+    if not label or not name_map:
+        return label
+    lmap = {k.lower(): v for k, v in name_map.items()}
+    low = label.lower()
+    if low in lmap:
+        return lmap[low]
+    for pid, pname in lmap.items():
+        if low == pid:
+            return pname
+        for sep in ("_", "-"):
+            prefix = f"{pid}{sep}"
+            if low.startswith(prefix) and len(label) > len(prefix):
+                suffix = label[len(pid):]  # keeps ``_ATP_MG`` or ``-protein``
+                return f"{pname}{suffix}"
+    return label
+
+
+def apply_label_name_map(
+    labels: List[str],
+    name_map: Optional[Dict[str, str]] = None,
+) -> List[str]:
+    """Apply ``resolve_display_label`` to every simulation label."""
+    if not name_map:
+        return list(labels)
+    return [resolve_display_label(lbl, name_map) for lbl in labels]
 
 
 def _collect_sim_summaries(
@@ -105,10 +135,9 @@ def _collect_sim_summaries(
     If *label_name_map* is provided it is used to replace raw labels (e.g.
     UniProt IDs) with human-readable protein names.
     """
-    _lmap = {k.lower(): v for k, v in (label_name_map or {}).items()}
     sims = []
     for sim_dir, label in zip(sim_dirs, labels):
-        display_label = _lmap.get(label.lower(), label)
+        display_label = resolve_display_label(label, label_name_map)
         analysis_dir = Path(sim_dir) / "analysis"
         jsonl = analysis_dir / "analysis_summary.jsonl"
         records: List[Dict[str, Any]] = []
@@ -156,10 +185,9 @@ def _collect_per_sim_resources(
     label_name_map: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Read comprehensive_summary.json and execution_plan.json for each sim."""
-    _lmap = {k.lower(): v for k, v in (label_name_map or {}).items()}
     resources = []
     for sim_dir, label in zip(sim_dirs, labels):
-        display_label = _lmap.get(label.lower(), label)
+        display_label = resolve_display_label(label, label_name_map)
         res: Dict[str, Any] = {
             "label": display_label,
             "sim_dir": sim_dir,
@@ -697,16 +725,38 @@ def _build_3d_viewer_html(pdb_frames: Dict[str, str]) -> str:
         return ""
 
 
-def _build_literature_html(refs: List[Dict[str, Any]]) -> str:
-    """Render aggregated literature references."""
-    if not refs:
+def _build_literature_html(
+    refs: List[Dict[str, Any]],
+    literature_review: Optional[str] = None,
+) -> str:
+    """Render contextual literature review narrative and reference list."""
+    if not refs and not literature_review:
         return ""
-    display = refs  # already capped at max_refs by _aggregate_literature
+    display = refs  # already capped at max_refs by caller
 
-    parts = ["<h2>&#128218; Literature References</h2>"]
+    parts = ["<h2>&#128218; Literature Review</h2>"]
+
+    if literature_review:
+        parts.append('<div class="literature-review">')
+        for paragraph in literature_review.split("\n\n"):
+            paragraph = paragraph.strip()
+            if paragraph:
+                paragraph = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", paragraph)
+                paragraph = re.sub(
+                    r"\[(\d+)\]",
+                    r'<sup class="lit-cite">[\1]</sup>',
+                    paragraph,
+                )
+                parts.append(f"<p>{paragraph}</p>")
+        parts.append("</div>")
+
+    if not display:
+        return "\n".join(parts)
+
     parts.append(
-        f"<p>Top {len(display)} most relevant {'reference' if len(display) == 1 else 'references'} "
-        f"aggregated and ranked from individual simulation reports:</p>"
+        f"<h3 style='margin-top:1.4em;color:#1e40af;'>References</h3>"
+        f"<p>Top {len(display)} publications selected for relevance to the study "
+        f"objectives and simulation findings:</p>"
     )
 
     for idx, ref in enumerate(display, 1):
@@ -769,6 +819,14 @@ def _build_literature_html(refs: List[Dict[str, Any]]) -> str:
             )
         if id_parts:
             parts.append(f'<div class="reference-doi">{", ".join(id_parts)}</div>')
+
+        abstract = ref.get("abstract") or ref.get("relevance_note") or ""
+        if abstract:
+            snippet = abstract[:500] + ("…" if len(abstract) > 500 else "")
+            parts.append(
+                f'<div class="reference-abstract" style="font-size:0.9em;color:#4b5563;'
+                f'margin-top:6px;line-height:1.5;">{_html_mod.escape(snippet)}</div>'
+            )
 
         parts.append("</div>")
 
@@ -901,6 +959,13 @@ tr:hover td { background: #dbeafe; transition: background 0.15s; }
     font-size: 11px; font-weight: 600; margin-left: 6px;
     background: #dbeafe; color: #1e40af;
 }
+.literature-review {
+    background: #f0fdf4; border-left: 4px solid #22c55e;
+    padding: 18px 22px; border-radius: 8px; margin: 12px 0 20px;
+    line-height: 1.75; font-size: 15px;
+}
+.literature-review .lit-cite { color: #15803d; font-weight: 700; }
+.reference-abstract { font-style: italic; }
 /* ---- Final impression ---- */
 .final-impression {
     margin: 20px 0; padding: 28px 30px; border-radius: 10px;
@@ -1056,6 +1121,90 @@ def _find_overlay_by_type(overlay_plots: List[str], keyword: str) -> Optional[st
         if kl in Path(p).name.lower():
             return p
     return None
+
+
+def _dedupe_dccm_combined_plots(plot_paths: List[str]) -> List[str]:
+    """Drop standalone ΔDCCM figures when a comparison panel already embeds the difference.
+
+    ``plot_dccm_comparison`` appends a Δ panel for two-simulation comparisons, so
+    separate ``dccm_difference*.png`` files would duplicate that content in reports.
+    """
+    if not plot_paths:
+        return []
+    names = [Path(p).name.lower() for p in plot_paths]
+    has_comparison = any("comparison" in n for n in names)
+    if not has_comparison:
+        return list(plot_paths)
+    return [
+        p for p in plot_paths
+        if "difference" not in Path(p).name.lower()
+    ]
+
+
+def _collect_comparative_panel_plot_paths(
+    overlay_plots: List[str],
+    sim_dirs: List[str],
+    labels: List[str],
+) -> set:
+    """Paths already shown in the Comparative Dynamics Summary (Panels A–F)."""
+    used: set = set()
+
+    def _mark(path: Optional[str]) -> None:
+        if path and Path(path).exists():
+            used.add(str(Path(path).resolve()))
+
+    for keyword in ("rmsd", "rmsf", "rg", "gyration", "com_distance"):
+        _mark(_find_overlay_by_type(overlay_plots, keyword))
+
+    for plot_path in overlay_plots:
+        name = Path(plot_path).name.lower()
+        if "rmsf_segment" in name or "dssp_comparison" in name:
+            _mark(plot_path)
+
+    for _, pth in _find_per_sim_plots(sim_dirs, labels, "pocket_distance"):
+        _mark(pth)
+    if not used:
+        for _, pth in _find_per_sim_plots(sim_dirs, labels, "ligand_pocket"):
+            _mark(pth)
+
+    dccm_combined = _dedupe_dccm_combined_plots([
+        p for p in overlay_plots
+        if "dccm" in Path(p).name.lower()
+    ])
+    _has_dccm_comparison = any(
+        "comparison" in Path(p).name.lower() for p in dccm_combined
+    )
+    if not _has_dccm_comparison:
+        for _, pth in _find_per_sim_plots(sim_dirs, labels, "dccm_heatmap"):
+            _mark(pth)
+        for _, pth in _find_per_sim_plots(sim_dirs, labels, "dccm"):
+            _mark(pth)
+
+    for p in dccm_combined:
+        _mark(p)
+
+    for plot_path in overlay_plots:
+        name = Path(plot_path).name.lower()
+        if any(k in name for k in ("ligand_pocket_distance", "com_distance.png")):
+            _mark(plot_path)
+
+    return used
+
+
+def _filter_redundant_overlay_plots(
+    overlay_plots: List[str],
+    sim_dirs: List[str],
+    labels: List[str],
+) -> List[str]:
+    """Remove plots already embedded in the comparative dynamics multi-panel section."""
+    used = _collect_comparative_panel_plot_paths(overlay_plots, sim_dirs, labels)
+    filtered: List[str] = []
+    for plot_path in overlay_plots:
+        resolved = str(Path(plot_path).resolve()) if Path(plot_path).exists() else plot_path
+        if resolved in used or plot_path in used:
+            continue
+        filtered.append(plot_path)
+    return filtered
 
 
 def _find_per_sim_plots(
@@ -1479,17 +1628,23 @@ def _build_comparative_dynamics_section(
         pocket_body,
     )
 
-    # ── Panel E: DCCM heatmaps (per-sim) + comparison/difference (combined) ─
-    dccm_per_sim = _find_per_sim_plots(sim_dirs, labels, "dccm_heatmap")
-    if not dccm_per_sim:
-        dccm_per_sim = _find_per_sim_plots(sim_dirs, labels, "dccm")
+    # ── Panel E: combined DCCM comparison (apo / holo / Δ) — skip per-sim heatmaps ─
+    dccm_per_sim: List[Tuple[str, str]] = []
 
     # Separate combined DCCM plots (comparison / difference) from overlay list
-    _dccm_combined_plots = [
+    _dccm_combined_plots = _dedupe_dccm_combined_plots([
         p for p in overlay_plots
         if "dccm" in Path(p).name.lower()
-        and Path(p).name not in {Path(pp).name for _, pp in dccm_per_sim}
-    ]
+    ])
+
+    # When a multi-panel comparison figure exists, individual heatmaps are redundant
+    _has_dccm_comparison = any(
+        "comparison" in Path(p).name.lower() for p in _dccm_combined_plots
+    )
+    if not _has_dccm_comparison:
+        dccm_per_sim = _find_per_sim_plots(sim_dirs, labels, "dccm_heatmap")
+        if not dccm_per_sim:
+            dccm_per_sim = _find_per_sim_plots(sim_dirs, labels, "dccm")
 
     if not dccm_per_sim and not _dccm_combined_plots:
         # Last fallback: any dccm overlay
@@ -1586,6 +1741,8 @@ def generate_combined_html_report(
     enriched_prompt: Optional[str] = None,
     user_goal: Optional[str] = None,
     protein_name: Optional[str] = None,
+    literature_refs: Optional[List[Dict[str, Any]]] = None,
+    literature_review: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generate a rich comparison HTML report spanning multiple MD simulations.
@@ -1626,31 +1783,46 @@ def generate_combined_html_report(
     # didn't already find the label there.
     if label_name_map:
         logger.info("Label → protein name map: %s", label_name_map)
+        labels = apply_label_name_map(labels, label_name_map)
 
     # ---- Collect data -------------------------------------------------------
     sims_summary = _collect_sim_summaries(sim_dirs, labels, label_name_map)
     sim_resources = _collect_per_sim_resources(sim_dirs, labels, label_name_map)
 
     stats_html = _build_stats_section(sims_summary)
-    plots_html = _build_plots_section(overlay_plots)
 
     # Comparative Dynamics Summary — multi-panel figure (Panels A–F)
     comparative_html = _build_comparative_dynamics_section(
         overlay_plots, sims_summary, sim_dirs, labels
     )
 
+    # Additional overlay plots not already shown in the comparative section
+    extra_plots = _filter_redundant_overlay_plots(overlay_plots, sim_dirs, labels)
+    extra_plots_html = _build_plots_section(extra_plots)
+    extra_plots_section = ""
+    if extra_plots_html and "No overlay plots" not in extra_plots_html:
+        extra_plots_section = (
+            '<div class="section-divider"></div>\n'
+            '<h2>&#128200; Additional Comparison Figures</h2>\n'
+            '<p>Supplementary plots not included in the comparative dynamics summary above.</p>\n'
+            + extra_plots_html
+        )
+
     # 3D viewer: pick one representative PDB per sim (max 5)
     pdb_frames = _select_representative_pdbs(sim_dirs, labels, max_pdbs=5)
     viewer_html = _build_3d_viewer_html(pdb_frames) if pdb_frames else ""
 
-    # Literature: aggregate from per-sim HTML reports (deduplicated)
-    agg_refs = _aggregate_literature(
-        sim_resources,
-        max_refs=10,
-        hypothesis_text=enriched_prompt,
-        protein_name=protein_name,
-    )
-    literature_html = _build_literature_html(agg_refs)
+    # Literature: prefer freshly searched refs; fall back to per-sim HTML aggregation
+    if literature_refs:
+        agg_refs = literature_refs
+    else:
+        agg_refs = _aggregate_literature(
+            sim_resources,
+            max_refs=10,
+            hypothesis_text=enriched_prompt or user_goal,
+            protein_name=protein_name,
+        )
+    literature_html = _build_literature_html(agg_refs, literature_review=literature_review)
 
     # Final impression: synthesise cross-sim stats
     final_text = _build_combined_final_impression(sims_summary, sim_resources)
@@ -1743,6 +1915,8 @@ def generate_combined_html_report(
 {"<div class='section-divider'></div>" if viewer_html else ""}
 
 {comparative_html}
+
+{extra_plots_section}
 
 <div class="section-divider"></div>
 

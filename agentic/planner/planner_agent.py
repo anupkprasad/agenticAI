@@ -9,10 +9,13 @@ Creates execution plans with access to:
 import logging
 import yaml
 import os
+from datetime import datetime
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 from ..state import MDState
 from ..llm import LLMClient
 from ..utils import log_supervisor_routing, log_llm_interaction
+from ..utils.plan_persistence import save_plan_artifacts
 from ..programmer import MDProgrammer
 from .tools_registry import get_tools_registry
 from .knowledge_loader import get_knowledge_loader
@@ -218,8 +221,93 @@ class MDPlanner:
             "supervisor",
             f"Planner: Created natural language plan with {num_agents} agents. Returning to supervisor."
         )
+
+        self._save_execution_plan(plan, state)
         
         return state
+
+    def _save_execution_plan(self, plan: Dict[str, Any], state: MDState) -> None:
+        """Persist execution plan under {working_directory}/planner/."""
+        working_dir = state.get("working_directory") or "working_dir"
+        phase = self._resolve_plan_phase(state)
+        label = self._resolve_plan_label(state)
+
+        plan_data = {
+            "title": plan.get("title", "Execution Plan"),
+            "format": plan.get("format", "natural_language"),
+            "method": plan.get("method"),
+            "subtask_type": state.get("subtask_type"),
+            "agent_sequence": plan.get("agent_sequence", []),
+            "agent_plans": plan.get("agent_plans", {}),
+            "steps": plan.get("steps", []),
+            "full_plan": plan.get("full_plan", ""),
+            "user_goal": state.get("user_goal"),
+            "enriched_prompt": state.get("enriched_prompt") or state.get("rephrased_goal"),
+            "is_multi_simulation": state.get("is_multi_simulation", False),
+            "multi_sim_phase": state.get("multi_sim_phase"),
+            "multi_sim_base_dir": state.get("multi_sim_base_dir"),
+        }
+
+        full_plan = plan.get("full_plan", "")
+        agent_seq = plan.get("agent_sequence", [])
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        md_lines = [
+            "# Planner Execution Plan",
+            "",
+            f"**Generated:** {ts}",
+            f"**Phase:** {phase or 'single'}",
+        ]
+        if label:
+            md_lines.append(f"**Simulation:** {label}")
+        md_lines += [
+            "",
+            f"## Overview",
+            "",
+            f"**Title:** {plan_data['title']}",
+            f"**Agent sequence:** {' → '.join(agent_seq) if agent_seq else 'N/A'}",
+            f"**Subtask:** {state.get('subtask_type') or 'full_task'}",
+            "",
+            "## Full Plan",
+            "",
+            full_plan or "_No plan text available._",
+        ]
+
+        save_plan_artifacts(
+            working_dir,
+            "planner",
+            json_filename="execution_plan.json",
+            md_filename="execution_plan.md",
+            history_filename="execution_plans.jsonl",
+            plan_data=plan_data,
+            md_content="\n".join(md_lines),
+            phase=phase,
+            label=label,
+        )
+
+    def _resolve_plan_phase(self, state: MDState) -> Optional[str]:
+        """Classify which planning phase produced this plan."""
+        if not state.get("is_multi_simulation"):
+            return "single"
+        multi_phase = state.get("multi_sim_phase")
+        if multi_phase == "combined_analysis":
+            return "combined_analysis"
+        if multi_phase == "executing_sims":
+            return "per_simulation"
+        if state.get("combined_analysis_plan") and not state.get("execution_plan"):
+            return "combined_analysis"
+        return "per_simulation"
+
+    def _resolve_plan_label(self, state: MDState) -> Optional[str]:
+        """Return per-simulation label when running inside the multi-sim loop."""
+        if not state.get("is_multi_simulation"):
+            return None
+        if state.get("multi_sim_phase") == "combined_analysis":
+            return "combined"
+        sim_prompts = state.get("sim_prompts") or []
+        current_idx = state.get("current_sim_index", 0)
+        if 0 <= current_idx < len(sim_prompts):
+            return sim_prompts[current_idx].get("label")
+        return Path(state.get("working_directory", "")).name or None
     
     def _create_plan_from_analysis(
         self,
