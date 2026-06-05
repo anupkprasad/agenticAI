@@ -50,6 +50,14 @@ class MDState(TypedDict):
     component_selection: Optional[Dict[str, Any]]  # User-specified component selection
     structured_prompt: Optional[str]  # High-level structured prompt for planner
     
+    # Structure acquisition (when user provides UniProt but no local PDB)
+    structure_request: Optional[Dict[str, Any]]
+    structure_requests: Optional[Dict[str, Dict[str, Any]]]  # keyed by pdb stem / uniprot id
+    domain_context: Optional[str]  # Resolved domain/residue info for agent prompts
+    sim_case: Optional[Dict[str, Any]]  # Per-sim component case metadata in multi-sim mode
+    structure_acquisition_result: Optional[Dict[str, Any]]
+    structure_acquisition_log: Optional[List[str]]
+
     # Preprocessing stage
     raw_pdb: Optional[str]
     cleaned_pdb: Optional[str]

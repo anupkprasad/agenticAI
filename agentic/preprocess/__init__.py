@@ -17,7 +17,8 @@ from .schemas import (
     PreprocessingPlan,
     PreprocessingStep,
     PreprocessingResult,
-    PDBAnalysisResult
+    PDBAnalysisResult,
+    StructureRequest,
 )
 
 __all__ = [
@@ -28,5 +29,6 @@ __all__ = [
     "PreprocessingPlan",
     "PreprocessingStep",
     "PreprocessingResult",
-    "PDBAnalysisResult"
+    "PDBAnalysisResult",
+    "StructureRequest",
 ]

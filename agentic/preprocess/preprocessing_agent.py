@@ -17,9 +17,18 @@ from ..utils import (
     SecureFileManager
 )
 from .schemas import (
-    PreprocessingPlan, PreprocessingStep, 
-    PreprocessingResult, PreprocessingAgentInput, PreprocessingAgentOutput
+    PreprocessingPlan, PreprocessingStep,
+    PreprocessingResult, PreprocessingAgentInput, PreprocessingAgentOutput,
+    StructureRequest,
 )
+from src.preprocess.structure_request_parser import (
+    parse_structure_request,
+    build_output_basename,
+    build_domain_context_for_agents,
+    resolve_domain_residue_range,
+)
+from src.preprocess.structure_acquisition import acquire_structure_from_request
+from src.preprocess.domain_extractor import extract_domain
 from .tools import PreprocessingToolExecutor, get_tool_metadata
 
 logger = logging.getLogger(__name__)
@@ -230,8 +239,10 @@ class PreprocessingAgent:
             else:
                 planner_instructions = rec_block
             
+        structure_request = self._resolve_structure_request(state, planner_instructions)
+
         return PreprocessingAgentInput(
-            pdb_path=state.get("raw_pdb", ""),
+            pdb_path=state.get("raw_pdb", "") or "",
             working_directory=state.get("working_directory", "working_dir"),
             force_field=state.get("force_field", defaults.get("force_field", "amber99sb-ildn")),
             water_model=state.get("water_model", defaults.get("water_model", "tip3p")),
@@ -239,8 +250,201 @@ class PreprocessingAgent:
             add_hydrogens=state.get("add_hydrogens", defaults.get("add_hydrogens", True)),
             user_goal=state.get("user_goal", ""),
             additional_instructions=planner_instructions,
-            component_selection=state.get("component_selection")
+            component_selection=state.get("component_selection"),
+            structure_request=structure_request,
         )
+
+    def _resolve_structure_request(
+        self, state: MDState, planner_instructions: Optional[str]
+    ) -> Optional[StructureRequest]:
+        """Build StructureRequest from state or parse user/planner text."""
+        raw = state.get("structure_request")
+        if isinstance(raw, dict) and raw.get("uniprot_id"):
+            return StructureRequest(**raw)
+
+        combined_text = "\n".join(
+            part for part in (
+                state.get("user_goal_original", ""),
+                state.get("user_goal", ""),
+                state.get("master_enriched_prompt", ""),
+                planner_instructions or "",
+                state.get("preprocessing_instructions", "") or "",
+            )
+            if part
+        )
+        parsed = parse_structure_request(combined_text)
+        if not parsed:
+            return None
+
+        defaults = self.config.get("structure_acquisition", {})
+        start_resid = parsed.get("start_resid")
+        end_resid = parsed.get("end_resid")
+        domain_label = parsed.get("domain_label")
+
+        if domain_label and parsed.get("uniprot_id") and not (start_resid and end_resid):
+            lookup = resolve_domain_residue_range(parsed["uniprot_id"], domain_label)
+            if lookup.get("domain_lookup_success"):
+                start_resid = lookup.get("start_resid")
+                end_resid = lookup.get("end_resid")
+
+        req = StructureRequest(
+            uniprot_id=parsed["uniprot_id"],
+            protein_name=parsed.get("protein_name"),
+            domain_label=domain_label,
+            start_resid=start_resid,
+            end_resid=end_resid,
+            extract_domain=bool(domain_label and start_resid and end_resid),
+            needs_download=parsed.get("needs_download", True),
+            structure_source=parsed.get("structure_source")
+            or defaults.get("default_source", "auto"),
+        )
+        domain_ctx = build_domain_context_for_agents({**parsed, **req.model_dump()})
+        if domain_ctx:
+            state["domain_context"] = domain_ctx
+        return req
+
+    def _combined_structure_text(
+        self, agent_input: PreprocessingAgentInput, state: MDState
+    ) -> str:
+        return "\n".join(
+            part for part in (
+                state.get("user_goal_original", ""),
+                agent_input.user_goal,
+                state.get("master_enriched_prompt", ""),
+                agent_input.additional_instructions or "",
+                state.get("preprocessing_instructions", "") or "",
+            )
+            if part
+        )
+
+    def _ensure_input_structure(
+        self, agent_input: PreprocessingAgentInput, state: MDState
+    ) -> PreprocessingAgentInput:
+        """
+        Download and extract structure when no local PDB exists but the user
+        described a UniProt accession / domain in their request.
+        """
+        req = agent_input.structure_request
+        if not req:
+            # Still try to infer domain trimming from free text alone
+            parsed = parse_structure_request(self._combined_structure_text(agent_input, state))
+            if parsed and parsed.get("start_resid") and parsed.get("end_resid"):
+                req = StructureRequest(
+                    uniprot_id=parsed.get("uniprot_id") or Path(agent_input.pdb_path).stem.upper(),
+                    protein_name=parsed.get("protein_name"),
+                    domain_label=parsed.get("domain_label"),
+                    start_resid=parsed.get("start_resid"),
+                    end_resid=parsed.get("end_resid"),
+                    extract_domain=True,
+                    needs_download=False,
+                    structure_source=parsed.get("structure_source", "auto"),
+                )
+                agent_input.structure_request = req
+            else:
+                return agent_input
+
+        preprocess_dir = str(self.tool_executor.working_dir)
+        combined_text = self._combined_structure_text(agent_input, state)
+        pdb_path = agent_input.pdb_path
+
+        if not pdb_path or not os.path.isfile(pdb_path):
+            logger.info(
+                "No local PDB found — acquiring structure for UniProt %s",
+                req.uniprot_id,
+            )
+            log_agent_action(
+                "preprocessing",
+                "Acquiring structure from database",
+                {"uniprot_id": req.uniprot_id, "source": req.structure_source},
+            )
+
+            result = acquire_structure_from_request(
+                text=combined_text,
+                working_dir=preprocess_dir,
+                source=req.structure_source,
+            )
+
+            if not result.get("success"):
+                logger.error("Structure acquisition failed: %s", result.get("error"))
+                state.setdefault("errors", []).append(
+                    f"Structure acquisition failed: {result.get('error')}"
+                )
+                return agent_input
+
+            acquired_pdb = result.get("pdb_file") or result.get("output_file")
+            if acquired_pdb and os.path.isfile(acquired_pdb):
+                agent_input.pdb_path = acquired_pdb
+                state["raw_pdb"] = acquired_pdb
+                state["structure_acquisition_log"] = result.get("log", [])
+                state["structure_acquisition_result"] = result
+                log_file_operation(
+                    "preprocessing", "create", acquired_pdb, True,
+                    "Downloaded/trimmed structure from database",
+                )
+                logger.info("Acquired structure: %s", acquired_pdb)
+
+        return self._apply_domain_trim_if_requested(agent_input, state, req)
+
+    def _apply_domain_trim_if_requested(
+        self,
+        agent_input: PreprocessingAgentInput,
+        state: MDState,
+        req: StructureRequest,
+    ) -> PreprocessingAgentInput:
+        """Trim an existing/full PDB to the requested residue range."""
+        if not req.extract_domain or not req.start_resid or not req.end_resid:
+            return agent_input
+
+        pdb_path = agent_input.pdb_path
+        if not pdb_path or not os.path.isfile(pdb_path):
+            return agent_input
+
+        preprocess_dir = str(self.tool_executor.working_dir)
+        basename = build_output_basename(
+            {
+                "protein_name": req.protein_name or Path(pdb_path).stem,
+                "domain_label": req.domain_label or "domain",
+                "extract_domain": True,
+                "uniprot_id": req.uniprot_id,
+            }
+        )
+        domain_pdb = str(Path(preprocess_dir) / f"{basename}.pdb")
+
+        if Path(domain_pdb).resolve() == Path(pdb_path).resolve():
+            return agent_input
+
+        if os.path.isfile(domain_pdb):
+            agent_input.pdb_path = domain_pdb
+            state["raw_pdb"] = domain_pdb
+            return agent_input
+
+        logger.info(
+            "Extracting domain residues %s-%s from %s",
+            req.start_resid,
+            req.end_resid,
+            Path(pdb_path).name,
+        )
+        result = extract_domain.func(
+            pdb_file=pdb_path,
+            start_resid=req.start_resid,
+            end_resid=req.end_resid,
+            output_file=domain_pdb,
+            protein_name=req.protein_name,
+            domain_name=req.domain_label or "domain",
+        )
+        if not result.get("success"):
+            state.setdefault("errors", []).append(
+                f"Domain extraction failed: {result.get('error')}"
+            )
+            return agent_input
+
+        agent_input.pdb_path = domain_pdb
+        state["raw_pdb"] = domain_pdb
+        log_file_operation(
+            "preprocessing", "create", domain_pdb, True,
+            f"Extracted domain residues {req.start_resid}-{req.end_resid}",
+        )
+        return agent_input
     
     def _run_preprocessing_workflow(self, agent_input: PreprocessingAgentInput, 
                                     state: MDState) -> PreprocessingAgentOutput:
@@ -251,6 +455,9 @@ class PreprocessingAgent:
         3. Return structured results
         """
         try:
+            # Step 0: Download/trim structure when user provided UniProt but no PDB
+            agent_input = self._ensure_input_structure(agent_input, state)
+
             # Step 1: LLM analyzes PDB and creates plan.
             # When human_recommendation is set, replan on top of the existing plan
             # so the recommendation is actually applied (not bypassed).
@@ -702,10 +909,17 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         steps = []
         workflows = self.config.get("workflows", {})
         
-        # Use "full" workflow as default
-        default_workflow = workflows.get("full", {}).get("steps", [
-            "analyze_pdb", "separate_complex_components", 
-            "add_hydrogens", "validate_structure"
+        # Use from_uniprot workflow when structure was acquired from database
+        if agent_input.structure_request and not os.path.isfile(agent_input.pdb_path or ""):
+            workflow_key = "from_uniprot"
+        elif agent_input.structure_request:
+            workflow_key = "full"
+        else:
+            workflow_key = "full"
+
+        default_workflow = workflows.get(workflow_key, {}).get("steps", [
+            "analyze_pdb", "separate_complex_components",
+            "add_hydrogens", "validate_structure",
         ])
         
         # Build steps based on workflow and analysis
@@ -847,8 +1061,30 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         tool_params["pdb_file"] = str(preprocess_path)
                 else:
                     # Auto-inject pdb_file for tools that need it
-                    if step.tool_name in ["add_hydrogens", "validate_structure", "separate_complex_components"]:
+                    if step.tool_name in [
+                        "add_hydrogens", "validate_structure",
+                        "separate_complex_components", "extract_domain",
+                    ]:
                         tool_params["pdb_file"] = current_pdb if current_pdb else agent_input.pdb_path
+
+                # Structure acquisition tools — resolve output paths
+                if step.tool_name == "download_structure":
+                    if not tool_params.get("output_file"):
+                        uid = tool_params.get("uniprot_id", "structure").lower()
+                        tool_params["output_file"] = str(
+                            Path(preprocess_dir) / f"{uid}.pdb"
+                        )
+                elif step.tool_name == "extract_domain":
+                    if not tool_params.get("output_file"):
+                        base = tool_params.get("protein_name") or Path(
+                            tool_params.get("pdb_file", "domain")
+                        ).stem
+                        domain = tool_params.get("domain_name") or "domain"
+                        tool_params["output_file"] = str(
+                            Path(preprocess_dir) / f"{base}_{domain}.pdb"
+                        )
+                elif step.tool_name == "acquire_protein_structure":
+                    tool_params["output_dir"] = str(preprocess_dir)
                 
                 # Generate appropriate output paths for specific tools
                 if step.tool_name == "separate_complex_components":
@@ -927,6 +1163,10 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         output_files.append(result["output_file"])
                         current_pdb = result["output_file"]
                         generated_files[result["output_file"]] = step.description
+                    if "pdb_file" in result and result["pdb_file"] not in output_files:
+                        output_files.append(result["pdb_file"])
+                        current_pdb = result["pdb_file"]
+                        generated_files[result["pdb_file"]] = step.description
                     if "protein_file" in result:
                         # Protein is always kept (required for MD)
                         output_files.append(result["protein_file"])
@@ -1007,7 +1247,16 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
 
             comp_sel = agent_input.component_selection or {}
             if len(issues) == 0:
-                if not current_pdb or Path(current_pdb).resolve() == Path(agent_input.pdb_path).resolve():
+                initial_pdb = agent_input.pdb_path
+                same_as_input = (
+                    initial_pdb
+                    and current_pdb
+                    and Path(current_pdb).resolve() == Path(initial_pdb).resolve()
+                )
+                if not current_pdb or (same_as_input and not any(
+                    s.tool_name in ("add_hydrogens", "separate_complex_components")
+                    for s in plan.steps
+                )):
                     issues.append("Preprocessing did not produce a processed protein output in preprocess/")
                 if comp_sel.get("ligand") and not ligand_files:
                     issues.append("Preprocessing did not produce ligand component output")

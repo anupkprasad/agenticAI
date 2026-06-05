@@ -175,8 +175,46 @@ def _analyze_pdb_if_available(
     match = re.search(pdb_pattern, user_goal, re.IGNORECASE)
     
     if not match:
-        logger.info("INPUT_VALIDATION: No PDB file mentioned in user goal - skipping PDB structure analysis")
-        # Don't set error - this is OK for analysis_only tasks
+        # Try UniProt-based structure request (preprocess agent will download)
+        from src.preprocess.structure_request_parser import parse_structure_request
+
+        structure_request = parse_structure_request(user_goal)
+        if structure_request:
+            state["structure_request"] = structure_request
+            from src.preprocess.structure_request_parser import build_domain_context_for_agents
+            domain_ctx = build_domain_context_for_agents(structure_request)
+            if domain_ctx:
+                state["domain_context"] = domain_ctx
+                existing_summary = state.get("pdb_summary") or ""
+                state["pdb_summary"] = (
+                    existing_summary
+                    + ("\n" if existing_summary else "")
+                    + domain_ctx
+                )
+            logger.info(
+                "INPUT_VALIDATION: No local PDB — will acquire structure for UniProt %s",
+                structure_request["uniprot_id"],
+            )
+            state["pdb_analysis"] = {
+                "total_atoms": 0,
+                "total_residues": 0,
+                "protein": {"present": True},
+                "ligands": {"present": False},
+                "water": {"present": False},
+                "components_available": {"protein": True},
+                "chain_ids": [],
+                "structure_request": structure_request,
+                "pending_download": True,
+            }
+            state["warnings"].append(
+                f"No local PDB file — structure will be downloaded for "
+                f"UniProt {structure_request['uniprot_id']}"
+            )
+        else:
+            logger.info(
+                "INPUT_VALIDATION: No PDB file mentioned in user goal - "
+                "skipping PDB structure analysis"
+            )
         return state
     
     pdb_filename = match.group(1)
@@ -271,11 +309,43 @@ def _validate_pdb_based_task(
     from .component_parser import parse_component_selection, validate_feasibility, build_human_summary
     
     analysis = state.get("pdb_analysis")
+    structure_request = state.get("structure_request")
     if not analysis:
-        state["errors"].append("PDB analysis not found - cannot proceed with setup/preprocessing")
-        return state
-    
+        if structure_request:
+            state["warnings"].append(
+                "PDB not available yet — preprocessing will download structure from database"
+            )
+            analysis = state.get("pdb_analysis") or {
+                "protein": {"present": True},
+                "components_available": {"protein": True},
+            }
+            state["pdb_analysis"] = analysis
+        else:
+            state["errors"].append(
+                "PDB analysis not found - cannot proceed with setup/preprocessing"
+            )
+            return state
+
     pdb_path = state.get("raw_pdb")
+    if not pdb_path and structure_request:
+        logger.info(
+            "INPUT_VALIDATION: Deferring PDB path resolution to preprocessing "
+            "(UniProt %s)",
+            structure_request.get("uniprot_id"),
+        )
+        state["component_selection"] = parse_component_selection(user_goal, analysis)
+        state["pdb_summary"] = (
+            f"Structure pending download for UniProt {structure_request.get('uniprot_id')}"
+        )
+        log_agent_action(
+            agent_name="supervisor.input_validation",
+            action="PDB Input Validation Complete (structure acquisition pending)",
+            details={
+                "structure_request": structure_request,
+                "component_selection": state["component_selection"],
+            },
+        )
+        return state
 
     # Extract system info from PDB/GRO file
     from .system_info_extractor import extract_system_info_from_structure

@@ -28,7 +28,11 @@ from ..planner import MDPlanner
 from .tools import (
     parse_component_selection,
     validate_feasibility,
-    detect_task_required_inputs
+    detect_task_required_inputs,
+)
+from src.supervisor.component_parser import (
+    parse_sim_case_requirements,
+    validate_sim_case_components,
 )
 
 # Import PDB analyzer
@@ -38,6 +42,24 @@ from src.utils.pdb_analyzer import analyze_pdb
 from src.supervisor.unified_enricher import enrich_prompt_unified, get_agent_execution_order
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_plan_text(value: Any, default: str = "") -> str:
+    """Normalize LLM plan fields (str, list, or dict) to a markdown-safe string."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip() or default
+    if isinstance(value, list):
+        parts = [_coerce_plan_text(item, default="") for item in value]
+        parts = [p for p in parts if p]
+        return "\n".join(parts) if parts else default
+    if isinstance(value, dict):
+        for key in ("prompt", "goal", "text", "description", "plan"):
+            if key in value and value[key]:
+                return _coerce_plan_text(value[key], default=default)
+        return json.dumps(value, indent=2, default=str)
+    return str(value).strip() or default
 
 
 class MDSupervisor:
@@ -275,16 +297,141 @@ class MDSupervisor:
         state = self._reset_state_for_new_sim(state, sim_goal, sim_working_dir, sim_pdb)
 
         # Copy PDB into per-sim directory so validator can find it
-        if sim_pdb and os.path.isfile(sim_pdb):
-            dest = Path(sim_working_dir) / Path(sim_pdb).name
-            if not dest.exists():
-                Path(sim_working_dir).mkdir(parents=True, exist_ok=True)
-                shutil.copy2(sim_pdb, dest)
-                logger.info(f"Copied PDB {sim_pdb} → {dest}")
-            state["user_goal"] = sim_goal.replace(sim_pdb, Path(sim_pdb).name)
+        pdb_name = Path(sim_pdb).name if sim_pdb else ""
+        resolved_pdb = sim_pdb
+        if sim_pdb:
+            dest = Path(sim_working_dir) / pdb_name
+            if os.path.isfile(sim_pdb):
+                if not dest.exists():
+                    Path(sim_working_dir).mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(sim_pdb, dest)
+                    logger.info(f"Copied PDB {sim_pdb} → {dest}")
+                resolved_pdb = str(dest)
+            else:
+                # Try shared copy at multi-sim base directory
+                base_dir = state.get("multi_sim_base_dir") or state.get("working_directory")
+                base_candidate = Path(base_dir) / pdb_name
+                if base_candidate.is_file():
+                    Path(sim_working_dir).mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(base_candidate, dest)
+                    resolved_pdb = str(dest)
+                    logger.info(f"Copied shared PDB {base_candidate} → {dest}")
+
+            state["raw_pdb"] = resolved_pdb if os.path.isfile(resolved_pdb) else None
+            state["user_goal"] = sim_goal.replace(sim_pdb, pdb_name)
+
+        # Propagate per-structure download metadata for preprocess agent
+        structure_requests = state.get("structure_requests") or {}
+        uid_key = Path(sim_pdb).stem.lower() if sim_pdb else ""
+        if uid_key in structure_requests:
+            state["structure_request"] = structure_requests[uid_key]
+        elif state.get("structure_request"):
+            pass  # keep master-level request
+        elif uid_key:
+            state["structure_request"] = {
+                "uniprot_id": uid_key.upper(),
+                "needs_download": not bool(state.get("raw_pdb")),
+                "structure_source": "auto",
+            }
+
+        state["sim_case"] = {
+            "label": sim_label,
+            "case_id": sim_info.get("case_id"),
+            "case_description": sim_info.get("case_description"),
+            "case_directive": sim_info.get("case_directive"),
+        }
+
+        skipped = self._validate_and_maybe_skip_sim_case(state, sim_pdb, sim_goal)
+        if skipped:
+            return skipped
 
         state["next_node"] = "input_validation"
         return state
+
+    def _validate_and_maybe_skip_sim_case(
+        self,
+        state: MDState,
+        sim_pdb: str,
+        sim_goal: str,
+    ) -> Optional[MDState]:
+        """
+        Skip holo/component-specific simulations when required ligands/ions
+        are absent from the source structure (e.g. AlphaFold protein-only PDB).
+        """
+        sim_case = state.get("sim_case") or {}
+        requirements = parse_sim_case_requirements(
+            label=sim_case.get("label", ""),
+            case_description=sim_case.get("case_description", ""),
+            case_directive=sim_case.get("case_directive", ""),
+            user_goal=sim_goal,
+        )
+        if requirements.get("case_type") in ("default", "protein_only"):
+            return None
+
+        source_pdb = sim_pdb
+        if source_pdb and not os.path.isfile(source_pdb):
+            base_dir = state.get("multi_sim_base_dir") or state.get("working_directory")
+            candidate = Path(base_dir) / Path(source_pdb).name
+            if candidate.is_file():
+                source_pdb = str(candidate)
+
+        if not source_pdb or not os.path.isfile(source_pdb):
+            return None
+
+        analysis_result = analyze_pdb.invoke({"pdb_file": source_pdb})
+        if not analysis_result.get("success"):
+            return None
+
+        validation = validate_sim_case_components(
+            analysis_result.get("analysis", {}),
+            requirements,
+        )
+        if validation.get("is_feasible"):
+            return None
+
+        label = sim_case.get("label", "simulation")
+        for err in validation.get("errors", []):
+            msg = f"Skipping {label}: {err}"
+            state["errors"].append(msg)
+            state["warnings"].append(msg)
+            logger.error(msg)
+
+        return self._skip_current_sim(state, reason="; ".join(validation.get("errors", [])))
+
+    def _skip_current_sim(self, state: MDState, reason: str) -> MDState:
+        """Record a failed sim snapshot and advance to the next simulation."""
+        sim_prompts = state.get("sim_prompts", [])
+        current_idx = state.get("current_sim_index", 0)
+        sim_label = (state.get("sim_case") or {}).get("label", f"sim_{current_idx}")
+
+        sim_case = state.get("sim_case") or {}
+        snapshot = {
+            "sim_index": current_idx,
+            "label": sim_label,
+            "case_description": sim_case.get("case_description"),
+            "working_directory": state.get("working_directory"),
+            "user_goal": state.get("user_goal"),
+            "success": False,
+            "skipped": True,
+            "skip_reason": reason,
+            "errors": list(state.get("errors", [])),
+            "warnings": list(state.get("warnings", [])),
+        }
+        completed = list(state.get("completed_sim_states") or [])
+        completed.append(snapshot)
+        state["completed_sim_states"] = completed
+
+        current_idx += 1
+        state["current_sim_index"] = current_idx
+        logger.warning(
+            "SUPERVISOR [multi-sim]: Skipped sim %s (%s)",
+            sim_label,
+            reason,
+        )
+
+        if current_idx >= len(sim_prompts):
+            return self._setup_combined_analysis(state)
+        return self._start_next_sim(state)
 
     def _advance_multi_sim(self, state: MDState) -> MDState:
         """
@@ -478,6 +625,7 @@ class MDSupervisor:
             "combined_analysis_plan", "current_sim_index",
             "completed_sim_states", "sim_working_dirs",
             "multi_sim_base_dir",
+            "structure_requests",
             # NOTE: pdb_list and all_pdb_analyses are NOT preserved - each per-sim
             # iteration should only see its own PDB via raw_pdb, not the full list.
             # This prevents input validation from treating per-sim as multi-sim.
@@ -531,6 +679,7 @@ class MDSupervisor:
             "final_report", "workflow_status",
             "file_registry", "generated_files", "file_info",
             "human_feedback", "human_recommendation", "error_triggered_hitl",
+            "sim_case",
         ]
         for key in per_sim_clear:
             if key in ("mdp_files",):
@@ -592,13 +741,17 @@ class MDSupervisor:
             or state.get("analysis_results")
             or state.get("reporter_output")
         )
+        sim_case = state.get("sim_case") or {}
         snapshot = {
             "sim_index": sim_index,
             "label": (state.get("sim_prompts") or [{}])[sim_index].get("label", f"sim_{sim_index}"),
+            "case_description": sim_case.get("case_description"),
             "working_directory": state.get("working_directory"),
             "user_goal": state.get("user_goal"),
             "success": _success,
+            "skipped": False,
             "job_id": state.get("job_id"),
+            "job_script": state.get("job_script"),
             "job_status": state.get("job_status"),
             "analysis_results": state.get("analysis_results", {}),
             "analysis_directory": state.get("analysis_directory") or state.get("analysis_dir"),
@@ -828,8 +981,14 @@ class MDSupervisor:
             log_llm_interaction("supervisor.multi_sim_master", decomposition_prompt, response)
             parsed = self._extract_json_from_response(response)
             if parsed and "sim_prompts" in parsed:
-                sim_prompts_list = parsed["sim_prompts"]
-                combined_plan = parsed.get("combined_analysis_plan", "")
+                sim_prompts_list = [
+                    _coerce_plan_text(item, default="")
+                    for item in parsed["sim_prompts"]
+                ]
+                combined_plan = _coerce_plan_text(
+                    parsed.get("combined_analysis_plan", ""),
+                    default="",
+                )
                 logger.info(
                     f"SUPERVISOR [multi-sim]: LLM generated {len(sim_prompts_list)} per-sim prompts"
                 )
@@ -838,7 +997,7 @@ class MDSupervisor:
                 if len(sim_prompts_list) > 1:
                     _keys = []
                     for _txt in sim_prompts_list:
-                        _k = (_txt or "").lower()
+                        _k = (_coerce_plan_text(_txt) or "").lower()
                         _k = re.sub(r"/[\w./\-]+", "<path>", _k)
                         _k = re.sub(r"\b[\w\-]+\.pdb\b", "<pdb>", _k)
                         _k = re.sub(r"\b[a-z0-9]{4,12}\b", "<tok>", _k)
@@ -863,11 +1022,22 @@ class MDSupervisor:
                 pdb_name = _Path(e["pdb"]).name
                 name = e["protein_name"]
                 lead = _styles[i % len(_styles)]
+                uniprot_hint = ""
+                structure_requests = state.get("structure_requests") or {}
+                uid_key = _Path(e["pdb"]).stem.lower()
+                req = structure_requests.get(uid_key)
+                if req and req.get("uniprot_id"):
+                    src = req.get("structure_source", "auto")
+                    uniprot_hint = (
+                        f" Download structure from {src} for UniProt "
+                        f"{req['uniprot_id']} if {pdb_name} is not present."
+                    )
                 sim_prompts_list.append(
                     (
                         f"{lead} simulation for {name} using source structure {pdb_name}. "
                         f"Simulation label is {e['label']} under {e['working_dir']}. "
-                        f"Case requirement: {e['case_description']}. {e['case_directive']} "
+                        f"Case requirement: {e['case_description']}. {e['case_directive']}"
+                        f"{uniprot_hint} "
                         f"Run workflow steps: {agents_desc}."
                     ).strip()
                 )
@@ -885,14 +1055,16 @@ class MDSupervisor:
                 {
                     "pdb": str(_Path(pdb).resolve()) if _Path(pdb).exists() else pdb,
                     "label": entry["label"],
-                    "prompt": prompt_text,
+                    "prompt": _coerce_plan_text(prompt_text, default=""),
                     "working_dir": entry["working_dir"],
+                    "case_id": entry.get("case_id"),
                     "case_description": entry["case_description"],
+                    "case_directive": entry.get("case_directive"),
                 }
             )
 
         state["sim_prompts"] = sim_prompts
-        state["combined_analysis_plan"] = combined_plan
+        state["combined_analysis_plan"] = _coerce_plan_text(combined_plan, default="")
 
         logger.info(
             f"SUPERVISOR [multi-sim]: Master plan ready - {len(sim_prompts)} simulations, "
@@ -965,13 +1137,13 @@ class MDSupervisor:
                 f"- **Directory:** {sim.get('working_dir', 'N/A')}",
                 f"- **Case:** {sim.get('case_description', 'N/A')}",
                 "",
-                sim.get("prompt", "_No prompt text._"),
+                _coerce_plan_text(sim.get("prompt"), default="_No prompt text._"),
                 "",
             ]
         md_lines += [
             "## Combined Analysis Plan",
             "",
-            combined_plan or "_No combined analysis plan._",
+            _coerce_plan_text(combined_plan, default="_No combined analysis plan._"),
         ]
 
         save_plan_artifacts(

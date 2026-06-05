@@ -13,6 +13,10 @@ from src.utils.pdb_analyzer import analyze_pdb
 from src.preprocess.hydrogen_adder import add_hydrogens
 from src.preprocess.structure_validator import validate_structure
 from src.preprocess.complex_separator import separate_complex_components
+from src.preprocess.structure_downloader import download_structure
+from src.preprocess.domain_extractor import extract_domain
+from src.preprocess.acquire_structure_tool import acquire_protein_structure
+from src.preprocess.domain_lookup_tool import lookup_domain_range_tool
 
 # Export tool functions for direct access
 __all__ = [
@@ -20,7 +24,11 @@ __all__ = [
     "analyze_pdb",
     "add_hydrogens",
     "validate_structure",
-    "separate_complex_components",  # Main tool for component separation
+    "separate_complex_components",
+    "download_structure",
+    "extract_domain",
+    "acquire_protein_structure",
+    "lookup_domain_range_tool",
     "get_preprocessing_tools",
     "get_tool_metadata",
 ]
@@ -37,6 +45,10 @@ def get_preprocessing_tools() -> list:
         List of StructuredTool objects ready for LLM use
     """
     return [
+        acquire_protein_structure,
+        lookup_domain_range_tool,
+        download_structure,
+        extract_domain,
         analyze_pdb,
         separate_complex_components,
         add_hydrogens,
@@ -102,6 +114,10 @@ class PreprocessingToolExecutor:
         
         # Tool map for built-in tools
         self.tool_map = {
+            "acquire_protein_structure": acquire_protein_structure,
+            "lookup_domain_range_tool": lookup_domain_range_tool,
+            "download_structure": download_structure,
+            "extract_domain": extract_domain,
             "analyze_pdb": analyze_pdb,
             "separate_complex_components": separate_complex_components,
             "add_hydrogens": add_hydrogens,

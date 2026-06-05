@@ -72,9 +72,21 @@ class PreprocessingResult(BaseModel):
     execution_log: str = Field(default="", description="Log of all commands executed")
 
 
+class StructureRequest(BaseModel):
+    """Parsed request to download and/or trim a structure from a database."""
+    uniprot_id: str = Field(description="UniProt accession (e.g. P21860)")
+    protein_name: Optional[str] = Field(default=None, description="Human-readable protein name")
+    domain_label: Optional[str] = Field(default=None, description="Domain label, e.g. kinase_domain")
+    start_resid: Optional[int] = Field(default=None, description="Domain start residue")
+    end_resid: Optional[int] = Field(default=None, description="Domain end residue")
+    extract_domain: bool = Field(default=False, description="Whether to trim to a domain")
+    needs_download: bool = Field(default=True, description="Whether structure must be downloaded")
+    structure_source: str = Field(default="auto", description="Download source: auto, alphafold, rcsb")
+
+
 class PreprocessingAgentInput(BaseModel):
     """Input to preprocessing agent"""
-    pdb_path: str = Field(description="Path to input PDB file")
+    pdb_path: str = Field(description="Path to input PDB file (may be empty if structure_request set)")
     working_directory: str = Field(description="Working directory for output files")
     force_field: str = Field(description="Force field to use (e.g., 'amber99sb-ildn')")
     water_model: str = Field(description="Water model (e.g., 'tip3p')")
@@ -88,6 +100,10 @@ class PreprocessingAgentInput(BaseModel):
     component_selection: Optional[Dict[str, Any]] = Field(
         default=None,
         description="User-specified component selection: {protein: bool, ligand: bool, ions: bool, water: bool}"
+    )
+    structure_request: Optional[StructureRequest] = Field(
+        default=None,
+        description="Download/trim request when no local PDB is available"
     )
 
 

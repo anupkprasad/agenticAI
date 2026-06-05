@@ -44,6 +44,15 @@ def enrich_prompt_unified(
     # Build context information
     context_parts = []
     
+    # 0. Domain context (kinase domain etc. resolved from UniProt)
+    domain_context = state.get("domain_context")
+    structure_request = state.get("structure_request")
+    if not domain_context and structure_request:
+        from src.preprocess.structure_request_parser import build_domain_context_for_agents
+        domain_context = build_domain_context_for_agents(structure_request)
+    if domain_context:
+        context_parts.append(f"\n**Domain Simulation Target:**\n{domain_context}\n")
+
     # 1. PDB context (if available)
     pdb_analysis = state.get("pdb_analysis")
     if pdb_analysis:

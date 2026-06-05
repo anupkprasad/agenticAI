@@ -404,6 +404,7 @@ class MDHPCAgent:
 - For copy_simulation_files: source_dir MUST be "{simsetup_dir}", dest_dir MUST be "{hpc_dir_path}"
 - For create_slurm_script: job_name MUST be "{job_name}", working_dir MUST be "{hpc_dir_path}"
 - For submit_job: remote_dir MUST be "{hpc_dir_path}"
+- For submit_job: DO NOT set script_path — the system resolves the script created by create_slurm_script (e.g. {job_name}_run.sh)
 - Tool execution order matters: copy files → estimate time → create script → submit → monitor → download
 - Maximum 2 job submission attempts (if first fails, retry once)
 - Monitor job hourly until completion
@@ -704,6 +705,21 @@ Output as JSON with this structure:
                             f"'{tool_params[key]}' → '{correct_hpc_dir}'"
                         )
                         tool_params[key] = correct_hpc_dir
+            if tool_name == "submit_job":
+                # LLM often hallucinates slurm_job.sh — resolve from created script instead
+                requested = tool_params.get("script_path")
+                resolved = self._resolve_submit_script_path(
+                    state, correct_hpc_dir, requested=requested
+                )
+                if resolved:
+                    if requested and Path(requested).resolve() != Path(resolved).resolve():
+                        logger.warning(
+                            "Correcting LLM-generated script_path "
+                            f"'{requested}' → '{resolved}'"
+                        )
+                    tool_params["script_path"] = resolved
+                elif "script_path" in tool_params:
+                    tool_params.pop("script_path", None)
             max_retries = max(step.get("max_retries", 1), 1)
             retry_on_failure = step.get("retry_on_failure", False)
             
@@ -800,6 +816,38 @@ Output as JSON with this structure:
             logger.error(f"Tool execution failed: {tool_name} - {e}")
             return {"success": False, "error": str(e)}
     
+    def _resolve_submit_script_path(
+        self,
+        state: MDState,
+        hpc_dir: str,
+        requested: Optional[str] = None,
+    ) -> Optional[str]:
+        """Resolve the SLURM script path, ignoring hallucinated LLM filenames."""
+        candidates: List[Path] = []
+
+        if requested:
+            candidates.append(Path(requested))
+        if state.get("job_script"):
+            candidates.append(Path(state["job_script"]))
+        job_name = self._derive_job_name(state)
+        candidates.extend([
+            Path(hpc_dir) / f"{job_name}_run.sh",
+            Path(hpc_dir) / f"{job_name}.sh",
+            Path(hpc_dir) / "md_simulation_run.sh",
+        ])
+        candidates.extend(sorted(Path(hpc_dir).glob("*.sh")))
+
+        seen = set()
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            key = str(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            if resolved.is_file():
+                return key
+        return None
+
     def _enrich_tool_params(
         self,
         tool_name: str,
@@ -837,29 +885,15 @@ Output as JSON with this structure:
         
         # Add state values for submit_job
         if tool_name == "submit_job":
-            if "script_path" not in enriched:
-                if state.get("job_script"):
-                    # Use absolute path for script
-                    script_path = Path(state["job_script"]).resolve()
-                    enriched["script_path"] = str(script_path)
-                else:
-                    # Fallback: look for the generated script in hpc_dir.
-                    # The script creator defaults to <job_name>_run.sh, so
-                    # prefer that naming pattern and only then try any .sh file.
-                    job_name = self._derive_job_name(state)
-                    candidate_scripts = [
-                        Path(hpc_dir) / f"{job_name}_run.sh",
-                        Path(hpc_dir) / f"{job_name}.sh",
-                        Path(hpc_dir) / "md_simulation_run.sh",
-                    ]
-                    for candidate in candidate_scripts:
-                        if candidate.exists():
-                            enriched["script_path"] = str(candidate.resolve())
-                            break
-                    else:
-                        sh_files = sorted(Path(hpc_dir).glob("*.sh"))
-                        if sh_files:
-                            enriched["script_path"] = str(sh_files[0].resolve())
+            resolved_script = self._resolve_submit_script_path(
+                state,
+                hpc_dir,
+                requested=enriched.get("script_path"),
+            )
+            if resolved_script:
+                enriched["script_path"] = resolved_script
+            else:
+                enriched.pop("script_path", None)
             
             remote_dir = self.config.get("paths", {}).get("remote_work_dir", "~/md_jobs")
             if "remote_dir" not in enriched:

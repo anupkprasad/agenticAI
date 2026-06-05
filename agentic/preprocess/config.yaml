@@ -11,6 +11,9 @@ agent:
     Orchestrates PDB preprocessing workflows for molecular dynamics simulations.
     Uses LLM-guided planning to intelligently select and sequence preprocessing tools.
   capabilities:
+    - "Download structures from AlphaFold DB or RCSB PDB by UniProt ID"
+    - "Extract protein domains by residue range (Bio.PDB / MDAnalysis)"
+    - "Validate domains for missing residues and broken loops"
     - "Analyze PDB structure and detect issues"
     - "Clean structures (remove waters, resolve alternate locations)"
     - "Add missing hydrogens"
@@ -33,8 +36,24 @@ defaults:
   hydrogen_method: "reduce"  # Options: reduce, obabel, none
   protonation_method: "pdb2pqr"  # Options: pdb2pqr, propka, copy
 
+# Structure acquisition (when user provides UniProt but no PDB file)
+structure_acquisition:
+  default_source: auto          # auto | alphafold | rcsb
+  source_order:
+    - alphafold
+    - rcsb
+  validate_after_extract: true
+
 # Standard preprocessing workflows
 workflows:
+  from_uniprot:
+    description: "Download structure, extract domain, validate, then preprocess"
+    steps:
+      - acquire_protein_structure
+      - analyze_pdb
+      - add_hydrogens
+      - validate_structure
+
   basic:
     description: "Basic protein extraction and hydrogen addition"
     steps:
@@ -113,6 +132,17 @@ llm:
     **Available Tools:**
     {tools_list}
     
+    **STRUCTURE ACQUISITION (when no local PDB):**
+    - If the user mentions a UniProt ID (e.g. P21860 / ERBB3) and a domain or residue range,
+      start with `acquire_protein_structure` OR chain `download_structure` → `extract_domain` → `validate_structure`
+    - If a domain is named WITHOUT explicit residues (e.g. "kinase domain"), call
+      `lookup_domain_range_tool` first — it queries UniProt feature annotations automatically
+    - Example kinase domain: lookup P21860 kinase_domain → UniProt residues 709-966,
+      download structure, extract_domain → ERBB3_kinase_domain.pdb
+    - Do NOT use analysis-only residue ranges (e.g. RMSF window) as the simulation domain
+    - Use `validate_structure` with check_domain=true after domain extraction
+    - Available download sources: alphafold (default), rcsb (experimental fallback)
+
     **CRITICAL FILE PATH RULES:**
     - Use ONLY filenames (e.g., "3.pdb", "protein_h.pdb") - NO directory paths!
     - DO NOT use paths like "working_dir/3.pdb" or "preprocess/3.pdb" or "working_dir/separated/protein_h.pdb"

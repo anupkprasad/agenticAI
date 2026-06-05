@@ -124,6 +124,128 @@ def parse_component_selection(user_goal: str, analysis: Dict[str, Any]) -> Dict[
     }
 
 
+def parse_sim_case_requirements(
+    label: str = "",
+    case_description: str = "",
+    case_directive: str = "",
+    user_goal: str = "",
+) -> Dict[str, Any]:
+    """
+    Infer required structural components for a multi-simulation case.
+
+    Example: label p21860_ATP_MG requires protein + ATP ligand + MG ion.
+    """
+    text = f"{label} {case_description} {case_directive} {user_goal}".lower()
+    text = (
+        text.replace("\u2011", "-")
+        .replace("\u2012", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+    )
+
+    requirements = {
+        "protein": True,
+        "ligand": False,
+        "ions": False,
+        "ligand_resnames": [],
+        "ion_resnames": [],
+        "case_type": "default",
+    }
+
+    if any(
+        token in text
+        for token in (
+            "protein only",
+            "protein-only",
+            "protein alone",
+            "apoprotein",
+            "apo protein",
+        )
+    ):
+        requirements["case_type"] = "protein_only"
+        return requirements
+
+    if (
+        "_atp_mg" in text
+        or "protein + atp + mg" in text
+        or "protein+atp+mg" in text
+        or "protein, atp, mg" in text
+        or ("atp" in text and "mg" in text and "protein" in text)
+    ):
+        requirements.update(
+            {
+                "ligand": True,
+                "ions": True,
+                "ligand_resnames": ["ATP"],
+                "ion_resnames": ["MG"],
+                "case_type": "holo_atp_mg",
+            }
+        )
+        return requirements
+
+    if (
+        "_atp" in text
+        or "protein + atp" in text
+        or "protein+atp" in text
+        or ("atp" in text and "protein" in text and "only" not in text)
+    ):
+        requirements.update(
+            {
+                "ligand": True,
+                "ligand_resnames": ["ATP"],
+                "case_type": "holo_atp",
+            }
+        )
+
+    return requirements
+
+
+def validate_sim_case_components(
+    analysis: Dict[str, Any],
+    requirements: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Validate that a source PDB contains components required by a sim case."""
+    errors = []
+    warnings = []
+
+    if requirements.get("protein") and not analysis.get("protein", {}).get("present"):
+        errors.append("Missing required protein in source structure")
+
+    if requirements.get("ligand"):
+        ligands = analysis.get("ligands", {})
+        if not ligands.get("present"):
+            errors.append("Missing required ligand in source structure")
+        else:
+            available = {name.upper() for name in ligands.get("residue_names", [])}
+            for resname in requirements.get("ligand_resnames", ["ATP"]):
+                if resname.upper() not in available:
+                    errors.append(
+                        f"Missing required ligand {resname} in source structure "
+                        f"(found: {sorted(available) or 'none'})"
+                    )
+
+    if requirements.get("ions"):
+        ions = analysis.get("ions", {})
+        if not ions.get("present"):
+            errors.append("Missing required ion in source structure")
+        else:
+            available = {name.upper() for name in (ions.get("types") or {}).keys()}
+            for resname in requirements.get("ion_resnames", ["MG"]):
+                if resname.upper() not in available:
+                    errors.append(
+                        f"Missing required ion {resname} in source structure "
+                        f"(found: {sorted(available) or 'none'})"
+                    )
+
+    return {
+        "is_feasible": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings,
+        "requirements": requirements,
+    }
+
+
 def validate_feasibility(
     user_goal: str, 
     analysis: Dict[str, Any], 
@@ -149,6 +271,9 @@ def validate_feasibility(
     
     if component_selection.get("ligand") and not analysis.get("ligands", {}).get("present"):
         errors.append("User requested ligand simulation but PDB contains no ligand")
+
+    if component_selection.get("ions") and not analysis.get("ions", {}).get("present"):
+        errors.append("User requested ion simulation but PDB contains no ions")
     
     # Check for specific chains
     if component_selection.get("specific_chains"):

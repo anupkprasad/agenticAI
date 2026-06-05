@@ -15,6 +15,11 @@ from agentic.llm import LLMClient
 from agentic.utils import (
     get_conversation_logger, log_user_prompt, log_workflow_completion, set_log_file
 )
+from src.utils.run_summary import (
+    build_run_summary,
+    format_run_summary_terminal,
+    write_run_summary,
+)
 from src.utils.chat_tools import (
     BUILTIN_TOOL_NAMES as _BUILTIN_TOOLS,
     TOOL_CALL_PATTERN as _TOOL_PATTERN,
@@ -1126,6 +1131,132 @@ def _extract_pdb_paths_from_goal(goal: str) -> list:
     return _re.findall(r'[\w./\\-]+\.pdb', goal, _re.IGNORECASE)
 
 
+def _build_pdb_list_from_uniprot_goal(goal: str, working_dir: str) -> List[Dict[str, Any]]:
+    """
+    Build synthetic PDB entries from UniProt IDs when no local PDB is provided.
+
+    Each entry maps a placeholder path ({working_dir}/{uniprot}.pdb) to download
+    metadata consumed by the preprocess agent and multi-sim orchestration.
+    """
+    from src.preprocess.structure_request_parser import (
+        extract_uniprot_ids,
+        extract_protein_name,
+        parse_structure_request,
+    )
+
+    parsed = parse_structure_request(goal)
+    uniprot_ids = extract_uniprot_ids(goal)
+    if not uniprot_ids:
+        return []
+
+    entries: List[Dict[str, Any]] = []
+    for uid in uniprot_ids:
+        req = parsed if parsed and parsed.get("uniprot_id") == uid else None
+        protein_name = (req or {}).get("protein_name") or extract_protein_name(goal, uid)
+        pdb_name = f"{uid.lower()}.pdb"
+        pdb_path = str((Path(working_dir) / pdb_name).resolve())
+        entries.append(
+            {
+                "uniprot_id": uid,
+                "protein_name": protein_name,
+                "pdb_path": pdb_path,
+                "pdb_name": pdb_name,
+                "structure_source": (req or {}).get("structure_source", "auto"),
+                "domain_label": (req or {}).get("domain_label"),
+                "start_resid": (req or {}).get("start_resid"),
+                "end_resid": (req or {}).get("end_resid"),
+                "extract_domain": (req or {}).get("extract_domain", False),
+            }
+        )
+    return entries
+
+
+def _prefetch_uniprot_structures(
+    entries: List[Dict[str, Any]],
+    goal: str,
+) -> List[str]:
+    """
+    Pre-download shared structures to the base working directory.
+
+    Returns list of successfully downloaded PDB paths.
+    """
+    from src.preprocess.structure_acquisition import acquire_structure_from_request
+    from src.preprocess.structure_downloader import download_structure
+
+    downloaded: List[str] = []
+    for entry in entries:
+        pdb_path = entry["pdb_path"]
+        if Path(pdb_path).exists():
+            downloaded.append(pdb_path)
+            continue
+
+        out_dir = str(Path(pdb_path).parent)
+        source = entry.get("structure_source", "auto")
+        uid = entry["uniprot_id"]
+
+        if entry.get("extract_domain") and entry.get("start_resid") and entry.get("end_resid"):
+            result = acquire_structure_from_request(goal, out_dir, source=source)
+            acquired = result.get("pdb_file") or result.get("output_file")
+            if result.get("success") and acquired:
+                downloaded.append(acquired)
+                entry["pdb_path"] = acquired
+                entry["pdb_name"] = Path(acquired).name
+            continue
+
+        result = download_structure.func(
+            uniprot_id=uid,
+            output_file=pdb_path,
+            source=source,
+        )
+        if result.get("success"):
+            downloaded.append(pdb_path)
+
+    return downloaded
+
+
+def _build_structure_request_config(entry: Dict[str, Any], goal: str) -> Dict[str, Any]:
+    """Normalize structure request metadata passed into workflow state."""
+    from src.preprocess.structure_request_parser import (
+        parse_structure_request,
+        resolve_domain_residue_range,
+    )
+
+    parsed = parse_structure_request(goal) or {}
+    uid = entry.get("uniprot_id") or parsed.get("uniprot_id")
+    domain_label = entry.get("domain_label") or parsed.get("domain_label")
+
+    start_resid = entry.get("start_resid") or parsed.get("start_resid")
+    end_resid = entry.get("end_resid") or parsed.get("end_resid")
+
+    # Re-resolve from UniProt when domain named but no explicit simulation range
+    domain_lookup = {}
+    if domain_label and uid and not (start_resid and end_resid):
+        domain_lookup = resolve_domain_residue_range(uid, domain_label)
+        if domain_lookup.get("domain_lookup_success"):
+            start_resid = domain_lookup.get("start_resid")
+            end_resid = domain_lookup.get("end_resid")
+
+    config = {
+        "uniprot_id": uid,
+        "protein_name": entry.get("protein_name") or parsed.get("protein_name"),
+        "structure_source": entry.get("structure_source") or parsed.get("structure_source", "auto"),
+        "extract_domain": bool(domain_label and start_resid and end_resid),
+        "start_resid": start_resid,
+        "end_resid": end_resid,
+        "domain_label": domain_label,
+        "needs_download": True,
+    }
+    if domain_lookup:
+        config.update(
+            {k: v for k, v in domain_lookup.items() if k.startswith("domain_lookup")}
+        )
+    elif parsed:
+        config.update(
+            {k: v for k, v in parsed.items() if k.startswith("domain_lookup")}
+        )
+    return config
+
+
 def _extract_production_ns_from_goal(goal: str) -> float | None:
     """Extract requested production duration in nanoseconds from goal text."""
     import re as _re
@@ -1320,6 +1451,7 @@ def main(argv=None):
 
     # Auto-detect PDbs from goal if not already provided via --pdb-list or --sim-dirs
     # This works for both explicit --simtype multisim and auto-detection mode
+    structure_request_entries: List[Dict[str, Any]] = []
     if not pdb_list:
         _goal_pdbs = _extract_pdb_paths_from_goal(goal)
         if len(_goal_pdbs) > 0:
@@ -1335,6 +1467,22 @@ def main(argv=None):
                     f"\n  Warning: --simtype multisim specified but only 1 PDB found in goal: {_goal_pdbs[0]}",
                     flush=True,
                 )
+        else:
+            # No .pdb in goal — try UniProt-based structure acquisition
+            structure_request_entries = _build_pdb_list_from_uniprot_goal(goal, working_dir)
+            if structure_request_entries:
+                pdb_list = [e["pdb_path"] for e in structure_request_entries]
+                uids = ", ".join(e["uniprot_id"] for e in structure_request_entries)
+                print(
+                    f"\n  No local PDB provided — will download structure(s) for UniProt: {uids}",
+                    flush=True,
+                )
+                if len(structure_request_entries) == 1 and simtype == 'multisim':
+                    print(
+                        "  Note: --simtype multisim with one UniProt ID will expand into "
+                        "component cases (e.g. protein-only vs protein+ATP+MG) if requested.",
+                        flush=True,
+                    )
 
     # Determine if multi-simulation mode should be activated
     # Priority: 1) explicit --simtype flag, 2) multiple PDbs detected
@@ -1352,7 +1500,7 @@ def main(argv=None):
                 file=sys.stderr, flush=True
             )
             print(
-                "   Please provide PDbs via:",
+                "   Please provide structures via:",
                 file=sys.stderr, flush=True
             )
             print(
@@ -1364,10 +1512,34 @@ def main(argv=None):
                 file=sys.stderr, flush=True
             )
             print(
-                "   - Or mention multiple .pdb files in your --goal",
+                "   - Mention .pdb files in your --goal",
+                file=sys.stderr, flush=True
+            )
+            print(
+                "   - Or request download by UniProt ID in --goal "
+                "(e.g. 'UniProt P21860, download from AlphaFold')",
                 file=sys.stderr, flush=True
             )
             return 1
+
+        # Pre-download UniProt structures once at base working_dir (shared by cases)
+        if structure_request_entries:
+            print("  Downloading structure(s) from database...", flush=True)
+            fetched = _prefetch_uniprot_structures(structure_request_entries, goal)
+            if fetched:
+                print(f"  Downloaded {len(fetched)} structure file(s)", flush=True)
+            else:
+                print(
+                    "  Warning: structure download deferred to preprocessing agent",
+                    flush=True,
+                )
+            config["structure_requests"] = {
+                Path(entry["pdb_path"]).stem.lower(): _build_structure_request_config(entry, goal)
+                for entry in structure_request_entries
+            }
+            config["structure_request"] = _build_structure_request_config(
+                structure_request_entries[0], goal
+            )
         
         # ---- MULTI-SIMULATION (in-graph) ----
         num_sims = len(pdb_list)
@@ -1417,48 +1589,20 @@ def main(argv=None):
             else:
                 final_state = workflow.run(goal, config)
 
-            # Print summary
-            completed_sims = final_state.get("completed_sim_states") or []
-            # Use explicit 'success' flag saved in snapshot; fall back to
-            # checking key outputs for snapshots from older runs.
-            def _sim_succeeded(s):
-                if "success" in s:
-                    return s["success"]
-                return bool(
-                    s.get("job_id") or s.get("trajectory_path")
-                    or s.get("topology") or s.get("coordinates")
-                    or s.get("analysis_results") or s.get("reporter_output")
-                )
-            n_ok = sum(1 for s in completed_sims if _sim_succeeded(s))
-            n_fail = len(completed_sims) - n_ok
-            
-            # Fallback: if completed_sim_states is missing/empty but per-sim dirs exist,
-            # infer status from directory structure
-            if not completed_sims and len(pdb_list) > 0:
-                sim_dirs = final_state.get("sim_working_dirs", [])
-                if sim_dirs:
-                    n_ok = sum(1 for d in sim_dirs if Path(d).exists())
-                    n_fail = len(sim_dirs) - n_ok
-                else:
-                    # Last resort: count subdirectories in working_dir
-                    subdirs = [d for d in Path(working_dir).iterdir() if d.is_dir() and d.name not in 
-                              ["planner", "programmer", "supervisor", "analysis", "reporter", 
-                               "preprocess", "simsetup", "hpc", "combinedAnalysis"]]
-                    n_ok = len(subdirs)  # Assume existence = success
-                    n_fail = len(pdb_list) - n_ok
-            
-            print(f"\n{'='*60}")
-            print("MULTI-SIMULATION WORKFLOW COMPLETED")
-            print(f"{'='*60}")
-            print(f"  Total: {len(pdb_list)}")
-            print(f"  Completed: {n_ok}")
-            print(f"  Failed: {n_fail}")
-            if completed_sims and (n_ok + n_fail != len(pdb_list)):
-                print(f"  ⚠️  Warning: Count mismatch detected (state may be incomplete)")
-            combined_dir = str(Path(working_dir) / "combinedAnalysis")
-            if Path(combined_dir).exists():
-                print(f"  Combined analysis: {combined_dir}")
-            print(f"\nFull log saved to: {log_path}")
+            run_summary = build_run_summary(
+                final_state,
+                working_dir=working_dir,
+                goal=goal,
+                pdb_list=pdb_list,
+                config=config,
+            )
+            summary_paths = write_run_summary(working_dir, run_summary)
+            run_summary["summary_files"] = summary_paths
+            print(f"\n{format_run_summary_terminal(run_summary)}", flush=True)
+
+            counts = run_summary.get("counts", {})
+            n_fail = counts.get("failed", 0)
+            n_skipped = counts.get("skipped", 0)
             return 0 if n_fail == 0 else 1
 
         except KeyboardInterrupt:
@@ -1472,6 +1616,19 @@ def main(argv=None):
     # ------------------------------------------------------------------
     # Single-simulation pipeline (original flow)
     # ------------------------------------------------------------------
+
+    # UniProt-only single-sim: pass structure request metadata to workflow
+    if structure_request_entries:
+        config["structure_requests"] = {
+            Path(entry["pdb_path"]).stem.lower(): _build_structure_request_config(entry, goal)
+            for entry in structure_request_entries
+        }
+        config["structure_request"] = _build_structure_request_config(
+            structure_request_entries[0], goal
+        )
+        if not any(Path(e["pdb_path"]).exists() for e in structure_request_entries):
+            print("  Downloading structure from database...", flush=True)
+            _prefetch_uniprot_structures(structure_request_entries, goal)
     
     # Initialize workflow
     workflow = MDWorkflow(llm_client)
@@ -1508,37 +1665,34 @@ def main(argv=None):
         # Log workflow completion is handled by conversation_logger
         # No need for separate log_workflow_state since conversation logger captures everything
         
-        # Log workflow completion
+        run_summary = build_run_summary(
+            final_state,
+            working_dir=working_dir,
+            goal=goal,
+            pdb_list=[],
+            config=config,
+        )
+        write_run_summary(working_dir, run_summary)
         success = len(final_state.get('errors', [])) == 0
         summary = f"Workflow completed with {len(final_state.get('errors', []))} errors and {len(final_state.get('warnings', []))} warnings"
         log_workflow_completion(final_state, success, summary)
-        
-        # Print results
-        print("\n" + "="*60)
-        print("WORKFLOW COMPLETED")
-        print("="*60)
-        
+
+        print(f"\n{format_run_summary_terminal(run_summary)}", flush=True)
+
         if final_state.get("final_report"):
+            print("\n--- Final Report ---\n")
             print(final_state["final_report"])
-        
+
         if final_state.get("errors"):
             print("\nERRORS:")
             for error in final_state["errors"]:
                 print(f"  - {error}")
-                
+
         if final_state.get("warnings"):
             print("\nWARNINGS:")
             for warning in final_state["warnings"]:
                 print(f"  - {warning}")
-        
-        print(f"\nFull conversation log saved to: {log_path}")
-        
-        # Show execution report path
-        report_path = str(Path(working_dir) / "supervisor" / "execution_report.md")
-        if Path(report_path).exists():
-            print(f"Execution report saved to: {report_path}")
-        
-        # Return appropriate exit code
+
         return 0 if not final_state.get("errors") else 1
         
     except KeyboardInterrupt:
