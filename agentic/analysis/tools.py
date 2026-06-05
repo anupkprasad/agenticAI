@@ -47,6 +47,9 @@ from src.analysis.combined_analysis import (
     run_combined_analysis,
     run_combined_dccm_analysis,
     run_combined_dccm_difference,
+    plot_combined_rmsf_segment_bars,
+    run_combined_rmsf_segment_analysis,
+    run_combined_com_distance_analysis,
 )
 
 # Import dynamic tool loader for programmer-generated tools
@@ -81,6 +84,9 @@ __all__ = [
     "run_combined_analysis",
     "run_combined_dccm_analysis",
     "run_combined_dccm_difference",
+    "plot_combined_rmsf_segment_bars",
+    "run_combined_rmsf_segment_analysis",
+    "run_combined_com_distance_analysis",
     "AnalysisToolExecutor",
     "get_analysis_tools",
     "get_tool_metadata",
@@ -124,6 +130,9 @@ def get_analysis_tools() -> list:
         run_combined_analysis,
         run_combined_dccm_analysis,
         run_combined_dccm_difference,
+        plot_combined_rmsf_segment_bars,
+        run_combined_rmsf_segment_analysis,
+        run_combined_com_distance_analysis,
     ]
 
 
@@ -250,6 +259,9 @@ class AnalysisToolExecutor:
             "run_combined_analysis": run_combined_analysis,
             "run_combined_dccm_analysis": run_combined_dccm_analysis,
             "run_combined_dccm_difference": run_combined_dccm_difference,
+            "plot_combined_rmsf_segment_bars": plot_combined_rmsf_segment_bars,
+            "run_combined_rmsf_segment_analysis": run_combined_rmsf_segment_analysis,
+            "run_combined_com_distance_analysis": run_combined_com_distance_analysis,
         }
         
         # Record built-in tool names BEFORE loading programmer tools

@@ -330,10 +330,19 @@ class ReporterAgent:
 
         # 5. Add combined DCCM comparison + difference plots produced by
         #    _run_combined_analysis (stored in analysis_results["combined"]["dccm_plots"]).
-        #    These are placed in the combined analysis dir and are not per-sim files,
-        #    so they must be added here explicitly.
         for _dccm_plot in combined_info.get("dccm_plots", []):
             _p = Path(_dccm_plot)
+            if _p.exists() and str(_p) not in overlay_plots:
+                overlay_plots.append(str(_p))
+
+        # 6. RMSF segment bar plots and COM distance combined overlay
+        for _seg_plot in combined_info.get("rmsf_segment_plots", []):
+            _p = Path(_seg_plot)
+            if _p.exists() and str(_p) not in overlay_plots:
+                overlay_plots.append(str(_p))
+        _com_plot = combined_info.get("com_distance_plot")
+        if _com_plot:
+            _p = Path(_com_plot)
             if _p.exists() and str(_p) not in overlay_plots:
                 overlay_plots.append(str(_p))
 

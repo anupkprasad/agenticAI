@@ -232,7 +232,12 @@ class MDAnalysisAgent:
         )
 
         try:
-            from .tools import run_combined_dccm_analysis, run_combined_dccm_difference
+            from .tools import (
+                run_combined_dccm_analysis,
+                run_combined_dccm_difference,
+                run_combined_rmsf_segment_analysis,
+                run_combined_com_distance_analysis,
+            )
 
             result = run_combined_analysis.func(
                 sim_dirs=sim_dirs,
@@ -337,6 +342,59 @@ class MDAnalysisAgent:
                     f"(ref_idx={ref_idx}, cmp_idx={cmp_idx})"
                 )
 
+            # ── RMSF segment bar plots (from user-specified residue ranges) ─
+            segment_plots: list = []
+            _goal_text = (
+                state.get("user_goal_original")
+                or state.get("user_goal")
+                or state.get("master_enriched_prompt")
+                or ""
+            )
+            try:
+                rmsf_seg = run_combined_rmsf_segment_analysis.func(
+                    sim_dirs=sim_dirs,
+                    labels=labels,
+                    working_dir=analysis_dir,
+                    user_goal=_goal_text,
+                    segments=state.get("rmsf_segments"),
+                )
+                if rmsf_seg.get("success"):
+                    segment_plots = rmsf_seg.get("plots", [])
+                    plots.extend(segment_plots)
+                    log_agent_action(
+                        "analysis", "RMSF segment bar plots generated",
+                        {"plots": segment_plots, "segments": rmsf_seg.get("segments", [])},
+                    )
+                else:
+                    logger.info(f"RMSF segments: {rmsf_seg.get('message')}")
+            except Exception as _exc:
+                logger.warning(f"RMSF segment analysis failed: {_exc}")
+
+            # ── ATP–pocket COM distance overlay (apo vs holo) ───────────────
+            com_plot: Optional[str] = None
+            try:
+                com_result = run_combined_com_distance_analysis.func(
+                    sim_dirs=sim_dirs,
+                    labels=labels,
+                    working_dir=analysis_dir,
+                )
+                if com_result.get("success"):
+                    com_plot = com_result.get("output_path")
+                    if com_plot and com_plot not in plots:
+                        plots.append(com_plot)
+                    log_agent_action(
+                        "analysis", "COM distance overlay generated",
+                        {
+                            "output": com_plot,
+                            "found": com_result.get("found_files", []),
+                            "missing": com_result.get("missing", []),
+                        },
+                    )
+                else:
+                    logger.info(f"COM distance overlay: {com_result.get('message')}")
+            except Exception as _exc:
+                logger.warning(f"COM distance overlay failed: {_exc}")
+
             # Store results in state for the reporter
             analysis_results = state.get("analysis_results") or {}
             analysis_results["combined"] = {
@@ -346,10 +404,14 @@ class MDAnalysisAgent:
                 "stats_tables": tables,
                 "skipped_metrics": skipped,
                 "dccm_plots": dccm_plots,
+                "rmsf_segment_plots": segment_plots,
+                "com_distance_plot": com_plot,
                 "analysis_dir": analysis_dir,
             }
             state["analysis_results"] = analysis_results
-            state["figures"] = list(state.get("figures") or []) + plots + dccm_plots
+            state["figures"] = (
+                list(state.get("figures") or []) + plots + dccm_plots
+            )
 
             state["errors"] = [
                 e for e in state.get("errors", [])

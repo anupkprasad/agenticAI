@@ -30,6 +30,14 @@ from .summary_logger import append_analysis_summary
 
 logger = logging.getLogger(__name__)
 
+# Fixed colour scales for combined DCCM figures (no per-matrix auto-normalisation).
+DCCM_CORR_VMIN = -1.0
+DCCM_CORR_VMAX = 1.0
+DCCM_DIFF_VMIN = -1.0
+DCCM_DIFF_VMAX = 1.0
+DCCM_CMAP = "RdBu_r"
+DCCM_DIFF_CMAP = "RdBu_r"
+
 # ── Optional heavy dependencies ─────────────────────────────────────────────
 try:
     import MDAnalysis as mda
@@ -395,11 +403,14 @@ def plot_dccm_comparison(
     labels: List[str],
     output_file: str,
     working_dir: str,
-    vmin: float = -1.0,
-    vmax: float = 1.0,
+    vmin: float = DCCM_CORR_VMIN,
+    vmax: float = DCCM_CORR_VMAX,
+    diff_vmin: float = DCCM_DIFF_VMIN,
+    diff_vmax: float = DCCM_DIFF_VMAX,
     figsize_per_panel: float = 5.0,
     dpi: int = 200,
-    cmap: str = "RdBu_r",
+    cmap: str = DCCM_CMAP,
+    cmap_diff: str = DCCM_DIFF_CMAP,
 ) -> Dict[str, Any]:
     """
     Create a side-by-side comparison heatmap of DCCM matrices from multiple
@@ -499,13 +510,12 @@ def plot_dccm_comparison(
     cbar = fig.colorbar(sm, ax=cbar_ax, fraction=0.046, pad=0.04)
     cbar.set_label("C$_{ij}$", fontsize=9)
 
-    # ── Optional difference panel ────────────────────────────────────────────
+    # ── Optional difference panel (fixed scale — no auto-normalisation) ─────
     if add_diff:
         diff = matrices[1] - matrices[0]
-        diff_max = max(abs(float(diff.min())), abs(float(diff.max()))) or 1.0
         ax_diff = axes[-1]
         im_diff = ax_diff.imshow(
-            diff, cmap="bwr", vmin=-diff_max, vmax=diff_max,
+            diff, cmap=cmap_diff, vmin=diff_vmin, vmax=diff_vmax,
             aspect="auto", interpolation="nearest", origin="lower",
         )
         ax_diff.set_title(f"Δ ({labels[1]} − {labels[0]})", fontsize=10)
@@ -547,7 +557,12 @@ def plot_dccm_difference(
     diff_threshold: float = 0.3,
     max_top_pairs: int = 50,
     dpi: int = 200,
-    cmap_diff: str = "bwr",
+    vmin_corr: float = DCCM_CORR_VMIN,
+    vmax_corr: float = DCCM_CORR_VMAX,
+    diff_vmin: float = DCCM_DIFF_VMIN,
+    diff_vmax: float = DCCM_DIFF_VMAX,
+    cmap_corr: str = DCCM_CMAP,
+    cmap_diff: str = DCCM_DIFF_CMAP,
 ) -> Dict[str, Any]:
     """
     Compute and plot the difference between two DCCM matrices (ΔC = compare − reference).
@@ -645,7 +660,6 @@ def plot_dccm_difference(
     _save_dccm_csv(diff, residue_ids, csv_path)
     output_files["delta_csv"] = csv_path
 
-    diff_max = max(abs(float(diff.min())), abs(float(diff.max()))) or 1.0
     diff_title = f"Δ DCCM ({compare_label} − {reference_label})"
 
     if plot_mode == "with_matrices":
@@ -657,7 +671,6 @@ def plot_dccm_difference(
         fig, axes = plt.subplots(
             1, 3, figsize=(16, 5.5),
         )
-        vmin_corr, vmax_corr = -1.0, 1.0
         n = n_residues
         step = max(1, n // 8)
         tick_pos = list(range(0, n, step))
@@ -669,7 +682,7 @@ def plot_dccm_difference(
             [reference_label, compare_label],
         ):
             ax.imshow(
-                mat, cmap="RdBu_r", vmin=vmin_corr, vmax=vmax_corr,
+                mat, cmap=cmap_corr, vmin=vmin_corr, vmax=vmax_corr,
                 aspect="auto", interpolation="nearest", origin="lower",
             )
             ax.set_title(title, fontsize=10, fontweight="bold")
@@ -682,7 +695,7 @@ def plot_dccm_difference(
 
         ax_diff = axes[2]
         im_diff = ax_diff.imshow(
-            diff, cmap=cmap_diff, vmin=-diff_max, vmax=diff_max,
+            diff, cmap=cmap_diff, vmin=diff_vmin, vmax=diff_vmax,
             aspect="auto", interpolation="nearest", origin="lower",
         )
         ax_diff.set_title(diff_title, fontsize=10, fontweight="bold")
@@ -706,7 +719,7 @@ def plot_dccm_difference(
     _plot_dccm_heatmap(
         diff, residue_ids, heatmap_path,
         title=diff_title,
-        vmin=-diff_max, vmax=diff_max,
+        vmin=diff_vmin, vmax=diff_vmax,
         cmap=cmap_diff,
         figsize=(8, 7),
         dpi=dpi,

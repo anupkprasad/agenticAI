@@ -9,6 +9,7 @@ Each function follows the same @tool convention used by the other modules
 in src/analysis/ (returns a Dict[str, Any] with at least a "success" key).
 """
 import os
+import re
 import csv
 import json
 import logging
@@ -65,6 +66,7 @@ def _find_metric_file(directory: str, filename_pattern: str) -> Optional[str]:
 def _read_two_column_file(
     filepath: str,
     y_col: int = 1,
+    x_col: int = 0,
 ) -> Tuple[List[float], List[float]]:
     """
     Read a whitespace-or-comma-separated data file.
@@ -104,9 +106,9 @@ def _read_two_column_file(
 
             # ── Data lines ────────────────────────────────────────────
             parts = raw.replace(",", " ").split()
-            if len(parts) >= y_col + 1:
+            if len(parts) > max(x_col, y_col):
                 try:
-                    xs.append(float(parts[0]))
+                    xs.append(float(parts[x_col]))
                     ys.append(float(parts[y_col]))
                 except ValueError:
                     continue
@@ -206,6 +208,8 @@ def plot_combined_overlay(
     title: str = "",
     xlabel: str = "Time (ns)",
     ylabel: str = "Value",
+    x_col: int = 0,
+    y_col: int = 1,
     colors: Optional[List[str]] = None,
     figsize: Tuple[int, int] = (10, 5),
     dpi: int = 200,
@@ -252,7 +256,7 @@ def plot_combined_overlay(
 
     for fpath, label, color in zip(data_files, labels, colors):
         try:
-            xs, ys = _read_two_column_file(fpath)
+            xs, ys = _read_two_column_file(fpath, x_col=x_col, y_col=y_col)
             ax.plot(xs, ys, label=label, color=color, linewidth=1.2, alpha=0.85)
             per_file_stats[label] = _float_stats(ys)
         except Exception as exc:
@@ -718,5 +722,346 @@ def run_combined_dccm_difference(
     except Exception as se:
         logger.warning(f"run_combined_dccm_difference: summary log failed: {se}")
 
+    return result
+
+
+# ---------------------------------------------------------------------------
+# RMSF segment bar plots & COM distance overlay
+# ---------------------------------------------------------------------------
+
+def parse_rmsf_segments_from_goal(text: str) -> List[Dict[str, Any]]:
+    """
+    Extract named protein residue ranges from a user goal string.
+
+    Recognises patterns such as:
+      - ``activation loop: 150 to 190``
+      - ``residue range 150-190``
+      - ``RMSF for residues 150 to 190``
+    """
+    if not text:
+        return []
+
+    segments: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    def _add(name: str, start: int, end: int) -> None:
+        if start > end:
+            start, end = end, start
+        key = (start, end)
+        if key in seen or end - start < 1:
+            return
+        low_name = name.lower()
+        if any(skip in low_name for skip in ("uniprot", "pdb:", "protein +")):
+            return
+        segments.append({
+            "name": name.strip(),
+            "residue_start": start,
+            "residue_end": end,
+        })
+        seen.add(key)
+
+    for m in re.finditer(
+        r'([A-Za-z][A-Za-z0-9\s\-]{2,40}?)\s*:\s*(\d+)\s*(?:to|–|-|—)\s*(\d+)',
+        text,
+        re.IGNORECASE,
+    ):
+        _add(m.group(1), int(m.group(2)), int(m.group(3)))
+
+    for m in re.finditer(
+        r'(?:residue(?:s)?|resid(?:ue)?s?)\s+(?:range\s+)?(\d+)\s*(?:to|–|-|—)\s*(\d+)',
+        text,
+        re.IGNORECASE,
+    ):
+        _add("Residue segment", int(m.group(1)), int(m.group(2)))
+
+    for m in re.finditer(
+        r'(activation[\s\-]*loop|αC[\s\-]*helix|A[\s\-]*loop|'
+        r'activation[\s\-]*segment|flexible[\s\-]*region)\s+'
+        r'(\d+)\s*(?:to|–|-|—)\s*(\d+)',
+        text,
+        re.IGNORECASE,
+    ):
+        _add(m.group(1), int(m.group(2)), int(m.group(3)))
+
+    return segments
+
+
+def _read_rmsf_file(filepath: str) -> Tuple[List[int], List[float]]:
+    """Read per-residue RMSF from .dat (tab/space) or two-column file."""
+    residues: List[int] = []
+    values: List[float] = []
+
+    with open(filepath, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            raw = line.strip()
+            if not raw or raw.startswith("#") or raw.startswith("@"):
+                continue
+            parts = raw.replace(",", "\t").split()
+            if len(parts) < 2:
+                continue
+            try:
+                residues.append(int(float(parts[0])))
+                values.append(float(parts[1]))
+            except ValueError:
+                continue
+
+    if not residues:
+        raise ValueError(f"No RMSF data found in {filepath}")
+    return residues, values
+
+
+def _slugify_segment_name(name: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", name.strip().lower()).strip("_")
+    return slug or "segment"
+
+
+@tool
+def plot_combined_rmsf_segment_bars(
+    sim_dirs: List[str],
+    labels: List[str],
+    residue_start: int,
+    residue_end: int,
+    working_dir: str,
+    segment_name: str = "Segment",
+    output_file: Optional[str] = None,
+    figsize: Tuple[int, int] = (12, 5),
+    dpi: int = 200,
+) -> Dict[str, Any]:
+    """
+    Grouped bar chart of per-residue RMSF within a residue range for all simulations.
+    """
+    if not HAS_MATPLOTLIB:
+        return {"success": False, "error": "matplotlib not available"}
+
+    if residue_start > residue_end:
+        residue_start, residue_end = residue_end, residue_start
+
+    Path(working_dir).mkdir(parents=True, exist_ok=True)
+    slug = _slugify_segment_name(segment_name)
+    out_name = output_file or f"rmsf_segment_{slug}_{residue_start}_{residue_end}.png"
+    output_path = str(Path(working_dir) / out_name)
+
+    series: List[Dict[str, Any]] = []
+    missing: List[str] = []
+
+    for sim_dir, label in zip(sim_dirs, labels):
+        rmsf_file = _find_metric_file(str(Path(sim_dir) / "analysis"), "rmsf")
+        if not rmsf_file:
+            rmsf_file = _find_metric_file(sim_dir, "rmsf")
+        if not rmsf_file:
+            missing.append(label)
+            continue
+        try:
+            res_ids, rmsf_vals = _read_rmsf_file(rmsf_file)
+            filtered = {
+                r: v for r, v in zip(res_ids, rmsf_vals)
+                if residue_start <= r <= residue_end
+            }
+            if not filtered:
+                missing.append(label)
+                continue
+            series.append({"label": label, "data": filtered})
+        except Exception as exc:
+            logger.warning(f"plot_combined_rmsf_segment_bars: {label}: {exc}")
+            missing.append(label)
+
+    if len(series) < 1:
+        return {
+            "success": False,
+            "error": f"No RMSF data in residues {residue_start}-{residue_end}",
+            "missing": missing,
+        }
+
+    all_residues = sorted({r for s in series for r in s["data"]})
+    if not all_residues:
+        return {"success": False, "error": "No residues in requested range"}
+
+    n_res = len(all_residues)
+    n_sims = len(series)
+    x = list(range(n_res))
+    width = 0.8 / max(n_sims, 1)
+    default_colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+                      "#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
+
+    fig, ax = plt.subplots(figsize=figsize)
+    for i, s in enumerate(series):
+        offset = (i - (n_sims - 1) / 2) * width
+        ys = [s["data"].get(r, 0.0) for r in all_residues]
+        ax.bar(
+            [xi + offset for xi in x], ys, width=width,
+            label=s["label"],
+            color=default_colors[i % len(default_colors)],
+            alpha=0.88,
+        )
+
+    step = max(1, n_res // 12)
+    tick_pos = list(range(0, n_res, step))
+    tick_labels = [str(all_residues[i]) for i in tick_pos]
+    ax.set_xticks(tick_pos)
+    ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=8)
+    ax.set_xlabel("Residue", fontsize=10)
+    ax.set_ylabel("RMSF (Å)", fontsize=10)
+    ax.set_title(
+        f"RMSF — {segment_name} (residues {residue_start}–{residue_end})",
+        fontsize=11, fontweight="bold",
+    )
+    ax.legend(loc="best", fontsize=9)
+    ax.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+
+    return {
+        "success": True,
+        "output_path": output_path,
+        "segment_name": segment_name,
+        "residue_start": residue_start,
+        "residue_end": residue_end,
+        "n_simulations": len(series),
+        "missing": missing,
+        "message": (
+            f"RMSF segment bar plot for {segment_name} "
+            f"({residue_start}–{residue_end}) saved to {output_path}"
+        ),
+    }
+
+
+@tool
+def run_combined_rmsf_segment_analysis(
+    sim_dirs: List[str],
+    labels: List[str],
+    working_dir: str,
+    user_goal: Optional[str] = None,
+    segments: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Generate RMSF bar plots for residue segments specified in the user goal."""
+    Path(working_dir).mkdir(parents=True, exist_ok=True)
+
+    seg_list = segments or parse_rmsf_segments_from_goal(user_goal or "")
+    if not seg_list:
+        return {
+            "success": False,
+            "plots": [],
+            "segments": [],
+            "message": "No RMSF residue segments found in user goal",
+        }
+
+    plots: List[str] = []
+    processed: List[Dict[str, Any]] = []
+
+    for seg in seg_list:
+        result = plot_combined_rmsf_segment_bars.func(
+            sim_dirs=sim_dirs,
+            labels=labels,
+            residue_start=int(seg["residue_start"]),
+            residue_end=int(seg["residue_end"]),
+            working_dir=working_dir,
+            segment_name=seg.get("name", "Segment"),
+        )
+        entry = {
+            "segment": seg,
+            "success": result.get("success", False),
+            "output_path": result.get("output_path", ""),
+        }
+        processed.append(entry)
+        if result.get("success"):
+            plots.append(result["output_path"])
+
+    try:
+        from src.analysis.summary_logger import append_analysis_summary
+        append_analysis_summary(
+            working_dir=working_dir,
+            analysis_type="Combined_RMSF_Segments",
+            statistics={"n_segments": len(processed), "n_plots": len(plots)},
+            files={"segment_plots": plots},
+            metadata={"segments": seg_list, "results": processed},
+        )
+    except Exception as se:
+        logger.warning(f"run_combined_rmsf_segment_analysis: summary log failed: {se}")
+
+    return {
+        "success": len(plots) > 0,
+        "plots": plots,
+        "segments": seg_list,
+        "results": processed,
+        "message": f"Generated {len(plots)} RMSF segment bar plot(s)",
+    }
+
+
+@tool
+def run_combined_com_distance_analysis(
+    sim_dirs: List[str],
+    labels: List[str],
+    working_dir: str,
+    output_file: str = "com_distance_overlay.png",
+) -> Dict[str, Any]:
+    """
+    Overlay ATP–catalytic-pocket COM distance time series across simulations.
+    """
+    Path(working_dir).mkdir(parents=True, exist_ok=True)
+
+    found_files: List[str] = []
+    found_labels: List[str] = []
+    missing: List[str] = []
+
+    for sim_dir, label in zip(sim_dirs, labels):
+        analysis_dir = Path(sim_dir) / "analysis"
+        hit = None
+        for pattern in ("ligand_pocket_distance", "com_distance"):
+            for search_root in [str(analysis_dir), sim_dir]:
+                hit = _find_metric_file(search_root, pattern)
+                if hit:
+                    break
+            if hit:
+                break
+        if hit:
+            found_files.append(hit)
+            found_labels.append(label)
+        else:
+            missing.append(label)
+
+    if len(found_files) < 1:
+        return {
+            "success": False,
+            "message": (
+                "No ligand pocket / COM distance CSV found in any simulation. "
+                f"Missing: {missing}"
+            ),
+            "missing": missing,
+        }
+
+    result = plot_combined_overlay.func(
+        data_files=found_files,
+        labels=found_labels,
+        output_file=output_file,
+        working_dir=working_dir,
+        title="ATP–Catalytic Pocket COM Distance",
+        xlabel="Time (ns)",
+        ylabel="COM Distance (Å)",
+        x_col=1,
+        y_col=2,
+    )
+
+    if result.get("success"):
+        try:
+            from src.analysis.summary_logger import append_analysis_summary
+            append_analysis_summary(
+                working_dir=working_dir,
+                analysis_type="Combined_COM_Distance",
+                statistics=result.get("stats", {}),
+                files={
+                    "overlay_plot": result.get("output_path", ""),
+                    "source_csv_files": found_files,
+                },
+                metadata={
+                    "simulations": found_labels,
+                    "missing_simulations": missing,
+                },
+            )
+        except Exception as se:
+            logger.warning(f"run_combined_com_distance_analysis: summary failed: {se}")
+
+    result["missing"] = missing
+    result["found_files"] = found_files
     return result
 

@@ -1379,12 +1379,36 @@ def _build_comparative_dynamics_section(
         _img(rmsd_path, "RMSD overlay") if rmsd_path else _missing("No RMSD overlay found"),
     )
 
-    # ── Panel B: RMSF overlay ────────────────────────────────────────────
+    # ── Panel B: RMSF overlay + optional segment bar plots ───────────────
     rmsf_path = _find_overlay_by_type(overlay_plots, "rmsf")
+    rmsf_segment_plots = [
+        p for p in overlay_plots if "rmsf_segment" in Path(p).name.lower()
+    ]
+    if rmsf_path or rmsf_segment_plots:
+        rmsf_body = ""
+        if rmsf_path:
+            rmsf_body += _img(rmsf_path, "RMSF overlay")
+        if rmsf_segment_plots:
+            if rmsf_path:
+                rmsf_body += (
+                    '<hr style="border:none;border-top:1px dashed #bfdbfe;'
+                    'margin:12px 0 10px;">'
+                )
+            rmsf_body += (
+                '<p style="font-weight:700;color:#1e40af;margin:0 0 8px;">'
+                'Segment RMSF (bar plots)</p>'
+            )
+            for seg_path in rmsf_segment_plots:
+                rmsf_body += _img(
+                    seg_path,
+                    Path(seg_path).stem.replace("_", " "),
+                )
+    else:
+        rmsf_body = _missing("No RMSF overlay found")
     panel_b = _panel(
-        "B", "RMSF Overlay",
-        "Per-residue C\u03b1 backbone flexibility across all simulations",
-        _img(rmsf_path, "RMSF overlay") if rmsf_path else _missing("No RMSF overlay found"),
+        "B", "RMSF Overlay & Segments",
+        "Per-residue C\u03b1 flexibility and user-defined segment bar comparisons",
+        rmsf_body,
     )
 
     # ── Panel C: Rg comparison ───────────────────────────────────────────
@@ -1397,16 +1421,36 @@ def _build_comparative_dynamics_section(
         _img(rg_path, "Rg overlay") if rg_path else _missing("No Rg overlay found"),
     )
 
-    # ── Panel D: ATP/ligand pocket distance ──────────────────────────────
+    # ── Panel D: ATP–catalytic pocket COM distance (combined overlay) ───
+    com_overlay = _find_overlay_by_type(overlay_plots, "com_distance")
     pocket_plots = _find_per_sim_plots(sim_dirs, labels, "pocket_distance")
     if not pocket_plots:
         pocket_plots = _find_per_sim_plots(sim_dirs, labels, "ligand_pocket")
-    if not pocket_plots:
-        pocket_plots = _find_per_sim_plots(sim_dirs, labels, "atp_distance")
-    if not pocket_plots:
-        pocket_plots = _find_per_sim_plots(sim_dirs, labels, "distance")
 
-    if pocket_plots:
+    if com_overlay:
+        pocket_body = (
+            '<p style="font-size:12px;color:#6b7280;margin:0 0 6px 0;">'
+            'Combined overlay — apo vs holo (holo systems with bound ATP)</p>'
+            + _img(com_overlay, "COM distance overlay")
+        )
+        if pocket_plots:
+            pocket_body += (
+                '<p style="font-size:11px;color:#6b7280;margin:10px 0 4px;">'
+                'Per-simulation traces:</p>'
+            )
+            pocket_body += '<div style="display:flex;flex-wrap:wrap;gap:6px;">'
+            for lbl, pth in pocket_plots[:4]:
+                uri = _encode_image(pth)
+                if uri:
+                    pocket_body += (
+                        f'<div style="flex:1 1 140px;text-align:center;">'
+                        f'<img src="{uri}" alt="{_html_mod.escape(lbl)}" '
+                        f'style="width:100%;border-radius:3px;">'
+                        f'<p style="font-size:10px;color:#6b7280;">'
+                        f'{_html_mod.escape(lbl)}</p></div>'
+                    )
+            pocket_body += '</div>'
+    elif pocket_plots:
         rep_label, rep_path = pocket_plots[0]
         pocket_body = (
             f'<p style="font-size:12px;color:#6b7280;margin:0 0 6px 0;">'
@@ -1427,11 +1471,11 @@ def _build_comparative_dynamics_section(
                     )
             pocket_body += '</div>'
     else:
-        pocket_body = _missing("No pocket distance data found")
+        pocket_body = _missing("No ATP–pocket COM distance data found")
 
     panel_d = _panel(
-        "D", "ATP Pocket / Active Site Distance",
-        "Key inter-residue distances in the nucleotide or ligand binding pocket",
+        "D", "ATP–Catalytic Pocket COM Distance",
+        "Center-of-mass distance between ATP and the catalytic pocket (apo vs holo)",
         pocket_body,
     )
 
