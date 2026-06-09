@@ -350,17 +350,30 @@ class ToolsRegistry:
         
         return description, args_dict
     
-    def get_tools_for_agent(self, agent_name: str) -> List[Dict[str, Any]]:
+    def get_tools_for_agent(
+        self,
+        agent_name: str,
+        exclude_combined_tools: bool = False,
+    ) -> List[Dict[str, Any]]:
         """
         Get all tools for a specific agent.
         
         Args:
             agent_name: Agent name (e.g., 'preprocess', 'setup')
+            exclude_combined_tools: When True, omit cross-simulation combined-analysis
+                tools from the analysis agent tool list.
             
         Returns:
             List of tool metadata dicts
         """
-        return self.tools_by_agent.get(agent_name, [])
+        tools = self.tools_by_agent.get(agent_name, [])
+        if not exclude_combined_tools or agent_name != "analysis":
+            return tools
+        try:
+            from agentic.analysis.tools import is_combined_analysis_tool
+            return [t for t in tools if not is_combined_analysis_tool(t.get("name", ""))]
+        except ImportError:
+            return tools
     
     def get_all_tools_summary(self) -> str:
         """
@@ -390,21 +403,36 @@ class ToolsRegistry:
         summary.append("=" * 80)
         return "\n".join(summary)
     
-    def get_tools_for_planner(self, agent_name: Optional[str] = None) -> str:
+    def get_tools_for_planner(
+        self,
+        agent_name: Optional[str] = None,
+        exclude_combined_tools: bool = False,
+    ) -> str:
         """
         Get formatted tools description for planner LLM context.
         
         Args:
             agent_name: If specified, only return tools for this agent
+            exclude_combined_tools: When True, omit cross-simulation combined-analysis
+                tools from the analysis agent section.
             
         Returns:
             Formatted string suitable for LLM prompts
         """
         if agent_name:
-            tools = self.get_tools_for_agent(agent_name)
+            tools = self.get_tools_for_agent(
+                agent_name,
+                exclude_combined_tools=exclude_combined_tools,
+            )
             agents_to_format = {agent_name: tools}
         else:
-            agents_to_format = self.tools_by_agent
+            agents_to_format = {
+                agent: self.get_tools_for_agent(
+                    agent,
+                    exclude_combined_tools=exclude_combined_tools,
+                )
+                for agent in self.tools_by_agent
+            }
         
         # Agent descriptions for planner context
         agent_descriptions = {

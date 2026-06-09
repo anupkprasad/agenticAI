@@ -53,7 +53,9 @@ def build_topology(
             "-p", str(topology_file),
             "-ff", force_field,
             "-water", water_model,
-            "-ignh"  # Ignore hydrogens in input
+            "-ignh",  # Ignore hydrogens in input
+            "-chainsep", "id_or_ter",
+            "-merge", "all",
         ]
         
         result = subprocess.run(

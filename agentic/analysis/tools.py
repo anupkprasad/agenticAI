@@ -50,6 +50,12 @@ from src.analysis.combined_analysis import (
     plot_combined_rmsf_segment_bars,
     run_combined_rmsf_segment_analysis,
     run_combined_com_distance_analysis,
+    pair_apo_holo_simulations,
+    is_holo_simulation,
+    plot_rmsf_apo_holo_comparison,
+    run_combined_rmsf_apo_holo_analysis,
+    run_combined_dccm_apo_holo_analysis,
+    run_combined_rmsf_segment_apo_holo_analysis,
 )
 
 # Import dynamic tool loader for programmer-generated tools
@@ -87,67 +93,115 @@ __all__ = [
     "plot_combined_rmsf_segment_bars",
     "run_combined_rmsf_segment_analysis",
     "run_combined_com_distance_analysis",
+    "pair_apo_holo_simulations",
+    "is_holo_simulation",
+    "plot_rmsf_apo_holo_comparison",
+    "run_combined_rmsf_apo_holo_analysis",
+    "run_combined_dccm_apo_holo_analysis",
+    "run_combined_rmsf_segment_apo_holo_analysis",
     "AnalysisToolExecutor",
     "get_analysis_tools",
     "get_tool_metadata",
+    "COMBINED_ANALYSIS_TOOL_NAMES",
+    "is_combined_analysis_tool",
     "initialize_summary_file",
     "generate_summary_report"
 ]
 
 logger = logging.getLogger(__name__)
 
+# Cross-simulation tools — only for the combined_analysis phase after all per-sim runs.
+# Must NOT be exposed to the planner or analysis LLM during individual simulation workflows.
+COMBINED_ANALYSIS_TOOL_NAMES = frozenset({
+    "collect_metric_files",
+    "plot_combined_overlay",
+    "compute_comparison_table",
+    "run_combined_analysis",
+    "run_combined_dccm_analysis",
+    "run_combined_dccm_difference",
+    "plot_combined_rmsf_segment_bars",
+    "run_combined_rmsf_segment_analysis",
+    "run_combined_com_distance_analysis",
+    "plot_rmsf_apo_holo_comparison",
+    "run_combined_rmsf_apo_holo_analysis",
+    "run_combined_dccm_apo_holo_analysis",
+    "run_combined_rmsf_segment_apo_holo_analysis",
+})
 
-def get_analysis_tools() -> list:
+_PER_SIM_ANALYSIS_TOOLS = [
+    calculate_rmsd,
+    calculate_rmsf,
+    calculate_radius_of_gyration,
+    calculate_sasa,
+    plot_sasa,
+    analyze_energy,
+    extract_trajectory_metrics,
+    analyze_secondary_structure,
+    plot_md_data,
+    plot_md_multipanel,
+    plot_combined_data,
+    calculate_com_distance,
+    calculate_ligand_pocket_distance,
+    calculate_dccm,
+    plot_dccm_comparison,
+    plot_dccm_difference,
+    wrap_trajectory,
+]
+
+_COMBINED_ANALYSIS_TOOLS = [
+    collect_metric_files,
+    plot_combined_overlay,
+    compute_comparison_table,
+    run_combined_analysis,
+    run_combined_dccm_analysis,
+    run_combined_dccm_difference,
+    plot_combined_rmsf_segment_bars,
+    run_combined_rmsf_segment_analysis,
+    run_combined_com_distance_analysis,
+    plot_rmsf_apo_holo_comparison,
+    run_combined_rmsf_apo_holo_analysis,
+    run_combined_dccm_apo_holo_analysis,
+    run_combined_rmsf_segment_apo_holo_analysis,
+]
+
+
+def is_combined_analysis_tool(tool_name: str) -> bool:
+    """Return True if *tool_name* is a cross-simulation combined-analysis tool."""
+    return tool_name in COMBINED_ANALYSIS_TOOL_NAMES
+
+
+def get_analysis_tools(include_combined: bool = False) -> list:
     """
-    Get all analysis @tool functions for LLM binding and tool registry.
-    These StructuredTool objects can be passed directly to LLM.bind_tools()
-    
+    Get analysis @tool functions for LLM binding and tool registry.
+
+    Args:
+        include_combined: When True, include cross-simulation combined-analysis tools.
+            Default False — per-simulation planner/analysis agents must not see them.
+
     Returns:
         List of StructuredTool objects ready for LLM use
     """
-    return [
-        calculate_rmsd,
-        calculate_rmsf,
-        calculate_radius_of_gyration,
-        calculate_sasa,
-        plot_sasa,
-        analyze_energy,
-        extract_trajectory_metrics,
-        analyze_secondary_structure,
-        plot_md_data,
-        plot_md_multipanel,
-        plot_combined_data,
-        calculate_com_distance,
-        calculate_ligand_pocket_distance,
-        calculate_dccm,
-        plot_dccm_comparison,
-        plot_dccm_difference,
-        wrap_trajectory,
-        # Combined (multi-sim) tools
-        collect_metric_files,
-        plot_combined_overlay,
-        compute_comparison_table,
-        run_combined_analysis,
-        run_combined_dccm_analysis,
-        run_combined_dccm_difference,
-        plot_combined_rmsf_segment_bars,
-        run_combined_rmsf_segment_analysis,
-        run_combined_com_distance_analysis,
-    ]
+    if include_combined:
+        return _PER_SIM_ANALYSIS_TOOLS + _COMBINED_ANALYSIS_TOOLS
+    return list(_PER_SIM_ANALYSIS_TOOLS)
 
 
-def get_tool_metadata(working_directory: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+def get_tool_metadata(
+    working_directory: Optional[str] = None,
+    include_combined: bool = False,
+) -> Dict[str, Dict[str, Any]]:
     """
     Dynamically extract metadata from all @tool functions.
     This provides tool information for the planner agent.
     
     Args:
         working_directory: Base working directory (e.g. 'work_di'). Used to locate programmer-generated tools.
+        include_combined: When True, include cross-simulation combined-analysis tools.
     
     Returns:
         Dict mapping tool names to their metadata (description, args, etc.)
     """
-    tools = get_analysis_tools()
+    tools = get_analysis_tools(include_combined=include_combined)
     metadata = {}
     
     for tool in tools:
@@ -228,8 +282,9 @@ class AnalysisToolExecutor:
             config: Analysis configuration (output paths, default selections, etc.)
         """
         self.config = config or {}
+        include_combined = self.config.get("include_combined_tools", False)
         
-        # Core analysis tools
+        # Core analysis tools (per-simulation only unless include_combined_tools=True)
         self.tools = {
             "calculate_rmsd": calculate_rmsd,
             "calculate_rmsf": calculate_rmsf,
@@ -252,17 +307,23 @@ class AnalysisToolExecutor:
             "plot_dccm_comparison": plot_dccm_comparison,
             "plot_dccm_difference": plot_dccm_difference,
             "wrap_trajectory": wrap_trajectory,
-            # Combined (multi-sim) tools
-            "collect_metric_files": collect_metric_files,
-            "plot_combined_overlay": plot_combined_overlay,
-            "compute_comparison_table": compute_comparison_table,
-            "run_combined_analysis": run_combined_analysis,
-            "run_combined_dccm_analysis": run_combined_dccm_analysis,
-            "run_combined_dccm_difference": run_combined_dccm_difference,
-            "plot_combined_rmsf_segment_bars": plot_combined_rmsf_segment_bars,
-            "run_combined_rmsf_segment_analysis": run_combined_rmsf_segment_analysis,
-            "run_combined_com_distance_analysis": run_combined_com_distance_analysis,
         }
+        if include_combined:
+            self.tools.update({
+                "collect_metric_files": collect_metric_files,
+                "plot_combined_overlay": plot_combined_overlay,
+                "compute_comparison_table": compute_comparison_table,
+                "run_combined_analysis": run_combined_analysis,
+                "run_combined_dccm_analysis": run_combined_dccm_analysis,
+                "run_combined_dccm_difference": run_combined_dccm_difference,
+                "plot_combined_rmsf_segment_bars": plot_combined_rmsf_segment_bars,
+                "run_combined_rmsf_segment_analysis": run_combined_rmsf_segment_analysis,
+                "run_combined_com_distance_analysis": run_combined_com_distance_analysis,
+                "plot_rmsf_apo_holo_comparison": plot_rmsf_apo_holo_comparison,
+                "run_combined_rmsf_apo_holo_analysis": run_combined_rmsf_apo_holo_analysis,
+                "run_combined_dccm_apo_holo_analysis": run_combined_dccm_apo_holo_analysis,
+                "run_combined_rmsf_segment_apo_holo_analysis": run_combined_rmsf_segment_apo_holo_analysis,
+            })
         
         # Record built-in tool names BEFORE loading programmer tools
         # so _auto_log_summary can skip tools that already self-log

@@ -22,7 +22,7 @@ def generate_slurm_script(
     ntasks: int = 1,
     cpus_per_task: int = 64,
     memory: str = "40G",
-    time_limit: str = "0-10:00:00",
+    time_limit: str = "3-00:00:00",
     gpu_count: int = 1,
     email: Optional[str] = None,
     gromacs_module: str = "GROMACS/2024.4-foss-2023b-CUDA-12.4.0-PLUMED-2.9.2",
@@ -48,7 +48,7 @@ def generate_slurm_script(
         ntasks: Number of tasks/processes (default: 1)
         cpus_per_task: CPU cores per task (default: 64)
         memory: Memory allocation (default: 40G)
-        time_limit: Time limit in format days-hours:minutes:seconds (default: 0-10:00:00)
+        time_limit: Time limit in format days-hours:minutes:seconds (default: 3-00:00:00)
         gpu_count: Number of GPUs to request (default: 1)
         email: Email address for job notifications (optional)
         gromacs_module: GROMACS module name to load (default: GROMACS/2024.4-foss-2023b-CUDA-12.4.0-PLUMED-2.9.2)
@@ -258,7 +258,7 @@ def generate_simple_slurm_script(
     partition: str = "gpu_p",
     cpus_per_task: int = 64,
     memory: str = "40G",
-    time_limit: str = "0-10:00:00",
+    time_limit: str = "3-00:00:00",
     gpu_count: int = 1,
     email: Optional[str] = None,
     modules: Optional[List[str]] = None,
@@ -274,7 +274,7 @@ def generate_simple_slurm_script(
         partition: SLURM partition (default: gpu_p)
         cpus_per_task: CPU cores (default: 64)
         memory: Memory allocation (default: 40G)
-        time_limit: Time limit (default: 0-10:00:00)
+        time_limit: Time limit (default: 3-00:00:00)
         gpu_count: Number of GPUs (default: 1)
         email: Email for notifications (optional)
         modules: List of modules to load (optional)

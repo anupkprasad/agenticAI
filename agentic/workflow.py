@@ -721,6 +721,10 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "completed_sim_states": None,
             "sim_working_dirs": None,
             "multi_sim_base_dir": None,
+            "combined_only": False,
+            "resume_failed_only": None,
+            "retry_labels": None,
+            "_resume_succeeded_labels": None,
         }
 
         if config:
@@ -840,7 +844,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
 
             # Multi-simulation progress bookkeeping must be restored so reruns
             # continue from remaining simulations instead of restarting.
-            if state.get("is_multi_simulation"):
+            if state.get("is_multi_simulation") and not state.get("combined_only"):
                 restore_keys.extend([
                     "multi_sim_phase",
                     "sim_prompts",
@@ -878,10 +882,23 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     "completed_sim_states",
                     "all_pdb_analyses",
                 }
+                # In resume mode, keep multi-sim bookkeeping so the supervisor can
+                # identify which sims have already succeeded and skip them.
+                if state.get("resume_failed_only") and state.get("is_multi_simulation"):
+                    skip_stale_keys -= {
+                        "sim_prompts",
+                        "combined_analysis_plan",
+                        "completed_sim_states",
+                        "master_enriched_prompt",
+                        "all_pdb_analyses",
+                        "enriched_prompt",
+                        "structured_prompt",
+                    }
                 restore_keys = [k for k in restore_keys if k not in skip_stale_keys]
                 logger.info(
                     "Restore policy: skipping stale planning/results keys "
-                    f"(completed={is_completed_snapshot}, same_signature={same_subtask_signature})"
+                    f"(completed={is_completed_snapshot}, same_signature={same_subtask_signature}, "
+                    f"resume={state.get('resume_failed_only', False)})"
                 )
 
             for key in restore_keys:
@@ -889,16 +906,64 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     state[key] = saved_state[key]
 
             if state.get("is_multi_simulation") and (is_completed_snapshot or not same_subtask_signature):
-                state["multi_sim_phase"] = None
-                state["current_sim_index"] = 0
-                state["completed_sim_states"] = None
-                state["sim_prompts"] = None
-                state["combined_analysis_plan"] = None
-                state["master_enriched_prompt"] = None
-                state["user_goal_original"] = None
-                state["all_pdb_analyses"] = None
+                if state.get("resume_failed_only"):
+                    # Resume mode: keep sim_prompts + completed_sim_states so the
+                    # supervisor can detect already-succeeded sims and skip them.
+                    # Only reset the execution phase so the supervisor re-enters the
+                    # per-sim loop and calls _setup_resume_mode.
+                    state["multi_sim_phase"] = None
+                    state["execution_plan"] = None
+                    logger.info(
+                        "[resume] Multi-sim state preserved (sim_prompts + completed_sim_states "
+                        "kept) — supervisor will retry failed simulations only"
+                    )
+                else:
+                    state["multi_sim_phase"] = None
+                    state["current_sim_index"] = 0
+                    state["completed_sim_states"] = None
+                    state["sim_prompts"] = None
+                    state["combined_analysis_plan"] = None
+                    state["master_enriched_prompt"] = None
+                    state["user_goal_original"] = None
+                    state["all_pdb_analyses"] = None
             
             logger.info("Restored previous workflow state — supervisor will skip completed stages")
+
+        # --combined-only reruns must not inherit per-sim routing from a saved state.
+        if state.get("combined_only"):
+            base_dir = state.get("working_directory")
+            for _k, _default in (
+                ("multi_sim_phase", None),
+                ("execution_plan", None),
+                ("plan_executed", False),
+                ("current_agent_idx", 0),
+                ("current_sim_index", 0),
+                ("enriched_prompt", None),
+                ("rephrased_goal", None),
+                ("analysis_results", {}),
+                ("reporter_output", None),
+                ("raw_pdb", None),
+                ("trajectory_path", None),
+                ("topology", None),
+                ("coordinates", None),
+                ("job_id", None),
+                ("analysis_instructions", None),
+                ("reporter_instructions", None),
+                ("sim_prompts", None),
+                ("completed_sim_states", None),
+                ("combined_analysis_plan", None),
+                ("input_validated", True),
+                ("subtask_type_initialized", False),
+            ):
+                state[_k] = _default
+            state["figures"] = []
+            if base_dir:
+                state["multi_sim_base_dir"] = base_dir
+                state["working_directory"] = base_dir
+            logger.info(
+                "[combined_only] Cleared restored routing state — "
+                "supervisor will run combined analysis + report only"
+            )
         
         # Ensure execution_path is always a list we control
         state["execution_path"] = list(state.get("execution_path", []))

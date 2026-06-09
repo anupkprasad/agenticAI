@@ -62,6 +62,77 @@ def _coerce_plan_text(value: Any, default: str = "") -> str:
     return str(value).strip() or default
 
 
+# Agents that run before trajectories exist (preprocess → HPC).
+_SIMULATION_STAGE_AGENTS = frozenset({"preprocess", "simsetup", "hpcjob"})
+
+
+def _is_post_simulation_subtask(state: Dict[str, Any]) -> bool:
+    """
+    True when the workflow only runs analysis and/or reporter on existing data.
+
+    Example: ``--subtask analysis reporter`` after simulations are already complete.
+    """
+    subtask_type = state.get("subtask_type")
+    if subtask_type in ("analysis_only", "reporter_only"):
+        return True
+    if subtask_type == "multi_agent":
+        agents = set(state.get("agent_list") or [])
+        return not bool(agents & _SIMULATION_STAGE_AGENTS)
+    return False
+
+
+def _build_per_sim_analysis_prompt(
+    entry: Dict[str, Any],
+    *,
+    original_goal: str,
+    enriched_prompt: str,
+    agents_desc: str,
+) -> str:
+    """Deterministic per-simulation prompt for post-simulation analysis/reporter runs."""
+    protein = entry.get("protein_name") or entry.get("label", "system")
+    label = entry.get("label", "simulation")
+    case = entry.get("case_description", "default system")
+    wdir = entry.get("working_dir", "")
+    requirements = (original_goal or enriched_prompt or "").strip()
+
+    return (
+        f"Perform post-simulation analysis and scientific reporting for {protein} "
+        f"(simulation label: {label}; system case: {case}). "
+        f"Completed MD outputs are in {wdir}/hpc/ (e.g. md.gro, md.xtc, md.edr). "
+        f"Run only these workflow steps: {agents_desc}. "
+        f"Apply the following project analysis and reporting requirements to this "
+        f"specific system (respecting apo vs holo case where relevant): {requirements}"
+    )
+
+
+def _build_combined_analysis_plan_fallback(
+    state: Dict[str, Any],
+    expanded_entries: List[Dict[str, Any]],
+) -> str:
+    """Fallback combined plan when LLM decomposition is unavailable."""
+    original = (state.get("user_goal_original") or state.get("user_goal") or "").strip()
+    labels = ", ".join(e.get("label", "") for e in expanded_entries)
+    base = (
+        "Perform combined cross-simulation analysis and reporting across all completed "
+        f"trajectories ({labels}).\n"
+        "1. Group comparisons by protein and apo vs holo (ligand-bound) case.\n"
+        "2. Generate per-protein overlay plots (RMSD, RMSF apo/holo, Rg) and summary statistics.\n"
+        "3. Compute DCCM comparisons and apo–holo ΔDCCM per pseudokinase.\n"
+        "4. Include active-site / segment RMSF bar plots where specified in the goal.\n"
+        "5. Produce a consolidated HTML report correlating simulation findings with literature.\n"
+    )
+    if original:
+        return f"{base}\nOriginal study goal for reference:\n{original}"
+    return base
+
+
+# Base-level agent folders — not per-simulation directories.
+_BASE_AGENT_SUBDIRS = frozenset({
+    "analysis", "reporter", "supervisor", "planner", "preprocess",
+    "simsetup", "hpc", "programmer", "combinedAnalysis",
+})
+
+
 class MDSupervisor:
     """
     LLM-powered supervisor that orchestrates the MD workflow.
@@ -143,6 +214,18 @@ class MDSupervisor:
 
         multi_sim_phase = state.get("multi_sim_phase")
 
+        # ── Combined-only fast path (before any per-sim routing) ─────────
+        # Per-simulation analysis/report already lives under {base}/{label}/.
+        # Combined outputs belong in {base}/analysis/ and {base}/reporter/.
+        # When --combined-only is set, discover sims from per-sim
+        # analysis_summary.jsonl files and jump straight to combined mode.
+        if state.get("is_multi_simulation") and state.get("combined_only"):
+            if multi_sim_phase != "combined_analysis":
+                activated = self._activate_combined_only_mode(state)
+                if activated is not None:
+                    return activated
+                multi_sim_phase = state.get("multi_sim_phase")
+
         # ── Subtask type initialisation (once) ───────────────────────────
         if not state.get("subtask_type_initialized"):
             subtask_type = state.get("subtask_type")
@@ -178,7 +261,9 @@ class MDSupervisor:
                 return state
 
         # ── Step 1: Input validation ──────────────────────────────────────
-        if not state.get("input_validated") and state.get("user_goal"):
+        if (not state.get("input_validated")
+                and state.get("user_goal")
+                and not state.get("combined_only")):
             logger.info(f"SUPERVISOR: Routing to input validation (subtask={subtask_type})")
             state["next_node"] = "input_validation"
             return state
@@ -201,10 +286,27 @@ class MDSupervisor:
         # before routing to the planner.  Replaces the old planner-side
         # _create_multi_sim_master_plan which exposed the full tools context to
         # the LLM unnecessarily.
+        # Regenerate when a prior full-pipeline master plan is reused for analysis-only.
+        if (state.get("is_multi_simulation")
+                and state.get("sim_prompts")
+                and multi_sim_phase is None
+                and _is_post_simulation_subtask(state)):
+            _scopes = {
+                (s or {}).get("task_scope") for s in (state.get("sim_prompts") or [])
+            }
+            if _scopes and _scopes != {"analysis_reporter"}:
+                logger.info(
+                    "SUPERVISOR [multi-sim]: Replacing stale full-pipeline sim_prompts "
+                    "with post-simulation analysis/reporter prompts"
+                )
+                state["sim_prompts"] = None
+                state["combined_analysis_plan"] = None
+
         if (state.get("is_multi_simulation")
                 and state.get("enriched_prompt")
                 and not state.get("sim_prompts")
-                and multi_sim_phase is None):
+                and multi_sim_phase is None
+                and not state.get("combined_only")):
             logger.info("SUPERVISOR [multi-sim]: Building master plan (per-sim prompts + combined plan)")
             state = self._create_multi_sim_master_plan(state)
             # Fall through to the detection block below which will start the per-sim loop.
@@ -215,11 +317,17 @@ class MDSupervisor:
         if (state.get("is_multi_simulation")
                 and state.get("sim_prompts")
                 and not state.get("execution_plan")
-                and multi_sim_phase is None):
+                and multi_sim_phase is None
+                and not state.get("combined_only")):
             logger.info("SUPERVISOR [multi-sim]: Master plan ready — starting per-sim loop")
             state["multi_sim_phase"] = "executing_sims"
-            state["current_sim_index"] = 0
-            state["completed_sim_states"] = []
+            if state.get("resume_failed_only"):
+                # Resume mode: determine which sims already succeeded and find
+                # the first one that still needs to run.
+                state = self._setup_resume_mode(state)
+            else:
+                state["current_sim_index"] = 0
+                state["completed_sim_states"] = []
             return self._start_next_sim(state)
 
         # ── Step 3: Create execution plan ────────────────────────────────
@@ -271,6 +379,247 @@ class MDSupervisor:
 
     # ── Multi-Simulation Orchestration ───────────────────────────────────
 
+    # ── Resume / retry helpers ────────────────────────────────────────────
+
+    def _discover_sim_dirs_from_analysis_summaries(
+        self, base_dir: str
+    ) -> List[Dict[str, Any]]:
+        """Locate per-simulation directories by scanning for analysis_summary.jsonl.
+
+        Each child of *base_dir* that contains ``analysis/analysis_summary.jsonl``
+        is treated as a completed per-simulation run.  Base-level agent folders
+        (``analysis/``, ``reporter/``, etc.) are excluded.
+        """
+        base = Path(base_dir).resolve()
+        entries: List[Dict[str, Any]] = []
+        if not base.is_dir():
+            return entries
+        for child in sorted(base.iterdir()):
+            if not child.is_dir() or child.name in _BASE_AGENT_SUBDIRS:
+                continue
+            analysis_dir = child / "analysis"
+            jsonl = analysis_dir / "analysis_summary.jsonl"
+            if jsonl.is_file() and jsonl.stat().st_size > 0:
+                entries.append({
+                    "label": child.name,
+                    "working_dir": str(child.resolve()),
+                    "analysis_directory": str(analysis_dir.resolve()),
+                    "analysis_summary": str(jsonl.resolve()),
+                })
+        return entries
+
+    def _clear_combined_only_stale_state(self, state: MDState) -> None:
+        """Remove restored per-sim / single-sim routing that would hijack combined-only."""
+        state["multi_sim_phase"] = None
+        state["plan_executed"] = False
+        state["execution_plan"] = None
+        state["current_agent_idx"] = 0
+        state["current_sim_index"] = 0
+        state["sim_prompts"] = None
+        state["completed_sim_states"] = None
+        state["enriched_prompt"] = None
+        state["rephrased_goal"] = None
+        state["analysis_results"] = {}
+        state["reporter_output"] = None
+        state["figures"] = []
+        state["conclusions"] = None
+        state["raw_pdb"] = None
+        state["trajectory_path"] = None
+        state["topology"] = None
+        state["coordinates"] = None
+        state["job_id"] = None
+        state["analysis_instructions"] = None
+        state["reporter_instructions"] = None
+        state["preprocessing_instructions"] = None
+        state["input_validated"] = True
+
+    def _activate_combined_only_mode(self, state: MDState) -> Optional[MDState]:
+        """Skip per-sim loop; run combined analysis + report from existing outputs."""
+        base_dir = state.get("multi_sim_base_dir") or state.get("working_directory", "")
+        if not base_dir:
+            logger.error("SUPERVISOR [combined_only]: no working_directory set")
+            state["errors"].append("combined_only: working_directory is not set")
+            state["next_node"] = "final_report"
+            return state
+
+        self._clear_combined_only_stale_state(state)
+
+        discovered = self._discover_sim_dirs_from_analysis_summaries(base_dir)
+        if not discovered:
+            logger.error(
+                f"SUPERVISOR [combined_only]: no per-simulation analysis_summary.jsonl "
+                f"found under {base_dir}"
+            )
+            state["errors"].append(
+                "combined_only: no per-simulation analysis_summary.jsonl files found. "
+                "Run per-simulation analysis first, or check --working-dir."
+            )
+            state["next_node"] = "final_report"
+            return state
+
+        state["multi_sim_base_dir"] = base_dir
+        state["sim_prompts"] = [
+            {
+                "label": entry["label"],
+                "working_dir": entry["working_dir"],
+                "task_scope": "analysis_reporter",
+            }
+            for entry in discovered
+        ]
+        state["completed_sim_states"] = [
+            {
+                "sim_index": idx,
+                "label": entry["label"],
+                "working_directory": entry["working_dir"],
+                "analysis_directory": entry["analysis_directory"],
+                "analysis_summary": entry["analysis_summary"],
+                "success": True,
+                "skipped": False,
+                "_source": "analysis_summary_discovery",
+            }
+            for idx, entry in enumerate(discovered)
+        ]
+        state["sim_working_dirs"] = [entry["working_dir"] for entry in discovered]
+        state["current_sim_index"] = len(discovered)
+        state["combined_only"] = True
+
+        if not state.get("combined_analysis_plan"):
+            state["combined_analysis_plan"] = _build_combined_analysis_plan_fallback(
+                state, state["sim_prompts"]
+            )
+
+        logger.info(
+            f"SUPERVISOR [combined_only]: discovered {len(discovered)} simulation(s) "
+            f"with analysis_summary.jsonl — entering combined analysis + report"
+        )
+        log_supervisor_routing(
+            state, "analysis",
+            f"combined_only: {len(discovered)} simulations from analysis_summary.jsonl "
+            "(per-sim analysis skipped)",
+        )
+        return self._setup_combined_analysis(state)
+
+    def _rebuild_completed_states_from_disk(self, state: MDState) -> List[Dict]:
+        """
+        Scan per-simulation supervisor/state.jsonl files and reconstruct a
+        completed_sim_states list.  Used when the base state.jsonl is missing
+        or contains fewer entries than the planned sim_prompts.
+        """
+        sim_prompts = state.get("sim_prompts") or []
+        base_dir = state.get("multi_sim_base_dir") or state.get("working_directory", "")
+        reconstructed: List[Dict] = []
+
+        for idx, sp in enumerate(sim_prompts):
+            label = sp.get("label", f"sim_{idx}")
+            sim_dir = sp.get("working_dir") or str(Path(base_dir) / label)
+            state_file = Path(sim_dir) / "supervisor" / "state.jsonl"
+
+            if state_file.exists():
+                try:
+                    data = json.loads(state_file.read_text(encoding="utf-8"))
+                    s = data.get("state", {})
+                    _success = bool(
+                        s.get("job_id")
+                        or s.get("trajectory_path")
+                        or s.get("topology")
+                        or s.get("coordinates")
+                        or s.get("analysis_results")
+                        or s.get("reporter_output")
+                    )
+                    snapshot = {
+                        "sim_index": idx,
+                        "label": label,
+                        "case_description": sp.get("case_description"),
+                        "working_directory": sim_dir,
+                        "success": _success,
+                        "skipped": False,
+                        "job_id": s.get("job_id"),
+                        "job_status": s.get("job_status"),
+                        "trajectory_path": s.get("trajectory_path"),
+                        "topology": s.get("topology"),
+                        "errors": list(s.get("errors", [])),
+                        "_source": "disk_rebuild",
+                    }
+                    reconstructed.append(snapshot)
+                    logger.info(
+                        f"[resume] Reconstructed state for '{label}': "
+                        f"success={_success}, job_id={s.get('job_id')}"
+                    )
+                except Exception as exc:
+                    logger.warning(f"[resume] Could not read state for '{label}': {exc}")
+                    reconstructed.append({
+                        "sim_index": idx,
+                        "label": label,
+                        "working_directory": sim_dir,
+                        "success": False,
+                        "skipped": False,
+                        "errors": [f"State reconstruction failed: {exc}"],
+                        "_source": "disk_rebuild_failed",
+                    })
+            else:
+                logger.info(f"[resume] No state file for '{label}' — will re-run")
+                reconstructed.append({
+                    "sim_index": idx,
+                    "label": label,
+                    "working_directory": sim_dir,
+                    "success": False,
+                    "skipped": False,
+                    "errors": ["No per-sim state.jsonl found"],
+                    "_source": "not_started",
+                })
+
+        return reconstructed
+
+    def _setup_resume_mode(self, state: MDState) -> MDState:
+        """
+        Prepare state for a --resume run:
+        1. Rebuild completed_sim_states from disk if missing or incomplete.
+        2. Determine which labels are already succeeded (excluding retry_labels).
+        3. Set current_sim_index to the first sim that still needs to run.
+        4. Log the full skip / re-run plan.
+        """
+        sim_prompts = state.get("sim_prompts") or []
+        retry_labels: set = set(state.get("retry_labels") or [])
+        existing = list(state.get("completed_sim_states") or [])
+
+        # Rebuild from disk when saved state is incomplete
+        if len(existing) < len(sim_prompts):
+            logger.info(
+                f"[resume] completed_sim_states has {len(existing)} entries "
+                f"but {len(sim_prompts)} sims planned — rebuilding from disk"
+            )
+            existing = self._rebuild_completed_states_from_disk(state)
+            state["completed_sim_states"] = existing
+
+        # Build set of labels confirmed as succeeded (not in retry_labels)
+        succeeded_labels: set = set()
+        for snap in existing:
+            label = snap.get("label")
+            if snap.get("success") and not snap.get("skipped") and label not in retry_labels:
+                succeeded_labels.add(label)
+
+        # Log the plan
+        logger.info("[resume] === Retry plan ===")
+        first_to_run = len(sim_prompts)
+        for idx, sp in enumerate(sim_prompts):
+            label = sp.get("label", f"sim_{idx}")
+            if label in succeeded_labels:
+                logger.info(f"  SKIP   [{idx}] {label} (already succeeded)")
+            else:
+                reason = "in --retry-labels" if label in retry_labels else "failed / not completed"
+                logger.info(f"  RERUN  [{idx}] {label} ({reason})")
+                if first_to_run == len(sim_prompts):
+                    first_to_run = idx
+
+        if first_to_run == len(sim_prompts):
+            logger.info("[resume] All simulations already succeeded — skipping to combined analysis")
+
+        state["_resume_succeeded_labels"] = list(succeeded_labels)
+        state["current_sim_index"] = first_to_run
+        return state
+
+    # ── Per-simulation loop ───────────────────────────────────────────────
+
     def _start_next_sim(self, state: MDState) -> MDState:
         """
         Reset state for the current sim_index and route to input_validation.
@@ -285,21 +634,55 @@ class MDSupervisor:
         sim_info = sim_prompts[current_idx]
         sim_label = sim_info.get("label", f"sim_{current_idx}")
         sim_pdb = sim_info.get("pdb", "")
-        sim_goal = sim_info.get("prompt", "")
+        post_sim_subtask = _is_post_simulation_subtask(state)
+        sim_goal = (
+            sim_info.get("analysis_prompt")
+            or sim_info.get("prompt")
+            or ""
+        )
         sim_working_dir = sim_info.get("working_dir", "")
+
+        # ── Resume mode: skip sims that already succeeded ─────────────────
+        if state.get("resume_failed_only"):
+            succeeded = set(state.get("_resume_succeeded_labels") or [])
+            if sim_label in succeeded:
+                logger.info(
+                    f"SUPERVISOR [resume]: Skipping already-succeeded sim "
+                    f"{current_idx + 1}/{len(sim_prompts)}: {sim_label}"
+                )
+                current_idx += 1
+                state["current_sim_index"] = current_idx
+                if current_idx >= len(sim_prompts):
+                    return self._setup_combined_analysis(state)
+                return self._start_next_sim(state)
 
         logger.info(
             f"SUPERVISOR [multi-sim]: Starting sim {current_idx + 1}/"
             f"{len(sim_prompts)}: {sim_label}  pdb={sim_pdb}"
         )
 
+        # Post-sim subtasks need the full per-sim analysis goal, not a metadata stub.
+        if post_sim_subtask and len(sim_goal) < 280:
+            sim_goal = _build_per_sim_analysis_prompt(
+                {
+                    "protein_name": sim_info.get("protein_name") or sim_label,
+                    "label": sim_label,
+                    "case_description": sim_info.get("case_description", ""),
+                    "working_dir": sim_working_dir,
+                },
+                original_goal=state.get("user_goal_original") or state.get("user_goal", ""),
+                enriched_prompt=state.get("master_enriched_prompt")
+                or state.get("enriched_prompt", ""),
+                agents_desc=" -> ".join(state.get("agent_list") or ["analysis", "reporter"]),
+            )
+
         # Reset per-sim state, set working_directory to {basepath}/{label}/
         state = self._reset_state_for_new_sim(state, sim_goal, sim_working_dir, sim_pdb)
 
-        # Copy PDB into per-sim directory so validator can find it
+        # Copy PDB into per-sim directory so validator can find it (setup stages only).
         pdb_name = Path(sim_pdb).name if sim_pdb else ""
         resolved_pdb = sim_pdb
-        if sim_pdb:
+        if sim_pdb and not post_sim_subtask:
             dest = Path(sim_working_dir) / pdb_name
             if os.path.isfile(sim_pdb):
                 if not dest.exists():
@@ -319,6 +702,15 @@ class MDSupervisor:
 
             state["raw_pdb"] = resolved_pdb if os.path.isfile(resolved_pdb) else None
             state["user_goal"] = sim_goal.replace(sim_pdb, pdb_name)
+        elif post_sim_subtask:
+            # Analysis/reporter-only: trajectory lives in hpc/; keep full analysis goal.
+            state["user_goal"] = sim_goal
+            if sim_pdb and os.path.isfile(sim_pdb):
+                state["raw_pdb"] = sim_pdb
+            else:
+                state["raw_pdb"] = None
+        else:
+            state["user_goal"] = sim_goal
 
         # Propagate per-structure download metadata for preprocess agent
         structure_requests = state.get("structure_requests") or {}
@@ -358,6 +750,11 @@ class MDSupervisor:
         Skip holo/component-specific simulations when required ligands/ions
         are absent from the source structure (e.g. AlphaFold protein-only PDB).
         """
+        # Analysis/reporter-only runs operate on existing trajectories in hpc/,
+        # not on the source PDB — never skip based on source structure components.
+        if _is_post_simulation_subtask(state):
+            return None
+
         sim_case = state.get("sim_case") or {}
         requirements = parse_sim_case_requirements(
             label=sim_case.get("label", ""),
@@ -469,10 +866,18 @@ class MDSupervisor:
         """
         completed = state.get("completed_sim_states", [])
 
-        # basepath = parent of per-sim dirs
-        basepath = str(
-            Path(state.get("sim_working_dirs", [state.get("working_directory", "")])[0]).parent.resolve()
-        )
+        # basepath = parent of per-sim dirs (or explicit multi-sim base)
+        basepath = state.get("multi_sim_base_dir")
+        if not basepath:
+            sim_wds = state.get("sim_working_dirs")
+            if sim_wds:
+                basepath = str(Path(sim_wds[0]).parent.resolve())
+            elif completed:
+                basepath = str(Path(completed[0]["working_directory"]).parent.resolve())
+            elif state.get("sim_prompts"):
+                basepath = str(Path(state["sim_prompts"][0]["working_dir"]).parent.resolve())
+            else:
+                basepath = str(Path(state.get("working_directory", "")).resolve())
 
         logger.info(f"SUPERVISOR [multi-sim]: Combined analysis at basepath={basepath}")
 
@@ -482,7 +887,13 @@ class MDSupervisor:
         # Build combined instructions
         sim_data_summary = self._build_sim_data_summary(completed)
         combined_plan = state.get("combined_analysis_plan", "")
-        combined_instructions = (
+        original_goal = (state.get("user_goal_original") or "").strip()
+        combined_instructions = ""
+        if original_goal:
+            combined_instructions += (
+                f"## Original Study Goal\n\n{original_goal}\n\n"
+            )
+        combined_instructions += (
             f"## Combined Multi-Simulation Analysis\n\n"
             f"{combined_plan}\n\n"
             f"## Simulation Data\n\n{sim_data_summary}\n\n"
@@ -494,6 +905,7 @@ class MDSupervisor:
         preserved_keys = {
             "is_multi_simulation", "sim_prompts", "combined_analysis_plan",
             "sim_working_dirs", "pdb_list", "completed_sim_states",
+            "multi_sim_base_dir", "combined_only",
             "md_engine", "force_field", "water_model", "human_in_loop",
             "subtask_type", "subtask_type_initialized", "agent_list",
             "required_inputs",
@@ -866,9 +1278,15 @@ class MDSupervisor:
         from pathlib import Path as _Path
 
         enriched_prompt = state.get("enriched_prompt") or state.get("user_goal", "")
+        original_goal = (
+            state.get("user_goal_original")
+            or state.get("user_goal")
+            or enriched_prompt
+        )
         pdb_list = state.get("pdb_list", [])
         base_working_dir = state.get("working_directory", "working_dir")
         agent_list = state.get("agent_list") or []
+        post_sim_subtask = _is_post_simulation_subtask(state)
 
         if not pdb_list:
             logger.warning("SUPERVISOR [multi-sim]: No pdb_list - cannot create master plan")
@@ -954,24 +1372,54 @@ class MDSupervisor:
                 + "\n\n"
             )
 
-        decomposition_prompt = (
-            "You are an expert MD simulation planner creating natural, varied per-simulation goals.\n\n"
-            f"OVERALL PROJECT:\n{enriched_prompt}\n\n"
-            f"SIMULATION ENTRIES ({len(expanded_entries)} total):\n"
-            + "\n".join(sim_context_lines)
-            + "\n\n"
-            + name_map_lines
-            + f"WORKFLOW PIPELINE: {agents_desc}\n\n"
-            "TASK: Return JSON with keys:\n"
-            f"1) sim_prompts: list of {len(expanded_entries)} prompts, same order as entries.\n"
-            "2) combined_analysis_plan: comparative analysis plan across all entries.\n\n"
-            "Prompt requirements:\n"
-            "- Mention source PDB and target label directory context.\n"
-            "- Enforce the case objective (for example protein only vs protein+ATP+MG).\n"
-            "- Keep each prompt concise and not repetitive.\n"
-            f"- Mention only these workflow steps: {agents_desc}.\n\n"
-            "Return only valid JSON."
-        )
+        if post_sim_subtask:
+            decomposition_prompt = (
+                "You are an expert MD trajectory analysis planner. "
+                "All simulations are ALREADY COMPLETE — trajectories exist under each "
+                "entry's working_dir/hpc/ folder.\n\n"
+                f"OVERALL PROJECT (full user analysis goals):\n{original_goal}\n\n"
+                f"ENRICHED CONTEXT:\n{enriched_prompt}\n\n"
+                f"COMPLETED SIMULATION ENTRIES ({len(expanded_entries)} total):\n"
+                + "\n".join(sim_context_lines)
+                + "\n\n"
+                + name_map_lines
+                + f"WORKFLOW PIPELINE (ONLY these steps): {agents_desc}\n\n"
+                "TASK: Return JSON with keys:\n"
+                f"1) sim_prompts: list of {len(expanded_entries)} prompts, same order as entries.\n"
+                "2) combined_analysis_plan: cross-simulation comparative analysis + reporting plan.\n\n"
+                "CRITICAL prompt requirements for sim_prompts:\n"
+                "- Each prompt must be a complete natural-language ANALYSIS + REPORTING goal "
+                "(typically 4–10 sentences), NOT a one-line metadata string.\n"
+                "- Do NOT mention preprocessing, system setup, force-field choice, box size, "
+                "HPC submission, or simulation length — those stages are finished.\n"
+                "- Do NOT use comma-separated key=value format like "
+                "'label: source=..., case=..., dir=...'.\n"
+                "- Include ALL analysis metrics from OVERALL PROJECT that apply to that system "
+                "(RMSD, RMSF, Rg, COM distance, DCCM, DSSP, literature, etc.).\n"
+                "- State protein name, simulation label, apo/holo case, and that data is in "
+                "working_dir/hpc/.\n"
+                f"- Mention only these workflow steps: {agents_desc}.\n\n"
+                "Return only valid JSON."
+            )
+        else:
+            decomposition_prompt = (
+                "You are an expert MD simulation planner creating natural, varied per-simulation goals.\n\n"
+                f"OVERALL PROJECT:\n{enriched_prompt}\n\n"
+                f"SIMULATION ENTRIES ({len(expanded_entries)} total):\n"
+                + "\n".join(sim_context_lines)
+                + "\n\n"
+                + name_map_lines
+                + f"WORKFLOW PIPELINE: {agents_desc}\n\n"
+                "TASK: Return JSON with keys:\n"
+                f"1) sim_prompts: list of {len(expanded_entries)} prompts, same order as entries.\n"
+                "2) combined_analysis_plan: comparative analysis plan across all entries.\n\n"
+                "Prompt requirements:\n"
+                "- Mention source PDB and target label directory context.\n"
+                "- Enforce the case objective (for example protein only vs protein+ATP+MG).\n"
+                "- Keep each prompt concise and not repetitive.\n"
+                f"- Mention only these workflow steps: {agents_desc}.\n\n"
+                "Return only valid JSON."
+            )
 
         sim_prompts_list = None
         combined_plan = None
@@ -1015,51 +1463,77 @@ class MDSupervisor:
 
         # Fallback: deterministic prompts per expanded entry.
         if not sim_prompts_list or len(sim_prompts_list) != len(expanded_entries):
-            logger.info("SUPERVISOR [multi-sim]: Using deterministic prompt decomposition")
-            sim_prompts_list = []
-            _styles = ["Prepare", "Process", "Set up", "Generate setup for"]
-            for i, e in enumerate(expanded_entries):
-                pdb_name = _Path(e["pdb"]).name
-                name = e["protein_name"]
-                lead = _styles[i % len(_styles)]
-                uniprot_hint = ""
-                structure_requests = state.get("structure_requests") or {}
-                uid_key = _Path(e["pdb"]).stem.lower()
-                req = structure_requests.get(uid_key)
-                if req and req.get("uniprot_id"):
-                    src = req.get("structure_source", "auto")
-                    uniprot_hint = (
-                        f" Download structure from {src} for UniProt "
-                        f"{req['uniprot_id']} if {pdb_name} is not present."
-                    )
-                sim_prompts_list.append(
-                    (
-                        f"{lead} simulation for {name} using source structure {pdb_name}. "
-                        f"Simulation label is {e['label']} under {e['working_dir']}. "
-                        f"Case requirement: {e['case_description']}. {e['case_directive']}"
-                        f"{uniprot_hint} "
-                        f"Run workflow steps: {agents_desc}."
-                    ).strip()
-                )
-            combined_plan = (
-                "Perform combined cross-simulation analysis grouped by protein and component case.\n"
-                "1. Compare metrics between case variants (for example protein-only vs ATP-bound).\n"
-                "2. Produce cross-protein overlays (RMSD, RMSF, Rg) and summary statistics.\n"
-                "3. Generate a consolidated markdown report with case-specific insights."
+            logger.info(
+                "SUPERVISOR [multi-sim]: Using deterministic prompt decomposition "
+                f"(post_sim_subtask={post_sim_subtask})"
             )
+            sim_prompts_list = []
+            if post_sim_subtask:
+                for e in expanded_entries:
+                    sim_prompts_list.append(
+                        _build_per_sim_analysis_prompt(
+                            e,
+                            original_goal=original_goal,
+                            enriched_prompt=enriched_prompt,
+                            agents_desc=agents_desc,
+                        )
+                    )
+                combined_plan = _build_combined_analysis_plan_fallback(
+                    state, expanded_entries
+                )
+            else:
+                _styles = ["Prepare", "Process", "Set up", "Generate setup for"]
+                for i, e in enumerate(expanded_entries):
+                    pdb_name = _Path(e["pdb"]).name
+                    name = e["protein_name"]
+                    lead = _styles[i % len(_styles)]
+                    uniprot_hint = ""
+                    structure_requests = state.get("structure_requests") or {}
+                    uid_key = _Path(e["pdb"]).stem.lower()
+                    req = structure_requests.get(uid_key)
+                    if req and req.get("uniprot_id"):
+                        src = req.get("structure_source", "auto")
+                        uniprot_hint = (
+                            f" Download structure from {src} for UniProt "
+                            f"{req['uniprot_id']} if {pdb_name} is not present."
+                        )
+                    sim_prompts_list.append(
+                        (
+                            f"{lead} simulation for {name} using source structure {pdb_name}. "
+                            f"Simulation label is {e['label']} under {e['working_dir']}. "
+                            f"Case requirement: {e['case_description']}. {e['case_directive']}"
+                            f"{uniprot_hint} "
+                            f"Run workflow steps: {agents_desc}."
+                        ).strip()
+                    )
+                combined_plan = _build_combined_analysis_plan_fallback(
+                    state, expanded_entries
+                )
 
         sim_prompts = []
         for entry, prompt_text in zip(expanded_entries, sim_prompts_list):
             pdb = entry["pdb"]
+            prompt_body = _coerce_plan_text(prompt_text, default="")
+            # Post-sim metadata-only prompts are too short for analysis agents.
+            if post_sim_subtask and len(prompt_body) < 280:
+                prompt_body = _build_per_sim_analysis_prompt(
+                    entry,
+                    original_goal=original_goal,
+                    enriched_prompt=enriched_prompt,
+                    agents_desc=agents_desc,
+                )
             sim_prompts.append(
                 {
                     "pdb": str(_Path(pdb).resolve()) if _Path(pdb).exists() else pdb,
                     "label": entry["label"],
-                    "prompt": _coerce_plan_text(prompt_text, default=""),
+                    "prompt": prompt_body,
+                    "analysis_prompt": prompt_body if post_sim_subtask else None,
+                    "task_scope": "analysis_reporter" if post_sim_subtask else "full_pipeline",
                     "working_dir": entry["working_dir"],
                     "case_id": entry.get("case_id"),
                     "case_description": entry["case_description"],
                     "case_directive": entry.get("case_directive"),
+                    "protein_name": entry.get("protein_name"),
                 }
             )
 
@@ -1107,6 +1581,11 @@ class MDSupervisor:
             "format": "master_plan",
             "phase": "master",
             "workflow_pipeline": agents_desc,
+            "task_scope": (
+                "analysis_reporter"
+                if any(s.get("task_scope") == "analysis_reporter" for s in sim_prompts)
+                else "full_pipeline"
+            ),
             "enriched_prompt": enriched_prompt,
             "sim_prompts": sim_prompts,
             "combined_analysis_plan": combined_plan,
@@ -1121,6 +1600,7 @@ class MDSupervisor:
             f"**Generated:** {ts}",
             f"**Simulations:** {len(sim_prompts)}",
             f"**Pipeline:** {agents_desc}",
+            f"**Task scope:** {plan_data.get('task_scope', 'full_pipeline')}",
             "",
             "## Overall Goal",
             "",
@@ -1184,7 +1664,12 @@ class MDSupervisor:
         for sim in completed_sims:
             label = sim.get("label", "unknown")
             wd = sim.get("working_directory", "?")
-            analysis_dir = sim.get("analysis_directory", "?")
+            analysis_dir = sim.get(
+                "analysis_directory", str(Path(wd) / "analysis") if wd != "?" else "?"
+            )
+            summary = sim.get(
+                "analysis_summary", str(Path(analysis_dir) / "analysis_summary.jsonl")
+            )
             traj = sim.get("trajectory_path", "N/A")
             topo = sim.get("topology", "N/A")
             energy = sim.get("energy_file", "N/A")
@@ -1194,6 +1679,7 @@ class MDSupervisor:
                 f"### Simulation: {label}\n"
                 f"- Working directory: {wd}\n"
                 f"- Analysis directory: {analysis_dir}\n"
+                f"- Analysis summary: {summary}\n"
                 f"- Trajectory: {traj}\n"
                 f"- Topology: {topo}\n"
                 f"- Energy: {energy}\n"

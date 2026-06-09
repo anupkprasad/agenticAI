@@ -319,10 +319,26 @@ class ReporterAgent:
                 if _p.exists() and str(_p) not in overlay_plots:
                     overlay_plots.append(str(_p))
 
-        # 3. Generate and add DSSP (secondary structure) comparison chart.
-        _dssp_chart = self._generate_dssp_comparison_chart(sim_dirs, labels, reporter_dir)
+        # 3. Ensure DSSP comparison chart exists in combined analysis directory.
+        _analysis_dir = combined_info.get("analysis_dir") or str(Path(working_dir) / "analysis")
+        try:
+            Path(_analysis_dir).mkdir(parents=True, exist_ok=True)
+        except Exception:
+            _analysis_dir = reporter_dir
+        from src.reporter.combined_reporter import (
+            generate_dssp_comparison_chart,
+            run_combined_dssp_analysis,
+        )
+        _dssp_existing = Path(_analysis_dir) / "dssp_comparison.png"
+        _goal_full = (_user_goal_text + " " + _enriched_text).strip()
+        if not _dssp_existing.exists():
+            run_combined_dssp_analysis(sim_dirs, labels, _analysis_dir, _goal_full)
+        _dssp_chart = generate_dssp_comparison_chart(sim_dirs, labels, _analysis_dir)
         if _dssp_chart and _dssp_chart not in overlay_plots:
             overlay_plots.append(_dssp_chart)
+        for _dssp_hm in sorted(Path(_analysis_dir).glob("dssp_activation_loop_*.png")):
+            if str(_dssp_hm) not in overlay_plots:
+                overlay_plots.append(str(_dssp_hm))
 
         # 4. Add any per-sim figure type that the user explicitly requested.
         _USER_PLOT_KEYWORDS: Dict[str, tuple] = {
@@ -385,12 +401,7 @@ class ReporterAgent:
         if not protein_name and labels:
             protein_name = ", ".join(labels[:3]) if labels else labels[0]
 
-        # Dynamic title: use mapped protein names
-        report_title = (
-            f"Multi-Simulation Comparison Report — {protein_name}"
-            if protein_name
-            else "Multi-Simulation Comparison Report"
-        )
+        report_title = "Multi-Simulation Report"
 
         try:
             # Prefer master_enriched_prompt (supervisor's unified rephrased goal)
@@ -400,7 +411,12 @@ class ReporterAgent:
                 state.get("master_enriched_prompt")
                 or state.get("enriched_prompt")
             )
-            _combined_user_goal = state.get("user_goal_original") or _user_goal_text
+            _combined_user_goal = state.get("user_goal_original") or ""
+            if not _combined_user_goal.strip():
+                # Avoid passing combined-analysis instruction blob as the display goal
+                _ug = (_user_goal_text or "").strip()
+                if _ug and not _ug.startswith("## Combined Multi-Simulation"):
+                    _combined_user_goal = _ug
 
             # Contextual literature search across all simulations
             combined_analysis_data = self._build_combined_analysis_data(sim_dirs, labels)

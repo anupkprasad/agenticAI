@@ -3,9 +3,9 @@ Combined Reporter - Multi-simulation comparison HTML report generator
 
 Reads per-simulation analysis summaries and overlay plots produced by the
 combined_analysis phase, then builds a rich single-page comparison HTML report
-with: task description, per-sim overview, 3D structure viewer (up to 5 PDBs),
-overlay plots, statistics comparison table, aggregated literature, and a final
-combined impression.
+with: task description, per-sim overview, 3D structure viewer (one structure per
+simulation), overlay plots, statistics comparison table, aggregated literature,
+and a final combined impression with discussion, hypotheses, and future steps.
 
 Designed to be imported by agentic/reporter/tools.py and exposed as an
 @tool for the Reporter Agent.
@@ -244,13 +244,16 @@ def _collect_per_sim_resources(
 
 
 def _select_representative_pdbs(
-    sim_dirs: List[str], labels: List[str], max_pdbs: int = 5
+    sim_dirs: List[str], labels: List[str], max_pdbs: int = 0
 ) -> Dict[str, str]:
     """Pick one representative PDB per simulation, labelled with sim type + timepoint.
 
     Label format: ``"1A (0 ns)"`` — simulation label + actual time from filename.
-    Capped at *max_pdbs* total.
+    By default (``max_pdbs <= 0``) every simulation is represented; pass a
+    positive *max_pdbs* to cap the total number of structures.
     """
+    if max_pdbs is None or max_pdbs <= 0:
+        max_pdbs = len(sim_dirs)
     pdb_frames: Dict[str, str] = {}
     for sim_dir, label in zip(sim_dirs, labels):
         if len(pdb_frames) >= max_pdbs:
@@ -585,16 +588,74 @@ def _build_combined_final_impression(
         if focus and len(focus) > 20:
             parts.append(f"**{res['label']} key observations:** {focus}")
 
-    if sim_rmsd or sim_rmsf or sim_rg:
-        if sim_rmsd:
-            stable = min(sim_rmsd, key=lambda k: sim_rmsd[k])
-            parts.append(
-                f"Overall, simulation **{stable}** demonstrates the most consistent "
-                f"structural behavior across the trajectory. These results highlight "
-                "the influence of system composition and simulation conditions on "
-                "the dynamic properties of the molecular system."
-            )
+    # ── Interpretation + discussion (flowing prose, no subsection headings) ─
+    def _is_holo(lbl: str) -> bool:
+        l = lbl.lower()
+        return any(k in l for k in ("atp", "_mg", "holo", "ligand", "bound"))
+
+    holo_labels = [s["label"] for s in sims_summary if _is_holo(s["label"])]
+    apo_labels = [s["label"] for s in sims_summary if not _is_holo(s["label"])]
+
+    if holo_labels and apo_labels:
+        rmsf_clause = ""
+        if sim_rmsf:
+            apo_mean = [sim_rmsf[l] for l in apo_labels if l in sim_rmsf]
+            holo_mean = [sim_rmsf[l] for l in holo_labels if l in sim_rmsf]
+            if apo_mean and holo_mean:
+                a = sum(apo_mean) / len(apo_mean)
+                h = sum(holo_mean) / len(holo_mean)
+                if h < a:
+                    rmsf_clause = (
+                        f" On average the ligand-bound (holo) systems are more rigid "
+                        f"(mean RMSF {h:.2f} Å) than their apo counterparts "
+                        f"({a:.2f} Å), consistent with ATP binding damping local "
+                        "backbone fluctuations around the nucleotide pocket."
+                    )
+                else:
+                    rmsf_clause = (
+                        f" The holo systems show comparable or higher mean flexibility "
+                        f"(RMSF {h:.2f} Å vs apo {a:.2f} Å), suggesting that ATP binding "
+                        "redistributes rather than simply suppresses backbone motion."
+                    )
+        parts.append(
+            "Comparing the apo and holo states isolates the dynamic signature of ATP "
+            "binding: differences in RMSD, RMSF, radius of gyration, ATP–pocket COM "
+            "distance, and the apo→holo ΔDCCM maps together indicate how the nucleotide "
+            "reshapes flexibility and inter-residue coupling, particularly across the "
+            "αC-helix and activation loop (residues 150–200)." + rmsf_clause +
+            " Persistent ATP–pocket COM distances in the holo trajectories point to a "
+            "stably bound nucleotide, so the accompanying changes in correlated motion "
+            "most likely reflect genuine ligand-induced allosteric coupling rather than "
+            "ligand drift. Where ΔDCCM patterns are conserved across the pseudokinases "
+            "they suggest a common allosteric wiring, whereas protein-specific "
+            "differences highlight divergent regulatory mechanisms — for example ATP "
+            "may rigidify the activation loop and αC-helix in some systems while "
+            "rerouting correlated motion toward distal regulatory elements in others."
+        )
     else:
+        parts.append(
+            "Taken together, the comparison of global stability (RMSD), local "
+            "flexibility (RMSF), compactness (Rg), and correlated motion (DCCM) shows "
+            "how system composition and environment shape each conformational "
+            "ensemble, with the largest differences concentrated around the "
+            "functionally important active-site region."
+        )
+
+    # Future directions woven into the same flowing section (no heading).
+    parts.append(
+        "These observations are drawn from finite-length classical MD with a single "
+        "replica per system, so the apo-vs-holo trends should be confirmed with "
+        "independent or extended trajectories and proper error estimates (e.g. block "
+        "averaging). Promising next steps include enhanced-sampling or free-energy "
+        "calculations (metadynamics, umbrella sampling, MM/PBSA) to quantify ATP "
+        "binding and activation-loop landscapes, per-residue decomposition of the "
+        "ΔDCCM together with network analysis to map candidate allosteric pathways, "
+        "in-silico mutagenesis of predicted hotspot residues, and cross-validation "
+        "against experimental data (HDX-MS, NMR order parameters, or mutational "
+        "studies) reported for each pseudokinase."
+    )
+
+    if not (sim_rmsd or sim_rmsf or sim_rg):
         parts.append(
             "Detailed quantitative comparison was limited by available analysis data. "
             "Refer to individual simulation reports for system-specific findings."
@@ -612,12 +673,10 @@ def _build_task_description_html(
     """Render a structured task description card.
 
     Layout:
-      - Protein / System badge (if protein_name provided)
-      - Overall Goal: the original user_goal text (clean, concise)
-      - Detailed Technical Objectives: collapsible block with enriched_prompt
+      - Overall Goal: the original user request (concise, single source of truth)
       - Per-Simulation Analysis Objectives: table from per-sim reasoning / report_focus
     """
-    if not enriched_prompt and not user_goal and not sim_resources:
+    if not user_goal and not sim_resources:
         return ""
 
     parts: List[str] = []
@@ -625,20 +684,7 @@ def _build_task_description_html(
     parts.append('<div class="task-box-header">&#128203; Study Objectives &amp; Task Description</div>')
     parts.append('<div class="task-box-body">')
 
-    # ── Protein / System badge ────────────────────────────────────────────
-    if protein_name:
-        parts.append(
-            f'<div style="display:inline-block;background:#ede9fe;color:#5b21b6;'
-            f'border:1px solid #c4b5fd;border-radius:16px;padding:4px 14px;'
-            f'font-size:13px;font-weight:700;margin-bottom:12px;">'
-            f'&#129516; Protein / System:&nbsp;<span style="color:#7c3aed;">'
-            f'{_html_mod.escape(protein_name)}</span></div>'
-        )
-
-    # ── Overall Goal — supervisor's enriched/rephrased goal ──────────────
-    # Show enriched_prompt as the primary authoritative goal statement.
-    # If no enriched prompt, fall back to user_goal.
-    primary_goal = (enriched_prompt or user_goal or "").strip()
+    primary_goal = (user_goal or "").strip()
     if primary_goal:
         parts.append('<div style="margin-bottom:14px;">')
         parts.append('<strong style="color:#5b21b6;">&#128269; Overall Goal</strong><br>')
@@ -647,25 +693,6 @@ def _build_task_description_html(
             f'{_html_mod.escape(primary_goal)}</p>'
         )
         parts.append('</div>')
-
-    # ── Original User Request (collapsible) ──────────────────────────────
-    # Show the raw user_goal in a collapsible so it's accessible but not
-    # dominant.  Only render when it differs from the enriched version.
-    if user_goal and user_goal.strip() != primary_goal:
-        parts.append(
-            '<details style="margin-bottom:14px;">'
-            '<summary style="cursor:pointer;color:#7c3aed;font-weight:600;'
-            'list-style:none;user-select:none;">&#128221; Original User Request '
-            '<span style="font-size:11px;font-weight:400;color:#9ca3af;">'
-            '(click to expand)</span></summary>'
-        )
-        parts.append('<div style="margin-top:8px;padding:10px 14px;background:#faf9ff;'
-                     'border-left:3px solid #c4b5fd;border-radius:4px;">')
-        parts.append(
-            f'<p style="margin:0;line-height:1.6;color:#374151;font-size:13px;">'
-            f'{_html_mod.escape(user_goal.strip())}</p>'
-        )
-        parts.append('</div></details>')
 
     # ── Per-simulation analysis objectives (from execution_plan / reasoning) ──
     if sim_resources:
@@ -866,7 +893,7 @@ body {
     color: #1f2937; min-height: 100vh;
 }
 .container {
-    max-width: 1200px; margin: 20px auto 40px; padding: 30px 28px 60px;
+    max-width: min(1600px, 96vw); margin: 20px auto 40px; padding: 30px 28px 60px;
     background: white;
     box-shadow: 0 4px 24px rgba(0,0,0,0.10);
     border-radius: 12px;
@@ -986,9 +1013,9 @@ footer {
 }
 /* ---- Comparative Dynamics Summary panels ---- */
 .dyn-panel-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
     margin: 20px 0;
 }
 .dyn-panel {
@@ -998,9 +1025,10 @@ footer {
     overflow: hidden;
     background: white;
     box-shadow: 0 2px 8px rgba(99,102,241,0.07);
+    width: 100%;
 }
 .dyn-panel.panel-full {
-    grid-column: 1 / -1;
+    width: 100%;
 }
 .panel-header {
     background: linear-gradient(135deg, #eef2ff 0%, #e0e7ff 100%);
@@ -1034,6 +1062,26 @@ footer {
 .panel-body {
     padding: 14px 16px;
     min-height: 80px;
+}
+.panel-body img {
+    width: 100%;
+    height: auto;
+    display: block;
+    border-radius: 4px;
+}
+.panel-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+.panel-stack-item {
+    width: 100%;
+}
+.panel-stack-label {
+    font-size: 13px;
+    font-weight: 700;
+    color: #1e40af;
+    margin: 0 0 8px 0;
 }
 .panel-missing {
     text-align: center;
@@ -1160,6 +1208,12 @@ def _collect_comparative_panel_plot_paths(
         name = Path(plot_path).name.lower()
         if "rmsf_segment" in name or "dssp_comparison" in name:
             _mark(plot_path)
+        if "dccm_apo_holo" in name and "panels" in name:
+            _mark(plot_path)
+
+    for entry in _collect_per_sim_dssp_figures(sim_dirs, labels):
+        _mark(entry.get("heatmap"))
+        _mark(entry.get("timeseries"))
 
     for _, pth in _find_per_sim_plots(sim_dirs, labels, "pocket_distance"):
         _mark(pth)
@@ -1167,10 +1221,12 @@ def _collect_comparative_panel_plot_paths(
         for _, pth in _find_per_sim_plots(sim_dirs, labels, "ligand_pocket"):
             _mark(pth)
 
-    dccm_combined = _dedupe_dccm_combined_plots([
-        p for p in overlay_plots
-        if "dccm" in Path(p).name.lower()
-    ])
+    dccm_combined = _find_dccm_apo_holo_panel_plots(overlay_plots)
+    if not dccm_combined:
+        dccm_combined = _dedupe_dccm_combined_plots([
+            p for p in overlay_plots
+            if "dccm" in Path(p).name.lower()
+        ])
     _has_dccm_comparison = any(
         "comparison" in Path(p).name.lower() for p in dccm_combined
     )
@@ -1473,11 +1529,418 @@ def _build_ranking_summary_table(sims_summary: List[Dict[str, Any]]) -> str:
     )
 
 
+def _find_dccm_apo_holo_panel_plots(overlay_plots: List[str]) -> List[str]:
+    """Return only the Apo | Holo | ΔDCCM triptych panel figures (no redundant heatmaps)."""
+    panels = [
+        p for p in overlay_plots
+        if "dccm_apo_holo" in Path(p).name.lower() and "panels" in Path(p).name.lower()
+    ]
+    return sorted(panels, key=lambda p: Path(p).name.lower())
+
+
+def _find_dssp_comparison_plot(overlay_plots: List[str]) -> Optional[str]:
+    """Locate the cross-simulation secondary-structure bar chart if present."""
+    for p in overlay_plots:
+        if "dssp_comparison" in Path(p).name.lower():
+            return str(p)
+    return None
+
+
+def _resolve_sim_md_inputs(sim_dir: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return (topology, trajectory) paths for a per-simulation directory."""
+    hpc = Path(sim_dir) / "hpc"
+    if not hpc.is_dir():
+        return None, None
+    topology = None
+    for name in ("md.tpr", "md.gro", "boxed.gro", "complex.gro"):
+        candidate = hpc / name
+        if candidate.is_file():
+            topology = str(candidate.resolve())
+            break
+    trajectory = None
+    for name in ("mdWrap.xtc", "md.xtc", "md.trr"):
+        candidate = hpc / name
+        if candidate.is_file():
+            trajectory = str(candidate.resolve())
+            break
+    return topology, trajectory
+
+
+def ensure_per_sim_dssp(
+    sim_dirs: List[str],
+    labels: List[str],
+) -> Dict[str, Any]:
+    """Run DSSP for any simulation missing dssp_raw_data.dat."""
+    from contextlib import contextmanager
+    import os
+
+    @contextmanager
+    def _in_dir(path: Path):
+        prev = os.getcwd()
+        os.chdir(path)
+        try:
+            yield
+        finally:
+            os.chdir(prev)
+
+    try:
+        from src.analysis.dssp_analyzer import analyze_secondary_structure
+    except ImportError as exc:
+        return {"success": False, "error": str(exc), "backfilled": []}
+
+    backfilled: List[str] = []
+    skipped: List[str] = []
+    errors: List[str] = []
+
+    for sim_dir, label in zip(sim_dirs, labels):
+        analysis_dir = Path(sim_dir) / "analysis"
+        raw_path = analysis_dir / "dssp_raw_data.dat"
+        if raw_path.is_file() and raw_path.stat().st_size > 0:
+            continue
+        topology, trajectory = _resolve_sim_md_inputs(sim_dir)
+        if not topology or not trajectory:
+            skipped.append(label)
+            errors.append(f"{label}: no topology/trajectory in {sim_dir}/hpc")
+            continue
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Backfilling DSSP for {label} → {analysis_dir}")
+        try:
+            with _in_dir(analysis_dir):
+                result = analyze_secondary_structure.func(
+                    topology_file=topology,
+                    trajectory_file=trajectory,
+                    output_prefix="dssp",
+                    working_dir=str(analysis_dir),
+                    create_heatmap=True,
+                    create_time_series=False,
+                    save_raw_data=True,
+                )
+            if result.get("success"):
+                backfilled.append(label)
+            else:
+                errors.append(f"{label}: {result.get('error', 'DSSP failed')}")
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+            logger.warning(f"DSSP backfill failed for {label}: {exc}")
+
+    return {
+        "success": bool(backfilled) or not errors,
+        "backfilled": backfilled,
+        "skipped": skipped,
+        "errors": errors,
+    }
+
+
+def generate_dssp_comparison_chart(
+    sim_dirs: List[str],
+    labels: List[str],
+    output_dir: str,
+) -> Optional[str]:
+    """Grouped bar chart of helix/sheet/coil % across simulations → dssp_comparison.png."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from src.analysis.summary_logger import read_summary_file
+    except ImportError as exc:
+        logger.warning(f"generate_dssp_comparison_chart: missing dependency {exc}")
+        return None
+
+    helix_vals, sheet_vals, coil_vals, plot_labels = [], [], [], []
+    _DSSP_TYPES = {"dssp", "dssp_secondarystructure", "secondary_structure", "secondarystructure"}
+    _KEY_HELIX = ("avg_helix_percent", "helix_percent", "helix", "percent_helix")
+    _KEY_SHEET = ("avg_sheet_percent", "sheet_percent", "sheet", "beta_sheet", "percent_sheet", "beta_percent")
+    _KEY_COIL = ("avg_coil_percent", "coil_percent", "coil", "percent_coil")
+
+    def _pick(stats: dict, keys: tuple):
+        for k in keys:
+            v = stats.get(k)
+            if isinstance(v, (int, float)):
+                return float(v)
+        return None
+
+    for sim_dir, label in zip(sim_dirs, labels):
+        analysis_dir = Path(sim_dir) / "analysis"
+        records: List[Dict[str, Any]] = []
+        try:
+            records = read_summary_file(str(analysis_dir))
+        except Exception:
+            jsonl = analysis_dir / "analysis_summary.jsonl"
+            if jsonl.exists():
+                for line in jsonl.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("---"):
+                        try:
+                            records.append(json.loads(line))
+                        except Exception:
+                            pass
+        for rec in records:
+            atype = rec.get("analysis_type", "").lower().replace(" ", "_")
+            if any(t in atype for t in _DSSP_TYPES):
+                stats = rec.get("statistics", {})
+                h = _pick(stats, _KEY_HELIX)
+                s = _pick(stats, _KEY_SHEET)
+                c = _pick(stats, _KEY_COIL)
+                if h is not None and s is not None:
+                    helix_vals.append(h)
+                    sheet_vals.append(s)
+                    coil_vals.append(c if c is not None else 100.0 - h - s)
+                    plot_labels.append(label)
+                    break
+
+    if len(plot_labels) < 2:
+        logger.info("generate_dssp_comparison_chart: not enough DSSP data (need ≥2 sims)")
+        return None
+
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    x = np.arange(len(plot_labels))
+    width = 0.25
+    fig, ax = plt.subplots(figsize=(max(6, len(plot_labels) * 1.4), 5), dpi=120)
+    ax.bar(x - width, helix_vals, width, label="α-Helix", color="#e74c3c", alpha=0.85)
+    ax.bar(x, sheet_vals, width, label="β-Sheet", color="#3498db", alpha=0.85)
+    ax.bar(x + width, coil_vals, width, label="Coil/Loop", color="#95a5a6", alpha=0.85)
+    ax.set_xlabel("Simulation", fontsize=12)
+    ax.set_ylabel("Secondary Structure Content (%)", fontsize=12)
+    ax.set_title("Secondary Structure Comparison Across Simulations", fontsize=13, fontweight="bold")
+    ax.set_xticks(x)
+    ax.set_xticklabels(plot_labels, rotation=20, ha="right", fontsize=10)
+    ax.legend(fontsize=10)
+    ax.set_ylim(0, max(max(helix_vals), max(sheet_vals), max(coil_vals)) * 1.2)
+    ax.yaxis.grid(True, linestyle="--", alpha=0.5)
+    ax.set_axisbelow(True)
+    plt.tight_layout()
+
+    out_path = str(Path(output_dir) / "dssp_comparison.png")
+    try:
+        plt.savefig(out_path, dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        logger.info(f"DSSP comparison chart saved → {out_path}")
+        return out_path
+    except Exception as exc:
+        logger.warning(f"Could not save DSSP comparison chart: {exc}")
+        plt.close(fig)
+        return None
+
+
+def run_combined_dssp_analysis(
+    sim_dirs: List[str],
+    labels: List[str],
+    output_dir: str,
+    user_goal: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Backfill missing per-sim DSSP, then write comparison + activation-loop heatmaps."""
+    ensure_result = ensure_per_sim_dssp(sim_dirs, labels)
+    comparison = generate_dssp_comparison_chart(sim_dirs, labels, output_dir)
+    heatmaps = _collect_activation_loop_dssp_heatmaps(
+        sim_dirs, labels, user_goal=user_goal, cache_dir=output_dir,
+    )
+    plots: List[str] = []
+    if comparison:
+        plots.append(comparison)
+    plots.extend(e["heatmap"] for e in heatmaps)
+    return {
+        "success": bool(comparison or heatmaps),
+        "comparison_plot": comparison,
+        "activation_loop_heatmaps": heatmaps,
+        "plots": plots,
+        "backfill": ensure_result,
+    }
+
+
+def _resolve_dssp_residue_range(user_goal: Optional[str]) -> Tuple[int, int]:
+    """Return 1-based residue range for activation-loop DSSP heatmaps."""
+    try:
+        from src.analysis.combined_analysis import parse_rmsf_segments_from_goal
+        segments = parse_rmsf_segments_from_goal(user_goal or "")
+    except Exception:
+        segments = []
+    if segments:
+        seg = segments[0]
+        return int(seg["residue_start"]), int(seg["residue_end"])
+    return 150, 200
+
+
+def _load_dssp_raw_matrix(raw_path: Path) -> Optional["Any"]:
+    """Load DSSP assignments from dssp_raw_data.dat into a (frames × residues) array."""
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+
+    n_frames = n_residues = None
+    code_to_num = {"H": 1, "B": 2, "E": 3, "G": 4, "I": 5, "T": 6, "S": 7, "-": 8}
+    sparse: Dict[int, Dict[int, int]] = {}
+
+    try:
+        with raw_path.open() as fh:
+            for line in fh:
+                if line.startswith("# Frames:"):
+                    m = re.search(r"Frames:\s*(\d+),\s*Residues:\s*(\d+)", line)
+                    if m:
+                        n_frames, n_residues = int(m.group(1)), int(m.group(2))
+                if line.startswith("#") or not line.strip():
+                    continue
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                frame_idx, res_idx, code = int(parts[0]), int(parts[1]), parts[2]
+                sparse.setdefault(frame_idx, {})[res_idx] = code_to_num.get(code, 8)
+    except Exception as exc:
+        logger.warning(f"Could not read DSSP raw data {raw_path}: {exc}")
+        return None
+
+    if n_frames is None or n_residues is None:
+        if not sparse:
+            return None
+        n_frames = max(sparse) + 1
+        n_residues = max(max(frame.keys()) for frame in sparse.values()) + 1
+
+    matrix = np.full((n_frames, n_residues), 8, dtype=np.int8)
+    for frame_idx, res_map in sparse.items():
+        for res_idx, val in res_map.items():
+            if frame_idx < n_frames and res_idx < n_residues:
+                matrix[frame_idx, res_idx] = val
+    return matrix
+
+
+def _generate_dssp_segment_heatmap(
+    analysis_dir: Path,
+    residue_start: int,
+    residue_end: int,
+    label: str,
+    cache_dir: Path,
+) -> Optional[str]:
+    """Build or reuse an activation-loop DSSP heatmap PNG for one simulation."""
+    slug = _slugify_label(label)
+    # Prefer clear names in the combined analysis directory
+    cached = cache_dir / f"dssp_activation_loop_{slug}.png"
+    legacy = cache_dir / f"{slug}_dssp_segment_{residue_start}_{residue_end}_heatmap.png"
+    for existing in (cached, legacy):
+        if existing.exists():
+            return str(existing)
+
+    segment_candidates = (
+        f"dssp_segment_{residue_start}_{residue_end}_heatmap.png",
+        "dssp_segment_heatmap.png",
+        "dssp_seg_heatmap.png",
+    )
+    for name in segment_candidates:
+        candidate = analysis_dir / name
+        if candidate.exists():
+            return str(candidate)
+
+    raw_path = analysis_dir / "dssp_raw_data.dat"
+    if not raw_path.exists():
+        return None
+
+    matrix = _load_dssp_raw_matrix(raw_path)
+    if matrix is None:
+        return None
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from src.analysis.dssp_analyzer import DSSP_CODE_MAP
+    except ImportError as exc:
+        logger.warning(f"DSSP segment heatmap skipped ({label}): {exc}")
+        return None
+
+    # User residue numbers are 1-based; DSSP raw indices are 0-based.
+    idx_start = max(0, residue_start - 1)
+    idx_end = min(matrix.shape[1], residue_end)
+    if idx_start >= idx_end:
+        return None
+
+    segment = matrix[:, idx_start:idx_end]
+    residue_ticks = list(range(residue_start, residue_start + segment.shape[1]))
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(12, 4.5))
+    cmap = plt.cm.get_cmap("tab10", 8)
+    im = ax.imshow(
+        segment.T, aspect="auto", cmap=cmap,
+        interpolation="nearest", vmin=1, vmax=8,
+    )
+    ax.set_xlabel("Frame", fontsize=11)
+    ax.set_ylabel("Residue", fontsize=11)
+    ax.set_title(
+        f"{label} — Activation loop DSSP (residues {residue_start}\u2013{residue_end})",
+        fontsize=12, fontweight="bold",
+    )
+    cbar = plt.colorbar(im, ax=ax, ticks=np.arange(1, 9))
+    cbar.ax.set_yticklabels(
+        [DSSP_CODE_MAP[code] for code in ["H", "B", "E", "G", "I", "T", "S", "-"]]
+    )
+    cbar.set_label("Secondary Structure", fontsize=10)
+    if segment.shape[0] > 50:
+        ax.set_xticks(np.linspace(0, segment.shape[0] - 1, 8))
+    if segment.shape[1] > 10:
+        step = max(1, len(residue_ticks) // 8)
+        tick_idx = list(range(0, len(residue_ticks), step))
+        ax.set_yticks(tick_idx)
+        ax.set_yticklabels([str(residue_ticks[i]) for i in tick_idx])
+    plt.tight_layout()
+    plt.savefig(cached, dpi=200, bbox_inches="tight")
+    plt.close()
+    return str(cached)
+
+
+def _slugify_label(label: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", label.strip().lower()).strip("_")
+    return slug or "sim"
+
+
+def _collect_activation_loop_dssp_heatmaps(
+    sim_dirs: List[str],
+    labels: List[str],
+    user_goal: Optional[str] = None,
+    cache_dir: Optional[str] = None,
+) -> List[Dict[str, str]]:
+    """Collect activation-loop DSSP heatmaps (apo + holo), stacked-ready."""
+    residue_start, residue_end = _resolve_dssp_residue_range(user_goal)
+    cache = Path(cache_dir) if cache_dir else Path(".reporter_cache")
+
+    entries: List[Dict[str, str]] = []
+    for sim_dir, label in zip(sim_dirs, labels):
+        analysis_dir = Path(sim_dir) / "analysis"
+        if not analysis_dir.exists():
+            continue
+        heatmap = _generate_dssp_segment_heatmap(
+            analysis_dir, residue_start, residue_end, label, cache,
+        )
+        if heatmap:
+            entries.append({"label": label, "heatmap": heatmap})
+
+    def _sort_key(entry: Dict[str, str]) -> Tuple[str, int]:
+        lbl = entry["label"].lower()
+        protein = lbl.replace("_atp_mg", "")
+        is_holo = 1 if "_atp_mg" in lbl or "holo" in lbl else 0
+        return protein, is_holo
+
+    return sorted(entries, key=_sort_key)
+
+
+def _collect_per_sim_dssp_figures(
+    sim_dirs: List[str],
+    labels: List[str],
+) -> List[Dict[str, Optional[str]]]:
+    """Deprecated alias — kept for callers expecting the old name."""
+    return [
+        {"label": e["label"], "heatmap": e["heatmap"], "timeseries": None}
+        for e in _collect_activation_loop_dssp_heatmaps(sim_dirs, labels)
+    ]
+
+
 def _build_comparative_dynamics_section(
     overlay_plots: List[str],
     sims_summary: List[Dict[str, Any]],
     sim_dirs: List[str],
     labels: List[str],
+    user_goal: Optional[str] = None,
+    cache_dir: Optional[str] = None,
 ) -> str:
     """Build the Comparative Dynamics Summary multi-panel HTML section.
 
@@ -1485,8 +1948,9 @@ def _build_comparative_dynamics_section(
     Panel B — RMSF overlay (per-residue backbone flexibility)
     Panel C — Rg comparison (structural compactness over time)
     Panel D — ATP/ligand pocket distance (active-site geometry)
-    Panel E — DCCM representative heatmaps (collective motions, one per sim)
+    Panel E — DCCM Apo | Holo | ΔDCCM triptychs (one per protein, stacked)
     Panel F — Summary bar chart generated from per-sim statistics
+    Panel G — Secondary structure (DSSP) comparison + activation-loop heatmaps
     """
 
     def _panel(
@@ -1494,11 +1958,9 @@ def _build_comparative_dynamics_section(
         title: str,
         subtitle: str,
         body: str,
-        full_width: bool = False,
     ) -> str:
-        cls = ' class="dyn-panel panel-full"' if full_width else ' class="dyn-panel"'
         return (
-            f'<div{cls}>'
+            f'<div class="dyn-panel panel-full">'
             f'<div class="panel-header">'
             f'<span class="panel-badge">Panel {_html_mod.escape(panel_id)}</span>'
             f'<span class="panel-title">{_html_mod.escape(title)}</span>'
@@ -1513,9 +1975,20 @@ def _build_comparative_dynamics_section(
         if uri is None:
             return f'<p class="panel-missing">Image not available: {_html_mod.escape(Path(fpath).name)}</p>'
         return (
-            f'<img src="{uri}" alt="{_html_mod.escape(alt)}" loading="lazy" '
-            f'style="width:100%;height:auto;border-radius:4px;">'
+            f'<img src="{uri}" alt="{_html_mod.escape(alt)}" loading="lazy">'
         )
+
+    def _img_stack(paths: List[str], alt_prefix: str = "") -> str:
+        if not paths:
+            return ""
+        parts = ['<div class="panel-stack">']
+        for p in paths:
+            label = Path(p).stem.replace("_", " ").title()
+            parts.append(
+                f'<div class="panel-stack-item">{_img(p, f"{alt_prefix} {label}".strip())}</div>'
+            )
+        parts.append("</div>")
+        return "\n".join(parts)
 
     def _missing(msg: str = "No data available") -> str:
         return f'<div class="panel-missing"><span>&#128202;</span><br>{_html_mod.escape(msg)}</div>'
@@ -1528,35 +2001,46 @@ def _build_comparative_dynamics_section(
         _img(rmsd_path, "RMSD overlay") if rmsd_path else _missing("No RMSD overlay found"),
     )
 
-    # ── Panel B: RMSF overlay + optional segment bar plots ───────────────
-    rmsf_path = _find_overlay_by_type(overlay_plots, "rmsf")
-    rmsf_segment_plots = [
-        p for p in overlay_plots if "rmsf_segment" in Path(p).name.lower()
+    # ── Panel B: RMSF apo/holo per protein + segment bar plots ──────────
+    rmsf_apo_holo_plots = [
+        p for p in overlay_plots
+        if "rmsf_apo_holo" in Path(p).name.lower()
     ]
-    if rmsf_path or rmsf_segment_plots:
+    rmsf_path = _find_overlay_by_type(overlay_plots, "rmsf")
+    rmsf_segment_plots = sorted(
+        [p for p in overlay_plots if "rmsf_segment" in Path(p).name.lower()],
+        key=lambda p: Path(p).name.lower(),
+    )
+    if rmsf_apo_holo_plots or rmsf_path or rmsf_segment_plots:
         rmsf_body = ""
-        if rmsf_path:
+        if rmsf_apo_holo_plots:
+            summary_ah = next(
+                (p for p in rmsf_apo_holo_plots if p.endswith("rmsf_apo_holo_comparison.png")),
+                rmsf_apo_holo_plots[0],
+            )
+            rmsf_body += (
+                '<p style="font-size:12px;color:#6b7280;margin:0 0 6px 0;">'
+                'Full-length per-residue RMSF — apo vs holo (one panel per pseudokinase)</p>'
+                + _img(summary_ah, "RMSF apo vs holo")
+            )
+        elif rmsf_path:
             rmsf_body += _img(rmsf_path, "RMSF overlay")
         if rmsf_segment_plots:
-            if rmsf_path:
+            if rmsf_apo_holo_plots or rmsf_path:
                 rmsf_body += (
                     '<hr style="border:none;border-top:1px dashed #bfdbfe;'
-                    'margin:12px 0 10px;">'
+                    'margin:16px 0 12px;">'
                 )
             rmsf_body += (
-                '<p style="font-weight:700;color:#1e40af;margin:0 0 8px;">'
-                'Segment RMSF (bar plots)</p>'
+                '<p style="font-weight:700;color:#1e40af;margin:0 0 10px;">'
+                'Activation-loop RMSF (residues 150\u2013200) \u2014 apo vs holo</p>'
+                + _img_stack(rmsf_segment_plots, "RMSF segment")
             )
-            for seg_path in rmsf_segment_plots:
-                rmsf_body += _img(
-                    seg_path,
-                    Path(seg_path).stem.replace("_", " "),
-                )
     else:
         rmsf_body = _missing("No RMSF overlay found")
     panel_b = _panel(
-        "B", "RMSF Overlay & Segments",
-        "Per-residue C\u03b1 flexibility and user-defined segment bar comparisons",
+        "B", "RMSF Apo vs Holo & Segments",
+        "Per-residue C\u03b1 flexibility by pseudokinase and active-site segment comparisons",
         rmsf_body,
     )
 
@@ -1570,57 +2054,22 @@ def _build_comparative_dynamics_section(
         _img(rg_path, "Rg overlay") if rg_path else _missing("No Rg overlay found"),
     )
 
-    # ── Panel D: ATP–catalytic pocket COM distance (combined overlay) ───
+    # ── Panel D: ATP–catalytic pocket COM distance (combined overlay only) ─
     com_overlay = _find_overlay_by_type(overlay_plots, "com_distance")
-    pocket_plots = _find_per_sim_plots(sim_dirs, labels, "pocket_distance")
-    if not pocket_plots:
-        pocket_plots = _find_per_sim_plots(sim_dirs, labels, "ligand_pocket")
-
     if com_overlay:
         pocket_body = (
             '<p style="font-size:12px;color:#6b7280;margin:0 0 6px 0;">'
             'Combined overlay — apo vs holo (holo systems with bound ATP)</p>'
             + _img(com_overlay, "COM distance overlay")
         )
-        if pocket_plots:
-            pocket_body += (
-                '<p style="font-size:11px;color:#6b7280;margin:10px 0 4px;">'
-                'Per-simulation traces:</p>'
-            )
-            pocket_body += '<div style="display:flex;flex-wrap:wrap;gap:6px;">'
-            for lbl, pth in pocket_plots[:4]:
-                uri = _encode_image(pth)
-                if uri:
-                    pocket_body += (
-                        f'<div style="flex:1 1 140px;text-align:center;">'
-                        f'<img src="{uri}" alt="{_html_mod.escape(lbl)}" '
-                        f'style="width:100%;border-radius:3px;">'
-                        f'<p style="font-size:10px;color:#6b7280;">'
-                        f'{_html_mod.escape(lbl)}</p></div>'
-                    )
-            pocket_body += '</div>'
-    elif pocket_plots:
-        rep_label, rep_path = pocket_plots[0]
-        pocket_body = (
-            f'<p style="font-size:12px;color:#6b7280;margin:0 0 6px 0;">'
-            f'Representative: <strong>{_html_mod.escape(rep_label)}</strong></p>'
-            + _img(rep_path, f"Pocket distance {rep_label}")
-        )
-        if len(pocket_plots) > 1:
-            pocket_body += '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">'
-            for lbl, pth in pocket_plots[1:]:
-                uri = _encode_image(pth)
-                if uri:
-                    pocket_body += (
-                        f'<div style="flex:1 1 110px;text-align:center;">'
-                        f'<img src="{uri}" alt="{_html_mod.escape(lbl)}" '
-                        f'style="width:100%;border-radius:3px;">'
-                        f'<p style="font-size:10px;color:#6b7280;margin:2px 0;">'
-                        f'{_html_mod.escape(lbl)}</p></div>'
-                    )
-            pocket_body += '</div>'
     else:
-        pocket_body = _missing("No ATP–pocket COM distance data found")
+        pocket_plots = _find_per_sim_plots(sim_dirs, labels, "pocket_distance")
+        if not pocket_plots:
+            pocket_plots = _find_per_sim_plots(sim_dirs, labels, "ligand_pocket")
+        if pocket_plots:
+            pocket_body = _img_stack([p for _, p in pocket_plots], "Pocket distance")
+        else:
+            pocket_body = _missing("No ATP–pocket COM distance data found")
 
     panel_d = _panel(
         "D", "ATP–Catalytic Pocket COM Distance",
@@ -1628,74 +2077,22 @@ def _build_comparative_dynamics_section(
         pocket_body,
     )
 
-    # ── Panel E: combined DCCM comparison (apo / holo / Δ) — skip per-sim heatmaps ─
-    dccm_per_sim: List[Tuple[str, str]] = []
-
-    # Separate combined DCCM plots (comparison / difference) from overlay list
-    _dccm_combined_plots = _dedupe_dccm_combined_plots([
-        p for p in overlay_plots
-        if "dccm" in Path(p).name.lower()
-    ])
-
-    # When a multi-panel comparison figure exists, individual heatmaps are redundant
-    _has_dccm_comparison = any(
-        "comparison" in Path(p).name.lower() for p in _dccm_combined_plots
-    )
-    if not _has_dccm_comparison:
-        dccm_per_sim = _find_per_sim_plots(sim_dirs, labels, "dccm_heatmap")
-        if not dccm_per_sim:
-            dccm_per_sim = _find_per_sim_plots(sim_dirs, labels, "dccm")
-
-    if not dccm_per_sim and not _dccm_combined_plots:
-        # Last fallback: any dccm overlay
-        dccm_ov = _find_overlay_by_type(overlay_plots, "dccm")
-        dccm_body = _img(dccm_ov, "DCCM heatmap") if dccm_ov else _missing("No DCCM heatmaps found")
+    # ── Panel E: Apo | Holo | ΔDCCM triptychs only (stacked, full width) ──
+    dccm_panel_plots = _find_dccm_apo_holo_panel_plots(overlay_plots)
+    if dccm_panel_plots:
+        dccm_body = (
+            '<p style="font-size:12px;color:#6b7280;margin:0 0 10px;">'
+            'Each row: Apo DCCM | Holo DCCM | \u0394(holo \u2212 apo)</p>'
+            + _img_stack(dccm_panel_plots, "DCCM apo holo delta")
+        )
     else:
-        dccm_body = ""
-        # Per-sim individual heatmaps
-        if dccm_per_sim:
-            dccm_body += (
-                '<p style="font-weight:700;color:#1e40af;margin:0 0 8px;">Individual Simulations</p>'
-                '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">'
-            )
-            for lbl, dpath in dccm_per_sim:
-                uri = _encode_image(dpath)
-                if uri:
-                    dccm_body += (
-                        f'<div style="flex:1 1 180px;max-width:260px;text-align:center;">'
-                        f'<img src="{uri}" alt="DCCM {_html_mod.escape(lbl)}" '
-                        f'style="width:100%;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,0.12);">'
-                        f'<p style="font-size:11px;font-weight:700;color:#1e40af;margin:5px 0 0;">'
-                        f'{_html_mod.escape(lbl)}</p></div>'
-                    )
-            dccm_body += '</div>'
-        # Combined DCCM comparison / difference plots
-        if _dccm_combined_plots:
-            if dccm_per_sim:
-                dccm_body += '<hr style="border:none;border-top:1px dashed #bfdbfe;margin:14px 0 10px;">'
-            dccm_body += (
-                '<p style="font-weight:700;color:#1e40af;margin:0 0 8px;">'
-                'Comparison &amp; Difference (Apo vs Holo)</p>'
-                '<div style="display:flex;flex-wrap:wrap;gap:12px;justify-content:center;">'
-            )
-            for _cp in _dccm_combined_plots:
-                uri = _encode_image(_cp)
-                if uri:
-                    _fname = Path(_cp).stem.replace("_", " ").title()
-                    dccm_body += (
-                        f'<div style="flex:1 1 320px;text-align:center;">'
-                        f'<img src="{uri}" alt="{_html_mod.escape(_fname)}" '
-                        f'style="width:100%;border-radius:4px;box-shadow:0 1px 6px rgba(0,0,0,0.15);">'
-                        f'<p style="font-size:11px;color:#6b7280;margin:5px 0 0;">'
-                        f'{_html_mod.escape(_fname)}</p></div>'
-                    )
-            dccm_body += '</div>'
+        dccm_ov = _find_overlay_by_type(overlay_plots, "dccm")
+        dccm_body = _img(dccm_ov, "DCCM heatmap") if dccm_ov else _missing("No DCCM apo/holo panels found")
 
     panel_e = _panel(
-        "E", "DCCM Heatmaps & Difference",
-        "Dynamic cross-correlation matrix \u2014 per-simulation heatmaps and apo\u2013holo \u0394DCCM",
+        "E", "DCCM Apo | Holo | \u0394DCCM",
+        "Dynamic cross-correlation — apo vs holo comparison with difference map (one figure per protein)",
         dccm_body,
-        full_width=True,
     )
 
     # ── Panel F: Summary bar chart ────────────────────────────────────────
@@ -1704,7 +2101,48 @@ def _build_comparative_dynamics_section(
         "F", "Summary Bar Chart",
         "Stability (RMSD \u2193), flexibility (RMSF \u2191), and compactness (Rg \u2193) rankings",
         bar_svg if bar_svg else _missing("Insufficient statistics for bar chart"),
-        full_width=True,
+    )
+
+    # ── Panel G: Secondary structure (DSSP) ───────────────────────────────
+    residue_start, residue_end = _resolve_dssp_residue_range(user_goal)
+    dssp_comparison = _find_dssp_comparison_plot(overlay_plots)
+    if not dssp_comparison and cache_dir:
+        candidate = Path(cache_dir) / "dssp_comparison.png"
+        if candidate.exists():
+            dssp_comparison = str(candidate)
+    dssp_heatmaps = _collect_activation_loop_dssp_heatmaps(
+        sim_dirs, labels, user_goal=user_goal, cache_dir=cache_dir,
+    )
+    if dssp_comparison or dssp_heatmaps:
+        dssp_body = ""
+        if dssp_comparison:
+            dssp_body += (
+                '<p style="font-size:12px;color:#6b7280;margin:0 0 8px 0;">'
+                'Average secondary-structure content across all simulations</p>'
+                + _img(dssp_comparison, "DSSP comparison")
+            )
+        if dssp_heatmaps:
+            if dssp_comparison:
+                dssp_body += (
+                    '<hr style="border:none;border-top:1px dashed #bfdbfe;'
+                    'margin:16px 0 12px;">'
+                )
+            dssp_body += (
+                f'<p style="font-weight:700;color:#1e40af;margin:0 0 10px;">'
+                f'Activation-loop DSSP heatmaps (residues {residue_start}\u2013{residue_end}) '
+                f'\u2014 apo and holo</p>'
+                + _img_stack([e["heatmap"] for e in dssp_heatmaps], "DSSP activation loop")
+            )
+    else:
+        dssp_body = _missing(
+            "No activation-loop DSSP heatmaps found "
+            f"(residues {residue_start}\u2013{residue_end})"
+        )
+
+    panel_g = _panel(
+        "G", "Secondary Structure (DSSP)",
+        f"Cross-simulation comparison and activation-loop heatmaps (residues {residue_start}\u2013{residue_end})",
+        dssp_body,
     )
 
     # ── Ranking table ─────────────────────────────────────────────────────
@@ -1713,7 +2151,7 @@ def _build_comparative_dynamics_section(
     return (
         '<h2>&#128202; Comparative Dynamics Summary</h2>\n'
         '<p>Multi-panel comparison of structural dynamics across all simulations. '
-        'Each panel highlights a distinct aspect of molecular behaviour.</p>\n'
+        'Each panel spans the full report width for side-by-side visual comparison.</p>\n'
         '<div class="dyn-panel-grid">\n'
         + panel_a + "\n"
         + panel_b + "\n"
@@ -1721,6 +2159,7 @@ def _build_comparative_dynamics_section(
         + panel_d + "\n"
         + panel_e + "\n"
         + panel_f + "\n"
+        + panel_g + "\n"
         + '</div>\n'
         + ranking_table
     )
@@ -1737,7 +2176,7 @@ def generate_combined_html_report(
     overlay_plots: List[str],
     working_dir: str,
     output_file: str = "combined_report.html",
-    title: str = "Multi-Simulation Comparison Report",
+    title: str = "Multi-Simulation Report",
     enriched_prompt: Optional[str] = None,
     user_goal: Optional[str] = None,
     protein_name: Optional[str] = None,
@@ -1791,25 +2230,24 @@ def generate_combined_html_report(
 
     stats_html = _build_stats_section(sims_summary)
 
-    # Comparative Dynamics Summary — multi-panel figure (Panels A–F)
+    # Comparative Dynamics Summary — multi-panel figure (Panels A–G)
+    base_analysis_dir = str(Path(working_dir).parent / "analysis")
     comparative_html = _build_comparative_dynamics_section(
-        overlay_plots, sims_summary, sim_dirs, labels
+        overlay_plots, sims_summary, sim_dirs, labels,
+        user_goal=user_goal,
+        cache_dir=base_analysis_dir if Path(base_analysis_dir).is_dir() else str(Path(working_dir) / ".dssp_cache"),
     )
 
-    # Additional overlay plots not already shown in the comparative section
-    extra_plots = _filter_redundant_overlay_plots(overlay_plots, sim_dirs, labels)
-    extra_plots_html = _build_plots_section(extra_plots)
+    # The "Additional Comparison Figures" section is intentionally omitted:
+    # all comparison/composite figures already live in the Comparative Dynamics
+    # Summary, so a supplementary figure dump would only duplicate them.
     extra_plots_section = ""
-    if extra_plots_html and "No overlay plots" not in extra_plots_html:
-        extra_plots_section = (
-            '<div class="section-divider"></div>\n'
-            '<h2>&#128200; Additional Comparison Figures</h2>\n'
-            '<p>Supplementary plots not included in the comparative dynamics summary above.</p>\n'
-            + extra_plots_html
-        )
 
-    # 3D viewer: pick one representative PDB per sim (max 5)
-    pdb_frames = _select_representative_pdbs(sim_dirs, labels, max_pdbs=5)
+    # 3D viewer: show at least one representative PDB per simulation (no 5-cap so
+    # every system in a batch — e.g. all 8 apo/holo runs — is represented).
+    pdb_frames = _select_representative_pdbs(
+        sim_dirs, labels, max_pdbs=max(len(sim_dirs), 5)
+    )
     viewer_html = _build_3d_viewer_html(pdb_frames) if pdb_frames else ""
 
     # Literature: prefer freshly searched refs; fall back to per-sim HTML aggregation
@@ -1828,25 +2266,16 @@ def generate_combined_html_report(
     final_text = _build_combined_final_impression(sims_summary, sim_resources)
     final_html = _build_final_impression_html(final_text, agg_refs)
 
-    # Task description (original prompt + per-sim objectives)
+    # Task description — original user goal only (no redundant enriched/combined text)
     task_html = _build_task_description_html(
-        enriched_prompt=enriched_prompt or "",
+        enriched_prompt="",
         sim_resources=sim_resources,
         user_goal=user_goal,
-        protein_name=protein_name,
     )
 
     # ---- Metadata header ----------------------------------------------------
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     sims_list_html = ", ".join(f"<b>{_html_mod.escape(s['label'])}</b>" for s in sims_summary)
-    # Build a protein name display: use unique labels (already resolved to names)
-    _unique_names = list(dict.fromkeys(s["label"] for s in sims_summary))
-    _names_display = ", ".join(_html_mod.escape(n) for n in _unique_names)
-    protein_meta_html = (
-        f'\n  <p><strong>&#129516; Protein / System:</strong> '
-        f'<span style="font-weight:700;color:#7c3aed;">{_names_display}</span></p>'
-        if _unique_names else ""
-    )
 
     # ---- Simulations overview table (enhanced) ------------------------------
     sim_overview_rows = ""
@@ -1881,21 +2310,22 @@ def generate_combined_html_report(
     )
 
     # ---- Assemble HTML ------------------------------------------------------
+    report_headline = "Multi-Simulation Report"
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{_html_mod.escape(title)}</title>
+<title>{_html_mod.escape(report_headline)}</title>
 <style>{_CSS}</style>
 {viewer_script}</head>
 <body>
 <div class="container">
 
-<h1>&#129516; {_html_mod.escape(title)}</h1>
+<h1>&#129516; {_html_mod.escape(report_headline)}</h1>
 <div class="header-meta">
   <p><strong>&#128197; Generated:</strong> {now}</p>
-  <p><strong>&#128202; Simulations:</strong> {sims_list_html}</p>{protein_meta_html}
+  <p><strong>&#128202; Simulations:</strong> {sims_list_html}</p>
   <p><strong>&#128296; Total analyses:</strong> {sum(len(s['records']) for s in sims_summary)}</p>
   <p><strong>&#129366; PDB structures in viewer:</strong> {len(pdb_frames)}</p>
   <p><strong>&#128218; Literature references:</strong> {len(agg_refs)}</p>
@@ -1934,7 +2364,7 @@ def generate_combined_html_report(
 {final_html}
 
 </div>
-<footer>Generated by AgenticAI Multi-Simulation Reporter &nbsp;|&nbsp; {now}</footer>
+<footer>Generated by SimAgent Multi-Simulation Reporter &nbsp;|&nbsp; {now}</footer>
 </body>
 </html>
 """

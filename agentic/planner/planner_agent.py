@@ -60,17 +60,57 @@ class MDPlanner:
         logger.info(f"MD Planner initialized with {len(self.tools_registry.tools)} tools and "
                    f"{len(self.knowledge_loader.knowledge_docs)} knowledge documents")
     
-    def _get_tools_context(self, agent_name: Optional[str] = None) -> str:
+    def _should_exclude_combined_tools(self, state: MDState) -> bool:
+        """Combined-analysis tools are only relevant after all per-sim runs finish."""
+        if state.get("multi_sim_phase") == "combined_analysis":
+            return False
+        return True
+
+    def _get_per_sim_scope_note(self, state: MDState) -> str:
+        """Planning-scope reminder for individual simulation workflows."""
+        if not self._should_exclude_combined_tools(state):
+            return ""
+
+        parts = [
+            "**SCOPE — INDIVIDUAL SIMULATION ONLY (CRITICAL):**",
+            "- Plan analysis for THIS simulation's trajectory only.",
+            "- Do NOT plan cross-simulation comparisons, overlay plots across multiple sim_dirs,",
+            "  or any run_combined_* / plot_combined_overlay / collect_metric_files steps.",
+            "- Cross-simulation combined analysis is handled automatically in a later workflow phase",
+            "  after all individual simulations complete.",
+        ]
+        if state.get("is_multi_simulation"):
+            idx = state.get("current_sim_index", 0)
+            sim_prompts = state.get("sim_prompts") or []
+            label = ""
+            if 0 <= idx < len(sim_prompts):
+                label = sim_prompts[idx].get("label", "")
+            if label:
+                parts.insert(1, f"- Current simulation label: {label}")
+            parts.append(
+                "- Focus the Analysis Agent instructions on metrics and plots for this label only."
+            )
+        return "\n".join(parts) + "\n"
+
+    def _get_tools_context(
+        self,
+        agent_name: Optional[str] = None,
+        exclude_combined_tools: bool = False,
+    ) -> str:
         """
         Get formatted tools context for LLM.
         
         Args:
             agent_name: If specified, only get tools for this agent
+            exclude_combined_tools: Omit cross-simulation combined-analysis tools
             
         Returns:
             Formatted tools description string
         """
-        return self.tools_registry.get_tools_for_planner(agent_name)
+        return self.tools_registry.get_tools_for_planner(
+            agent_name,
+            exclude_combined_tools=exclude_combined_tools,
+        )
     
     def _get_knowledge_context(self, 
                                category: Optional[str] = None,
@@ -91,7 +131,11 @@ class MDPlanner:
         """Get knowledge files summary (for logging only, not full content)."""
         return self.knowledge_loader.get_knowledge_files_summary()
 
-    def _get_combined_tools_context(self, agent_list: List[str]) -> str:
+    def _get_combined_tools_context(
+        self,
+        agent_list: List[str],
+        exclude_combined_tools: bool = False,
+    ) -> str:
         """
         Get tools context for a list of agents combined, preserving workflow order.
 
@@ -100,6 +144,7 @@ class MDPlanner:
 
         Args:
             agent_list: Ordered list of CLI agent names (e.g. ["analysis", "reporter"])
+            exclude_combined_tools: Omit cross-simulation combined-analysis tools from analysis
 
         Returns:
             Formatted tools description string covering all listed agents
@@ -116,7 +161,7 @@ class MDPlanner:
         
         if not agent_list:
             logger.warning("PLANNER: agent_list is empty, returning all tools")
-            return self._get_tools_context()
+            return self._get_tools_context(exclude_combined_tools=exclude_combined_tools)
 
         parts = []
         seen = set()
@@ -127,7 +172,10 @@ class MDPlanner:
                 logger.debug(f"PLANNER: Skipping duplicate agent '{registry_name}'")
                 continue
             seen.add(registry_name)
-            ctx = self._get_tools_context(agent_name=registry_name)
+            ctx = self._get_tools_context(
+                agent_name=registry_name,
+                exclude_combined_tools=exclude_combined_tools,
+            )
             if ctx.strip():
                 logger.info(f"PLANNER: Added tools context for '{registry_name}' ({len(ctx)} chars)")
                 parts.append(ctx)
@@ -136,7 +184,7 @@ class MDPlanner:
 
         if not parts:
             logger.error(f"PLANNER: No tools found for any agent in {agent_list}, falling back to ALL tools")
-            return self._get_tools_context()
+            return self._get_tools_context(exclude_combined_tools=exclude_combined_tools)
         
         logger.info(f"PLANNER: Returning combined tools context for {len(parts)} agents")
         return "\n".join(parts)
@@ -331,9 +379,13 @@ class MDPlanner:
             logger.info(f"PLANNER: Planning for subtask type: {subtask_type}")
         
         # Get available tools context - agent-specific for subtask workflows
+        exclude_combined = self._should_exclude_combined_tools(state)
         if subtask_type == "analysis_only":
             logger.info("PLANNER: Getting analysis agent tools for analysis-only workflow")
-            tools_context = self._get_tools_context(agent_name="analysis")
+            tools_context = self._get_tools_context(
+                agent_name="analysis",
+                exclude_combined_tools=exclude_combined,
+            )
         elif subtask_type == "setup_only":
             logger.info("PLANNER: Getting setup agent tools for setup-only workflow")
             tools_context = self._get_tools_context(agent_name="simsetup")
@@ -347,14 +399,17 @@ class MDPlanner:
             agent_list = state.get("agent_list") or []
             logger.info(f"PLANNER: Getting combined tools for multi-agent workflow: {agent_list}")
             logger.info(f"PLANNER: DEBUG - subtask_type={subtask_type}, agent_list from state={agent_list}")
-            tools_context = self._get_combined_tools_context(agent_list)
+            tools_context = self._get_combined_tools_context(
+                agent_list,
+                exclude_combined_tools=exclude_combined,
+            )
             logger.info(f"PLANNER: DEBUG - tools_context length: {len(tools_context)} chars")
             # Log first few lines to see what agents are included
             tools_lines = tools_context.split('\n')[:10]
             logger.info(f"PLANNER: DEBUG - First 10 lines of tools_context:\n" + "\n".join(tools_lines))
         else:
             # Full workflow - get all tools
-            tools_context = self._get_tools_context()
+            tools_context = self._get_tools_context(exclude_combined_tools=exclude_combined)
         
         # Get relevant knowledge (protocols and force fields)
         knowledge_context = self._get_knowledge_context(max_chars=6000)
@@ -464,8 +519,12 @@ class MDPlanner:
                             self.tools_registry.discover_all_tools()
                             
                             # Rebuild tools context with new tools
+                            exclude_combined = self._should_exclude_combined_tools(state)
                             if subtask_type == "analysis_only":
-                                current_tools_context = self._get_tools_context(agent_name="analysis")
+                                current_tools_context = self._get_tools_context(
+                                    agent_name="analysis",
+                                    exclude_combined_tools=exclude_combined,
+                                )
                             elif subtask_type == "setup_only":
                                 current_tools_context = self._get_tools_context(agent_name="simsetup")
                             elif subtask_type == "preprocess_only":
@@ -476,10 +535,15 @@ class MDPlanner:
                                 # Get combined tools context for multi-agent workflow
                                 agent_list = state.get("agent_list") or []
                                 logger.info(f"PLANNER: Rebuilding tools context for multi-agent workflow: {agent_list}")
-                                current_tools_context = self._get_combined_tools_context(agent_list)
+                                current_tools_context = self._get_combined_tools_context(
+                                    agent_list,
+                                    exclude_combined_tools=exclude_combined,
+                                )
                             else:
                                 # Full workflow - get all tools
-                                current_tools_context = self._get_tools_context()
+                                current_tools_context = self._get_tools_context(
+                                    exclude_combined_tools=exclude_combined,
+                                )
                             
                             # Rebuild prompt with updated tools
                             current_prompt = self._build_planning_prompt(
@@ -851,6 +915,8 @@ Generate tool specifications now (ONLY for missing tools):"""
     ) -> str:
         """Build planning prompt for execution plan creation."""
         
+        per_sim_scope_note = self._get_per_sim_scope_note(state)
+        
         # Common natural language format instructions for ALL plan types
         nl_format_instructions = """**OUTPUT FORMAT - MANDATORY:**
 
@@ -904,7 +970,7 @@ File Structure:
 **Available Analysis Agent Tools:**
 {tools_context}
 
-{self._get_tool_creation_instructions(include_new_tools_note)}
+{per_sim_scope_note}{self._get_tool_creation_instructions(include_new_tools_note)}
 
 **CRITICAL INSTRUCTIONS:**
 - FIRST: Check if the requested analysis is available in the tools list above
@@ -1118,7 +1184,7 @@ Working Directory: {working_dir}
 **Available Tools (for the listed agents only):**
 {tools_context}
 
-{self._get_tool_creation_instructions(include_new_tools_note, agent_list)}
+{per_sim_scope_note}{self._get_tool_creation_instructions(include_new_tools_note, agent_list)}
 
 **CRITICAL INSTRUCTIONS:**
 - Your plan MUST cover ONLY the agents listed: {agents_str}
@@ -1207,7 +1273,7 @@ Water Model: {state.get('water_model', 'tip3p')}
 **Available Agents and Their Tools:**
 {tools_context}
 
-{self._get_tool_creation_instructions(include_new_tools_note)}
+{per_sim_scope_note}{self._get_tool_creation_instructions(include_new_tools_note)}
 
 **CRITICAL INSTRUCTIONS FOR TOOL CHECKING:**
 - BEFORE creating your plan, verify that all required tools are available in the lists above

@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from langchain.tools import tool
 
+from src.preprocess.pdb_utils import insert_ter_records
+
 
 # Common ion residue names
 COMMON_IONS = {
@@ -101,6 +103,7 @@ def separate_complex_components(
             if not protein_output:
                 protein_output = str(working_dir / "protein.pdb")
             protein.write(protein_output)
+            insert_ter_records(protein_output)
             result["protein_file"] = protein_output
             result["files_created"].append(protein_output)
             result["statistics"]["protein"] = {

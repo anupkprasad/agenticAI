@@ -27,7 +27,7 @@ from .schemas import (
     AnalysisResult as AnalysisExecutionResult,
     AnalysisAgentInput, AnalysisAgentOutput
 )
-from .tools import AnalysisToolExecutor, get_tool_metadata
+from .tools import AnalysisToolExecutor, get_tool_metadata, is_combined_analysis_tool
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,60 @@ class MDAnalysisAgent:
             "output_dir": "./working_dir/analysis",
             "use_mdanalysis": True,
         }
+
+    def _get_analysis_tool_metadata(self, state: Optional[MDState] = None) -> Dict[str, Dict[str, Any]]:
+        """Per-simulation tool metadata for LLM planning (excludes combined-analysis tools)."""
+        working_dir = state.get("working_directory") if state else None
+        include_combined = bool(
+            state and state.get("multi_sim_phase") == "combined_analysis"
+        )
+        return get_tool_metadata(
+            working_directory=working_dir,
+            include_combined=include_combined,
+        )
+
+    def _format_tools_list_for_prompt(self, tool_metadata: Dict[str, Dict[str, Any]]) -> str:
+        """Format tool metadata as a prompt-friendly bullet list."""
+        tools_list = []
+        for tool_info in tool_metadata.values():
+            tool_entry = f"→ {tool_info['name']}: {tool_info['description']}"
+            tools_list.append(tool_entry)
+        return "\n".join(tools_list)
+
+    def _format_tools_list_detailed(self, tool_metadata: Dict[str, Dict[str, Any]]) -> str:
+        """Format tool metadata with parameter details for standard planning prompts."""
+        tools_list = []
+        for tool_info in tool_metadata.values():
+            tool_entry = f"→ {tool_info['name']}\n"
+            tool_entry += f"  {tool_info['description']}\n"
+            if tool_info.get("args"):
+                tool_entry += "  Parameters:\n"
+                for arg_name, arg_details in tool_info["args"].items():
+                    required = "required" if arg_details["required"] else "optional"
+                    desc = arg_details.get("description", "No description")
+                    tool_entry += f"    • {arg_name} ({required}): {desc}\n"
+            tools_list.append(tool_entry)
+        return "\n".join(tools_list)
+
+    def _get_per_sim_tool_scope_note(self, state: Optional[MDState] = None) -> str:
+        """Tell the analysis LLM to stay within this simulation's scope."""
+        if state and state.get("multi_sim_phase") == "combined_analysis":
+            return ""
+        note = (
+            "**SCOPE — THIS SIMULATION ONLY:**\n"
+            "- Use only per-trajectory analysis tools listed below.\n"
+            "- Do NOT call run_combined_*, plot_combined_overlay, collect_metric_files, "
+            "or other cross-simulation tools.\n"
+            "- Cross-simulation comparison runs automatically after all simulations finish.\n"
+        )
+        if state and state.get("is_multi_simulation"):
+            idx = state.get("current_sim_index", 0)
+            sim_prompts = state.get("sim_prompts") or []
+            if 0 <= idx < len(sim_prompts):
+                label = sim_prompts[idx].get("label")
+                if label:
+                    note += f"- Current simulation: {label}\n"
+        return note
 
     def analysis_node(self, state: MDState) -> MDState:
         """
@@ -128,7 +182,10 @@ class MDAnalysisAgent:
             state["analysis_dir"] = analysis_dir
             state["analysis_directory"] = analysis_dir  # Backward compatibility
             
-            self.tool_executor = AnalysisToolExecutor(config={"working_directory": analysis_dir})
+            self.tool_executor = AnalysisToolExecutor(config={
+                "working_directory": analysis_dir,
+                "include_combined_tools": False,
+            })
             
             # Copy files from HPC output directory if needed (using secure file manager)
             self._copy_files_from_hpc_secure(state)
@@ -214,10 +271,17 @@ class MDAnalysisAgent:
         # Apply protein name mapping from goal text (fallback for re-runs where
         # labels may still be raw UniProt IDs from a prior planner run).
         from src.reporter.combined_reporter import _parse_label_name_map, apply_label_name_map
-        _nm_text = (state.get("master_enriched_prompt") or "") + " " + (state.get("user_goal", "") or "")
+        _nm_text = (
+            (state.get("user_goal_original") or "")
+            + " "
+            + (state.get("master_enriched_prompt") or "")
+            + " "
+            + (state.get("user_goal", "") or "")
+        )
         _name_map_a = _parse_label_name_map(_nm_text)
         if _name_map_a:
             labels = apply_label_name_map(labels, _name_map_a)
+        _goal_text = _nm_text.strip()
 
         log_agent_start(
             "analysis",
@@ -231,13 +295,32 @@ class MDAnalysisAgent:
                 run_combined_dccm_difference,
                 run_combined_rmsf_segment_analysis,
                 run_combined_com_distance_analysis,
+                pair_apo_holo_simulations,
+                run_combined_rmsf_apo_holo_analysis,
+                run_combined_dccm_apo_holo_analysis,
+                run_combined_rmsf_segment_apo_holo_analysis,
             )
+
+            # pair_apo_holo_simulations is a plain helper (not a @tool), so it
+            # is called directly without .func.
+            apo_holo_pairs = pair_apo_holo_simulations(
+                sim_dirs=sim_dirs,
+                labels=labels,
+                label_name_map=_name_map_a or None,
+                user_goal=_goal_text or None,
+            )
+
+            # Skip all-simulation RMSF overlay when apo/holo pairs exist —
+            # per-protein RMSF comparison is clearer for ligand-effect studies.
+            combined_metrics = ["rmsd", "rmsf", "rg", "energy"]
+            if apo_holo_pairs:
+                combined_metrics = ["rmsd", "rg", "energy"]
 
             result = run_combined_analysis.func(
                 sim_dirs=sim_dirs,
                 labels=labels,
                 working_dir=analysis_dir,
-                metrics=["rmsd", "rmsf", "rg", "energy"],
+                metrics=combined_metrics,
             )
 
             plots = result.get("plots", [])
@@ -255,103 +338,92 @@ class MDAnalysisAgent:
                 },
             )
 
-            # ── DCCM combined comparison & difference ─────────────────────
-            dccm_plots: list = []
-
-            # 1. Side-by-side heatmap for all simulations
-            try:
-                dccm_cmp = run_combined_dccm_analysis.func(
-                    sim_dirs=sim_dirs,
-                    labels=labels,
-                    working_dir=analysis_dir,
-                    output_file="dccm_comparison.png",
-                )
-                if dccm_cmp.get("success"):
-                    dccm_plots.append(dccm_cmp["output_path"])
-                    log_agent_action("analysis", "DCCM comparison generated",
-                                     {"output": dccm_cmp.get("output_path")})
-                else:
-                    logger.warning(f"DCCM comparison: {dccm_cmp.get('message')}")
-            except Exception as _exc:
-                logger.warning(f"DCCM comparison failed: {_exc}")
-
-            # 2. DCCM difference (apo vs holo): detect reference / compare pair.
-            #    Holo = sim dir/label containing ATP, MG, ligand, holo, bound, adp keywords.
-            #    Apo  = sim dir/label containing apo, protein_only, noligand keywords.
-            #    Fallback: if only one holo found, everything else becomes reference.
-            _HOLO_KW = {"holo", "atp", "mg", "adp", "ligand", "bound", "_atp_", "_mg_"}
-            _APO_KW  = {"apo", "protein_only", "protein-only", "noligand", "no_ligand", "_apo_"}
-
-            ref_idx: Optional[int] = None
-            cmp_idx: Optional[int] = None
-            for _i, (_sd, _lb) in enumerate(zip(sim_dirs, labels)):
-                _key = _sd.lower() + " " + _lb.lower()
-                if any(_kw in _key for _kw in _HOLO_KW) and cmp_idx is None:
-                    cmp_idx = _i
-                elif any(_kw in _key for _kw in _APO_KW) and ref_idx is None:
-                    ref_idx = _i
-
-            # Fallbacks when keywords are insufficient
-            if ref_idx is None and cmp_idx is None and len(sim_dirs) >= 2:
-                ref_idx, cmp_idx = 0, 1
-            elif ref_idx is None and cmp_idx is not None:
-                ref_idx = next((j for j in range(len(sim_dirs)) if j != cmp_idx), None)
-            elif cmp_idx is None and ref_idx is not None:
-                cmp_idx = next((j for j in range(len(sim_dirs)) if j != ref_idx), None)
-
-            if ref_idx is not None and cmp_idx is not None and ref_idx != cmp_idx:
+            # ── Per-protein RMSF apo vs holo ──────────────────────────────
+            rmsf_apo_holo_plots: list = []
+            if apo_holo_pairs:
                 try:
-                    dccm_diff = run_combined_dccm_difference.func(
-                        reference_sim_dir=sim_dirs[ref_idx],
-                        compare_sim_dir=sim_dirs[cmp_idx],
-                        reference_label=labels[ref_idx],
-                        compare_label=labels[cmp_idx],
+                    rmsf_ah = run_combined_rmsf_apo_holo_analysis.func(
+                        sim_dirs=sim_dirs,
+                        labels=labels,
                         working_dir=analysis_dir,
-                        output_prefix="dccm_difference",
-                        plot_mode="with_matrices",
+                        label_name_map=_name_map_a or None,
+                        user_goal=_goal_text or None,
                     )
-                    if dccm_diff.get("success"):
-                        for _f in dccm_diff.get("output_files", {}).values():
-                            if _f and _f not in dccm_plots:
-                                dccm_plots.append(_f)
+                    if rmsf_ah.get("success"):
+                        rmsf_apo_holo_plots = rmsf_ah.get("plots", [])
+                        plots.extend(rmsf_apo_holo_plots)
                         log_agent_action(
-                            "analysis", "DCCM difference computed",
-                            {
-                                "reference": labels[ref_idx],
-                                "compare":   labels[cmp_idx],
-                                "outputs":   dccm_diff.get("output_files", {}),
-                                "mean_abs_delta": dccm_diff.get(
-                                    "delta_matrix_stats", {}).get("mean_abs_delta"),
-                            },
+                            "analysis", "Per-protein RMSF apo/holo comparison",
+                            {"plots": rmsf_apo_holo_plots, "pairs": apo_holo_pairs},
                         )
                     else:
-                        logger.warning(
-                            f"DCCM difference failed: {dccm_diff.get('message')}"
-                        )
+                        logger.info(f"RMSF apo/holo: {rmsf_ah.get('message')}")
                 except Exception as _exc:
-                    logger.warning(f"DCCM difference failed: {_exc}")
+                    logger.warning(f"RMSF apo/holo comparison failed: {_exc}")
+
+            # ── DCCM: per-protein apo | holo | Δ triptychs ────────────────
+            dccm_plots: list = []
+
+            if apo_holo_pairs:
+                try:
+                    dccm_ah = run_combined_dccm_apo_holo_analysis.func(
+                        sim_dirs=sim_dirs,
+                        labels=labels,
+                        working_dir=analysis_dir,
+                        plot_mode="with_matrices",
+                        label_name_map=_name_map_a or None,
+                        user_goal=_goal_text or None,
+                    )
+                    if dccm_ah.get("success"):
+                        dccm_plots = dccm_ah.get("plots", [])
+                        log_agent_action(
+                            "analysis", "Per-protein DCCM apo/holo triptychs",
+                            {"plots": dccm_plots, "pairs": apo_holo_pairs},
+                        )
+                    else:
+                        logger.warning(f"DCCM apo/holo: {dccm_ah.get('message')}")
+                except Exception as _exc:
+                    logger.warning(f"DCCM apo/holo analysis failed: {_exc}")
             else:
-                logger.info(
-                    "_run_combined_analysis: DCCM difference skipped "
-                    f"(ref_idx={ref_idx}, cmp_idx={cmp_idx})"
-                )
+                # Fallback: all-simulation comparison when pairing is unavailable
+                try:
+                    dccm_cmp = run_combined_dccm_analysis.func(
+                        sim_dirs=sim_dirs,
+                        labels=labels,
+                        working_dir=analysis_dir,
+                        output_file="dccm_comparison.png",
+                    )
+                    if dccm_cmp.get("success"):
+                        dccm_plots.append(dccm_cmp["output_path"])
+                        log_agent_action(
+                            "analysis", "DCCM comparison generated",
+                            {"output": dccm_cmp.get("output_path")},
+                        )
+                    else:
+                        logger.warning(f"DCCM comparison: {dccm_cmp.get('message')}")
+                except Exception as _exc:
+                    logger.warning(f"DCCM comparison failed: {_exc}")
 
             # ── RMSF segment bar plots (from user-specified residue ranges) ─
             segment_plots: list = []
-            _goal_text = (
-                state.get("user_goal_original")
-                or state.get("user_goal")
-                or state.get("master_enriched_prompt")
-                or ""
-            )
             try:
-                rmsf_seg = run_combined_rmsf_segment_analysis.func(
-                    sim_dirs=sim_dirs,
-                    labels=labels,
-                    working_dir=analysis_dir,
-                    user_goal=_goal_text,
-                    segments=state.get("rmsf_segments"),
-                )
+                if apo_holo_pairs:
+                    rmsf_seg = run_combined_rmsf_segment_apo_holo_analysis.func(
+                        sim_dirs=sim_dirs,
+                        labels=labels,
+                        working_dir=analysis_dir,
+                        user_goal=_goal_text,
+                        segments=state.get("rmsf_segments"),
+                        label_name_map=_name_map_a or None,
+                    )
+                else:
+                    rmsf_seg = run_combined_rmsf_segment_analysis.func(
+                        sim_dirs=sim_dirs,
+                        labels=labels,
+                        working_dir=analysis_dir,
+                        user_goal=_goal_text,
+                        segments=state.get("rmsf_segments"),
+                    )
                 if rmsf_seg.get("success"):
                     segment_plots = rmsf_seg.get("plots", [])
                     plots.extend(segment_plots)
@@ -389,6 +461,34 @@ class MDAnalysisAgent:
             except Exception as _exc:
                 logger.warning(f"COM distance overlay failed: {_exc}")
 
+            # ── DSSP: backfill missing per-sim runs, comparison chart, activation-loop heatmaps ─
+            dssp_plots: list = []
+            try:
+                from src.reporter.combined_reporter import run_combined_dssp_analysis
+                dssp_result = run_combined_dssp_analysis(
+                    sim_dirs=sim_dirs,
+                    labels=labels,
+                    output_dir=analysis_dir,
+                    user_goal=_goal_text,
+                )
+                dssp_plots = dssp_result.get("plots", [])
+                if dssp_plots:
+                    plots.extend(p for p in dssp_plots if p not in plots)
+                    log_agent_action(
+                        "analysis", "Combined DSSP analysis",
+                        {
+                            "comparison": dssp_result.get("comparison_plot"),
+                            "n_heatmaps": len(dssp_result.get("activation_loop_heatmaps", [])),
+                            "backfilled": dssp_result.get("backfill", {}).get("backfilled", []),
+                        },
+                    )
+                elif dssp_result.get("backfill", {}).get("errors"):
+                    logger.warning(
+                        "Combined DSSP: %s", dssp_result["backfill"]["errors"]
+                    )
+            except Exception as _exc:
+                logger.warning(f"Combined DSSP analysis failed: {_exc}")
+
             # Store results in state for the reporter
             analysis_results = state.get("analysis_results") or {}
             analysis_results["combined"] = {
@@ -398,8 +498,11 @@ class MDAnalysisAgent:
                 "stats_tables": tables,
                 "skipped_metrics": skipped,
                 "dccm_plots": dccm_plots,
+                "rmsf_apo_holo_plots": rmsf_apo_holo_plots,
+                "apo_holo_pairs": apo_holo_pairs,
                 "rmsf_segment_plots": segment_plots,
                 "com_distance_plot": com_plot,
+                "dssp_plots": dssp_plots,
                 "analysis_dir": analysis_dir,
             }
             state["analysis_results"] = analysis_results
@@ -563,7 +666,13 @@ class MDAnalysisAgent:
         Skipped when:
           - ``state["skip_pbc_wrap"]`` is True (caller opted out), or
           - no trajectory file is available, or
-          - no TPR file is available (wrapping requires the run-input file).
+          - no TPR file is available (wrapping requires the run-input file), or
+          - a valid wrapped trajectory (``mdWrap.xtc``) already exists and is
+            not older than the source trajectory (idempotent re-runs).
+
+        Re-wrapping is expensive (CPU/IO/memory), so repeated analysis
+        iterations reuse the existing ``mdWrap.xtc`` instead of regenerating it.
+        Set ``state["force_pbc_wrap"]=True`` to force a fresh wrap.
 
         The ligand name is taken from ``state["ligand_resnames"]`` (first entry)
         or falls back to ``"LIG"``.  The output dt (ps) can be overridden via
@@ -578,6 +687,36 @@ class MDAnalysisAgent:
         if not traj or not Path(traj).exists():
             logger.info("_wrap_trajectory_pbc: no trajectory available — skipping")
             return
+
+        # ── Reuse an already-wrapped trajectory (idempotent re-runs) ───────
+        # Wrapping is CPU/IO/memory intensive; avoid repeating it when the
+        # user re-iterates analysis. Set state["force_pbc_wrap"]=True to force.
+        wrapped_name = "mdWrap.xtc"
+        hpc_dir = state.get("hpc_dir") or str(
+            Path(state.get("working_directory", "working_dir")) / "hpc"
+        )
+
+        if not state.get("force_pbc_wrap"):
+            # Case 1: current trajectory already points to the wrapped file.
+            if Path(traj).name == wrapped_name and Path(traj).stat().st_size > 0:
+                logger.info(
+                    "_wrap_trajectory_pbc: trajectory already wrapped "
+                    f"({Path(traj).name}) — reusing, skipping re-wrap"
+                )
+                return
+
+            # Case 2: a wrapped file already exists next to the raw trajectory
+            # or in hpc_dir, and is newer than the source — reuse it.
+            existing = self._find_existing_wrapped_traj(
+                hpc_dir, Path(traj), wrapped_name
+            )
+            if existing:
+                state["trajectory_path"] = existing
+                logger.info(
+                    "_wrap_trajectory_pbc: found existing wrapped trajectory "
+                    f"→ {existing} — reusing, skipping re-wrap"
+                )
+                return
 
         # Resolve TPR (required for gmx trjconv -s)
         tpr = (
@@ -606,14 +745,12 @@ class MDAnalysisAgent:
 
         from src.analysis.trajectory_wrapper import _wrap_trajectory_impl
 
-        # Save wrapped trajectory into hpc_dir so it lives alongside the
-        # original simulation data and the reporter can find it there.
-        hpc_dir = state.get("hpc_dir") or str(Path(state.get("working_directory", "working_dir")) / "hpc")
-
+        # Save wrapped trajectory into hpc_dir (resolved above) so it lives
+        # alongside the original simulation data and the reporter can find it.
         result = _wrap_trajectory_impl(
             tpr_file=str(tpr),
             trajectory_file=str(traj),
-            output_file="mdWrap.xtc",
+            output_file=wrapped_name,
             ligand=ligand,
             dt=dt,
             working_dir=hpc_dir,
@@ -629,6 +766,53 @@ class MDAnalysisAgent:
                 f"_wrap_trajectory_pbc: wrapping failed — continuing with "
                 f"original trajectory. Error: {result.get('error', 'unknown')}"
             )
+
+    def _find_existing_wrapped_traj(
+        self, hpc_dir: str, source_traj: Path, wrapped_name: str
+    ) -> Optional[str]:
+        """Locate a previously wrapped trajectory that is safe to reuse.
+
+        Returns the absolute path to an existing, non-empty wrapped trajectory
+        that is at least as new as *source_traj* (so stale wraps are ignored).
+        Searches hpc_dir, the source trajectory's own directory, and hpc_dir's
+        sub-directories. Returns None when no valid wrapped file is found.
+        """
+        try:
+            src_mtime = source_traj.stat().st_mtime if source_traj.exists() else 0.0
+        except OSError:
+            src_mtime = 0.0
+
+        candidates: List[Path] = []
+        if hpc_dir:
+            candidates.append(Path(hpc_dir) / wrapped_name)
+        candidates.append(source_traj.parent / wrapped_name)
+
+        # Also scan hpc_dir sub-directories (e.g. nested output folders).
+        if hpc_dir and Path(hpc_dir).is_dir():
+            candidates.extend(sorted(Path(hpc_dir).rglob(wrapped_name)))
+
+        seen: set = set()
+        for cand in candidates:
+            try:
+                resolved = cand.resolve()
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if resolved == source_traj.resolve():
+                continue
+            if not resolved.is_file() or resolved.stat().st_size == 0:
+                continue
+            # Ignore wrapped files older than the source (source was re-run).
+            if resolved.stat().st_mtime + 1 < src_mtime:
+                logger.info(
+                    f"_wrap_trajectory_pbc: ignoring stale wrapped file {resolved} "
+                    "(older than source trajectory)"
+                )
+                continue
+            return str(resolved)
+        return None
 
     def _find_tpr(self, directory: str) -> Optional[str]:
         """Return the first .tpr file found in *directory* or its sub-dirs."""
@@ -998,6 +1182,20 @@ class MDAnalysisAgent:
 
         return "LIG"
 
+    def _is_holo_simulation(self, state: MDState, agent_input: AnalysisAgentInput) -> bool:
+        """True when the current per-simulation run is a ligand-bound (holo) system."""
+        from src.analysis.combined_analysis import is_holo_simulation
+
+        label = ""
+        sim_prompts = state.get("sim_prompts") or []
+        idx = state.get("current_sim_index")
+        if idx is not None and 0 <= idx < len(sim_prompts):
+            label = sim_prompts[idx].get("label", "")
+        if not label:
+            label = Path(state.get("working_directory", "")).name
+        sim_dir = state.get("working_directory", "")
+        return is_holo_simulation(sim_dir, label)
+
     def _inject_mandatory_steps(self, plan_dict: Dict[str, Any],
                                  agent_input: AnalysisAgentInput,
                                  state: MDState) -> Dict[str, Any]:
@@ -1033,6 +1231,13 @@ class MDAnalysisAgent:
                 ligand_info = pdb_analysis.get("ligand", {})
                 if isinstance(ligand_info, dict) and ligand_info.get("present"):
                     needs_pocket_distance = True
+
+            if needs_pocket_distance and not self._is_holo_simulation(state, agent_input):
+                logger.info(
+                    "_inject_mandatory_steps: skipping ligand pocket distance — "
+                    "protein-only (apo) simulation has no bound ligand"
+                )
+                needs_pocket_distance = False
 
             if needs_pocket_distance:
                 ligand_resname = self._detect_ligand_resname(agent_input, state)
@@ -1219,16 +1424,9 @@ class MDAnalysisAgent:
                                                 state: MDState) -> str:
         """Build prompt using planner's detailed natural language instructions"""
         
-        # Get available tools for reference using tool metadata
-        working_dir = state.get("working_directory") if state else None
-        tool_metadata = get_tool_metadata(working_directory=working_dir)
-        tools_list = []
-        
-        for tool_info in tool_metadata.values():
-            tool_entry = f"→ {tool_info['name']}: {tool_info['description']}"
-            tools_list.append(tool_entry)
-        
-        tools_list_str = "\n".join(tools_list)
+        tool_metadata = self._get_analysis_tool_metadata(state)
+        tools_list_str = self._format_tools_list_for_prompt(tool_metadata)
+        scope_note = self._get_per_sim_tool_scope_note(state)
         
         # Extract file registry information
         file_registry = state.get("file_registry", {})
@@ -1264,6 +1462,7 @@ class MDAnalysisAgent:
 **Available Tools:**
 {tools_list_str}
 
+{scope_note}
 **CRITICAL INSTRUCTIONS:**
 - You MUST ONLY use the tools listed above - do NOT invent or suggest non-existent tools
 - Every "tool_name" in your plan must match exactly one of the tool names listed above
@@ -1330,25 +1529,9 @@ Output as JSON with this structure:
         """Build LLM planning prompt from config template using dynamic tool metadata"""
         config_prompt = self.config.get("llm", {}).get("planning_prompt_template", "")
         
-        # Get available tools list dynamically from tool metadata
-        working_dir = state.get("working_directory") if state else None
-        tool_metadata = get_tool_metadata(working_directory=working_dir)
-        tools_list = []
-        
-        for tool_info in tool_metadata.values():
-            tool_entry = f"→ {tool_info['name']}\n"
-            tool_entry += f"  {tool_info['description']}\n"
-            
-            if tool_info['args']:
-                tool_entry += "  Parameters:\n"
-                for arg_name, arg_details in tool_info['args'].items():
-                    required = "required" if arg_details['required'] else "optional"
-                    desc = arg_details.get('description', 'No description')
-                    tool_entry += f"    • {arg_name} ({required}): {desc}\n"
-            
-            tools_list.append(tool_entry)
-        
-        tools_list_str = "\n".join(tools_list)
+        tool_metadata = self._get_analysis_tool_metadata(state)
+        tools_list_str = self._format_tools_list_detailed(tool_metadata)
+        scope_note = self._get_per_sim_tool_scope_note(state)
         
         # Build analysis context
         analysis_context = "\n".join([
@@ -1370,7 +1553,7 @@ Output as JSON with this structure:
                 user_goal=agent_input.user_goal,
                 hpc_output_dir=agent_input.hpc_output_dir or "Not specified",
                 analysis_context=analysis_context,
-                tools_list=tools_list_str
+                tools_list=tools_list_str + ("\n\n" + scope_note if scope_note else ""),
             )
         else:
             # Fallback prompt if config template missing
@@ -1386,6 +1569,7 @@ Output as JSON with this structure:
 **Available Tools:**
 {tools_list_str}
 
+{scope_note}
 **CRITICAL:**
 - You MUST ONLY use the tools listed above. Do NOT invent or suggest non-existent tools.
 - For input file parameters (topology_file, trajectory_file, energy_file etc.):
@@ -1436,17 +1620,18 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
 
         if current_plan:
             # Modification mode: keep existing plan, apply targeted changes
-            working_dir = state.get("working_directory")
-            tool_metadata = get_tool_metadata(working_directory=working_dir)
+            tool_metadata = self._get_analysis_tool_metadata(state)
             tools_list = [
                 f"→ {t['name']}: {t['description']}"
                 for t in tool_metadata.values()
             ]
             tools_str = "\n".join(tools_list)
+            scope_note = self._get_per_sim_tool_scope_note(state)
             prompt = (
                 f"You are updating an MD trajectory analysis execution plan.\n\n"
                 f"CURRENT PLAN (JSON):\n```json\n{_j.dumps(current_plan, indent=2)}\n```\n\n"
                 f"HUMAN GUIDANCE (apply ONLY these changes):\n{human_recommendation}\n\n"
+                f"{scope_note}\n"
                 f"Available tools for reference (tool_name must match):\n{tools_str}\n\n"
                 f"Rules:\n"
                 f"- Apply ONLY the changes the human requested.\n"
@@ -1597,8 +1782,8 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 ),
             ])
 
-            # Ligand pocket distance — only when user mentioned ligand/distance
-            if _has_ligand_request:
+            # Ligand pocket distance — holo simulations only (apo has no ligand)
+            if _has_ligand_request and self._is_holo_simulation(state, agent_input):
                 steps.extend([
                     AnalysisStep(
                         name="Ligand Pocket Distance",
@@ -1759,6 +1944,19 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     log_agent_action("analysis", f"Step {i+1}/{len(plan.steps)} skipped", {
                         "step": step.name,
                         "reason": f"Invalid tool name: {step.tool_name}"
+                    })
+                    continue
+
+                if is_combined_analysis_tool(step.tool_name):
+                    skip_msg = (
+                        f"Skipping step {i+1} '{step.name}': '{step.tool_name}' is a "
+                        "cross-simulation tool and cannot run in per-simulation analysis"
+                    )
+                    execution_log.append(f"\n⚠ {skip_msg}")
+                    warnings.append(skip_msg)
+                    log_agent_action("analysis", f"Step {i+1}/{len(plan.steps)} skipped", {
+                        "step": step.name,
+                        "reason": f"Combined-analysis tool not allowed: {step.tool_name}"
                     })
                     continue
                 

@@ -1326,7 +1326,28 @@ def main(argv=None):
                        help="Base working directory (agents use subdirs: working_dir/preprocess/, working_dir/hpc/, etc.)")
     parser.add_argument("--max-concurrent", type=int, default=4,
                        help="Maximum concurrent simulations in multi-sim mode (default: 4)")
-    
+    parser.add_argument("--resume", action="store_true",
+                       help=(
+                           "Resume a multi-sim run by re-running only the simulations that "
+                           "previously failed or were not completed. Already-succeeded simulations "
+                           "are skipped. The --working-dir must point to the same directory as "
+                           "the original run so prior state can be loaded."
+                       ))
+    parser.add_argument("--retry-labels", default=None, nargs="+", metavar="LABEL",
+                       help=(
+                           "Force-retry specific simulation labels even if they previously "
+                           "succeeded. Useful when a job submitted but ran with wrong parameters. "
+                           "Example: --retry-labels p21860_ATP_MG q8nb16_ATP_MG"
+                       ))
+    parser.add_argument("--combined-only", action="store_true",
+                       help=(
+                           "Multi-sim only: skip per-simulation analysis and run ONLY the "
+                           "combined cross-simulation analysis + report using existing per-sim "
+                           "outputs on disk. Use after per-sim analysis is already complete to "
+                           "regenerate combined overlays/DCCM/report without re-analysing each "
+                           "simulation. Requires the same --working-dir as the original run."
+                       ))
+
     args = parser.parse_args(argv)
 
     # -------------------------------------------------------------------------
@@ -1388,7 +1409,10 @@ def main(argv=None):
         "force_field": args.force_field,
         "water_model": args.water_model,
         "human_in_loop": not args.no_human_loop,
-        "working_directory": args.working_dir
+        "working_directory": args.working_dir,
+        "resume_failed_only": getattr(args, "resume", False),
+        "retry_labels": list(getattr(args, "retry_labels", None) or []),
+        "combined_only": getattr(args, "combined_only", False),
     }
     
     # Pass subtask type directly in config

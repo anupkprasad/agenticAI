@@ -344,9 +344,15 @@ def compute_comparison_table(
         rows.append(row)
 
     if rows:
-        fieldnames = list(rows[0].keys())
+        fieldnames: List[str] = []
+        seen: set = set()
+        for row in rows:
+            for key in row:
+                if key not in seen:
+                    seen.add(key)
+                    fieldnames.append(key)
         with open(output_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(rows)
 
@@ -749,6 +755,121 @@ def run_combined_dccm_difference(
 
 
 # ---------------------------------------------------------------------------
+# Apo / holo pairing helpers
+# ---------------------------------------------------------------------------
+
+_HOLO_SUFFIXES = ("_atp_mg", "_atp", "-atp-mg", "_holo")
+_HOLO_KEYWORDS = {"_atp_mg", "_atp_", "atp_mg", "holo", "ligand", "bound", "_mg_"}
+
+
+def _base_protein_id(name: str) -> str:
+    """Extract base protein ID from a simulation label or directory name."""
+    base = Path(name).name.lower()
+    for suffix in _HOLO_SUFFIXES:
+        if base.endswith(suffix):
+            return base[: -len(suffix)]
+    return base
+
+
+def is_holo_simulation(sim_dir: str, label: str) -> bool:
+    """Return True when the simulation directory/label denotes a holo (ligand-bound) system."""
+    key = f"{sim_dir} {label}".lower()
+    return any(kw in key for kw in _HOLO_KEYWORDS)
+
+
+def _get_label_name_map(
+    label_name_map: Optional[Dict[str, str]] = None,
+    user_goal: Optional[str] = None,
+) -> Dict[str, str]:
+    """Resolve {uniprot_id: protein_name} from explicit map or goal text."""
+    if label_name_map:
+        return {k.lower(): v for k, v in label_name_map.items()}
+    if user_goal:
+        from src.reporter.combined_reporter import _parse_label_name_map
+        return _parse_label_name_map(user_goal)
+    return {}
+
+
+def _protein_display_name(
+    protein_id: str,
+    apo_label: str,
+    name_map: Optional[Dict[str, str]] = None,
+) -> str:
+    """Human-readable protein name for plot titles and legends."""
+    from src.reporter.combined_reporter import resolve_display_label
+
+    if name_map:
+        for candidate in (apo_label, protein_id):
+            display = resolve_display_label(candidate, name_map)
+            if display != candidate:
+                return display
+    # Labels may already be mapped (e.g. ERBB3 instead of p21860).
+    base = _base_protein_id(apo_label)
+    if base and not re.match(r"^[pq]\d", base, re.IGNORECASE):
+        return apo_label.split("_")[0].split("-")[0]
+    return (apo_label or protein_id).upper()
+
+
+def _apo_holo_legend_labels(
+    protein_id: str,
+    apo_label: str,
+    name_map: Optional[Dict[str, str]] = None,
+) -> Tuple[str, str]:
+    """Return (apo_legend, holo_legend) using protein name when available."""
+    display = _protein_display_name(protein_id, apo_label, name_map)
+    return f"{display} (Apo)", f"{display} (Holo)"
+
+
+def pair_apo_holo_simulations(
+    sim_dirs: List[str],
+    labels: List[str],
+    label_name_map: Optional[Dict[str, str]] = None,
+    user_goal: Optional[str] = None,
+) -> List[Dict[str, str]]:
+    """
+    Group simulation directories into apo/holo pairs by base protein ID.
+
+    Example: ``p21860`` + ``p21860_ATP_MG`` → one pair with protein_id ``p21860``.
+    """
+    by_id: Dict[str, Dict[str, str]] = {}
+
+    for sim_dir, label in zip(sim_dirs, labels):
+        protein_id = _base_protein_id(label) or _base_protein_id(sim_dir)
+        if protein_id not in by_id:
+            by_id[protein_id] = {"protein_id": protein_id}
+        entry = by_id[protein_id]
+        if is_holo_simulation(sim_dir, label):
+            entry["holo_dir"] = sim_dir
+            entry["holo_label"] = label
+        else:
+            entry["apo_dir"] = sim_dir
+            entry["apo_label"] = label
+
+    name_map = _get_label_name_map(label_name_map, user_goal)
+    pairs: List[Dict[str, str]] = []
+    for protein_id in sorted(by_id):
+        entry = by_id[protein_id]
+        if entry.get("apo_dir") and entry.get("holo_dir"):
+            apo_label = entry.get("apo_label", protein_id)
+            holo_label = entry.get("holo_label", f"{protein_id}_ATP_MG")
+            protein_display = _protein_display_name(protein_id, apo_label, name_map)
+            apo_legend, holo_legend = _apo_holo_legend_labels(
+                protein_id, apo_label, name_map
+            )
+            pairs.append({
+                "protein_id": protein_id,
+                "protein_display": protein_display,
+                "apo_dir": entry["apo_dir"],
+                "apo_label": apo_label,
+                "holo_dir": entry["holo_dir"],
+                "holo_label": holo_label,
+                "apo_legend": apo_legend,
+                "holo_legend": holo_legend,
+            })
+    return pairs
+
+
+# ---------------------------------------------------------------------------
 # RMSF segment bar plots & COM distance overlay
 # ---------------------------------------------------------------------------
 
@@ -1087,4 +1208,457 @@ def run_combined_com_distance_analysis(
     result["missing"] = missing
     result["found_files"] = found_files
     return result
+
+
+# ---------------------------------------------------------------------------
+# Per-protein apo vs holo comparison plots
+# ---------------------------------------------------------------------------
+
+@tool
+def plot_rmsf_apo_holo_comparison(
+    apo_rmsf_file: str,
+    holo_rmsf_file: str,
+    apo_label: str,
+    holo_label: str,
+    protein_label: str,
+    output_file: str,
+    working_dir: str,
+    figsize: Tuple[int, int] = (10, 4),
+    dpi: int = 200,
+) -> Dict[str, Any]:
+    """
+    Overlay apo and holo RMSF curves for a single protein on one panel.
+    """
+    if not HAS_MATPLOTLIB:
+        return {"success": False, "error": "matplotlib not available"}
+
+    Path(working_dir).mkdir(parents=True, exist_ok=True)
+    output_path = str(Path(working_dir) / output_file)
+
+    try:
+        apo_res, apo_vals = _read_rmsf_file(apo_rmsf_file)
+        holo_res, holo_vals = _read_rmsf_file(holo_rmsf_file)
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.plot(apo_res, apo_vals, label=apo_label, color="#1f77b4", linewidth=1.2, alpha=0.9)
+    ax.plot(holo_res, holo_vals, label=holo_label, color="#d62728", linewidth=1.2, alpha=0.9)
+    ax.set_xlabel("Residue", fontsize=10)
+    ax.set_ylabel("RMSF (Å)", fontsize=10)
+    ax.set_title(f"RMSF — {protein_label} (Apo vs Holo)", fontsize=11, fontweight="bold")
+    ax.legend(loc="best", fontsize=9)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+
+    return {
+        "success": True,
+        "output_path": output_path,
+        "protein_label": protein_label,
+        "message": f"RMSF apo/holo comparison saved to {output_path}",
+    }
+
+
+@tool
+def run_combined_rmsf_apo_holo_analysis(
+    sim_dirs: List[str],
+    labels: List[str],
+    working_dir: str,
+    output_file: str = "rmsf_apo_holo_comparison.png",
+    per_protein_files: bool = True,
+    figsize_per_panel: Tuple[int, int] = (10, 3),
+    dpi: int = 200,
+    label_name_map: Optional[Dict[str, str]] = None,
+    user_goal: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Generate per-protein RMSF comparisons (apo vs holo overlaid).
+
+    Produces:
+    - One multi-row summary figure (``rmsf_apo_holo_comparison.png``) with one
+      panel per protein.
+    - Optional individual PNGs per protein (``rmsf_apo_holo_<protein_id>.png``).
+    """
+    if not HAS_MATPLOTLIB:
+        return {"success": False, "error": "matplotlib not available", "plots": []}
+
+    Path(working_dir).mkdir(parents=True, exist_ok=True)
+    pairs = pair_apo_holo_simulations(
+        sim_dirs, labels,
+        label_name_map=label_name_map,
+        user_goal=user_goal,
+    )
+    if not pairs:
+        return {
+            "success": False,
+            "plots": [],
+            "pairs": [],
+            "message": "No apo/holo simulation pairs detected",
+        }
+
+    plots: List[str] = []
+    processed: List[Dict[str, Any]] = []
+
+    n_pairs = len(pairs)
+    fig, axes = plt.subplots(
+        n_pairs, 1,
+        figsize=(figsize_per_panel[0], figsize_per_panel[1] * n_pairs),
+        squeeze=False,
+    )
+
+    for row, pair in enumerate(pairs):
+        protein_id = pair["protein_id"]
+        protein_display = pair.get("protein_display", protein_id.upper())
+        apo_legend = pair.get("apo_legend", pair["apo_label"])
+        holo_legend = pair.get("holo_legend", pair["holo_label"])
+        apo_file = _find_metric_file(str(Path(pair["apo_dir"]) / "analysis"), "rmsf")
+        if not apo_file:
+            apo_file = _find_metric_file(pair["apo_dir"], "rmsf")
+        holo_file = _find_metric_file(str(Path(pair["holo_dir"]) / "analysis"), "rmsf")
+        if not holo_file:
+            holo_file = _find_metric_file(pair["holo_dir"], "rmsf")
+
+        if not apo_file or not holo_file:
+            processed.append({
+                "protein_id": protein_id,
+                "success": False,
+                "error": "Missing RMSF file for apo or holo",
+            })
+            axes[row, 0].set_visible(False)
+            continue
+
+        try:
+            apo_res, apo_vals = _read_rmsf_file(apo_file)
+            holo_res, holo_vals = _read_rmsf_file(holo_file)
+        except Exception as exc:
+            processed.append({"protein_id": protein_id, "success": False, "error": str(exc)})
+            axes[row, 0].set_visible(False)
+            continue
+
+        ax = axes[row, 0]
+        ax.plot(apo_res, apo_vals, label=apo_legend, color="#1f77b4", linewidth=1.2)
+        ax.plot(holo_res, holo_vals, label=holo_legend, color="#d62728", linewidth=1.2)
+        ax.set_ylabel("RMSF (Å)", fontsize=9)
+        ax.set_title(f"{protein_display} — Apo vs Holo", fontsize=10, fontweight="bold")
+        ax.legend(loc="best", fontsize=8)
+        ax.grid(True, alpha=0.3)
+        if row == n_pairs - 1:
+            ax.set_xlabel("Residue", fontsize=10)
+
+        entry = {
+            "protein_id": protein_id,
+            "success": True,
+            "apo_file": apo_file,
+            "holo_file": holo_file,
+        }
+        processed.append(entry)
+
+        if per_protein_files:
+            indiv = plot_rmsf_apo_holo_comparison.func(
+                apo_rmsf_file=apo_file,
+                holo_rmsf_file=holo_file,
+                apo_label=apo_legend,
+                holo_label=holo_legend,
+                protein_label=protein_display,
+                output_file=f"rmsf_apo_holo_{protein_id}.png",
+                working_dir=working_dir,
+            )
+            if indiv.get("success"):
+                plots.append(indiv["output_path"])
+                entry["individual_plot"] = indiv["output_path"]
+
+    fig.suptitle("Per-Residue RMSF — Apo vs Holo by Pseudokinase", fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    summary_path = str(Path(working_dir) / output_file)
+    fig.savefig(summary_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    plots.insert(0, summary_path)
+
+    try:
+        from src.analysis.summary_logger import append_analysis_summary
+        append_analysis_summary(
+            working_dir=working_dir,
+            analysis_type="Combined_RMSF_Apo_Holo",
+            statistics={"n_pairs": len(pairs), "n_plots": len(plots)},
+            files={"summary_plot": summary_path, "per_protein_plots": plots[1:]},
+            metadata={"pairs": pairs, "results": processed},
+        )
+    except Exception as se:
+        logger.warning(f"run_combined_rmsf_apo_holo_analysis: summary log failed: {se}")
+
+    return {
+        "success": any(p.get("success") for p in processed),
+        "plots": plots,
+        "pairs": pairs,
+        "results": processed,
+        "message": f"Generated {len(plots)} RMSF apo/holo plot(s) for {len(pairs)} protein(s)",
+    }
+
+
+def _find_sim_traj_topology(sim_dir: str) -> Tuple[Optional[str], Optional[str]]:
+    """Locate (topology, trajectory) for a simulation directory.
+
+    Prefers a wrapped trajectory (``mdWrap.xtc``) and a ``.tpr``/``.gro``
+    topology under the simulation's ``hpc/`` folder, falling back to the sim
+    directory itself.  Returns ``(topology, trajectory)`` (either may be None).
+    """
+    search_roots = [Path(sim_dir) / "hpc", Path(sim_dir)]
+    topo: Optional[str] = None
+    traj: Optional[str] = None
+    for root in search_roots:
+        if not root.is_dir():
+            continue
+        if traj is None:
+            for name in ("mdWrap.xtc", "md.xtc", "md.trr"):
+                cand = root / name
+                if cand.is_file():
+                    traj = str(cand)
+                    break
+            if traj is None:
+                xtcs = sorted(root.glob("*.xtc"))
+                if xtcs:
+                    traj = str(xtcs[0])
+        if topo is None:
+            for name in ("md.tpr", "md.gro", "npt.gro", "system.gro"):
+                cand = root / name
+                if cand.is_file():
+                    topo = str(cand)
+                    break
+            if topo is None:
+                tps = sorted(root.glob("*.tpr")) or sorted(root.glob("*.gro"))
+                if tps:
+                    topo = str(tps[0])
+        if traj and topo:
+            break
+    return topo, traj
+
+
+def _ensure_dccm_csv(sim_dir: str) -> Optional[str]:
+    """Return a DCCM CSV for *sim_dir*, computing it from the trajectory if absent.
+
+    Per-simulation DCCM can be missing when the per-sim analysis step failed
+    (e.g. the LLM omitted required arguments to ``calculate_dccm``).  To keep
+    the combined apo/holo ΔDCCM robust, this falls back to computing DCCM
+    directly from the simulation's wrapped trajectory + topology.
+    """
+    analysis_dir = Path(sim_dir) / "analysis"
+    for root in (analysis_dir, Path(sim_dir)):
+        if root.is_dir():
+            for p in sorted(root.rglob("dccm*.csv")):
+                return str(p)
+
+    topo, traj = _find_sim_traj_topology(sim_dir)
+    if not topo or not traj:
+        logger.warning(f"_ensure_dccm_csv: no topology/trajectory found for {sim_dir}")
+        return None
+    try:
+        from src.analysis.dccm_calculator import calculate_dccm
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            f"_ensure_dccm_csv: per-sim DCCM CSV missing for {sim_dir} — "
+            f"computing from {Path(traj).name}"
+        )
+        res = calculate_dccm.func(
+            topology_file=topo,
+            trajectory_file=traj,
+            selection="protein and name CA",
+            output_prefix="dccm",
+            working_dir=str(analysis_dir),
+        )
+        if res.get("success"):
+            csv_path = (res.get("output_files") or {}).get("csv")
+            if csv_path and Path(csv_path).is_file():
+                return csv_path
+        logger.warning(
+            f"_ensure_dccm_csv: calculate_dccm failed for {sim_dir}: "
+            f"{res.get('error') or res.get('message')}"
+        )
+    except Exception as exc:
+        logger.warning(f"_ensure_dccm_csv: DCCM computation error for {sim_dir}: {exc}")
+    return None
+
+
+@tool
+def run_combined_dccm_apo_holo_analysis(
+    sim_dirs: List[str],
+    labels: List[str],
+    working_dir: str,
+    plot_mode: str = "with_matrices",
+    diff_threshold: float = 0.3,
+    dpi: int = 200,
+    label_name_map: Optional[Dict[str, str]] = None,
+    user_goal: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    For each apo/holo protein pair, generate a 3-panel DCCM figure:
+    apo DCCM | holo DCCM | Δ(holo − apo).
+
+    Missing per-simulation DCCM matrices are computed on demand from the
+    wrapped trajectory so the ΔDCCM comparison is always produced when the
+    trajectories are available.
+    """
+    from src.analysis.dccm_calculator import plot_dccm_difference as _plot_diff
+
+    Path(working_dir).mkdir(parents=True, exist_ok=True)
+    pairs = pair_apo_holo_simulations(
+        sim_dirs, labels,
+        label_name_map=label_name_map,
+        user_goal=user_goal,
+    )
+    if not pairs:
+        return {
+            "success": False,
+            "plots": [],
+            "pairs": [],
+            "message": "No apo/holo simulation pairs detected",
+        }
+
+    plots: List[str] = []
+    processed: List[Dict[str, Any]] = []
+
+    for pair in pairs:
+        protein_id = pair["protein_id"]
+        ref_csv = _ensure_dccm_csv(pair["apo_dir"])
+        cmp_csv = _ensure_dccm_csv(pair["holo_dir"])
+        if not ref_csv or not cmp_csv:
+            missing = []
+            if not ref_csv:
+                missing.append("apo")
+            if not cmp_csv:
+                missing.append("holo")
+            processed.append({
+                "protein_id": protein_id,
+                "success": False,
+                "error": f"Missing DCCM CSV (could not compute) for: {', '.join(missing)}",
+            })
+            continue
+
+        apo_legend = pair.get("apo_legend", f"{pair['apo_label']} (Apo)")
+        holo_legend = pair.get("holo_legend", f"{pair['holo_label']} (Holo)")
+        result = _plot_diff.func(
+            reference_dccm_file=ref_csv,
+            compare_dccm_file=cmp_csv,
+            reference_label=apo_legend,
+            compare_label=holo_legend,
+            output_prefix=f"dccm_apo_holo_{protein_id}",
+            working_dir=working_dir,
+            plot_mode=plot_mode,
+            diff_threshold=diff_threshold,
+            dpi=dpi,
+        )
+        entry = {
+            "protein_id": protein_id,
+            "success": result.get("success", False),
+            "output_files": result.get("output_files", {}),
+            "mean_abs_delta": result.get("delta_matrix_stats", {}).get("mean_abs_delta"),
+        }
+        processed.append(entry)
+        if result.get("success"):
+            panels = result.get("output_files", {}).get("panels")
+            heatmap = result.get("output_files", {}).get("heatmap")
+            if panels:
+                plots.append(panels)
+            elif heatmap:
+                plots.append(heatmap)
+
+    try:
+        from src.analysis.summary_logger import append_analysis_summary
+        append_analysis_summary(
+            working_dir=working_dir,
+            analysis_type="Combined_DCCM_Apo_Holo",
+            statistics={
+                "n_pairs": len(pairs),
+                "n_plots": len(plots),
+            },
+            files={"per_protein_dccm_plots": plots},
+            metadata={"pairs": pairs, "results": processed},
+        )
+    except Exception as se:
+        logger.warning(f"run_combined_dccm_apo_holo_analysis: summary log failed: {se}")
+
+    return {
+        "success": len(plots) > 0,
+        "plots": plots,
+        "pairs": pairs,
+        "results": processed,
+        "message": f"Generated {len(plots)} per-protein DCCM apo/holo plot(s)",
+    }
+
+
+@tool
+def run_combined_rmsf_segment_apo_holo_analysis(
+    sim_dirs: List[str],
+    labels: List[str],
+    working_dir: str,
+    user_goal: Optional[str] = None,
+    segments: Optional[List[Dict[str, Any]]] = None,
+    label_name_map: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """
+    RMSF segment bar plots per protein — apo vs holo only (two bar series per residue).
+    """
+    Path(working_dir).mkdir(parents=True, exist_ok=True)
+    pairs = pair_apo_holo_simulations(
+        sim_dirs, labels,
+        label_name_map=label_name_map,
+        user_goal=user_goal,
+    )
+    seg_list = segments or parse_rmsf_segments_from_goal(user_goal or "")
+    if not pairs:
+        return {"success": False, "plots": [], "message": "No apo/holo pairs detected"}
+    if not seg_list:
+        return {"success": False, "plots": [], "message": "No RMSF residue segments found"}
+
+    plots: List[str] = []
+    processed: List[Dict[str, Any]] = []
+
+    for pair in pairs:
+        protein_display = pair.get("protein_display", pair["protein_id"].upper())
+        apo_legend = pair.get("apo_legend", pair["apo_label"])
+        holo_legend = pair.get("holo_legend", pair["holo_label"])
+        for seg in seg_list:
+            result = plot_combined_rmsf_segment_bars.func(
+                sim_dirs=[pair["apo_dir"], pair["holo_dir"]],
+                labels=[apo_legend, holo_legend],
+                residue_start=int(seg["residue_start"]),
+                residue_end=int(seg["residue_end"]),
+                working_dir=working_dir,
+                segment_name=f"{protein_display} — {seg.get('name', 'Segment')}",
+                output_file=(
+                    f"rmsf_segment_{_slugify_segment_name(protein_display)}_"
+                    f"{_slugify_segment_name(seg.get('name', 'segment'))}_"
+                    f"{seg['residue_start']}_{seg['residue_end']}.png"
+                ),
+            )
+            processed.append({
+                "protein_id": pair["protein_id"],
+                "segment": seg,
+                "success": result.get("success", False),
+                "output_path": result.get("output_path", ""),
+            })
+            if result.get("success"):
+                plots.append(result["output_path"])
+
+    try:
+        from src.analysis.summary_logger import append_analysis_summary
+        append_analysis_summary(
+            working_dir=working_dir,
+            analysis_type="Combined_RMSF_Segment_Apo_Holo",
+            statistics={"n_plots": len(plots), "n_pairs": len(pairs)},
+            files={"segment_plots": plots},
+            metadata={"segments": seg_list, "results": processed},
+        )
+    except Exception as se:
+        logger.warning(f"run_combined_rmsf_segment_apo_holo_analysis: summary failed: {se}")
+
+    return {
+        "success": len(plots) > 0,
+        "plots": plots,
+        "segments": seg_list,
+        "pairs": pairs,
+        "results": processed,
+        "message": f"Generated {len(plots)} per-protein apo/holo segment bar plot(s)",
+    }
 

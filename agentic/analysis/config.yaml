@@ -209,6 +209,15 @@ llm:
     13b. run_combined_dccm_difference
         - tool_params: {{"reference_sim_dir": "...", "compare_sim_dir": "...", "reference_label": "Protein only", "compare_label": "Protein + ATP", "working_dir": "combined_analysis"}}
 
+    **Combined apo vs holo (multi-simulation workflows — preferred for ligand-effect studies):**
+    14. run_combined_rmsf_apo_holo_analysis
+        - One panel per protein with apo and holo RMSF overlaid (not all 8 sims on one plot).
+    15. run_combined_dccm_apo_holo_analysis
+        - Per protein: 3-panel figure — apo DCCM | holo DCCM | Δ(holo − apo).
+    16. run_combined_rmsf_segment_apo_holo_analysis
+        - Active-site / segment RMSF bar plots per protein (apo vs holo only).
+    Note: calculate_ligand_pocket_distance runs on holo simulations only (apo has no ligand).
+
     **Analysis Interpretation Guidelines:**
     - RMSD < 2.0 Å: Stable structure
     - RMSD 2.0-5.0 Å: Moderate drift

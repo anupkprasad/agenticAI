@@ -58,6 +58,12 @@ class MDState(TypedDict):
     structure_acquisition_result: Optional[Dict[str, Any]]
     structure_acquisition_log: Optional[List[str]]
 
+    # Resume / retry control (set by --resume / --retry-labels CLI flags)
+    resume_failed_only: Optional[bool]   # True → skip already-succeeded sims on re-run
+    retry_labels: Optional[List[str]]    # Labels to force-retry even if previously succeeded
+    _resume_succeeded_labels: Optional[List[str]]  # Internal: labels confirmed succeeded on disk
+    combined_only: Optional[bool]        # True → skip per-sim loop; run base-level combined analysis + report only
+
     # Preprocessing stage
     raw_pdb: Optional[str]
     cleaned_pdb: Optional[str]

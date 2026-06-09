@@ -330,8 +330,11 @@ class ComplexSystemBuilder:
 
         # =====================================================================
         # Step 2: Build protein topology (gmx pdb2gmx via topology_builder)
+        # Use PDB when available: GRO has no chain IDs or TER records, so
+        # multi-chain complexes lose C-terminus handling (OXT on SER 648, etc.).
         # =====================================================================
-        r = self._step_build_topology(protein_gro, force_field, water_model)
+        topology_input = protein_file if self._is_pdb(protein_file) else protein_gro
+        r = self._step_build_topology(topology_input, force_field, water_model)
         if not r.get("success"):
             return {"success": False, "error": f"Topology build failed: {r.get('error', r.get('stderr', 'unknown'))}"}
         protein_processed = r["output_file"]
