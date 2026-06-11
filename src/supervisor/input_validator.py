@@ -92,7 +92,11 @@ def _analyze_pdb_if_available(
     # Check if we're in multi-simulation MASTER PLANNING phase (not per-sim execution)
     # During per-sim execution, pdb_list is intentionally cleared from state so each
     # simulation only sees its own PDB via raw_pdb.
-    pdb_list = state.get("pdb_list", [])
+    from src.utils.pdb_paths import unique_pdb_paths
+
+    pdb_list = unique_pdb_paths(state.get("pdb_list", []))
+    if pdb_list != state.get("pdb_list"):
+        state["pdb_list"] = pdb_list
     multi_sim_phase = state.get("multi_sim_phase")
     is_multi_sim_master_planning = len(pdb_list) > 1 and multi_sim_phase != "executing_sims"
     

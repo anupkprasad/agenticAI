@@ -1126,9 +1126,12 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
 
 
 def _extract_pdb_paths_from_goal(goal: str) -> list:
-    """Extract PDB file paths / filenames from a natural-language goal string."""
+    """Extract unique PDB file paths / filenames from a natural-language goal."""
     import re as _re
-    return _re.findall(r'[\w./\\-]+\.pdb', goal, _re.IGNORECASE)
+    from src.utils.pdb_paths import unique_pdb_paths
+
+    matches = _re.findall(r'[\w./\\-]+\.pdb', goal, _re.IGNORECASE)
+    return unique_pdb_paths(matches)
 
 
 def _build_pdb_list_from_uniprot_goal(goal: str, working_dir: str) -> List[Dict[str, Any]]:
@@ -1598,7 +1601,9 @@ def main(argv=None):
                 # File not found yet — store the path under working_dir so
                 # agents know where to look
                 resolved_pdbs.append(str((Path(working_dir) / p).resolve()))
-        config["pdb_list"] = resolved_pdbs
+        from src.utils.pdb_paths import unique_pdb_paths
+
+        config["pdb_list"] = unique_pdb_paths(resolved_pdbs)
 
         feedback_handler = None
         if config["human_in_loop"]:

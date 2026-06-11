@@ -1132,6 +1132,116 @@ def run_combined_rmsf_segment_analysis(
     }
 
 
+_COM_DISTANCE_FILE_PATTERNS = (
+    "ligand_pocket_distance",
+    "pocket_distance",
+    "com_distance",
+)
+
+_STANDARD_AA = {
+    "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
+    "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
+}
+_ION_RESNAMES = {"NA", "CL", "MG", "K", "CA", "ZN", "FE", "MN", "CU"}
+_SOLVENT_RESNAMES = {"SOL", "WAT", "HOH", "TIP3", "TIP4", "SPC", "SPCE", "W"}
+_KNOWN_LIGAND_RESNAMES = ("ATP", "ADP", "AMP", "GTP", "GDP", "NAD", "UNL", "LIG")
+
+
+def _infer_ligand_selection(topology_file: str, trajectory_file: str) -> Optional[str]:
+    """Best-effort MDAnalysis selection for the bound ligand in a holo system."""
+    try:
+        import MDAnalysis as mda
+    except ImportError:
+        return None
+
+    try:
+        u = mda.Universe(topology_file, trajectory_file)
+        for resname in _KNOWN_LIGAND_RESNAMES:
+            sel = f"resname {resname}"
+            if len(u.select_atoms(sel)) > 0:
+                return sel
+
+        candidates: List[Tuple[str, int]] = []
+        for res in u.residues:
+            rn = res.resname.upper()
+            if rn in _STANDARD_AA or rn in _ION_RESNAMES or rn in _SOLVENT_RESNAMES:
+                continue
+            n_atoms = len(res.atoms)
+            if 5 <= n_atoms <= 80:
+                candidates.append((rn, n_atoms))
+        if candidates:
+            candidates.sort(key=lambda item: item[1])
+            return f"resname {candidates[0][0]}"
+    except Exception as exc:
+        logger.warning(f"_infer_ligand_selection failed: {exc}")
+    return None
+
+
+def _find_com_distance_file(directory: str) -> Optional[str]:
+    """Locate a ligand-pocket COM distance CSV under *directory*."""
+    for pattern in _COM_DISTANCE_FILE_PATTERNS:
+        hit = _find_metric_file(directory, pattern)
+        if hit:
+            return hit
+    return None
+
+
+def _ensure_ligand_pocket_distance_csv(sim_dir: str) -> Optional[str]:
+    """Return ligand-pocket COM distance CSV for *sim_dir*, computing it if absent.
+
+    Per-simulation analysis may omit ``calculate_ligand_pocket_distance`` or write
+    the metric under an alternate filename (e.g. ``pocket_distance.csv``).
+    """
+    analysis_dir = Path(sim_dir) / "analysis"
+    for root in (analysis_dir, Path(sim_dir)):
+        if root.is_dir():
+            hit = _find_com_distance_file(str(root))
+            if hit:
+                return hit
+
+    topo, traj = _find_sim_traj_topology(sim_dir)
+    if not topo or not traj:
+        logger.warning(
+            f"_ensure_ligand_pocket_distance_csv: no topology/trajectory for {sim_dir}"
+        )
+        return None
+
+    try:
+        from src.analysis.com_distance_calculator import calculate_ligand_pocket_distance
+
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            f"_ensure_ligand_pocket_distance_csv: computing for {sim_dir} "
+            f"from {Path(traj).name}"
+        )
+        ligand_selection = _infer_ligand_selection(topo, traj) or "resname ATP"
+        res = calculate_ligand_pocket_distance.func(
+            topology_file=topo,
+            trajectory_file=traj,
+            ligand_selection=ligand_selection,
+            output_file="ligand_pocket_distance.csv",
+            working_dir=str(analysis_dir),
+        )
+        if not res.get("success"):
+            logger.warning(
+                f"_ensure_ligand_pocket_distance_csv: failed for {sim_dir}: "
+                f"{res.get('error') or res.get('message')}"
+            )
+            return None
+
+        out = res.get("output_file") or "ligand_pocket_distance.csv"
+        out_path = Path(out)
+        if not out_path.is_absolute():
+            out_path = analysis_dir / out_path
+        if out_path.is_file():
+            return str(out_path)
+    except Exception as exc:
+        logger.warning(
+            f"_ensure_ligand_pocket_distance_csv: error for {sim_dir}: {exc}"
+        )
+    return None
+
+
 @tool
 def run_combined_com_distance_analysis(
     sim_dirs: List[str],
@@ -1140,7 +1250,7 @@ def run_combined_com_distance_analysis(
     output_file: str = "com_distance_overlay.png",
 ) -> Dict[str, Any]:
     """
-    Overlay ATP–catalytic-pocket COM distance time series across simulations.
+    Overlay ATP–catalytic-pocket COM distance time series across holo simulations.
     """
     Path(working_dir).mkdir(parents=True, exist_ok=True)
 
@@ -1149,15 +1259,10 @@ def run_combined_com_distance_analysis(
     missing: List[str] = []
 
     for sim_dir, label in zip(sim_dirs, labels):
-        analysis_dir = Path(sim_dir) / "analysis"
-        hit = None
-        for pattern in ("ligand_pocket_distance", "com_distance"):
-            for search_root in [str(analysis_dir), sim_dir]:
-                hit = _find_metric_file(search_root, pattern)
-                if hit:
-                    break
-            if hit:
-                break
+        if not is_holo_simulation(sim_dir, label):
+            continue
+
+        hit = _ensure_ligand_pocket_distance_csv(sim_dir)
         if hit:
             found_files.append(hit)
             found_labels.append(label)

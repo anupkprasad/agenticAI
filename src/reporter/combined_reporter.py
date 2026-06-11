@@ -351,10 +351,17 @@ def _score_ref_relevance(
     ref: Dict[str, Any],
     protein_terms: List[str],
     analysis_terms: List[str],
+    context: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Score a reference for relevance. Higher = more relevant."""
+    if context:
+        from src.reporter.literature_search import score_literature_ref_relevance
+        score, _ = score_literature_ref_relevance(ref, context)
+        return score
+
     haystack = " ".join([
         ref.get("title", ""),
+        ref.get("abstract", "") or "",
         ref.get("journal", ""),
         " ".join(ref.get("authors", [])),
     ]).lower()
@@ -374,6 +381,7 @@ def _aggregate_literature(
     max_refs: int = 10,
     hypothesis_text: Optional[str] = None,
     protein_name: Optional[str] = None,
+    user_goal: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Collect, deduplicate, and rank literature refs from all per-sim HTML reports.
 
@@ -445,7 +453,17 @@ def _aggregate_literature(
                 protein_terms.extend([_part] * 3)
 
     analysis_terms = ["RMSD", "RMSF", "radius of gyration", "molecular dynamics",
-                      "MD simulation", "protein", "trajectory", "secondary structure"]
+                      "MD simulation", "protein", "trajectory", "secondary structure",
+                      "pseudokinase", "activation loop", "apo", "holo", "ATP", "allosteric"]
+
+    from src.reporter.literature_search import extract_research_context
+    research_context = extract_research_context(
+        user_goal=hypothesis_text or user_goal,
+        protein_name=protein_name,
+        analysis_types=analysis_terms,
+    )
+    for pname in research_context.get("protein_names", []):
+        protein_terms.extend([pname] * 3)
 
     all_refs: List[Dict[str, Any]] = []
     seen_dois: set = set()
@@ -474,17 +492,21 @@ def _aggregate_literature(
                 seen_titles.add(title_key)
 
             ref["source"] = res["label"]
-            # Combine protein, analysis, and hypothesis terms for scoring
-            all_score_terms = protein_terms + analysis_terms + hyp_terms
-            ref["_relevance"] = _score_ref_relevance(ref, all_score_terms, [])
+            ref["_relevance"] = _score_ref_relevance(
+                ref, protein_terms + hyp_terms, analysis_terms, context=research_context,
+            )
             all_refs.append(ref)
 
     # Sort by relevance descending, then cap
     all_refs.sort(key=lambda r: r.get("_relevance", 0), reverse=True)
-    for ref in all_refs:
+    min_score = 8
+    filtered = [r for r in all_refs if r.get("_relevance", 0) >= min_score]
+    if len(filtered) < 2:
+        filtered = all_refs
+    for ref in filtered:
         ref.pop("_relevance", None)
 
-    return all_refs[:max_refs]
+    return filtered[:max_refs]
 
 
 def _extract_mean_value(stats: Dict[str, Any], atype_lower: str) -> Optional[float]:
@@ -768,13 +790,7 @@ def _build_literature_html(
         for paragraph in literature_review.split("\n\n"):
             paragraph = paragraph.strip()
             if paragraph:
-                paragraph = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", paragraph)
-                paragraph = re.sub(
-                    r"\[(\d+)\]",
-                    r'<sup class="lit-cite">[\1]</sup>',
-                    paragraph,
-                )
-                parts.append(f"<p>{paragraph}</p>")
+                parts.append(f"<p>{_format_report_paragraph(paragraph)}</p>")
         parts.append("</div>")
 
     if not display:
@@ -860,6 +876,17 @@ def _build_literature_html(
     return "\n".join(parts)
 
 
+def _format_report_paragraph(paragraph: str, cite_class: str = "lit-cite") -> str:
+    """Convert markdown bold and [n] citations to HTML."""
+    paragraph = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", paragraph)
+    paragraph = re.sub(
+        r"\[(\d+)\]",
+        rf'<sup class="{cite_class}">[\1]</sup>',
+        paragraph,
+    )
+    return paragraph
+
+
 def _build_final_impression_html(text: str, refs: List[Dict[str, Any]]) -> str:
     """Render the combined final impression paragraph with bold/citation support."""
     if not text:
@@ -873,8 +900,9 @@ def _build_final_impression_html(text: str, refs: List[Dict[str, Any]]) -> str:
     for paragraph in text.split("\n\n"):
         paragraph = paragraph.strip()
         if paragraph:
-            paragraph = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", paragraph)
-            parts.append(f"<p>{paragraph}</p>")
+            parts.append(
+                f"<p>{_format_report_paragraph(paragraph, cite_class='final-cite')}</p>"
+            )
 
     parts.append("</div>")
     return "\n".join(parts)
@@ -1001,11 +1029,27 @@ tr:hover td { background: #dbeafe; transition: background 0.15s; }
 }
 .final-impression p { margin: 10px 0; line-height: 1.85; font-size: 16px; }
 .final-impression strong { color: #92400e; }
+.final-impression .final-cite { color: #b45309; font-weight: 700; }
 /* ---- Stats section ---- */
 .stats-section {
     margin: 20px 0; padding: 20px; background: #f9fafb;
     border-radius: 8px; border: 1px solid #e5e7eb;
 }
+.stats-dropdown {
+    margin: 10px 0; border: 1px solid #dbeafe; border-radius: 8px;
+    background: #fff; overflow: hidden;
+}
+.stats-dropdown summary {
+    cursor: pointer; padding: 12px 16px; font-weight: 700; color: #1e40af;
+    background: #eff6ff; list-style: none; user-select: none;
+}
+.stats-dropdown summary::-webkit-details-marker { display: none; }
+.stats-dropdown summary::before {
+    content: "▸ "; display: inline-block; transition: transform 0.15s ease;
+}
+.stats-dropdown[open] summary::before { transform: rotate(90deg); }
+.stats-dropdown .stats-table-wrap { padding: 0 12px 12px; overflow-x: auto; }
+.stats-dropdown table { margin-top: 8px; }
 /* ---- Footer ---- */
 footer {
     text-align: center; padding: 20px; font-size: 13px; color: #9ca3af;
@@ -1094,7 +1138,7 @@ footer {
 
 
 def _build_stats_section(sims_summary: List[Dict[str, Any]]) -> str:
-    """Generate an HTML comparison table of per-sim statistics for every analysis type."""
+    """Generate collapsible HTML comparison tables of per-sim statistics."""
     all_types: List[str] = []
     for s in sims_summary:
         for t in _extract_stats(s["records"]):
@@ -1104,7 +1148,10 @@ def _build_stats_section(sims_summary: List[Dict[str, Any]]) -> str:
     if not all_types:
         return "<p><em>No per-simulation statistics available.</em></p>\n"
 
-    html_parts: List[str] = []
+    html_parts: List[str] = [
+        '<p style="font-size:13px;color:#6b7280;margin:0 0 12px;">'
+        "Expand a subsection below to view detailed statistics for each analysis type.</p>"
+    ]
     for atype in all_types:
         stat_keys: List[str] = []
         for s in sims_summary:
@@ -1115,20 +1162,28 @@ def _build_stats_section(sims_summary: List[Dict[str, Any]]) -> str:
         if not stat_keys:
             continue
 
-        html_parts.append(f"<h3>{_html_mod.escape(atype)}</h3>\n<table>\n")
+        table_parts = ["<table>\n"]
         header_cols = "".join(
             f"<th>{_html_mod.escape(k.replace('_', ' ').title())}</th>" for k in stat_keys
         )
-        html_parts.append(f"<tr><th>Simulation</th>{header_cols}</tr>\n")
+        table_parts.append(f"<tr><th>Simulation</th>{header_cols}</tr>\n")
 
         for s in sims_summary:
             st = _extract_stats(s["records"]).get(atype, {})
             cells = "".join(
                 f"<td>{st.get(k, 'N/A')}</td>" for k in stat_keys
             )
-            html_parts.append(f"<tr><td><b>{_html_mod.escape(s['label'])}</b></td>{cells}</tr>\n")
+            table_parts.append(
+                f"<tr><td><b>{_html_mod.escape(s['label'])}</b></td>{cells}</tr>\n"
+            )
+        table_parts.append("</table>\n")
 
-        html_parts.append("</table>\n")
+        html_parts.append(
+            f'<details class="stats-dropdown">'
+            f'<summary>{_html_mod.escape(atype)}</summary>'
+            f'<div class="stats-table-wrap">{"".join(table_parts)}</div>'
+            f'</details>\n'
+        )
 
     return "".join(html_parts)
 
@@ -1635,62 +1690,39 @@ def generate_dssp_comparison_chart(
     sim_dirs: List[str],
     labels: List[str],
     output_dir: str,
+    user_goal: Optional[str] = None,
 ) -> Optional[str]:
-    """Grouped bar chart of helix/sheet/coil % across simulations → dssp_comparison.png."""
+    """Grouped bar chart of activation-loop helix/sheet/coil % → dssp_comparison.png."""
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         import numpy as np
-        from src.analysis.summary_logger import read_summary_file
     except ImportError as exc:
         logger.warning(f"generate_dssp_comparison_chart: missing dependency {exc}")
         return None
 
+    residue_start, residue_end = _resolve_dssp_residue_range(user_goal)
     helix_vals, sheet_vals, coil_vals, plot_labels = [], [], [], []
-    _DSSP_TYPES = {"dssp", "dssp_secondarystructure", "secondary_structure", "secondarystructure"}
-    _KEY_HELIX = ("avg_helix_percent", "helix_percent", "helix", "percent_helix")
-    _KEY_SHEET = ("avg_sheet_percent", "sheet_percent", "sheet", "beta_sheet", "percent_sheet", "beta_percent")
-    _KEY_COIL = ("avg_coil_percent", "coil_percent", "coil", "percent_coil")
-
-    def _pick(stats: dict, keys: tuple):
-        for k in keys:
-            v = stats.get(k)
-            if isinstance(v, (int, float)):
-                return float(v)
-        return None
 
     for sim_dir, label in zip(sim_dirs, labels):
         analysis_dir = Path(sim_dir) / "analysis"
-        records: List[Dict[str, Any]] = []
-        try:
-            records = read_summary_file(str(analysis_dir))
-        except Exception:
-            jsonl = analysis_dir / "analysis_summary.jsonl"
-            if jsonl.exists():
-                for line in jsonl.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if line and not line.startswith("---"):
-                        try:
-                            records.append(json.loads(line))
-                        except Exception:
-                            pass
-        for rec in records:
-            atype = rec.get("analysis_type", "").lower().replace(" ", "_")
-            if any(t in atype for t in _DSSP_TYPES):
-                stats = rec.get("statistics", {})
-                h = _pick(stats, _KEY_HELIX)
-                s = _pick(stats, _KEY_SHEET)
-                c = _pick(stats, _KEY_COIL)
-                if h is not None and s is not None:
-                    helix_vals.append(h)
-                    sheet_vals.append(s)
-                    coil_vals.append(c if c is not None else 100.0 - h - s)
-                    plot_labels.append(label)
-                    break
+        segment_pct = _activation_loop_dssp_percentages(
+            analysis_dir, residue_start, residue_end,
+        )
+        if segment_pct is None:
+            continue
+        h, s, c = segment_pct
+        helix_vals.append(h)
+        sheet_vals.append(s)
+        coil_vals.append(c)
+        plot_labels.append(label)
 
     if len(plot_labels) < 2:
-        logger.info("generate_dssp_comparison_chart: not enough DSSP data (need ≥2 sims)")
+        logger.info(
+            "generate_dssp_comparison_chart: not enough activation-loop DSSP data "
+            f"(residues {residue_start}\u2013{residue_end}; need \u22652 sims)"
+        )
         return None
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -1702,7 +1734,11 @@ def generate_dssp_comparison_chart(
     ax.bar(x + width, coil_vals, width, label="Coil/Loop", color="#95a5a6", alpha=0.85)
     ax.set_xlabel("Simulation", fontsize=12)
     ax.set_ylabel("Secondary Structure Content (%)", fontsize=12)
-    ax.set_title("Secondary Structure Comparison Across Simulations", fontsize=13, fontweight="bold")
+    ax.set_title(
+        f"Activation-Loop Secondary Structure (residues {residue_start}\u2013{residue_end})",
+        fontsize=13,
+        fontweight="bold",
+    )
     ax.set_xticks(x)
     ax.set_xticklabels(plot_labels, rotation=20, ha="right", fontsize=10)
     ax.legend(fontsize=10)
@@ -1731,7 +1767,9 @@ def run_combined_dssp_analysis(
 ) -> Dict[str, Any]:
     """Backfill missing per-sim DSSP, then write comparison + activation-loop heatmaps."""
     ensure_result = ensure_per_sim_dssp(sim_dirs, labels)
-    comparison = generate_dssp_comparison_chart(sim_dirs, labels, output_dir)
+    comparison = generate_dssp_comparison_chart(
+        sim_dirs, labels, output_dir, user_goal=user_goal,
+    )
     heatmaps = _collect_activation_loop_dssp_heatmaps(
         sim_dirs, labels, user_goal=user_goal, cache_dir=output_dir,
     )
@@ -1802,6 +1840,48 @@ def _load_dssp_raw_matrix(raw_path: Path) -> Optional["Any"]:
             if frame_idx < n_frames and res_idx < n_residues:
                 matrix[frame_idx, res_idx] = val
     return matrix
+
+
+def _compute_dssp_segment_ss_percentages(
+    matrix: "Any",
+    residue_start: int,
+    residue_end: int,
+) -> Optional[Tuple[float, float, float]]:
+    """Return (helix%, sheet%, coil%) for a 1-based residue range from a DSSP matrix."""
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+
+    idx_start = max(0, residue_start - 1)
+    idx_end = min(matrix.shape[1], residue_end)
+    if idx_start >= idx_end:
+        return None
+
+    segment = matrix[:, idx_start:idx_end]
+    total = segment.size
+    if total == 0:
+        return None
+
+    helix_pct = float(np.sum(segment == 1) / total * 100.0)  # H
+    sheet_pct = float(np.sum(segment == 3) / total * 100.0)  # E
+    coil_pct = 100.0 - helix_pct - sheet_pct
+    return helix_pct, sheet_pct, coil_pct
+
+
+def _activation_loop_dssp_percentages(
+    analysis_dir: Path,
+    residue_start: int,
+    residue_end: int,
+) -> Optional[Tuple[float, float, float]]:
+    """Compute activation-loop helix/sheet/coil % from per-sim DSSP raw data."""
+    raw_path = analysis_dir / "dssp_raw_data.dat"
+    if not raw_path.exists():
+        return None
+    matrix = _load_dssp_raw_matrix(raw_path)
+    if matrix is None:
+        return None
+    return _compute_dssp_segment_ss_percentages(matrix, residue_start, residue_end)
 
 
 def _generate_dssp_segment_heatmap(
@@ -2118,7 +2198,8 @@ def _build_comparative_dynamics_section(
         if dssp_comparison:
             dssp_body += (
                 '<p style="font-size:12px;color:#6b7280;margin:0 0 8px 0;">'
-                'Average secondary-structure content across all simulations</p>'
+                f'Average activation-loop secondary-structure content '
+                f'(residues {residue_start}\u2013{residue_end}) across simulations</p>'
                 + _img(dssp_comparison, "DSSP comparison")
             )
         if dssp_heatmaps:
@@ -2182,6 +2263,7 @@ def generate_combined_html_report(
     protein_name: Optional[str] = None,
     literature_refs: Optional[List[Dict[str, Any]]] = None,
     literature_review: Optional[str] = None,
+    final_impression: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generate a rich comparison HTML report spanning multiple MD simulations.
@@ -2259,11 +2341,16 @@ def generate_combined_html_report(
             max_refs=10,
             hypothesis_text=enriched_prompt or user_goal,
             protein_name=protein_name,
+            user_goal=user_goal,
         )
     literature_html = _build_literature_html(agg_refs, literature_review=literature_review)
 
-    # Final impression: synthesise cross-sim stats
-    final_text = _build_combined_final_impression(sims_summary, sim_resources)
+    # Final impression: prefer LLM synthesis with literature citations; else rule-based.
+    final_text = (
+        final_impression.strip()
+        if final_impression and final_impression.strip()
+        else _build_combined_final_impression(sims_summary, sim_resources)
+    )
     final_html = _build_final_impression_html(final_text, agg_refs)
 
     # Task description — original user goal only (no redundant enriched/combined text)
@@ -2357,11 +2444,11 @@ def generate_combined_html_report(
 
 <div class="section-divider"></div>
 
-{literature_html}
-
-{"<div class='section-divider'></div>" if literature_html else ""}
-
 {final_html}
+
+{"<div class='section-divider'></div>" if final_html else ""}
+
+{literature_html}
 
 </div>
 <footer>Generated by SimAgent Multi-Simulation Reporter &nbsp;|&nbsp; {now}</footer>

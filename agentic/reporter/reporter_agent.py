@@ -333,7 +333,9 @@ class ReporterAgent:
         _goal_full = (_user_goal_text + " " + _enriched_text).strip()
         if not _dssp_existing.exists():
             run_combined_dssp_analysis(sim_dirs, labels, _analysis_dir, _goal_full)
-        _dssp_chart = generate_dssp_comparison_chart(sim_dirs, labels, _analysis_dir)
+        _dssp_chart = generate_dssp_comparison_chart(
+            sim_dirs, labels, _analysis_dir, user_goal=_goal_full,
+        )
         if _dssp_chart and _dssp_chart not in overlay_plots:
             overlay_plots.append(_dssp_chart)
         for _dssp_hm in sorted(Path(_analysis_dir).glob("dssp_activation_loop_*.png")):
@@ -390,7 +392,7 @@ class ReporterAgent:
             },
         )
 
-        # Resolve protein name for report title
+        # Resolve protein/system name for literature + report title
         protein_name: Optional[str] = None
         sys_info = state.get("system_info") or {}
         if isinstance(sys_info, dict):
@@ -398,8 +400,14 @@ class ReporterAgent:
                 sys_info.get("protein_name")
                 or sys_info.get("system_name")
             )
-        if not protein_name and labels:
-            protein_name = ", ".join(labels[:3]) if labels else labels[0]
+        _mapped_names = [
+            v for v in (_label_name_map or {}).values()
+            if v and len(v) >= 2
+        ]
+        if _mapped_names:
+            protein_name = ", ".join(dict.fromkeys(_mapped_names))
+        elif not protein_name and labels:
+            protein_name = labels[0]
 
         report_title = "Multi-Simulation Report"
 
@@ -429,7 +437,13 @@ class ReporterAgent:
                 combined_state["system_info"] = sys_info
             literature_refs = self._ensure_literature_search(combined_analysis_data, combined_state)
             literature_review = self._generate_literature_review(
-                combined_analysis_data, literature_refs, combined_state
+                combined_analysis_data, literature_refs, combined_state,
+                is_combined=True,
+            )
+            final_impression = self._generate_combined_final_impression(
+                combined_analysis_data, literature_refs, combined_state,
+                sim_dirs=sim_dirs,
+                labels=labels,
             )
 
             result = generate_combined_html_report.func(
@@ -444,6 +458,7 @@ class ReporterAgent:
                 protein_name=protein_name,
                 literature_refs=literature_refs,
                 literature_review=literature_review,
+                final_impression=final_impression,
             )
 
             if result.get("success"):
@@ -979,11 +994,11 @@ No need to specify image paths in tool_params - they're extracted from the analy
 
             # ── 1. PubMed (protein-priority queries) ──────────────
             for qkey, query_text in queries.items():
-                if len(literature_refs) >= 10:
+                if len(literature_refs) >= MAX_REFS:
                     break
                 if not query_text or qkey == "_fallback_general":
                     continue
-                remaining = 10 - len(literature_refs)
+                remaining = MAX_REFS - len(literature_refs)
                 result = search_pubmed.invoke({
                     "query": query_text,
                     "max_results": min(5, remaining),
@@ -994,8 +1009,33 @@ No need to specify image paths in tool_params - they're extracted from the analy
                     for ref in result.get("results", []):
                         if not _add_ref(ref):
                             continue
-                        if len(literature_refs) >= 10:
+                        if len(literature_refs) >= MAX_REFS:
                             break
+
+            # Per-protein queries for multi-system studies (e.g. ERBB3, VRK3, MLKL, TITIN).
+            for pname in research_context.get("protein_names", [])[:6]:
+                if len(literature_refs) >= MAX_REFS:
+                    break
+                for theme in (
+                    f"{pname} pseudokinase molecular dynamics",
+                    f"{pname} activation loop dynamics",
+                    f"{pname} ATP binding apo holo",
+                ):
+                    if len(literature_refs) >= MAX_REFS:
+                        break
+                    remaining = MAX_REFS - len(literature_refs)
+                    result = search_pubmed.invoke({
+                        "query": theme,
+                        "max_results": min(3, remaining),
+                        "include_abstracts": True,
+                        "max_age_years": 12,
+                    })
+                    if isinstance(result, dict) and result.get("success"):
+                        for ref in result.get("results", []):
+                            if not _add_ref(ref):
+                                continue
+                            if len(literature_refs) >= MAX_REFS:
+                                break
             logger.info("After PubMed: %d refs", len(literature_refs))
 
             # ── 2. bioRxiv preprints (top protein query) ──────────
@@ -1093,6 +1133,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
         analysis_data: Dict[str, Any],
         literature_refs: List[Dict[str, Any]],
         state: MDState,
+        is_combined: bool = False,
     ) -> Optional[str]:
         """Write a contextual literature review linking papers to simulation results."""
         if not literature_refs:
@@ -1102,11 +1143,13 @@ No need to specify image paths in tool_params - they're extracted from the analy
             build_analysis_summary_text,
             extract_analysis_stats_from_entries,
             extract_research_context,
+            score_literature_ref_relevance,
         )
 
         user_goal = (
-            state.get("enriched_prompt")
+            state.get("user_goal_original")
             or state.get("master_enriched_prompt")
+            or state.get("enriched_prompt")
             or state.get("user_goal", "")
         )
         analysis_stats = extract_analysis_stats_from_entries(analysis_data)
@@ -1114,9 +1157,10 @@ No need to specify image paths in tool_params - they're extracted from the analy
         if isinstance(analysis_data.get("analysis_types"), list):
             analysis_types = analysis_data["analysis_types"]
 
+        sys_info = state.get("system_info") if isinstance(state.get("system_info"), dict) else {}
         context = extract_research_context(
             user_goal=user_goal,
-            protein_name=state.get("system_info", {}).get("protein_name") if isinstance(state.get("system_info"), dict) else None,
+            protein_name=sys_info.get("protein_name") if sys_info else None,
             analysis_types=analysis_types,
             analysis_stats=analysis_stats,
         )
@@ -1126,22 +1170,35 @@ No need to specify image paths in tool_params - they're extracted from the analy
         for i, ref in enumerate(literature_refs[:12], 1):
             title = ref.get("title", "Unknown")
             abstract = ref.get("abstract") or ""
-            snippet = abstract[:600] if abstract else "(abstract not available — title/metadata only)"
-            lit_parts.append(f"[{i}] {title}\n    {snippet}")
+            score, note = score_literature_ref_relevance(ref, context)
+            snippet = abstract[:700] if abstract else "(abstract not available — title/metadata only)"
+            lit_parts.append(
+                f"[{i}] {title} (relevance score {score}; {note})\n    {snippet}"
+            )
         lit_text = "\n".join(lit_parts)
 
         protein_focus = ", ".join(context.get("protein_names") or []) or "the simulated protein(s)"
         objective = context.get("user_goal") or user_goal or "MD simulation analysis"
+        ligand_focus = ", ".join(context.get("ligand_terms") or []) or "ligand binding"
+        region_focus = ", ".join(context.get("region_terms") or []) or "active site / activation loop"
+        findings_focus = "; ".join(context.get("finding_phrases") or []) or "see analysis summary"
 
         if not self.llm.available:
             return (
-                f"Literature was searched for studies relating to {protein_focus} dynamics "
-                f"and the user's objective: {objective[:200]}. "
-                f"{len(literature_refs)} publications were retrieved and ranked by relevance "
-                f"to the performed analyses ({', '.join(analysis_types[:6]) or 'RMSD, RMSF'}). "
+                f"Literature was searched for studies relating to {protein_focus} dynamics, "
+                f"{ligand_focus}, and apo/holo comparisons. "
+                f"{len(literature_refs)} publications were retrieved and ranked by abstract/title "
+                f"relevance to the performed analyses ({', '.join(analysis_types[:6]) or 'RMSD, RMSF'}). "
                 f"See the reference list below for experimental and computational precedents "
-                f"that contextualise the simulation findings summarised in the analysis sections."
+                f"that contextualise the simulation findings summarised above."
             )
+
+        combined_note = (
+            "This is a MULTI-SIMULATION comparative report (apo vs holo, multiple proteins). "
+            "Prioritise papers that discuss the named proteins, pseudokinase regulation, "
+            "activation-loop conformations, ATP/nucleotide effects, and MD-derived dynamics."
+            if is_combined else ""
+        )
 
         prompt = f"""You are a computational biophysics expert writing the Literature Review section of an MD simulation report.
 
@@ -1149,20 +1206,25 @@ No need to specify image paths in tool_params - they're extracted from the analy
 {objective}
 
 **Protein(s) / System Focus:** {protein_focus}
+**Ligand / state focus:** {ligand_focus} (apo vs holo where applicable)
+**Structural region focus:** {region_focus}
+**Key simulation findings to contextualise:** {findings_focus}
+{combined_note}
 
 **Simulation Analysis Results (quantitative summary):**
 {analysis_text}
 
-**Candidate Publications (with abstracts or metadata):**
+**Candidate Publications (read each abstract; relevance score provided):**
 {lit_text}
 
 **Instructions:**
-- Write 2–4 paragraphs of scientific prose that connect published work to THIS simulation study
-- Focus on dynamics, flexibility, stability, ligand effects, or other themes present in BOTH the user goal and the analysis results
-- Explicitly relate simulation findings (RMSD, RMSF, Rg, DCCM, ATP binding, etc.) to what the literature reports for the same or related proteins
+- Read the abstracts and ONLY discuss papers that are genuinely relevant to the proteins, MD dynamics, apo/holo ATP effects, activation-loop behaviour, or analysis outputs above
+- Skip or downplay papers that do not mention the target protein(s), pseudokinase/kinase dynamics, ligand binding, or conformational flexibility
+- Write 2–4 paragraphs of scientific prose connecting published work to THIS simulation study
+- Explicitly relate simulation findings (RMSD, RMSF, Rg, DCCM, ATP–pocket distance, DSSP) to literature for the same or related proteins
 - Cite sources using bracket notation [1], [2], etc. matching the reference numbers above
 - Do NOT simply list paper titles — synthesise and compare with the simulation outcomes
-- If abstracts are missing for some papers, infer relevance cautiously from titles only
+- If a paper's abstract is missing or clearly irrelevant, do not cite it
 - Do NOT include section headers — output only the review paragraphs"""
 
         try:
@@ -1183,7 +1245,114 @@ No need to specify image paths in tool_params - they're extracted from the analy
         except Exception as e:
             logger.warning("Failed to generate literature review: %s", e)
             return None
-    
+
+    def _generate_combined_final_impression(
+        self,
+        analysis_data: Dict[str, Any],
+        literature_refs: List[Dict[str, Any]],
+        state: MDState,
+        sim_dirs: Optional[List[str]] = None,
+        labels: Optional[List[str]] = None,
+    ) -> Optional[str]:
+        """Generate combined final impression with literature citations."""
+        from src.reporter.combined_reporter import _build_combined_final_impression, _collect_sim_summaries
+        from src.reporter.literature_search import (
+            build_analysis_summary_text,
+            extract_analysis_stats_from_entries,
+            extract_research_context,
+        )
+
+        user_goal = (
+            state.get("user_goal_original")
+            or state.get("master_enriched_prompt")
+            or state.get("enriched_prompt")
+            or state.get("user_goal", "")
+        )
+        analysis_stats = extract_analysis_stats_from_entries(analysis_data)
+        analysis_types = list((analysis_data.get("analysis_types") or {}).keys())
+        if isinstance(analysis_data.get("analysis_types"), list):
+            analysis_types = analysis_data["analysis_types"]
+
+        sys_info = state.get("system_info") if isinstance(state.get("system_info"), dict) else {}
+        context = extract_research_context(
+            user_goal=user_goal,
+            protein_name=sys_info.get("protein_name") if sys_info else None,
+            analysis_types=analysis_types,
+            analysis_stats=analysis_stats,
+        )
+        analysis_text = build_analysis_summary_text(analysis_data, analysis_stats)
+        protein_focus = ", ".join(context.get("protein_names") or []) or "the simulated systems"
+
+        if sim_dirs and labels:
+            sims_summary = _collect_sim_summaries(sim_dirs, labels)
+            sim_resources = [
+                {"label": lbl, "report_focus": ""} for lbl in labels
+            ]
+            fallback = _build_combined_final_impression(sims_summary, sim_resources)
+        else:
+            fallback = (
+                "Cross-simulation comparison summarises structural stability, flexibility, "
+                "ligand-binding behaviour, and activation-loop dynamics across all systems."
+            )
+
+        if not self.llm.available:
+            return fallback
+
+        lit_text = "No literature references available."
+        if literature_refs:
+            lit_parts = []
+            for i, ref in enumerate(literature_refs[:10], 1):
+                title = ref.get("title", "Unknown")
+                abstract = ref.get("abstract", "")
+                snippet = abstract[:350] if abstract else "No abstract"
+                lit_parts.append(f"[{i}] {title}\n    {snippet}")
+            lit_text = "\n".join(lit_parts)
+
+        prompt = f"""You are a computational biophysics expert writing the Combined Final Impression for a multi-simulation MD report.
+
+**User's Research Question / Objective:**
+{user_goal}
+
+**Protein(s) studied:** {protein_focus}
+**Ligand / comparison focus:** {", ".join(context.get("ligand_terms") or ["ATP", "apo", "holo"])}
+**Activation-loop / region focus:** {", ".join(context.get("region_terms") or ["residues 150-200"])}
+
+**Simulation Analysis Results:**
+{analysis_text}
+
+**Draft synthesis (rule-based baseline — refine and enrich this):**
+{fallback}
+
+**Literature References (use for contextual comparison; cite as [1], [2], ...):**
+{lit_text}
+
+**Instructions:**
+- Write 3–5 paragraphs synthesising cross-simulation dynamics (apo vs holo, multiple pseudokinases/proteins)
+- Integrate quantitative trends (RMSD, RMSF, Rg, DCCM, ATP–pocket distance, DSSP activation loop) with published knowledge
+- Cite relevant literature using bracket notation [1], [2], etc. wherever you compare with prior experimental or MD studies
+- Emphasise protein-specific and shared mechanisms: activation-loop conformations, ATP effects, allosteric coupling
+- End with concise implications and suggested follow-up experiments or simulations
+- Do NOT include section headers — output only the impression paragraphs"""
+
+        try:
+            response = self.llm.prompt(prompt)
+            log_llm_interaction(
+                agent_name="reporter.combined_final_impression",
+                prompt=prompt[:500] + "...",
+                response=response[:500] + "..." if len(response) > 500 else response,
+                is_mock=not self.llm.available,
+            )
+            cleaned = response.strip()
+            cleaned = re.sub(r'^#{1,3}\s+.*\n?', '', cleaned, flags=re.MULTILINE).strip()
+            if len(cleaned) < 120:
+                logger.warning("Combined final impression too short, using fallback")
+                return fallback
+            logger.info("Generated combined final impression (%d chars)", len(cleaned))
+            return cleaned
+        except Exception as exc:
+            logger.warning("Failed to generate combined final impression: %s", exc)
+            return fallback
+
     def _extract_pdb_for_viewer(self, state: MDState, analysis_data: Dict[str, Any] = None) -> Optional[Dict[str, str]]:
         """Extract trajectory frames at analysis-driven time points for the 3D viewer.
 

@@ -160,67 +160,109 @@ def build_analysis_summary_text(
     return "\n".join(lines) if lines else "No quantitative analysis statistics available."
 
 
-def rank_literature_refs(
-    refs: List[Dict[str, Any]],
+def score_literature_ref_relevance(
+    ref: Dict[str, Any],
     context: Dict[str, Any],
-    max_refs: int = 15,
-) -> List[Dict[str, Any]]:
-    """Re-rank literature by relevance to protein, user goal, and simulation findings."""
+) -> Tuple[int, str]:
+    """Score one reference against research context; return (score, short note)."""
     protein_names = context.get("protein_names") or []
+    protein_ids = context.get("protein_ids") or []
     hypothesis_terms = context.get("hypothesis_terms") or []
     ligand_terms = context.get("ligand_terms") or []
     region_terms = context.get("region_terms") or []
     finding_phrases = context.get("finding_phrases") or []
     analysis_types = [str(a).lower() for a in (context.get("analysis_types") or [])]
 
-    scored: List[Tuple[int, Dict[str, Any]]] = []
-    for ref in refs:
-        haystack = " ".join(filter(None, [
-            ref.get("title", ""),
-            ref.get("abstract", "") or "",
-            ref.get("journal", ""),
-            " ".join(ref.get("authors") or []),
-        ])).lower()
+    haystack = " ".join(filter(None, [
+        ref.get("title", ""),
+        ref.get("abstract", "") or "",
+        ref.get("journal", ""),
+        " ".join(ref.get("authors") or []),
+    ])).lower()
 
-        score = 0
-        for name in protein_names:
-            if name.lower() in haystack:
-                score += 8
+    score = 0
+    matched: List[str] = []
 
-        for term in hypothesis_terms + ligand_terms:
-            if term.lower() in haystack:
-                score += 4
+    for name in protein_names + protein_ids:
+        if name and name.lower() in haystack:
+            score += 10
+            matched.append(name)
 
+    for term in hypothesis_terms + ligand_terms:
+        if term.lower() in haystack:
+            score += 4
+
+    for term in _DYNAMICS_TERMS:
+        if term in haystack:
+            score += 3
+
+    for atype in analysis_types:
+        if atype and atype in haystack:
+            score += 2
+
+    for region in region_terms:
+        if region.lower() in haystack:
+            score += 3
+
+    for finding in finding_phrases:
+        for word in finding.lower().split():
+            if len(word) > 5 and word in haystack:
+                score += 2
+                break
+
+    abstract = ref.get("abstract") or ""
+    if abstract:
+        score += 2
+        # Abstract-level checks carry more weight than title-only matches.
+        abstract_lower = abstract.lower()
+        for name in protein_names + protein_ids:
+            if name and name.lower() in abstract_lower:
+                score += 6
         for term in _DYNAMICS_TERMS:
-            if term in haystack:
+            if term in abstract_lower:
                 score += 2
-
-        for atype in analysis_types:
-            if atype and atype in haystack:
-                score += 2
-
-        for region in region_terms:
-            if region.lower() in haystack:
+        for term in ligand_terms:
+            if term in abstract_lower:
                 score += 3
 
-        for finding in finding_phrases:
-            for word in finding.lower().split():
-                if len(word) > 5 and word in haystack:
-                    score += 1
-                    break
+    note = ""
+    if matched:
+        note = f"Mentions: {', '.join(dict.fromkeys(matched))}"
+    elif score >= 8:
+        note = "Matches dynamics / ligand / analysis themes"
+    else:
+        note = "Low contextual overlap with study"
 
-        if ref.get("abstract"):
-            score += 2  # prefer papers where we have abstract text for review
+    return score, note
 
+
+def rank_literature_refs(
+    refs: List[Dict[str, Any]],
+    context: Dict[str, Any],
+    max_refs: int = 15,
+    min_score: int = 8,
+) -> List[Dict[str, Any]]:
+    """Re-rank literature by relevance to protein, user goal, and simulation findings."""
+    scored: List[Tuple[int, Dict[str, Any]]] = []
+    for ref in refs:
+        score, note = score_literature_ref_relevance(ref, context)
         ref_copy = dict(ref)
         ref_copy["_relevance_score"] = score
+        ref_copy["relevance_note"] = note
         scored.append((score, ref_copy))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    ranked = [r for _, r in scored[:max_refs]]
-    for r in ranked:
+
+    # Keep papers that match at least one protein/theme when possible.
+    filtered = [r for s, r in scored if s >= min_score]
+    if len(filtered) < 2:
+        filtered = [r for _, r in scored[:max_refs]]
+    else:
+        filtered = filtered[:max_refs]
+
+    for r in filtered:
         r.pop("_relevance_score", None)
-    return ranked
+    return filtered
 
 
 def extract_analysis_stats_from_entries(

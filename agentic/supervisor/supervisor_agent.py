@@ -1283,7 +1283,10 @@ class MDSupervisor:
             or state.get("user_goal")
             or enriched_prompt
         )
-        pdb_list = state.get("pdb_list", [])
+        from src.utils.pdb_paths import unique_pdb_paths
+
+        pdb_list = unique_pdb_paths(state.get("pdb_list", []))
+        state["pdb_list"] = pdb_list
         base_working_dir = state.get("working_directory", "working_dir")
         agent_list = state.get("agent_list") or []
         post_sim_subtask = _is_post_simulation_subtask(state)
