@@ -875,6 +875,14 @@ Output as JSON with this structure:
                 if key not in enriched:
                     enriched[key] = value
 
+            from src.hpc.time_options import resolve_hpc_time_limit
+
+            enriched["time_limit"] = resolve_hpc_time_limit(
+                state=state,
+                proposed=enriched.get("time_limit"),
+                estimate_slurm_time=state.get("estimated_slurm_time"),
+            )
+
             # Always override job_name with the PDB-derived name so every
             # simulation gets a unique, identifiable SLURM job name.
             enriched["job_name"] = self._derive_job_name(state)
@@ -882,6 +890,19 @@ Output as JSON with this structure:
             # Add email if available in state
             if "email" not in enriched and state.get("user_email"):
                 enriched["email"] = state["user_email"]
+
+            if "simulation_phases" not in enriched:
+                simsetup_dir = state.get("simsetup_dir") or str(
+                    Path(state.get("working_directory", ".")) / "simsetup"
+                )
+                hpc_path = Path(hpc_dir)
+                phases = ["minim", "nvt", "npt", "md"]
+                if state.get("extended_minimization") or (
+                    Path(simsetup_dir, "minim2.mdp").is_file()
+                    or hpc_path.joinpath("minim2.mdp").is_file()
+                ):
+                    phases = ["minim", "minim2", "nvt", "npt", "md"]
+                enriched["simulation_phases"] = phases
         
         # Add state values for submit_job
         if tool_name == "submit_job":
@@ -945,6 +966,11 @@ Output as JSON with this structure:
                         description="Coordinates staged in HPC directory"
                     )
         
+        elif tool_name == "estimate_simulation_time":
+            slurm_time = result.get("slurm_time")
+            if slurm_time:
+                state["estimated_slurm_time"] = slurm_time
+
         elif tool_name == "create_slurm_script":
             script_path = result.get("script_path")
             state["job_script"] = script_path

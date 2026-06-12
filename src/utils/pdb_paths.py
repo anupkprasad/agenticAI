@@ -1,14 +1,17 @@
 """Helpers for resolving and deduplicating PDB path lists."""
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 
-def unique_pdb_paths(paths: List[str]) -> List[str]:
+def unique_pdb_paths(paths: Optional[List[str]]) -> List[str]:
     """Return unique PDB paths, preserving first-seen order.
 
     Goals often mention the same ``.pdb`` filename multiple times; without
     deduplication the multi-simulation loop runs duplicate jobs.
     """
+    if not paths:
+        return []
+
     seen: set[str] = set()
     unique: List[str] = []
     for raw in paths:

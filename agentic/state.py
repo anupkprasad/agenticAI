@@ -31,6 +31,7 @@ class MDState(TypedDict):
     force_field: str               # "amber99sb-ildn"
     water_model: str               # "tip3p"
     production_ns: Optional[float] # Requested production simulation length (ns)
+    extended_minimization: Optional[bool]  # Two-stage minim for remodelled/strained structures
     human_in_loop: bool
     
     # Subtask-specific workflow

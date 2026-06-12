@@ -218,6 +218,11 @@ class HPCToolExecutor:
             for key, value in slurm_defaults.items():
                 if key not in enriched:
                     enriched[key] = value
+            from src.hpc.time_options import resolve_hpc_time_limit
+
+            enriched["time_limit"] = resolve_hpc_time_limit(
+                proposed=enriched.get("time_limit"),
+            )
         
         return enriched
     

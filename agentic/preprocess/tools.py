@@ -17,6 +17,12 @@ from src.preprocess.structure_downloader import download_structure
 from src.preprocess.domain_extractor import extract_domain
 from src.preprocess.acquire_structure_tool import acquire_protein_structure
 from src.preprocess.domain_lookup_tool import lookup_domain_range_tool
+from src.preprocess.structure_remodel.remodel_tool import (
+    align_model_to_experimental,
+    detect_missing_structure_elements,
+    remodel_structure,
+)
+from src.preprocess.phosphorylation_normalizer import normalize_phosphorylation_for_gromacs
 
 # Export tool functions for direct access
 __all__ = [
@@ -29,6 +35,10 @@ __all__ = [
     "extract_domain",
     "acquire_protein_structure",
     "lookup_domain_range_tool",
+    "detect_missing_structure_elements",
+    "remodel_structure",
+    "align_model_to_experimental",
+    "normalize_phosphorylation_for_gromacs",
     "get_preprocessing_tools",
     "get_tool_metadata",
 ]
@@ -49,6 +59,10 @@ def get_preprocessing_tools() -> list:
         lookup_domain_range_tool,
         download_structure,
         extract_domain,
+        detect_missing_structure_elements,
+        remodel_structure,
+        align_model_to_experimental,
+        normalize_phosphorylation_for_gromacs,
         analyze_pdb,
         separate_complex_components,
         add_hydrogens,
@@ -118,6 +132,10 @@ class PreprocessingToolExecutor:
             "lookup_domain_range_tool": lookup_domain_range_tool,
             "download_structure": download_structure,
             "extract_domain": extract_domain,
+            "detect_missing_structure_elements": detect_missing_structure_elements,
+            "remodel_structure": remodel_structure,
+            "align_model_to_experimental": align_model_to_experimental,
+            "normalize_phosphorylation_for_gromacs": normalize_phosphorylation_for_gromacs,
             "analyze_pdb": analyze_pdb,
             "separate_complex_components": separate_complex_components,
             "add_hydrogens": add_hydrogens,

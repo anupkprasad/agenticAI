@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from langchain.tools import tool
 
+from src.hpc.force_field_bundle import bundle_force_fields_for_topology
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,18 +60,27 @@ def copy_simulation_files(
                 })
                 logger.info(f"Copied: {file_path.name} -> {dest_dir}")
         
+        ff_copied = bundle_force_fields_for_topology(source_path, dest_path)
+        for entry in ff_copied:
+            copied_files.append(entry)
+
         if not copied_files:
             return {
                 "success": False,
                 "error": f"No files matching patterns {file_patterns} found in {source_dir}"
             }
-        
+
+        msg = f"Copied {len(copied_files)} file(s) to {dest_dir}"
+        if ff_copied:
+            msg += f" (including {len(ff_copied)} force-field bundle(s))"
+
         return {
             "success": True,
             "files_copied": len(copied_files),
             "copied_files": copied_files,
+            "force_fields_bundled": [e.get("force_field") for e in ff_copied],
             "destination": str(dest_path),
-            "message": f"Copied {len(copied_files)} files to {dest_dir}"
+            "message": msg,
         }
         
     except Exception as e:

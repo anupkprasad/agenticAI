@@ -632,6 +632,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "force_field": "amber99sb-ildn",
             "water_model": "tip3p",
             "production_ns": None,
+            "extended_minimization": config.get("extended_minimization", False),
             "human_in_loop": False,
             "preprocessing_issues": [],
             "setup_issues": [],
@@ -729,6 +730,9 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
 
         if config:
             state.update(config)
+
+        if state.get("pdb_list") is None:
+            state["pdb_list"] = []
 
         # CRITICAL: Convert working_directory to absolute path to prevent nested directory creation
         # This ensures that even if agents use os.chdir(), paths remain correct

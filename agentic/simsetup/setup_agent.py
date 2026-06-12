@@ -23,6 +23,7 @@ from .schemas import (
     SimSetupResult, SimSetupAgentInput, SimSetupAgentOutput
 )
 from .tools import SimulationSetupToolExecutor, get_tool_metadata
+from src.preprocess.phospho_residues import is_phospho_protein_resname
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,16 @@ class SimulationSetupAgent:
                 filename = Path(file_path).name
                 file_type = metadata.get("type", "file")
                 
+                stem_upper = Path(file_path).stem.upper()
+                if file_type == "ligand" and (
+                    stem_upper in self.PHOSPHO_PROTEIN_RESNAMES
+                    or is_phospho_protein_resname(stem_upper)
+                ):
+                    logger.info(
+                        "Skipping phospho protein file (not a ligand): %s", filename,
+                    )
+                    continue
+
                 # Filter by component selection
                 if component_selection:
                     if file_type == "ligand" and not component_selection.get("ligand", True):
@@ -345,30 +356,47 @@ class SimulationSetupAgent:
             else:
                 planner_instructions = rec_block
 
-        # Determine production duration preference (priority: state key -> extracted text -> config default)
-        production_ns = state.get("production_ns")
-        if production_ns is None:
-            production_ns = _extract_production_ns(
-                state.get("user_goal", ""),
-                planner_instructions,
-                state.get("enriched_prompt", ""),
-            )
-        if production_ns is None:
-            production_ns = defaults.get("production_ns")
+        from src.simsetup.system_options import resolve_simsetup_options
+
+        sim_label = Path(state.get("working_directory", "working_dir")).name
+        resolved = resolve_simsetup_options(
+            state=state,
+            user_text="\n".join(
+                filter(
+                    None,
+                    [
+                        state.get("user_goal", ""),
+                        state.get("user_goal_original", ""),
+                        planner_instructions or "",
+                        state.get("enriched_prompt", ""),
+                    ],
+                )
+            ),
+            pdb_path=state.get("raw_pdb") or state.get("cleaned_pdb"),
+            label=sim_label,
+            defaults=defaults,
+        )
+
+        production_ns = resolved.get("production_ns")
         if production_ns is not None:
             try:
                 production_ns = float(production_ns)
             except (TypeError, ValueError):
                 production_ns = None
+
+        temperature = resolved.get("temperature") or defaults.get("temperature", 300.0)
+        pressure = resolved.get("pressure") or defaults.get("pressure", 1.0)
+        extended_minim = resolved.get("extended_minimization", False)
             
         return SimSetupAgentInput(
             cleaned_pdb=state.get("cleaned_pdb", ""),
             working_directory=state.get("working_directory", "working_dir"),
             force_field=state.get("force_field", defaults.get("force_field", "amber99sb-ildn")),
             water_model=state.get("water_model", defaults.get("water_model", "tip3p")),
-            temperature=state.get("temperature", defaults.get("temperature", 300.0)),
-            pressure=state.get("pressure", defaults.get("pressure", 1.0)),
+            temperature=temperature,
+            pressure=pressure,
             production_ns=production_ns,
+            extended_minimization=extended_minim,
             user_goal=state.get("user_goal", ""),
             additional_instructions=planner_instructions,
             component_selection=state.get("component_selection")
@@ -415,9 +443,14 @@ class SimulationSetupAgent:
             else:
                 plan = self._create_setup_plan(agent_input, state)
 
-            log_agent_action("setup", "Generated setup plan", {
+            log_agent_action("setup", "Generated setup plan (LLM proposal — may differ from executed params)", {
                 "steps": len(plan.steps),
-                "reasoning": plan.reasoning[:200]
+                "reasoning": plan.reasoning[:200],
+                "note": (
+                    "LLM tool_params are overridden at execution by goal/state "
+                    "(box_type, box_distance, ions, temperature, production_ns, etc.). "
+                    "See 'Resolved simsetup parameters' and 'Applied deterministic overrides' logs."
+                ),
             })
 
             # Persist structured plan to state for HITL inspection/modification
@@ -549,6 +582,11 @@ class SimulationSetupAgent:
         'HOH', 'WAT', 'SOL', 'TIP', 'MG', 'CA', 'ZN', 'MN', 'FE', 'NA', 'CL',
         'K', 'CU', 'NI', 'CO',
     }
+
+    # Phosphorylated amino acids are protein residues (pdb2gmx), not ACPYPE ligands
+    PHOSPHO_PROTEIN_RESNAMES = frozenset({
+        'SEP', 'TPO', 'PTR', 'SP2', 'THP1', 'THP', 'TP2',
+    })
     
     # Pre-built ligand parameter directory
     LIGAND_PARAM_DIR = Path(__file__).resolve().parent.parent.parent / "src" / "simsetup" / "amber_ligand_param"
@@ -591,9 +629,19 @@ class SimulationSetupAgent:
             state_ion_files = state.get("ion_files") or []
             
             if state_ligand_resnames:
-                analysis["ligand_resnames"] = list(state_ligand_resnames)
-                analysis["has_ligand"] = True
-                logger.info(f"Ligand resnames from state: {state_ligand_resnames}")
+                filtered = [
+                    r for r in state_ligand_resnames
+                    if not is_phospho_protein_resname(r)
+                ]
+                if filtered:
+                    analysis["ligand_resnames"] = filtered
+                    analysis["has_ligand"] = True
+                    logger.info(f"Ligand resnames from state: {filtered}")
+                elif state_ligand_resnames:
+                    logger.info(
+                        "Ignored phospho residue names from state (protein, not ligand): %s",
+                        state_ligand_resnames,
+                    )
             if state_ion_resnames:
                 analysis["ion_resnames"] = list(state_ion_resnames)
                 analysis["has_ions"] = True
@@ -608,9 +656,14 @@ class SimulationSetupAgent:
             for file_path, metadata in self.file_manager.file_registry.items():
                 ftype = metadata.get("type", "")
                 if ftype == "ligand" and not analysis["has_ligand"]:
-                    analysis["has_ligand"] = True
-                    # Infer resname from filename stem (e.g. ATP.pdb → ATP)
                     resname = Path(file_path).stem.upper()
+                    if is_phospho_protein_resname(resname):
+                        logger.info(
+                            "Skipping phospho protein file mis-tagged as ligand: %s",
+                            file_path,
+                        )
+                        continue
+                    analysis["has_ligand"] = True
                     if resname not in analysis["ligand_resnames"]:
                         analysis["ligand_resnames"].append(resname)
                     logger.info(f"Ligand detected from file_registry: {file_path}")
@@ -663,7 +716,18 @@ class SimulationSetupAgent:
                     ion_names = het_resnames & self.STANDARD_RESNAMES
                     ligand_names = het_resnames & self.KNOWN_LIGAND_RESNAMES
                     
-                    remaining = het_resnames - self.STANDARD_RESNAMES - ligand_names
+                    phospho_names = {r for r in het_resnames if is_phospho_protein_resname(r)}
+                    if phospho_names:
+                        logger.info(
+                            "Phosphorylated protein residues (not ligands): %s",
+                            sorted(phospho_names),
+                        )
+                    remaining = {
+                        r for r in het_resnames
+                        if not is_phospho_protein_resname(r)
+                    }
+                    remaining -= self.STANDARD_RESNAMES
+                    remaining -= ligand_names
                     for resname in remaining:
                         atom_count = sum(1 for l in heteroatoms if len(l.split()) > 3 and l.split()[3].strip() == resname)
                         if atom_count > 5:
@@ -812,7 +876,8 @@ class SimulationSetupAgent:
                 "\n- Only use build_topology on the protein PDB file, not the full complex."
                 "\n\n**IMPORTANT:** 'Keep Crystallographic Water: False' means do NOT keep water from the original PDB file."
                 "\n  It does NOT mean skip solvation. Solvation with tip3p water is ALWAYS part of standard simulation setup."
-                "\n  The build_simulation_system tool handles solvation automatically — do NOT pass water_model='none' or ion_concentration=0."
+                "\n  The build_simulation_system tool handles solvation automatically — do NOT pass water_model='none'."
+                "\n  For neutralize-only systems, ion_concentration=0 is correct (counter-ions only, no bulk salt)."
             )
         else:
             component_context = ""
@@ -1087,16 +1152,27 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         """
         system_type = analysis.get("system_type", "protein_only")
 
+        from src.simsetup.system_options import resolve_simsetup_options
+
+        defaults = self.config.get("defaults", {})
+        resolved = resolve_simsetup_options(
+            user_text=agent_input.user_goal,
+            pdb_path=agent_input.cleaned_pdb,
+            label=Path(agent_input.working_directory).name,
+            defaults=defaults,
+        )
+
         # Build tool params based on what components are present
         tool_params: Dict[str, Any] = {
             "protein_file": agent_input.cleaned_pdb,
             "force_field": agent_input.force_field,
             "water_model": agent_input.water_model,
-            "box_type": "cubic",
-            "box_distance": 1.0,
-            "ion_concentration": 0.15,
+            "box_type": resolved.get("box_type") or "cubic",
+            "box_distance": resolved.get("box_distance") or 1.0,
+            "ion_concentration": resolved.get("ion_concentration") if resolved.get("ion_concentration") is not None else 0.15,
             "temperature": agent_input.temperature,
             "pressure": agent_input.pressure,
+            "extended_minimization": agent_input.extended_minimization,
         }
         if hasattr(agent_input, 'production_ns') and agent_input.production_ns:
             tool_params["production_ns"] = agent_input.production_ns
@@ -1172,12 +1248,49 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         # Get simsetup directory
         simsetup_dir = state.get("simsetup_directory", self.tool_executor.working_dir)
 
-        requested_production_ns = None
-        if getattr(agent_input, "production_ns", None):
+        from src.simsetup.system_options import (
+            SIMSETUP_OVERRIDE_KEYS,
+            coerce_simsetup_tool_value,
+            resolve_simsetup_options,
+            summarize_override_changes,
+        )
+
+        simsetup_tool_opts = resolve_simsetup_options(
+            state=state,
+            user_text=agent_input.user_goal,
+            pdb_path=state.get("raw_pdb") or agent_input.cleaned_pdb,
+            label=Path(state.get("working_directory", "working_dir")).name,
+            defaults=self.config.get("defaults", {}),
+        )
+        requested_production_ns = simsetup_tool_opts.get("production_ns")
+        if requested_production_ns is not None:
             try:
-                requested_production_ns = float(agent_input.production_ns)
+                requested_production_ns = float(requested_production_ns)
             except (TypeError, ValueError):
                 requested_production_ns = None
+
+        simsetup_override_tools = {
+            "build_simulation_system",
+            "build_simulation_box",
+            "generate_mdp_files",
+            "solvate_system",
+            "add_ions",
+        }
+
+        log_agent_action(
+            "setup",
+            "Resolved simsetup parameters (override LLM plan at execution)",
+            {
+                "note": (
+                    "The LLM plan JSON may show different values; "
+                    "these resolved parameters are applied when tools run."
+                ),
+                "sim_label": Path(state.get("working_directory", "working_dir")).name,
+                "resolved": {
+                    k: simsetup_tool_opts.get(k) for k in SIMSETUP_OVERRIDE_KEYS
+                },
+            },
+        )
         
         try:
             if not plan.steps:
@@ -1221,6 +1334,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 
                 # Prepare tool parameters
                 tool_params = dict(step.tool_params) if step.tool_params else {}
+                llm_tool_params = dict(tool_params)
                 
                 # CRITICAL: Normalize all file paths to ensure directory isolation
                 # Tools should only receive filenames, and working_dir handles the rest
@@ -1271,12 +1385,48 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 tool_params["output_dir"] = simsetup_dir
                 tool_params["working_dir"] = simsetup_dir
 
-                # Ensure production time from user goal is propagated to setup tools
-                # if the LLM plan omitted it.
-                if requested_production_ns and step.tool_name in {
-                    "generate_mdp_files", "build_simulation_system", "solvate_system"
-                }:
-                    tool_params.setdefault("production_ns", requested_production_ns)
+                if step.tool_name in simsetup_override_tools:
+                    for key in SIMSETUP_OVERRIDE_KEYS:
+                        val = coerce_simsetup_tool_value(
+                            key, simsetup_tool_opts.get(key)
+                        )
+                        if val is not None:
+                            tool_params[key] = val
+
+                    override_changes = summarize_override_changes(
+                        llm_tool_params, tool_params
+                    )
+                    if override_changes:
+                        log_agent_action(
+                            "setup",
+                            "Applied deterministic overrides (LLM plan → executed)",
+                            {
+                                "step": step.name,
+                                "tool": step.tool_name,
+                                "changes": override_changes,
+                            },
+                        )
+                        execution_log.append(
+                            "Deterministic overrides applied: "
+                            + ", ".join(
+                                f"{k}={override_changes[k]['executed']}"
+                                for k in sorted(override_changes)
+                            )
+                        )
+                    else:
+                        log_agent_action(
+                            "setup",
+                            "Tool parameters match resolved goal/state values",
+                            {
+                                "step": step.name,
+                                "tool": step.tool_name,
+                                "executed": {
+                                    k: tool_params.get(k)
+                                    for k in SIMSETUP_OVERRIDE_KEYS
+                                    if tool_params.get(k) is not None
+                                },
+                            },
+                        )
                 
                 # Tool-specific default output filenames (relative paths)
                 if step.tool_name == "generate_ligand_parameters":

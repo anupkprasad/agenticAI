@@ -1125,13 +1125,33 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
 # Remove the old log_workflow_state function since we now use conversation_logger
 
 
+def _filter_remodel_donor_pdbs(goal: str, paths: list) -> list:
+    """
+    When the goal is structure remodeling (experimental + model donor), keep only
+    the experimental PDB for multi-sim / raw_pdb selection. The donor stays in the
+    goal text for the preprocessing agent tools.
+    """
+    from src.simsetup.system_options import filter_remodel_donor_pdbs
+
+    return filter_remodel_donor_pdbs(goal, paths)
+
+
 def _extract_pdb_paths_from_goal(goal: str) -> list:
-    """Extract unique PDB file paths / filenames from a natural-language goal."""
+    """Extract unique input PDB paths / filenames from a natural-language goal."""
     import re as _re
     from src.utils.pdb_paths import unique_pdb_paths
 
     matches = _re.findall(r'[\w./\\-]+\.pdb', goal, _re.IGNORECASE)
-    return unique_pdb_paths(matches)
+    paths = unique_pdb_paths(matches)
+    paths = [
+        path
+        for path in paths
+        if not (
+            path.lower().endswith(".pdb")
+            and _is_likely_output_file_reference(path, goal)
+        )
+    ]
+    return _filter_remodel_donor_pdbs(goal, paths)
 
 
 def _build_pdb_list_from_uniprot_goal(goal: str, working_dir: str) -> List[Dict[str, Any]]:
@@ -1286,6 +1306,51 @@ def _extract_production_ns_from_goal(goal: str) -> float | None:
     return None
 
 
+# Filename suffixes that usually denote generated outputs, not workflow inputs.
+_OUTPUT_PDB_SUFFIXES = (
+    "_remodeled", "_aligned", "_cleaned", "_fixed", "_merged", "_separated",
+    "_trimmed", "_domain", "_extracted", "_processed",
+)
+
+
+def _is_likely_output_file_reference(filename: str, goal: str) -> bool:
+    """Return True when a .pdb in --goal is probably an output, not an input."""
+    stem = Path(filename).stem.lower()
+    if any(stem.endswith(suffix) for suffix in _OUTPUT_PDB_SUFFIXES):
+        return True
+    # e.g. "Output chain_a_6VC0_remodeled.pdb" or "write to foo.pdb"
+    pattern = re.compile(
+        r"(?:output|write|save|generate|create|produce)\s+"
+        + re.escape(filename),
+        re.IGNORECASE,
+    )
+    return bool(pattern.search(goal))
+
+
+def _goal_file_exists(candidate: str, working_dir: Path) -> bool:
+    """Check whether a goal-referenced file exists in common search locations."""
+    path = Path(candidate)
+    if path.is_absolute():
+        return path.exists()
+
+    search_roots = [Path.cwd(), working_dir]
+    rel_parts = path.parts
+    candidates = [
+        Path.cwd() / path,
+        working_dir / path,
+    ]
+    # Agent subdirs (preprocess/, hpc/, etc.)
+    for root in search_roots:
+        candidates.append(root / path)
+        for sub in ("preprocess", "simsetup", "hpc", "analysis"):
+            candidates.append(root / sub / path)
+    # If goal uses preprocess/foo.pdb, also try foo.pdb at working_dir root
+    if len(rel_parts) >= 2 and rel_parts[0] in {"preprocess", "simsetup", "hpc"}:
+        candidates.append(working_dir / Path(*rel_parts[1:]))
+
+    return any(p.exists() for p in candidates)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="LangGraph-based MD Simulation Workflow"
@@ -1377,22 +1442,21 @@ def main(argv=None):
         r'(?:^|\s)([^\s"\']+\.(?:pdb|gro|top|xtc|trr|tpr|itp|mdp))',
         args.goal, _re_val.IGNORECASE
     )
-    _wd_for_check = Path(args.working_dir) if args.working_dir not in (".", "working_dir") else Path.cwd()
+    _wd_for_check = (
+        Path(args.working_dir)
+        if args.working_dir not in (".", "working_dir")
+        else Path.cwd()
+    )
     for _cand in _path_candidates:
-        _p = Path(_cand)
-        # Only check paths that look like explicit relative or absolute references
-        if _p.is_absolute():
-            if not _p.exists():
-                _validation_errors.append(
-                    f"File referenced in --goal not found: '{_cand}'"
-                )
-        else:
-            # Check relative to cwd and relative to working-dir
-            if not (Path.cwd() / _cand).exists() and not (_wd_for_check / _cand).exists():
-                _validation_errors.append(
-                    f"File referenced in --goal not found: '{_cand}' "
-                    f"(checked relative to cwd and '{_wd_for_check}')"
-                )
+        if _cand.lower().endswith(".pdb") and _is_likely_output_file_reference(
+            _cand, args.goal
+        ):
+            continue
+        if not _goal_file_exists(_cand, _wd_for_check):
+            _validation_errors.append(
+                f"File referenced in --goal not found: '{_cand}' "
+                f"(checked cwd, '{_wd_for_check}', and agent subdirs)"
+            )
 
     if _validation_errors:
         print("\n" + "=" * 60, flush=True)
@@ -1439,6 +1503,17 @@ def main(argv=None):
     production_ns = _extract_production_ns_from_goal(goal)
     if production_ns is not None:
         config["production_ns"] = production_ns
+
+    from src.simsetup.minimization_options import parse_extended_minimization_from_text
+    from src.simsetup.system_options import apply_goal_simsetup_config
+
+    if parse_extended_minimization_from_text(goal):
+        config["extended_minimization"] = True
+    apply_goal_simsetup_config(goal, config)
+
+    from src.hpc.time_options import apply_goal_hpc_time_config
+
+    apply_goal_hpc_time_config(goal, config)
     
     # Resolve working directory (same logic as workflow._initialize_state)
     working_dir = args.working_dir
@@ -1645,6 +1720,9 @@ def main(argv=None):
     # ------------------------------------------------------------------
     # Single-simulation pipeline (original flow)
     # ------------------------------------------------------------------
+
+    if pdb_list:
+        config["pdb_list"] = pdb_list
 
     # UniProt-only single-sim: pass structure request metadata to workflow
     if structure_request_entries:

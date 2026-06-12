@@ -6,6 +6,11 @@ import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+from src.simsetup.residuetypes_utils import (
+    ensure_phospho_residuetypes_dat,
+    pdb_has_phospho_residues,
+)
+
 
 def build_topology(
     pdb_file: str,
@@ -45,6 +50,12 @@ def build_topology(
         water_model = "tip3p"
     
     try:
+        pdb_path = Path(pdb_file)
+        if not pdb_path.is_file():
+            pdb_path = working_dir / pdb_file
+        if pdb_has_phospho_residues(str(pdb_path)):
+            ensure_phospho_residuetypes_dat(working_dir, pdb_file=str(pdb_path))
+
         # Run gmx pdb2gmx
         cmd = [
             "gmx", "pdb2gmx",

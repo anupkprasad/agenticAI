@@ -81,6 +81,22 @@ def _is_post_simulation_subtask(state: Dict[str, Any]) -> bool:
     return False
 
 
+def _should_run_combined_analysis(state: Dict[str, Any]) -> bool:
+    """
+    True when multi-sim should run cross-simulation analysis + reporter at basepath.
+
+    Respects ``--subtask``: combined analysis runs only when analysis or reporter
+    is in the agent list (or for full_task / analysis-only workflows).
+    """
+    subtask_type = state.get("subtask_type")
+    if subtask_type == "multi_agent":
+        agents = set(state.get("agent_list") or [])
+        return bool(agents & {"analysis", "reporter"})
+    if subtask_type in ("analysis_only", "reporter_only", "full_task", None):
+        return True
+    return False
+
+
 def _build_per_sim_analysis_prompt(
     entry: Dict[str, Any],
     *,
@@ -653,7 +669,9 @@ class MDSupervisor:
                 current_idx += 1
                 state["current_sim_index"] = current_idx
                 if current_idx >= len(sim_prompts):
-                    return self._setup_combined_analysis(state)
+                    if _should_run_combined_analysis(state):
+                        return self._setup_combined_analysis(state)
+                    return self._finish_multi_sim_pipeline(state)
                 return self._start_next_sim(state)
 
         logger.info(
@@ -827,7 +845,9 @@ class MDSupervisor:
         )
 
         if current_idx >= len(sim_prompts):
-            return self._setup_combined_analysis(state)
+            if _should_run_combined_analysis(state):
+                return self._setup_combined_analysis(state)
+            return self._finish_multi_sim_pipeline(state)
         return self._start_next_sim(state)
 
     def _advance_multi_sim(self, state: MDState) -> MDState:
@@ -848,12 +868,31 @@ class MDSupervisor:
         )
 
         if current_idx >= len(sim_prompts):
-            # All sims complete — start combined analysis at basepath level
-            logger.info("SUPERVISOR [multi-sim]: All sims complete — combined analysis")
-            return self._setup_combined_analysis(state)
+            if _should_run_combined_analysis(state):
+                logger.info(
+                    "SUPERVISOR [multi-sim]: All sims complete — combined analysis"
+                )
+                return self._setup_combined_analysis(state)
+            return self._finish_multi_sim_pipeline(state)
 
         # Start next sim
         return self._start_next_sim(state)
+
+    def _finish_multi_sim_pipeline(self, state: MDState) -> MDState:
+        """End multi-sim after per-simulation agents without combined analysis."""
+        logger.info(
+            "SUPERVISOR [multi-sim]: All per-simulation agents complete — "
+            "skipping combined analysis (not in --subtask)"
+        )
+        state["plan_executed"] = True
+        state["multi_sim_phase"] = "complete"
+        state["next_node"] = "final_report"
+        log_supervisor_routing(
+            state,
+            "final_report",
+            "Multi-sim pipeline complete (preprocess/setup/hpc only)",
+        )
+        return state
 
     def _setup_combined_analysis(self, state: MDState) -> MDState:
         """
@@ -1285,7 +1324,7 @@ class MDSupervisor:
         )
         from src.utils.pdb_paths import unique_pdb_paths
 
-        pdb_list = unique_pdb_paths(state.get("pdb_list", []))
+        pdb_list = unique_pdb_paths(state.get("pdb_list") or [])
         state["pdb_list"] = pdb_list
         base_working_dir = state.get("working_directory", "working_dir")
         agent_list = state.get("agent_list") or []

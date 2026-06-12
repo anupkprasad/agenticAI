@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from langchain.tools import tool
 
-from src.preprocess.pdb_utils import insert_ter_records
+from src.preprocess.pdb_utils import reorder_pdb_by_resid
+from src.preprocess.phospho_residues import (
+    is_phospho_protein_resname,
+    phospho_resnames_in_universe,
+    phospho_resname_mda_selection,
+    select_phospho_protein_atoms,
+)
 
 
 # Common ion residue names
@@ -61,11 +67,23 @@ def separate_complex_components(
         # Load the complex structure
         u = mda.Universe(pdb_file)
         
-        # Select different components
-        protein = u.select_atoms("protein")
-        
-        # Get all non-protein, non-water atoms
-        non_protein_non_water = u.select_atoms("not protein and not (resname " + " ".join(WATER_NAMES) + ")")
+        # Protein + phosphorylated amino acids (SEP/TPO/PTR not in MDAnalysis "protein")
+        file_phospho_names = phospho_resnames_in_universe(u)
+        phospho_sel = phospho_resname_mda_selection(file_phospho_names)
+        protein = u.select_atoms("protein") + select_phospho_protein_atoms(u)
+        if len(protein) > 0:
+            import numpy as np
+            sort_ix = np.lexsort((protein.resids, protein.chainIDs))
+            protein = protein[sort_ix]
+
+        # Non-protein hetero excluding water and phospho protein residues
+        non_protein_non_water = u.select_atoms(
+            "not protein and not (resname "
+            + " ".join(WATER_NAMES)
+            + ") and not ("
+            + phospho_sel
+            + ")"
+        )
         
         # Separate ions from ligands by checking residue names
         ions = None
@@ -77,6 +95,8 @@ def separate_complex_components(
             ligand_resnames = []
             
             for residue in non_protein_non_water.residues:
+                if is_phospho_protein_resname(residue.resname):
+                    continue
                 if residue.resname in COMMON_IONS:
                     ion_resnames.append(residue.resname)
                 else:
@@ -103,7 +123,7 @@ def separate_complex_components(
             if not protein_output:
                 protein_output = str(working_dir / "protein.pdb")
             protein.write(protein_output)
-            insert_ter_records(protein_output)
+            reorder_pdb_by_resid(protein_output)
             result["protein_file"] = protein_output
             result["files_created"].append(protein_output)
             result["statistics"]["protein"] = {

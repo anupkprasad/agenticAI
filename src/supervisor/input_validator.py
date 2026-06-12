@@ -94,7 +94,7 @@ def _analyze_pdb_if_available(
     # simulation only sees its own PDB via raw_pdb.
     from src.utils.pdb_paths import unique_pdb_paths
 
-    pdb_list = unique_pdb_paths(state.get("pdb_list", []))
+    pdb_list = unique_pdb_paths(state.get("pdb_list") or [])
     if pdb_list != state.get("pdb_list"):
         state["pdb_list"] = pdb_list
     multi_sim_phase = state.get("multi_sim_phase")

@@ -99,7 +99,17 @@ def _detect_molecule_type(pdb_file: str) -> str:
         u = mda.Universe(pdb_file)
         
         protein = u.select_atoms("protein")
-        ligand = u.select_atoms("not protein and not resname HOH WAT TIP3 SOL and not ion")
+        from src.preprocess.phospho_residues import phospho_resname_mda_selection, select_phospho_protein_atoms
+
+        phospho_sel = phospho_resname_mda_selection()
+        ligand = u.select_atoms(
+            f"not protein and not ({phospho_sel}) "
+            "and not resname HOH WAT TIP3 SOL and not ion"
+        )
+        # Exclude numbered phospho variants (e.g. 1TPO) missed by static resname list
+        phospho_atoms = select_phospho_protein_atoms(u)
+        if len(phospho_atoms) > 0:
+            ligand = ligand - phospho_atoms
         
         has_protein = len(protein) > 0
         has_ligand = len(ligand) > 0

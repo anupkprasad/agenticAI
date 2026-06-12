@@ -68,23 +68,26 @@ class MDPGenerator:
         else:
             return "-DPOSRES"
     
-    def generate_minimization_mdp(
+    def _write_minimization_mdp(
         self,
         output_file: str,
-        nsteps: int = 600000,
-        emtol: float = 100.0,
-        has_ligand: bool = False,
-        **kwargs
+        *,
+        title: str,
+        integrator: str,
+        nsteps: int,
+        emtol: float,
+        emstep: float,
+        has_ligand: bool,
+        use_posres: bool,
     ) -> str:
-        """Generate energy minimization MDP file."""
         cutoffs = self._get_cutoff_params()
-        posres = self._get_position_restraints(has_ligand)
-        
-        mdp_content = f"""; Energy Minimization
-define          = {posres}
-integrator      = steep
+        define_line = ""
+        if use_posres:
+            define_line = f"define          = {self._get_position_restraints(has_ligand)}\n"
+        mdp_content = f"""; {title}
+{define_line}integrator      = {integrator}
 emtol           = {emtol}
-emstep          = 0.01
+emstep          = {emstep}
 nsteps          = {nsteps}
 
 ; Output control
@@ -121,6 +124,54 @@ DispCorr        = {cutoffs['DispCorr']}
         
         Path(output_file).write_text(mdp_content)
         return output_file
+
+    def generate_minimization_mdp(
+        self,
+        output_file: str,
+        nsteps: int = 600000,
+        emtol: float = 100.0,
+        emstep: float = 0.01,
+        integrator: str = "steep",
+        has_ligand: bool = False,
+        use_posres: bool = True,
+        extended_minimization: bool = False,
+        **kwargs
+    ) -> str:
+        """Generate stage-1 energy minimization MDP (restrained by default)."""
+        from src.simsetup.minimization_options import EXTENDED_MINIM_STAGE1, STANDARD_MINIM
+
+        params = EXTENDED_MINIM_STAGE1 if extended_minimization else STANDARD_MINIM
+        return self._write_minimization_mdp(
+            output_file,
+            title="Energy Minimization (stage 1, position restraints)",
+            integrator=params["integrator"],
+            nsteps=params["nsteps"],
+            emtol=params["emtol"],
+            emstep=params["emstep"],
+            has_ligand=has_ligand,
+            use_posres=params["use_posres"],
+        )
+
+    def generate_minimization_stage2_mdp(
+        self,
+        output_file: str,
+        has_ligand: bool = False,
+        **kwargs
+    ) -> str:
+        """Stage-2 minimization without position restraints (relieve remodel clashes)."""
+        from src.simsetup.minimization_options import EXTENDED_MINIM_STAGE2
+
+        params = EXTENDED_MINIM_STAGE2
+        return self._write_minimization_mdp(
+            output_file,
+            title="Energy Minimization (stage 2, no position restraints)",
+            integrator=params["integrator"],
+            nsteps=params["nsteps"],
+            emtol=params["emtol"],
+            emstep=params["emstep"],
+            has_ligand=has_ligand,
+            use_posres=False,
+        )
     
     def generate_nvt_mdp(
         self,
@@ -407,6 +458,7 @@ pbc             = xyz
         has_ligand: bool = False,
         has_ions: bool = False,
         production_ns: float = 200.0,
+        extended_minimization: bool = False,
         **kwargs
     ) -> Dict[str, str]:
         """
@@ -438,9 +490,15 @@ pbc             = xyz
         mdp_files['minim'] = self.generate_minimization_mdp(
             str(output_dir / "minim.mdp"),
             has_ligand=has_ligand,
+            extended_minimization=extended_minimization,
             **kwargs
         )
-        
+        if extended_minimization:
+            mdp_files['minim2'] = self.generate_minimization_stage2_mdp(
+                str(output_dir / "minim2.mdp"),
+                has_ligand=has_ligand,
+            )
+
         mdp_files['nvt'] = self.generate_nvt_mdp(
             str(output_dir / "nvt.mdp"),
             temperature=temperature,
@@ -479,6 +537,7 @@ def generate_mdp_files(
     has_ligand: bool = False,
     has_ions: bool = False,
     production_ns: float = 200.0,
+    extended_minimization: bool = False,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -506,17 +565,24 @@ def generate_mdp_files(
             has_ligand=has_ligand,
             has_ions=has_ions,
             production_ns=production_ns,
+            extended_minimization=extended_minimization,
             **kwargs
         )
-        
+
+        msg = f"Generated {len(mdp_files)} MDP files in {output_dir}"
+        if extended_minimization:
+            msg += " (extended two-stage minim: minim + minim2)"
+
         return {
             "success": True,
             "mdp_files": mdp_files,
-            "message": f"Generated {len(mdp_files)} MDP files in {output_dir}",
+            "message": msg,
+            "extended_minimization": extended_minimization,
             "parameters": {
                 "force_field": force_field,
                 "temperature": temperature,
                 "pressure": pressure,
+                "extended_minimization": extended_minimization,
                 "has_ligand": has_ligand,
                 "has_ions": has_ions,
                 "production_ns": production_ns

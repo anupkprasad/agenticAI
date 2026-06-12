@@ -14,6 +14,9 @@ agent:
     - "Download structures from AlphaFold DB or RCSB PDB by UniProt ID"
     - "Extract protein domains by residue range (Bio.PDB / MDAnalysis)"
     - "Validate domains for missing residues and broken loops"
+    - "Align experimental and AlphaFold/model structures by sequence"
+    - "Detect and copy missing residues/atoms (e.g. loops, phosphate) from model to experimental PDB"
+    - "Remodel structures manually (donor residue range) or automatically (gap detection)"
     - "Analyze PDB structure and detect issues"
     - "Clean structures (remove waters, resolve alternate locations)"
     - "Add missing hydrogens"
@@ -143,15 +146,30 @@ llm:
     - Use `validate_structure` with check_domain=true after domain extraction
     - Available download sources: alphafold (default), rcsb (experimental fallback)
 
-    **CRITICAL FILE PATH RULES:**
-    - Use ONLY filenames (e.g., "3.pdb", "protein_h.pdb") - NO directory paths!
-    - DO NOT use paths like "working_dir/3.pdb" or "preprocess/3.pdb" or "working_dir/separated/protein_h.pdb"
-    - The system automatically prepends the correct directory (working_dir/preprocess/)
-    - DO NOT specify output_dir, output_file, protein_output, ligand_output, or ion_output
-    - Example CORRECT: "pdb_file": "complex.pdb"
-    - Example WRONG: "pdb_file": "working_dir/preprocess/complex.pdb"
-    - Example WRONG: "pdb_file": "working_dir/separated/protein.pdb"
-    - IGNORE any directory paths mentioned in the planner instructions - extract only the filename!
+    **STRUCTURE REMODELING (experimental + AlphaFold/model PDB):**
+    - When experimental PDB has missing loops/residues or atoms (e.g. phosphate on SEP/TPO/PTR),
+      use `detect_missing_structure_elements` to compare target vs donor
+    - `remodel_structure` merges ONLY missing content from donor into experimental target
+      (does not replace existing experimental coordinates)
+    - Manual mode: set mode='manual' and donor_residue_range='165-168' to copy specific donor resids
+    - Auto mode: sequence alignment + gap detection fills all missing residues/atoms
+    - `align_model_to_experimental` superposes donor for visual inspection without merging
+    - Typical workflow: download AF3 model → detect_missing_structure_elements → remodel_structure
+      → validate_structure → add_hydrogens
+    - Run remodel on raw.pdb BEFORE separate_complex_components when possible
+    - Phosphorylated structures: normalize_phosphorylation_for_gromacs runs automatically
+      after separation when SEP/TPO/PTR are present (maps to SP2/THP1/TP2 for GROMACS)
+
+    **CRITICAL: DO NOT SPECIFY FILE PATHS IN tool_params**
+    - The executor assigns canonical preprocess filenames automatically.
+    - Planner / LLM should choose tool_name and non-path settings only (mode, ph, check_domain, …).
+    - NEVER set pdb_file, target_pdb, donor_pdb, output_file, protein_output, ligand_output, ion_output.
+    - Canonical preprocess filenames (executor assigns paths; describe each step):
+      raw.pdb (imported structure), reference_af3.pdb (AF3/model reference),
+      merged_missing_from_model.pdb (after remodel), protein.pdb (clean protein),
+      protein_phospho_mapped.pdb (SEP→SP2, TPO→THP1, PTR→TP2 for GROMACS), protein_h.pdb (final)
+    - Phosphorylated proteins: auto-map SEP→SP2, TPO→THP1, PTR→TP2 (O3P→OT); kept in
+      protein.pdb — never parameterized as separate ligands
     
     **CRITICAL: DO NOT CONCATENATE OR MERGE FILES**
     - Your job is ONLY to clean and prepare individual components (protein, ligand, ions)

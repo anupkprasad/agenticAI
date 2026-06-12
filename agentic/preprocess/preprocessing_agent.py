@@ -543,10 +543,23 @@ class PreprocessingAgent:
                     )
             
             # Step 4: Prepare supervisor update - preprocessing outputs cleaned PDB and file registry
+            from src.simsetup.minimization_options import should_use_extended_minimization
+
+            preprocess_dir = str(Path(self.tool_executor.working_dir))
+            extended_minim = should_use_extended_minimization(
+                user_text=agent_input.user_goal,
+                preprocess_dir=preprocess_dir,
+            )
+            if not extended_minim:
+                extended_minim = any(
+                    "merged_missing" in path or "remodel" in (desc or "").lower()
+                    for path, desc in result.generated_files.items()
+                )
             supervisor_update = {
                 "cleaned_pdb": result.cleaned_pdb,
                 "preprocessing_report": result.report,
-                "file_registry": self.file_manager.file_registry  # Use file_registry from file_manager
+                "file_registry": self.file_manager.file_registry,
+                "extended_minimization": extended_minim,
             }
             
             return PreprocessingAgentOutput(
@@ -714,13 +727,10 @@ IMPORTANT: After separating complex components, ONLY keep the components marked 
 **Available Tools:**
 {tools_list_str}
 
-**CRITICAL FILE PATH RULES:**
-- Use ONLY filenames (e.g., "3.pdb", "protein_h.pdb") - NO directory paths!
-- DO NOT include paths like "working_dir/separated/...", "working_dir/preprocess/...", etc.
-- The system automatically handles directories - you only specify filenames
-- Example CORRECT: "pdb_file": "protein.pdb"
-- Example WRONG: "pdb_file": "working_dir/separated/protein.pdb"
-- If planner mentions paths like "working_dir/separated/protein.pdb", extract ONLY "protein.pdb"
+**CRITICAL: DO NOT PUT FILE PATHS IN tool_params**
+- The executor assigns canonical preprocess filenames (input_experimental.pdb, input_donor.pdb,
+  protein.pdb, remodeled.pdb, protein_h.pdb). You choose tool_name and settings only (mode, ph, …).
+- Leave tool_params empty or with non-path options only — never pdb_file, target_pdb, donor_pdb, output_file.
 
 **CRITICAL INSTRUCTIONS:**
 - You MUST ONLY use the tools listed above - do NOT invent or suggest non-existent tools
@@ -936,6 +946,78 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             recommendations=["Review generated topology file before simulation"]
         )
     
+    def _auto_normalize_phosphorylation(
+        self,
+        stage,
+        protein_path: str,
+        execution_log: list,
+        generated_files: dict,
+        file_alias_map: dict,
+        force_field: str = "amber99sb-ildn",
+        user_text: str = "",
+    ) -> str:
+        """Map phospho residues for GROMACS (CHARMM dianionic SP2/THP2/TP2 by default)."""
+        from src.preprocess.phospho_residues import (
+            is_charmm_force_field,
+            parse_phospho_ionic_state,
+        )
+        from src.preprocess.phosphorylation_normalizer import needs_gromacs_phospho_mapping
+
+        ionic_state = parse_phospho_ionic_state(user_text, force_field)
+
+        if not protein_path or not needs_gromacs_phospho_mapping(
+            protein_path, force_field, ionic_state=ionic_state, user_text=user_text,
+        ):
+            return protein_path
+
+        if is_charmm_force_field(force_field):
+            execution_log.append(
+                f"\n--- Auto: CHARMM phospho mapping ({ionic_state}) "
+                f"for {force_field} ---"
+            )
+        else:
+            execution_log.append(
+                "\n--- Auto: normalize_phosphorylation_for_gromacs (AMBER SP2/THP/TP2) ---"
+            )
+        params = stage.apply_tool_params(
+            "normalize_phosphorylation_for_gromacs",
+            {"force_field": force_field, "user_text": user_text},
+            protein_path,
+        )
+        result = self.tool_executor.execute_tool(
+            "normalize_phosphorylation_for_gromacs", params,
+        )
+        if result.get("success"):
+            execution_log.append(f"✓ {result.get('message', 'Phosphorylation mapped')}")
+            mapped = result.get("output_file")
+            final = result.get("protein_file", protein_path)
+            if mapped:
+                generated_files[mapped] = "Phosphorylation mapped for GROMACS (SP2/THP1/TP2)"
+            if final:
+                generated_files[final] = "Clean protein (GROMACS phospho names)"
+            file_alias_map.update(stage.register_aliases())
+            log_agent_action(
+                "preprocessing",
+                "Auto phosphorylation mapping for GROMACS",
+                {
+                    "status": "✅ SUCCESS",
+                    "output_files": [mapped, final],
+                    "resname_changes": result.get("resname_changes"),
+                    "atom_changes": result.get("atom_changes"),
+                },
+            )
+            return final or protein_path
+
+        execution_log.append(
+            f"✗ Phosphorylation mapping failed: {result.get('error', 'unknown')}"
+        )
+        log_agent_action(
+            "preprocessing",
+            "Auto phosphorylation mapping for GROMACS",
+            {"status": "❌ FAILED", "error": result.get("error")},
+        )
+        return protein_path
+
     def _create_step_from_tool(self, tool_name: str, agent_input: PreprocessingAgentInput,
                                analysis: Dict[str, Any]) -> Optional[PreprocessingStep]:
         """Create preprocessing step from tool name and analysis"""
@@ -1012,6 +1094,52 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             if len(plan.steps) > max_steps:
                 warnings.append(f"Plan has {len(plan.steps)} steps, limiting to {max_steps}")
                 plan.steps = plan.steps[:max_steps]
+
+            preprocess_dir = self.tool_executor.working_dir
+            base_working_dir = str(Path(preprocess_dir).parent)
+            from src.preprocess.stage_files import PreprocessStageManager
+
+            goal_text = "\n".join(
+                part for part in (
+                    agent_input.user_goal,
+                    agent_input.additional_instructions or "",
+                )
+                if part
+            )
+            stage = PreprocessStageManager(str(preprocess_dir))
+            staged_path = stage.initialize(
+                experimental_source=agent_input.pdb_path,
+                goal_text=goal_text,
+                search_dirs=[base_working_dir],
+            )
+            if staged_path and os.path.isfile(staged_path):
+                current_pdb = staged_path
+            file_alias_map.update(stage.register_aliases())
+            staged_files: dict[str, str] = {}
+            if stage._raw_staged:
+                staged_files["raw.pdb"] = str(stage.files.raw.resolve())
+            if stage._reference_staged:
+                staged_files["reference_af3.pdb"] = str(stage.files.reference_af3.resolve())
+            execution_log.append(
+                f"Canonical preprocess staging: {stage.summary()} "
+                f"(working PDB: {Path(current_pdb).name if current_pdb else 'none'})"
+            )
+            if staged_files:
+                for label, path in staged_files.items():
+                    execution_log.append(f"  staged {label}: {path}")
+                log_agent_action(
+                    "preprocessing",
+                    "Staged input PDB files",
+                    {
+                        "status": "✅ SUCCESS",
+                        "staged_files": staged_files,
+                        "working_pdb": current_pdb,
+                        "note": (
+                            "reference_af3.pdb is optional — used only when remodel/align "
+                            "tools need an AlphaFold or homology model donor"
+                        ),
+                    },
+                )
             
             for i, step in enumerate(plan.steps):
                 # Log step start
@@ -1025,85 +1153,13 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 execution_log.append(f"Tool: {step.tool_name}")
                 execution_log.append(f"Reason: {step.reason}")
                 
-                # Prepare tool parameters
-                tool_params = dict(step.tool_params) if step.tool_params else {}
-                
-                # CRITICAL: Normalize all paths to ensure preprocessing outputs stay in preprocess directory
-                from ..utils import normalize_tool_params_for_agent, get_output_path_for_agent
-                
-                preprocess_dir = self.tool_executor.working_dir
-                
-                # Normalize to filenames only
-                tool_params = normalize_tool_params_for_agent(
-                    tool_params,
-                    preprocess_dir,
-                    param_names=[
-                        "pdb_file", "output_file", "output_dir",
-                        "protein_output", "ligand_output", "ion_output"
-                    ]
+                # Deterministic paths: LLM supplies tool + settings only
+                tool_params = stage.apply_tool_params(
+                    step.tool_name,
+                    dict(step.tool_params) if step.tool_params else {},
+                    current_pdb,
                 )
-                
-                # Resolve input file paths from preprocess directory
-                if "pdb_file" in tool_params:
-                    filename = tool_params["pdb_file"]
-                    preprocess_path = Path(preprocess_dir) / filename
 
-                    if filename in file_alias_map:
-                        # Alias registered after separation (e.g. "ligand.pdb" → "ATP.pdb")
-                        tool_params["pdb_file"] = file_alias_map[filename]
-                    elif preprocess_path.exists():
-                        tool_params["pdb_file"] = str(preprocess_path)
-                    elif Path(filename).name in file_alias_map:
-                        tool_params["pdb_file"] = file_alias_map[Path(filename).name]
-                    elif current_pdb and os.path.exists(current_pdb):
-                        tool_params["pdb_file"] = current_pdb
-                    else:
-                        tool_params["pdb_file"] = str(preprocess_path)
-                else:
-                    # Auto-inject pdb_file for tools that need it
-                    if step.tool_name in [
-                        "add_hydrogens", "validate_structure",
-                        "separate_complex_components", "extract_domain",
-                    ]:
-                        tool_params["pdb_file"] = current_pdb if current_pdb else agent_input.pdb_path
-
-                # Structure acquisition tools — resolve output paths
-                if step.tool_name == "download_structure":
-                    if not tool_params.get("output_file"):
-                        uid = tool_params.get("uniprot_id", "structure").lower()
-                        tool_params["output_file"] = str(
-                            Path(preprocess_dir) / f"{uid}.pdb"
-                        )
-                elif step.tool_name == "extract_domain":
-                    if not tool_params.get("output_file"):
-                        base = tool_params.get("protein_name") or Path(
-                            tool_params.get("pdb_file", "domain")
-                        ).stem
-                        domain = tool_params.get("domain_name") or "domain"
-                        tool_params["output_file"] = str(
-                            Path(preprocess_dir) / f"{base}_{domain}.pdb"
-                        )
-                elif step.tool_name == "acquire_protein_structure":
-                    tool_params["output_dir"] = str(preprocess_dir)
-                
-                # Generate appropriate output paths for specific tools
-                if step.tool_name == "separate_complex_components":
-                    # Let the tool auto-name by real residue names (protein.pdb, ATP.pdb, MG.pdb)
-                    # Only set output_dir so files land in the preprocess directory
-                    tool_params["output_dir"] = str(preprocess_dir)
-                    # Remove any agent-forced output names — let tool detect component names
-                    tool_params.pop("protein_output", None)
-                    tool_params.pop("ligand_output", None)
-                    tool_params.pop("ion_output", None)
-                    
-                elif step.tool_name == "add_hydrogens":
-                    input_file = tool_params.get("pdb_file", current_pdb)
-                    base_name = Path(input_file).stem
-                    # Remove repeated _h suffixes
-                    while base_name.endswith("_h"):
-                        base_name = base_name[:-2]
-                    tool_params["output_file"] = get_output_path_for_agent(f"{base_name}_h.pdb", preprocess_dir)
-                
                 # Log actual paths being used (after overrides)
                 execution_log.append(f"Parameters: {json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in tool_params.items()}, indent=2)}")
                 
@@ -1159,7 +1215,12 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     
                     # Collect output files for logging
                     output_files = []
-                    if "output_file" in result:
+                    if step.tool_name == "remodel_structure" and result.get("output_file"):
+                        output_files.append(result["output_file"])
+                        current_pdb = result["output_file"]
+                        generated_files[result["output_file"]] = step.description
+                    file_alias_map.update(stage.register_aliases())
+                    if "output_file" in result and step.tool_name != "remodel_structure":
                         output_files.append(result["output_file"])
                         current_pdb = result["output_file"]
                         generated_files[result["output_file"]] = step.description
@@ -1172,9 +1233,48 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         output_files.append(result["protein_file"])
                         current_pdb = result["protein_file"]  # Use protein for chaining
                         generated_files[result["protein_file"]] = "Protein component"
+                        actual_protein = result["protein_file"]
+                        file_alias_map["protein.pdb"] = actual_protein
+                        file_alias_map[Path(actual_protein).name] = actual_protein
+                        input_stem = Path(agent_input.pdb_path or "").stem
+                        if input_stem:
+                            file_alias_map[f"{input_stem}_protein.pdb"] = actual_protein
+                        file_alias_map.update(stage.register_aliases())
+                        current_pdb = self._auto_normalize_phosphorylation(
+                            stage,
+                            current_pdb,
+                            execution_log,
+                            generated_files,
+                            file_alias_map,
+                            force_field=state.get("force_field", "amber99sb-ildn"),
+                            user_text=state.get("user_goal", "") or "",
+                        )
+                    elif step.tool_name == "remodel_structure" and result.get("output_file"):
+                        current_pdb = self._auto_normalize_phosphorylation(
+                            stage,
+                            result["output_file"],
+                            execution_log,
+                            generated_files,
+                            file_alias_map,
+                            force_field=state.get("force_field", "amber99sb-ildn"),
+                            user_text=state.get("user_goal", "") or "",
+                        )
+                    if step.tool_name == "normalize_phosphorylation_for_gromacs" and result.get("protein_file"):
+                        current_pdb = result["protein_file"]
                     if "ligand_file" in result:
-                        # Only keep ligand if component_selection says so (or if no selection specified)
-                        if not comp_sel or comp_sel.get("ligand", True):
+                        from src.preprocess.phospho_residues import is_phospho_protein_resname
+
+                        lig_stats = result.get("statistics", {}).get("ligand", {})
+                        lig_resnames = lig_stats.get("resnames", [])
+                        phospho_only = lig_resnames and all(
+                            is_phospho_protein_resname(r) for r in lig_resnames
+                        )
+                        if phospho_only:
+                            execution_log.append(
+                                f"  ⊘ Ignored phospho residue file as ligand: "
+                                f"{Path(result['ligand_file']).name}"
+                            )
+                        elif not comp_sel or comp_sel.get("ligand", True):
                             output_files.append(result["ligand_file"])
                             generated_files[result["ligand_file"]] = "Ligand component"
                             ligand_files.append(result["ligand_file"])
@@ -1186,7 +1286,10 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                             # Extract resnames from statistics
                             stats = result.get("statistics", {}).get("ligand", {})
                             if stats.get("resnames"):
-                                ligand_resnames.extend(stats["resnames"])
+                                ligand_resnames.extend(
+                                    r for r in stats["resnames"]
+                                    if not is_phospho_protein_resname(r)
+                                )
                         else:
                             execution_log.append(f"  ⊘ Ligand file excluded by component selection: {Path(result['ligand_file']).name}")
                     if "ion_file" in result:

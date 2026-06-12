@@ -77,9 +77,22 @@ def analyze_pdb(pdb_file: str) -> Dict[str, Any]:
         else:
             analysis["protein"] = {"present": False}
         
-        # Analyze ligands (non-protein, non-water, non-ion heteroatoms)
-        # Avoid 'ion' keyword - list common ion residue names instead
-        ligand = u.select_atoms("not protein and not resname HOH WAT TIP3 SOL NA CL K CA MG ZN FE CU ZN2 CA2 MG2 SOD CLA")
+        from src.preprocess.phospho_residues import (
+            phospho_resname_mda_selection,
+            select_phospho_protein_atoms,
+        )
+
+        # Analyze ligands (exclude protein, water, ions, phosphorylated amino acids)
+        phospho_sel = phospho_resname_mda_selection()
+        ligand = u.select_atoms(
+            "not protein and not (resname HOH WAT TIP3 SOL NA CL K CA MG ZN FE CU "
+            "ZN2 CA2 MG2 SOD CLA) and not ("
+            + phospho_sel
+            + ")"
+        )
+        phospho_atoms = select_phospho_protein_atoms(u)
+        if len(phospho_atoms) > 0:
+            ligand = ligand - phospho_atoms
         if len(ligand) > 0:
             ligand_residues = {}
             for resname in set(ligand.residues.resnames):

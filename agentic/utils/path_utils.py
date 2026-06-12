@@ -208,6 +208,54 @@ def ensure_agent_directory_exists(base_working_dir: str, agent_name: str) -> str
     return agent_dir
 
 
+def resolve_preprocess_pdb_path(
+    filename: str,
+    preprocess_dir: str,
+    file_alias_map: Optional[Dict[str, str]] = None,
+    current_pdb: Optional[str] = None,
+    extra_search_dirs: Optional[List[str]] = None,
+) -> str:
+    """
+    Resolve a PDB filename for preprocessing tools (including structure remodel).
+
+    Handles LLM-invented names like ``chain_a_6VC0_protein.pdb`` after
+    ``separate_complex_components`` produced ``protein.pdb``.
+    """
+    if not filename:
+        return current_pdb or ""
+
+    file_alias_map = file_alias_map or {}
+    clean = normalize_to_filename(filename)
+
+    if filename in file_alias_map:
+        return file_alias_map[filename]
+    if clean in file_alias_map:
+        return file_alias_map[clean]
+
+    preprocess_path = Path(preprocess_dir) / clean
+    if preprocess_path.exists():
+        return str(preprocess_path)
+
+    search_dirs = [preprocess_dir]
+    if extra_search_dirs:
+        search_dirs.extend(extra_search_dirs)
+    parent = Path(preprocess_dir).parent
+    if str(parent) not in search_dirs:
+        search_dirs.append(str(parent))
+
+    for root in search_dirs:
+        candidate = Path(root) / clean
+        if candidate.exists():
+            return str(candidate)
+
+    if current_pdb and os.path.isfile(current_pdb):
+        current_name = Path(current_pdb).name
+        if clean == current_name or clean == "protein.pdb" or clean.endswith("_protein.pdb"):
+            return current_pdb
+
+    return str(preprocess_path)
+
+
 def get_output_path_for_agent(
     filename: str,
     agent_working_dir: str

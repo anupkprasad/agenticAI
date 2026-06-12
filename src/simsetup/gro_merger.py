@@ -44,9 +44,14 @@ class GROMerger:
             # Merge all atom groups
             merged = Merge(*[u.atoms for u in universes])
             
-            # Write merged structure
+            # Write merged structure (fix MDAnalysis default title for GROMACS logs)
             with GROWriter(output_file, n_atoms=merged.atoms.n_atoms) as writer:
                 writer.write(merged.atoms)
+            out_path = Path(output_file)
+            lines = out_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if lines:
+                lines[0] = "Merged GROMACS system"
+                out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             
             # Collect statistics
             component_stats = []

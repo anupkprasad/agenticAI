@@ -205,7 +205,8 @@ class ComplexSystemBuilder:
 
     def _step_generate_mdp(
         self, force_field: str, has_ligand: bool, has_ions: bool,
-        production_ns: float, temperature: float, pressure: float
+        production_ns: float, temperature: float, pressure: float,
+        extended_minimization: bool = False,
     ) -> Dict[str, str]:
         """Step: generate all MDP files (ions, minim, nvt, npt, md)."""
         gen = MDPGenerator(force_field=force_field)
@@ -216,6 +217,7 @@ class ComplexSystemBuilder:
             has_ligand=has_ligand,
             has_ions=has_ions,
             production_ns=production_ns,
+            extended_minimization=extended_minimization,
         )
 
     def _step_generate_tpr(
@@ -249,6 +251,7 @@ class ComplexSystemBuilder:
         production_ns: float = 200.0,
         temperature: float = 310.0,
         pressure: float = 1.0,
+        extended_minimization: bool = False,
     ) -> Dict[str, Any]:
         """
         Build a complete GROMACS simulation system.
@@ -391,10 +394,18 @@ class ComplexSystemBuilder:
         mdp_files = self._step_generate_mdp(
             force_field, has_ligand, has_crystal_ions,
             production_ns, temperature, pressure,
+            extended_minimization=extended_minimization,
         )
-        ions_mdp = mdp_files["ions"]
-        results["steps"].append("Generated MDP files (ions, minim, nvt, npt, md)")
+        minim_note = "minim, minim2, nvt, npt, md" if extended_minimization else "minim, nvt, npt, md"
+        results["steps"].append(f"Generated MDP files (ions, {minim_note})")
         results["files"]["mdp_files"] = mdp_files
+
+        ions_mdp = mdp_files.get("ions")
+        if not ions_mdp:
+            return {
+                "success": False,
+                "error": "MDP generation did not produce ions.mdp",
+            }
 
         # =====================================================================
         # Step 8: Add neutralising ions + salt (ion_adder)
@@ -443,6 +454,7 @@ def build_simulation_system(
     production_ns: float = 200.0,
     temperature: float = 310.0,
     pressure: float = 1.0,
+    extended_minimization: bool = False,
 ) -> Dict[str, Any]:
     """
     Build complete GROMACS simulation system from component PDB or GRO files.
@@ -493,4 +505,5 @@ def build_simulation_system(
         production_ns=production_ns,
         temperature=temperature,
         pressure=pressure,
+        extended_minimization=extended_minimization,
     )

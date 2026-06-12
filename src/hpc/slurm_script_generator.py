@@ -22,7 +22,7 @@ def generate_slurm_script(
     ntasks: int = 1,
     cpus_per_task: int = 64,
     memory: str = "40G",
-    time_limit: str = "3-00:00:00",
+    time_limit: str = "5-00:00:00",
     gpu_count: int = 1,
     email: Optional[str] = None,
     gromacs_module: str = "GROMACS/2024.4-foss-2023b-CUDA-12.4.0-PLUMED-2.9.2",
@@ -48,7 +48,7 @@ def generate_slurm_script(
         ntasks: Number of tasks/processes (default: 1)
         cpus_per_task: CPU cores per task (default: 64)
         memory: Memory allocation (default: 40G)
-        time_limit: Time limit in format days-hours:minutes:seconds (default: 3-00:00:00)
+        time_limit: Time limit in format days-hours:minutes:seconds (default: 5-00:00:00)
         gpu_count: Number of GPUs to request (default: 1)
         email: Email address for job notifications (optional)
         gromacs_module: GROMACS module name to load (default: GROMACS/2024.4-foss-2023b-CUDA-12.4.0-PLUMED-2.9.2)
@@ -69,9 +69,14 @@ def generate_slurm_script(
         # Default simulation phases
         if simulation_phases is None:
             simulation_phases = ["minim", "nvt", "npt", "md"]
-        
+
         # Validate working directory and convert to absolute path
         work_path = Path(working_dir).resolve()
+
+        if (work_path / "minim2.mdp").is_file() and "minim2" not in simulation_phases:
+            simulation_phases = ["minim", "minim2"] + [
+                p for p in simulation_phases if p != "minim"
+            ]
         if not work_path.exists():
             return {
                 "success": False,
@@ -125,13 +130,24 @@ echo "======================================"
 # Change to working directory
 cd {working_dir_abs} || exit 1
 echo "Changed to directory: $(pwd)"
+
+# MPI foss GROMACS builds may auto-start multiple ranks under SLURM, which fails
+# domain decomposition on modest boxes. Force one MPI rank + OpenMP threads.
+export OMP_PLACES=cores
+OMP_CPU_THREADS=${{SLURM_CPUS_PER_TASK:-{cpus_per_task}}}
+OMP_GPU_THREADS=${{SLURM_CPUS_PER_TASK:-{cpus_per_task}}}
+if [ "$OMP_GPU_THREADS" -gt 16 ]; then OMP_GPU_THREADS=16; fi
+# OMP_NUM_THREADS must match -ntomp on each mdrun line (set per phase below).
+MDRUN_CPU="-ntmpi 1 -ntomp ${{OMP_CPU_THREADS}} -nb cpu -pme cpu -bonded cpu"
+MDRUN_GPU="-ntmpi 1 -ntomp ${{OMP_GPU_THREADS}} -nb gpu -pme gpu -bonded cpu -update cpu"
 """
         
         # Build GROMACS command sections for each phase
         gromacs_commands = []
         
         phase_descriptions = {
-            "minim": "Energy Minimization",
+            "minim": "Energy Minimization (stage 1, restrained)",
+            "minim2": "Energy Minimization (stage 2, unrestrained)",
             "nvt": "NVT Equilibration (Constant Volume)",
             "npt": "NPT Equilibration (Constant Pressure)",
             "md": "Production MD Simulation"
@@ -178,12 +194,21 @@ if [ $? -ne 0 ]; then
 fi
 """
             
-            # Build mdrun command
-            # Use simple mdrun command and let GROMACS automatically choose hardware
-            # GROMACS will automatically use GPU when appropriate based on integrator type
+            # minim: CPU thread-parallel; equilibration/production: GPU when requested
+            if gpu_count > 0 and phase in ("nvt", "npt", "md"):
+                mdrun_line = (
+                    f"export OMP_NUM_THREADS=${{OMP_GPU_THREADS}}\n"
+                    f"gmx mdrun -v -deffnm {output_prefix} $MDRUN_GPU"
+                )
+            else:
+                mdrun_line = (
+                    f"export OMP_NUM_THREADS=${{OMP_CPU_THREADS}}\n"
+                    f"gmx mdrun -v -deffnm {output_prefix} $MDRUN_CPU"
+                )
+
             mdrun_cmd = f"""
 # Run simulation
-gmx mdrun -v -deffnm {output_prefix}
+{mdrun_line}
 
 if [ $? -ne 0 ]; then
     echo "ERROR: mdrun failed for {phase}"
@@ -258,7 +283,7 @@ def generate_simple_slurm_script(
     partition: str = "gpu_p",
     cpus_per_task: int = 64,
     memory: str = "40G",
-    time_limit: str = "3-00:00:00",
+    time_limit: str = "5-00:00:00",
     gpu_count: int = 1,
     email: Optional[str] = None,
     modules: Optional[List[str]] = None,
@@ -274,7 +299,7 @@ def generate_simple_slurm_script(
         partition: SLURM partition (default: gpu_p)
         cpus_per_task: CPU cores (default: 64)
         memory: Memory allocation (default: 40G)
-        time_limit: Time limit (default: 3-00:00:00)
+        time_limit: Time limit (default: 5-00:00:00)
         gpu_count: Number of GPUs (default: 1)
         email: Email for notifications (optional)
         modules: List of modules to load (optional)

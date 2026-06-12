@@ -19,7 +19,7 @@ def create_slurm_script(
     partition: str = "gpu_p",
     cpus_per_task: int = 64,
     memory: str = "40G",
-    time_limit: str = "3-00:00:00",
+    time_limit: str = "5-00:00:00",
     gpu_count: int = 1,
     email: Optional[str] = None,
     gromacs_module: str = "GROMACS/2024.4-foss-2023b-CUDA-12.4.0-PLUMED-2.9.2"

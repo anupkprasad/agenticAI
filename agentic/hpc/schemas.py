@@ -17,7 +17,7 @@ class HPCConfig(BaseModel):
     cpus_per_task: int = Field(default=64, description="CPUs per task")
     memory: str = Field(default="40G", description="Memory allocation")
     gpu_count: int = Field(default=1, description="Number of GPUs")
-    time_limit: str = Field(default="3-00:00:00", description="Time limit (days-hours:min:sec)")
+    time_limit: str = Field(default="5-00:00:00", description="Time limit (days-hours:min:sec)")
     email: Optional[str] = Field(None, description="Email for notifications")
     gromacs_module: str = Field(
         default="GROMACS/2024.4-foss-2023b-CUDA-12.4.0-PLUMED-2.9.2",
