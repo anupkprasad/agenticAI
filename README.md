@@ -13,7 +13,7 @@ system can:
 5. Analyse trajectories (RMSD, RMSF, Rg, DCCM, DSSP, COM distances)
 6. Produce HTML reports with literature references and interactive 3D views
 
-**Full usage guide:** [docs/TUTORIAL.md](docs/TUTORIAL.md)
+**Full usage guide:** [TUTORIAL.md](TUTORIAL.md)
 
 ---
 
@@ -97,7 +97,7 @@ python run_agenticAIWork.py \
   --use-llm --no-human-loop
 ```
 
-More examples (resume, component cases, parameter overrides): [docs/TUTORIAL.md](docs/TUTORIAL.md)
+More examples (resume, component cases, parameter overrides): [TUTORIAL.md](TUTORIAL.md)
 
 ---
 
@@ -153,7 +153,7 @@ python run_agenticAIWork.py ... --force-field charmm36-jul2022
 Multi-sim run under `--working-dir /work/pseudo`:
 
 ```
-/work/pseudo/
+/pseudo/
   p21860/
     preprocess/       # protein.pdb, protein_h.pdb, ...
     simsetup/         # topol.top, *.gro, *.mdp
@@ -191,8 +191,8 @@ src/
   simsetup/                # GROMACS system builder
   analysis/                # Combined cross-sim analysis
   reporter/                # Report generation
+TUTORIAL.md                # End-to-end usage guide
 docs/
-  TUTORIAL.md              # End-to-end usage guide
   ARCHITECTURE.md          # System design
   PROJECT.md               # Extended project overview
   TOOLS.md                 # Tool catalogue
@@ -204,7 +204,7 @@ docs/
 
 | Document | Description |
 |----------|-------------|
-| [docs/TUTORIAL.md](docs/TUTORIAL.md) | Step-by-step workflows and troubleshooting |
+| [TUTORIAL.md](TUTORIAL.md) | Step-by-step workflows and troubleshooting |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | LangGraph pipeline and multi-sim design |
 | [docs/PROJECT.md](docs/PROJECT.md) | Extended overview and conventions |
 | [docs/TOOLS.md](docs/TOOLS.md) | Available agent tools |
@@ -310,3 +310,31 @@ If you do **not** want the extra `minim2` stage, omit “extended minimization�
 
 If minim/minim2 finished but NVT failed (e.g. OpenMP thread mismatch), use the updated `*_run.sh` in `hpc/` (per-phase `OMP_NUM_THREADS`) or continue manually from `minim2.gro` with the NVT `grompp` / `mdrun` commands in that script.
 
+
+
+
+
+
+####   Examples run in the project  ############
+```bash
+python run_agenticAIWork.py \
+  --goal "I want to study the effect of ATP binding in protein dynamics of these four PDBs p21860.pdb, q8iv63.pdb, q8nb16.pdb, q8wz42.pdb which are available in /pseudo/ directory. Each pdb file has protein + ATP + MG. Please preprocess and setup MD Simulation for 100 ns of all Pdbs with two different cases: 1. Protein only, 2. Protein + ATP + MG therefore total 8 simulations. Once the simulation setups are done please submit the job in HPC. The simulated protein are human pseudokinases and the name of pseudokinase in the uniprotid are p21860: ERBB3, q8iv63: VRK3, q8nb16: MLKL, q8wz42: TITIN. For each system compute: (1) backbone RMSD over time to assess structural stability, (2) per-residue RMSF to identify flexible and rigid regions, Also the RMSF bar plot near active sites (resid 150 to 200) (3) radius of gyration to monitor compactness, (4) center-of-mass distance between the bound ATP ligand and the catalytic pocket (pocket defined as all protein atoms within 5 Å of ATP at frame 0) to track binding-site stability, (5) Dynamic Cross-Correlation Matrix (DCCM) of Cα fluctuations to reveal correlated and anti-correlated residue motions and allosteric communication networks, DCCM diffs in holo and apo form of protein and (6) secondary structure (DSSP) time evolution of whole protein and active sites (resid 150 to 200) which quantify αC-helix and activation-loop structural dynamics. After per-simulation analysis, generate comparative overlay plots and statistical tables across all pseudokinases. For the reporter agent, retrieve relevant literature for each pseudokinase with its given name focusing on activation-loop conformations, allosteric regulation, and dynamics from MD simulations or experimental. Correlate findings results from simulation with literature in the final report." \
+  --working-dir pseudo \
+  --subtask preprocess simsetup hpcjob \
+  --simtype multisim \
+  --use-llm --no-human-loop
+
+
+| `--subtask` | all agents | `preprocess simsetup hpcjob analysis reporter` |
+
+
+
+  python run_agenticAIWork.py \
+  --goal "I want to study the dynamics of the N-terminal segment of chain B in the two PDBs, dclk3_psma3_in.pdb and dclk3_psma3_less_out.pdb, which are available in the /dclk_PSMA/ directory. Please preprocess and set up 100 ns MD simulations for protein complex provided in both PDBs and submit the jobs on the HPC after setup. In the analysis The main focus should be on chain B from residues 1 to 34 and how this segment interacts with nearby residues in chain A. For each simulation, compute backbone RMSD over time for the whole complex and for chain B residues 1 to 34. Compute per residue RMSF for chain B residues 1 to 34. At frame 0, identify all chain A residues within 10 Å of chain B residues 1 to 34, then compute RMSF for only those chain A residues throughout the trajectory. Also track the center of mass distance and minimum heavy atom distance between chain B residues 1 to 34 and those nearby chain A residues over time to determine whether the N terminal segment remains associated with chain A or moves away. Finally, generate comparative plots and statistical tables for dclk3_psma3_in.pdb versus dclk3_psma3_less_out.pdb, focusing on RMSD, RMSF, contact stability, and distance changes. In the final report, summarize which structure shows greater movement of chain B residues 1 to 34, whether this segment remains close to chain A, and whether nearby chain A residues become more or less flexible during the simulations." \
+  --working-dir dclk_PSMA \
+  --subtask analysis reporter \
+  --simtype multisim \
+  --use-llm --no-human-loop
+
+
+```
