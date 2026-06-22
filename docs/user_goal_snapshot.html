@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>User Goal Snapshot — Research Paper Export</title>
+  <style>
+    :root {
+      --page-width: 16cm;
+      --font-size: 11pt;
+      --line-height: 1.55;
+      --text: #111827;
+      --muted: #6b7280;
+      --border: #d1d5db;
+      --bg: #f9fafb;
+      --card: #ffffff;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 24px;
+      font-family: "Times New Roman", Times, Georgia, serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .toolbar {
+      max-width: 900px;
+      margin: 0 auto 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 13px;
+    }
+
+    .toolbar button {
+      padding: 8px 14px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #fff;
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    .toolbar button.primary {
+      background: #1e40af;
+      color: #fff;
+      border-color: #1e40af;
+    }
+
+    .toolbar label {
+      color: var(--muted);
+      margin-left: 4px;
+    }
+
+    .toolbar select, .toolbar input[type="number"] {
+      padding: 6px 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+
+    .hint {
+      max-width: 900px;
+      margin: 0 auto 20px;
+      font-family: system-ui, sans-serif;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    /* ── Export target (what gets captured) ── */
+    #snapshot {
+      width: var(--page-width);
+      margin: 0 auto;
+      background: var(--card);
+      border: 1px solid var(--border);
+      padding: 1.4cm 1.5cm;
+    }
+
+    .caption-label {
+      font-family: system-ui, sans-serif;
+      font-size: 9pt;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0 0 10px;
+    }
+
+    .goal-text {
+      margin: 0;
+      font-size: var(--font-size);
+      line-height: var(--line-height);
+      text-align: justify;
+      text-justify: inter-word;
+      hyphens: auto;
+      -webkit-hyphens: auto;
+    }
+
+    .footnote {
+      margin-top: 14px;
+      padding-top: 10px;
+      border-top: 1px solid #e5e7eb;
+      font-family: system-ui, sans-serif;
+      font-size: 8.5pt;
+      color: var(--muted);
+      text-align: left;
+    }
+
+    textarea.editor {
+      display: block;
+      width: 100%;
+      max-width: 900px;
+      margin: 0 auto 16px;
+      min-height: 180px;
+      padding: 12px;
+      font-family: system-ui, sans-serif;
+      font-size: 13px;
+      line-height: 1.5;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      resize: vertical;
+    }
+
+    @media print {
+      body { background: #fff; padding: 0; }
+      .toolbar, .hint, textarea.editor { display: none !important; }
+      #snapshot {
+        border: none;
+        margin: 0;
+        width: 100%;
+        padding: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button class="primary" id="btnPng">Download PNG (high-res)</button>
+    <button id="btnPdf">Print / Save PDF</button>
+    <button id="btnUpdate">Update preview</button>
+    <label>Scale
+      <select id="scale">
+        <option value="2">2×</option>
+        <option value="3" selected>3×</option>
+        <option value="4">4×</option>
+      </select>
+    </label>
+    <label>Font
+      <select id="fontFamily">
+        <option value='"Times New Roman", Times, serif' selected>Times New Roman</option>
+        <option value='Georgia, serif'>Georgia</option>
+        <option value='"Palatino Linotype", Palatino, serif'>Palatino</option>
+        <option value='Arial, Helvetica, sans-serif'>Arial</option>
+      </select>
+    </label>
+    <label>Size
+      <input type="number" id="fontSize" value="11" min="9" max="14" step="0.5" /> pt
+    </label>
+  </div>
+
+  <p class="hint">
+    Paste your <code>--goal</code> text below. The preview uses <strong>justified alignment</strong>
+    (flush left and right) for publication figures. For best quality: use <strong>Download PNG</strong>
+    at 3× or 4× scale, or <strong>Print / Save PDF</strong> with margins set to minimum.
+    Avoid screenshots of the Cursor editor — monospace code blocks are left-aligned by design.
+  </p>
+
+  <textarea class="editor" id="goalInput" spellcheck="false"></textarea>
+
+  <div id="snapshot">
+    <p class="caption-label">Figure X. Natural-language study objective (agentic MD workflow input)</p>
+    <p class="goal-text" id="goalDisplay"></p>
+    <p class="footnote" id="footnote">
+      Input prompt submitted to the agentic AI MD pipeline (<code>run_agenticAIWork.py --goal</code>).
+    </p>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+  <script>
+    const DEFAULT_GOAL = `I want to study the effect of ATP binding in protein dynamics of these four PDBs p21860.pdb, q8iv63.pdb, q8nb16.pdb, q8wz42.pdb which are available in /pseudo/ directory. Each pdb file has protein + ATP + MG. Please preprocess and setup MD Simulation for 100 ns of all Pdbs with two different cases: 1. Protein only, 2. Protein + ATP + MG therefore total 8 simulations. Once the simulation setups are done please submit the job in HPC. The simulated protein are human pseudokinases and the name of pseudokinase in the uniprotid are p21860: ERBB3, q8iv63: VRK3, q8nb16: MLKL, q8wz42: TITIN. For each system compute: (1) backbone RMSD over time to assess structural stability, (2) per-residue RMSF to identify flexible and rigid regions, Also the RMSF bar plot near active sites (resid 150 to 200) (3) radius of gyration to monitor compactness, (4) center-of-mass distance between the bound ATP ligand and the catalytic pocket (pocket defined as all protein atoms within 5 Å of ATP at frame 0) to track binding-site stability, (5) Dynamic Cross-Correlation Matrix (DCCM) of Cα fluctuations to reveal correlated and anti-correlated residue motions and allosteric communication networks, DCCM diffs in holo and apo form of protein and (6) secondary structure (DSSP) time evolution of whole protein and active sites (resid 150 to 200) which quantify αC-helix and activation-loop structural dynamics. After per-simulation analysis, generate comparative overlay plots and statistical tables across all pseudokinases. For the reporter agent, retrieve relevant literature for each pseudokinase with its given name focusing on activation-loop conformations, allosteric regulation, and dynamics from MD simulations or experimental. Correlate findings results from simulation with literature in the final report.`;
+
+    const goalInput = document.getElementById('goalInput');
+    const goalDisplay = document.getElementById('goalDisplay');
+    const snapshot = document.getElementById('snapshot');
+
+    goalInput.value = DEFAULT_GOAL;
+
+    function updatePreview() {
+      const text = goalInput.value.trim();
+      goalDisplay.textContent = text || '(paste goal text above)';
+      const font = document.getElementById('fontFamily').value;
+      const size = document.getElementById('fontSize').value;
+      goalDisplay.style.fontFamily = font;
+      goalDisplay.style.fontSize = size + 'pt';
+      snapshot.style.setProperty('--font-size', size + 'pt');
+    }
+
+    document.getElementById('btnUpdate').addEventListener('click', updatePreview);
+    document.getElementById('fontFamily').addEventListener('change', updatePreview);
+    document.getElementById('fontSize').addEventListener('change', updatePreview);
+    goalInput.addEventListener('input', () => {
+      clearTimeout(window._debounce);
+      window._debounce = setTimeout(updatePreview, 250);
+    });
+
+    document.getElementById('btnPdf').addEventListener('click', () => {
+      updatePreview();
+      window.print();
+    });
+
+    document.getElementById('btnPng').addEventListener('click', async () => {
+      updatePreview();
+      const scale = parseInt(document.getElementById('scale').value, 10) || 3;
+      const canvas = await html2canvas(snapshot, {
+        scale,
+        backgroundColor: '#ffffff',
+        useCORS: true,
+        logging: false,
+      });
+      const link = document.createElement('a');
+      link.download = 'user_goal_snapshot.png';
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    });
+
+    updatePreview();
+  </script>
+</body>
+</html>

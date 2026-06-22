@@ -16,7 +16,6 @@ work_di/
 work_dir_hl/
 work_dir_hl2/
 multi_run/
-multi_run_bckp/
 pseudokin/
 pseudokin_june3bckp/
 pseudokin1/
@@ -27,11 +26,12 @@ pseudo_for_paper/
 dclk_PSMA/
 horse_MLKL/
 pseudo1/
+agenticB5R1/
 *_bckp/
 backup/
 tests/
 tmp/
-docs/
+ment/
 
 # Log files
 *.log

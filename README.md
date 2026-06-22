@@ -337,4 +337,12 @@ python run_agenticAIWork.py \
   --use-llm --no-human-loop
 
 
+  python run_agenticAIWork.py \
+  --goal "Simulation are already done for these uniprot ids: p23458.pdb, p29597.pdb, p52333.pdb, q7rtn6.pdb, q96c45.pdb, q9bxu1.pdb, q9c0k7.pdb, q9y616.pdb. So please do not preprocess or simsetup or hpc. Directly do the analysis of this data. I want specifically RMSF for all the simulations" \
+  --working-dir /scratch/akp66103/agenticB5R1 \
+  --subtask analysis reporter \
+  --simtype multisim \
+  --use-llm --no-human-loop
+
+
 ```
