@@ -198,7 +198,8 @@ class ToolsRegistry:
             "get_simulation_setup_tools",
             "get_tool_metadata",
             "get_analysis_tools",
-            "get_hpc_tools"
+            "get_hpc_tools",
+            "get_reporter_tools",
         }
         if name in meta_function_names:
             return False
@@ -350,6 +351,19 @@ class ToolsRegistry:
         
         return description, args_dict
     
+    @staticmethod
+    def _dedupe_tools_by_name(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Return tools deduplicated by tool name (first occurrence wins)."""
+        seen: set[str] = set()
+        deduped: List[Dict[str, Any]] = []
+        for tool in tools:
+            name = tool.get("name", "")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            deduped.append(tool)
+        return deduped
+
     def get_tools_for_agent(
         self,
         agent_name: str,
@@ -366,7 +380,7 @@ class ToolsRegistry:
         Returns:
             List of tool metadata dicts
         """
-        tools = self.tools_by_agent.get(agent_name, [])
+        tools = self._dedupe_tools_by_name(self.tools_by_agent.get(agent_name, []))
         if not exclude_combined_tools or agent_name != "analysis":
             return tools
         try:
@@ -374,6 +388,102 @@ class ToolsRegistry:
             return [t for t in tools if not is_combined_analysis_tool(t.get("name", ""))]
         except ImportError:
             return tools
+
+    def _format_tools_compact(
+        self,
+        agent_name: str,
+        tools: List[Dict[str, Any]],
+        max_chars: int = 6000,
+    ) -> str:
+        """Compact tool listing for master-plan prompts (names + short descriptions)."""
+        agent_descriptions = {
+            "preprocess": "PDB cleanup, validation, hydrogen addition",
+            "simsetup": "Topology, solvation, ions, MDP/TPR generation",
+            "hpc": "SLURM submission and job monitoring",
+            "analysis": "Per-simulation trajectory metrics and plots",
+            "reporter": "HTML reports, literature search, summaries",
+        }
+        header = f"**{agent_name.upper()} AGENT:**"
+        expertise = agent_descriptions.get(agent_name.lower(), "")
+        lines = [header]
+        if expertise:
+            lines.append(f"Role: {expertise}")
+        for tool in tools:
+            params = tool.get("parameters") or {}
+            param_names = ", ".join(params.keys()) if params else "—"
+            desc = (tool.get("description") or "").strip().split("\n")[0]
+            if len(desc) > 120:
+                desc = desc[:117] + "..."
+            lines.append(f"  • {tool['name']}({param_names}): {desc}")
+        text = "\n".join(lines)
+        if len(text) <= max_chars:
+            return text
+        truncated = text[: max_chars - 40].rsplit("\n", 1)[0]
+        return truncated + f"\n  … ({len(tools)} tools total; list truncated)"
+
+    def get_combined_only_tools_context(self, max_chars: int = 5000) -> str:
+        """Tools that run once at project base across multiple simulations."""
+        try:
+            from agentic.analysis.tools import COMBINED_ANALYSIS_TOOL_NAMES
+        except ImportError:
+            return "(No cross-simulation combined tools registered.)"
+
+        combined_tools = [
+            t
+            for t in self.get_tools_for_agent("analysis", exclude_combined_tools=False)
+            if t.get("name") in COMBINED_ANALYSIS_TOOL_NAMES
+        ]
+        if not combined_tools:
+            return "(No cross-simulation combined tools registered.)"
+        return self._format_tools_compact(
+            "analysis (cross-simulation only)",
+            combined_tools,
+            max_chars=max_chars,
+        )
+
+    def get_master_plan_per_sim_tools_context(
+        self,
+        agent_list: List[str],
+        max_chars_per_agent: int = 5500,
+    ) -> str:
+        """
+        Per-simulation tools for each workflow agent in *agent_list*.
+
+        Uses compact formatting and a per-agent char budget so large analysis
+        tool lists do not crowd out reporter (or other) agents.
+        """
+        _cli_to_registry = {
+            "preprocess": "preprocess",
+            "simsetup": "simsetup",
+            "hpcjob": "hpc",
+            "analysis": "analysis",
+            "reporter": "reporter",
+        }
+        parts: List[str] = []
+        seen: set[str] = set()
+        for cli_name in agent_list:
+            registry_name = _cli_to_registry.get(cli_name, cli_name)
+            if registry_name in seen:
+                continue
+            seen.add(registry_name)
+            exclude_combined = registry_name == "analysis"
+            tools = self.get_tools_for_agent(
+                registry_name,
+                exclude_combined_tools=exclude_combined,
+            )
+            if not tools:
+                logger.warning(
+                    "ToolsRegistry: no per-sim tools for agent '%s'", registry_name
+                )
+                continue
+            parts.append(
+                self._format_tools_compact(
+                    registry_name,
+                    tools,
+                    max_chars=max_chars_per_agent,
+                )
+            )
+        return "\n\n".join(parts) if parts else "(No per-simulation tools found.)"
     
     def get_all_tools_summary(self) -> str:
         """

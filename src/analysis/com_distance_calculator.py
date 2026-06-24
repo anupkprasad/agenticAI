@@ -47,30 +47,31 @@ def calculate_com_distance(
     frame_interval: int = 1,
 ) -> Dict[str, Any]:
     """
-    Calculate per-frame center-of-mass (COM) distance between two atom selections.
+    Calculate per-frame center-of-mass (COM) distance between two explicit atom selections.
 
-    Works for any pair of MDAnalysis selections: protein domains, protein-ligand,
-    ligand-ions, chain-chain, etc.
+    **Use when** the user wants the distance between the COM of group A and the COM
+    of group B — e.g. whole protein vs ligand, N-terminal domain vs C-terminal domain,
+    or chain A vs chain B. You choose both selections explicitly.
+
+    **Do NOT use for** "ligand pocket distance" or "binding-site stability" — use
+    ``calculate_ligand_pocket_distance`` instead, which identifies pocket atoms near
+    the ligand at frame 0 and tracks ligand COM vs that pocket COM.
 
     Args:
         topology_file: Topology file (.gro, .pdb, .tpr) - full path
         trajectory_file: Trajectory file (.xtc, .trr, .dcd) - full path
-        selection1: First MDAnalysis selection string (e.g. "protein", "resname ATP")
-        selection2: Second MDAnalysis selection string (e.g. "resid 1:100 and name CA")
-        label1: Human-readable label for selection 1 (e.g. "Protein", "N-terminal domain")
-        label2: Human-readable label for selection 2 (e.g. "ATP", "C-terminal domain")
-        output_file: Output CSV filename (default: "com_distance.csv") - saved in working_dir
-        working_dir: Working directory for analysis (files will be written here)
-        frame_interval: Process every Nth frame (default: 1 = every frame)
+        selection1: First MDAnalysis selection (e.g. ``"protein"``, ``"resid 1:100"``)
+        selection2: Second MDAnalysis selection (e.g. ``"resname ATP"``)
+        label1: Plot label for selection 1 (default: ``"group1"``)
+        label2: Plot label for selection 2 (default: ``"group2"``)
+        output_file: CSV filename (default: ``"com_distance.csv"``)
+        working_dir: Directory for output files
+        frame_interval: Process every Nth frame (default: 1)
 
     Returns:
-        Dict with COM distance results and statistics
+        Dict with COM distance statistics and output path.
 
-    Output file format (CSV):
-        frame,time_ns,distance_angstrom
-        0,0.0000,12.3456
-        1,0.1000,12.5678
-        ...
+    Standard outputs: ``com_distance.csv``, plot as ``com_distance.png``.
     """
     try:
         # Setup working directory
@@ -221,39 +222,33 @@ def calculate_ligand_pocket_distance(
     """
     Track ligand displacement from its catalytic binding pocket over a trajectory.
 
-    Step 1 — Identify pocket atoms: at the first trajectory frame, collect all
-    protein atoms within ``cutoff`` Å of any ligand atom.  These atoms define
-    the "catalytic pocket" reference group and stay fixed for the entire analysis.
+    **Use when** the user asks for ligand **pocket** distance, binding-site stability,
+    or "COM distance of ATP from the protein" in a holo kinase context without
+    specifying whole-protein COM. This is the standard metric for ligand binding studies.
 
-    Step 2 — Track COM-to-COM distance: for every frame, compute the Euclidean
-    distance between the center of mass (COM) of the pocket atoms and the COM of
-    the ligand.  A rising distance indicates the ligand is moving away from the
-    pocket; a stable, small distance indicates it remains bound.
+    **Do NOT use for** arbitrary two-group COM distances — use ``calculate_com_distance``
+    with explicit ``selection1`` / ``selection2`` (e.g. whole protein vs ligand, or
+    domain–domain distances).
+
+    **Algorithm:**
+    1. At frame 0, collect protein atoms within ``cutoff`` Å of the ligand → pocket group.
+    2. Each frame: distance between pocket COM and ligand COM.
 
     Args:
         topology_file: Topology file (.gro, .pdb, .tpr) — full path.
         trajectory_file: Trajectory file (.xtc, .trr, .dcd) — full path.
-        ligand_selection: MDAnalysis selection for the ligand
-            (default: ``"resname LIG"``).  Use the residue name from your
-            topology, e.g. ``"resname ATP"`` or ``"resname INH"``.
-        protein_selection: MDAnalysis selection for the protein atoms to search
-            within (default: ``"protein"``).  Restrict to heavy atoms with
-            ``"protein and not name H*"`` if desired.
-        cutoff: Distance cutoff in Å used to identify pocket atoms at frame 0
-            (default: 5.0).
-        output_file: Output CSV filename (default: auto-generated from selections).
-            Saved inside ``working_dir`` when provided.
-        working_dir: Working directory for analysis output files.
-        frame_interval: Process every Nth frame (default: 1 = every frame).
+        ligand_selection: MDAnalysis ligand selection (default: ``"resname LIG"``).
+            Examples: ``"resname ATP"``, ``"resname INH"``.
+        protein_selection: Protein atoms searched for pocket contacts (default: ``"protein"``).
+        cutoff: Å cutoff to define pocket atoms at frame 0 (default: 5.0).
+        output_file: CSV filename (default: ``"ligand_pocket_distance.csv"``).
+        working_dir: Output directory.
+        frame_interval: Process every Nth frame (default: 1).
 
     Returns:
-        Dict with keys:
-            success (bool), n_pocket_atoms (int), pocket_selection (str),
-            mean_distance / std_distance / min_distance / max_distance (float, Å),
-            n_frames (int), output_file (str), message (str).
+        Dict with pocket atom count, distance statistics, and output path.
 
-    Output CSV columns:
-        frame, time_ns, distance_angstrom
+    Standard outputs: ``ligand_pocket_distance.csv``, plot as ``ligand_pocket_distance.png``.
     """
     try:
         original_dir = None

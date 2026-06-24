@@ -149,11 +149,37 @@ Note: Only included components should be extracted during preprocessing and set 
 """
             context_parts.append(comp_context)
     
-    # 5. Task type context
+    # 5. Task type and workflow agents context
+    agent_list = state.get("agent_list") or []
+    execution_order = get_agent_execution_order(subtask_type, state)
+    post_sim_analysis = subtask_type in ("analysis_only", "reporter_only", "multi_agent") and (
+        set(agent_list or []) <= {"analysis", "reporter"}
+        or execution_order == ["analysis", "reporter"]
+    )
+
+    agent_lines = []
+    if execution_order:
+        agent_lines.append(
+            "Involved field agents (ONLY these stages — do not mention others): "
+            + " → ".join(execution_order)
+        )
+    elif agent_list:
+        agent_lines.append(
+            "Involved field agents (ONLY these stages): " + ", ".join(agent_list)
+        )
+    if post_sim_analysis:
+        agent_lines.append(
+            "Trajectories already exist. Do NOT mention preprocessing, simulation setup, "
+            "HPC submission, equilibration, production runs, or solvation unless the user "
+            "explicitly requests those stages."
+        )
+
     task_context = f"""
 **Task Type:** {subtask_type}
 **Working Directory:** {working_dir}
 """
+    if agent_lines:
+        task_context += "**Workflow Scope:**\n" + "\n".join(f"- {line}" for line in agent_lines) + "\n"
     context_parts.append(task_context)
     
     # Build the enrichment prompt

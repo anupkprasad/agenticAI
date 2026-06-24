@@ -128,12 +128,15 @@ class ConversationLogger:
         for field in relevant_fields:
             value = input_data.get(field)
             if value:
-                # Truncate long planner instructions for log readability
-                if field == 'planner_instructions' and isinstance(value, str) and len(value) > 200:
+                if field in ("user_goal", "user_goal_original") and isinstance(value, str) and len(value) > 200:
+                    self.logger.info(f"     • {field}:")
+                    for line in value.splitlines():
+                        self.logger.info(f"       {line}")
+                elif field == 'planner_instructions' and isinstance(value, str) and len(value) > 200:
                     display_value = value[:200] + "... [truncated, see full plan above]"
+                    self.logger.info(f"     • {field}: {display_value}")
                 else:
-                    display_value = value
-                self.logger.info(f"     • {field}: {display_value}")
+                    self.logger.info(f"     • {field}: {value}")
         self.logger.info("")
         self._flush()
     
@@ -204,6 +207,12 @@ class ConversationLogger:
         for key, value in details.items():
             if isinstance(value, (list, dict)):
                 self.logger.info(f"   📊 {key}: {json.dumps(value, indent=6)}")
+            elif isinstance(value, str) and key in (
+                "user_goal", "user_goal_original", "goal", "reasoning", "overview"
+            ) and len(value) > 200:
+                self.logger.info(f"   📊 {key}:")
+                for line in value.splitlines():
+                    self.logger.info(f"      {line}")
             else:
                 self.logger.info(f"   📊 {key}: {value}")
         self.logger.info("")

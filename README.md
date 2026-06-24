@@ -21,11 +21,11 @@ system can:
 
 - **Natural-language goals** — describe what you want; agents build a concrete plan
 - **UniProt / AlphaFold integration** — start from an accession without a local PDB
-- **Multi-simulation mode** — compare proteins or component cases (apo vs holo) in one run
+- **Multi-simulation mode** — run several proteins or component cases in one study
 - **Holo feasibility guard** — skips holo cases when ligands are missing (e.g. AlphaFold)
 - **Phosphorylated proteins** — SEP/TPO/PTR stay in the protein chain; mapped for
   CHARMM36 (SP2/THP/TP2), not parameterized as separate ligands
-- **Supervisor → Planner → Agents** — validated routing and tool-based execution
+- **Supervisor → Planner → Agents** — validated routing, planner-owned master plans, and tool-based execution
 - **Resume / retry** — re-run failed multi-sim jobs without redoing successes
 - **Audit trail** — `agent_conversation.log`, `run_summary.md`, execution plans
 
@@ -101,6 +101,47 @@ More examples (resume, component cases, parameter overrides): [TUTORIAL.md](TUTO
 
 ---
 
+## Prompt Engineering Guide
+
+AgenticAI works best when `--goal` describes the scientific intent, the available inputs, the requested workflow stages, and the exact analyses you want. Write the goal as a short paragraph or a few sentences, not as comma-separated metadata. Natural language gives the planner enough context to create per-simulation prompts that downstream agents can follow.
+
+Include these details when they apply:
+
+- **Inputs and labels:** list PDB files, UniProt IDs, simulation directories, and protein names such as `p21860: ERBB3`.
+- **Workflow stage:** say whether to preprocess, set up simulation, submit to HPC, analyze completed trajectories, report results, or only run a subset via `--subtask`.
+- **Simulation intent:** specify component cases such as protein-only, protein+ATP+MG, mutant vs wild type, phosphorylated vs dephosphorylated, or chain/residue windows.
+- **Analysis scope:** name the exact analyses you want. For example, “RMSF only for all simulations” will keep the analysis focused on RMSF. If you ask broadly for “protein dynamics” without naming metrics, the planner may choose appropriate dynamics analyses such as RMSD, RMSF, Rg, DCCM, or interaction distances based on available tools and biological context.
+- **Per-metric simulation subsets (multi-sim):** each combined metric can target a different set of simulations. You do not need every metric on every protein. Examples:
+  - “RMSF for all four simulations” → combined RMSF overlay uses all sims.
+  - “DCCM for JAK1 and TYK2 only” → per-sim DCCM on those two; combined DCCM compares only them.
+  - “Radius of gyration for JAK1, TYK2, and ULK4” → Rg per-sim on those three; combined Rg overlay on those three only (STRAA excluded).
+- **Combined analysis intent:** ask explicitly for comparison, cross-simulation trends, aggregate plots, or a combined report only when you want base-level combined analysis. Otherwise multi-sim runs focus on the individual simulation plans.
+- **COM distance wording (important):** two tools exist — choose the phrasing that matches your intent:
+  - **Ligand pocket distance** (recommended for holo kinases): say “ligand pocket distance”, “ATP distance to the catalytic pocket”, or “protein atoms within 5 Å of ATP at frame 0”. Output: `ligand_pocket_distance.csv`.
+  - **Whole-protein COM distance:** say “COM distance between the **whole protein** and ATP” or “protein COM to ligand COM”. Output: `com_distance.csv`.
+  - Do not mix both unless you explicitly want pocket tracking **and** whole-protein COM.
+- **Outputs:** mention required plots, CSV summaries, residue ranges, ligand-pocket definitions, literature context, and report format.
+
+Example multi-metric subset prompt:
+
+```bash
+--goal "Trajectories are complete for p23458:JAK1, p29597:TYK2, q7rtn6:STRAA, q96c45:ULK4. Analysis only. For all simulations: RMSF and ligand pocket distance (ATP, 5 Å pocket at frame 0). Combined: overlay RMSF and pocket distance across all four. DCCM for JAK1 and TYK2 only. Radius of gyration for JAK1, TYK2, and ULK4 with a combined Rg plot. Do not run preprocessing or HPC."
+```
+
+Example focused analysis prompt:
+
+```bash
+--goal "Simulations are already complete for p23458.pdb, p29597.pdb, and p52333.pdb under /scratch/project. Run analysis and reporting only. I want RMSF only for each simulation, with per-residue RMSF plots and a CSV summary for each protein. Do not run preprocessing, setup, HPC, or additional analyses."
+```
+
+Example comparative prompt:
+
+```bash
+--goal "Analyze completed trajectories for ERBB3, VRK3, MLKL, and TITIN. Compute backbone RMSD, per-residue RMSF, and radius of gyration for each simulation, then create a combined comparison report showing cross-protein trends and shared flexible regions. Include protein names in the report and cite relevant literature."
+```
+
+---
+
 ## CLI Reference
 
 ```bash
@@ -162,7 +203,7 @@ Multi-sim run under `--working-dir /work/pseudo`:
     reporter/         # report.html
     agent_conversation.log
   p21860_ATP_MG/      # or skipped with reason in run_summary
-  analysis/           # combined overlay plots
+  analysis/           # combined plots when requested by user intent or --combined-only
   reporter/
     combined_report.html
   run_summary.md      # human-readable outcome
@@ -338,11 +379,12 @@ python run_agenticAIWork.py \
 
 
   python run_agenticAIWork.py \
-  --goal "Simulation are already done for these uniprot ids: p23458.pdb, p29597.pdb, p52333.pdb, q7rtn6.pdb, q96c45.pdb, q9bxu1.pdb, q9c0k7.pdb, q9y616.pdb. So please do not preprocess or simsetup or hpc. Directly do the analysis of this data. I want specifically RMSF for all the simulations" \
-  --working-dir /scratch/akp66103/agenticB5R1 \
+  --goal "Simulation are already done for these uniprot ids: p23458.pdb, p29597.pdb, q7rtn6.pdb, q96c45.pdb. So please do not preprocess or simsetup or hpc. Directly do the analysis of these data. I want specifically RMSF of protein and COM distance of ATP (ligand) from protein for all the simulations. In combined analysis, please compare the RMSF in cross simulations and ligand pocket distance in cross simulaitons. The given uniprotid:protein name are p23458:JAK1, p29597:TYK2, q7rtn6:STRAA and q96c45:ULK4. Calculate the DCCM for JAK1 and TYK2 to compare the dynamics between these two proteins. Please also calculate radius of gyration for JAK1, TYK2 and ULK4 and compare them in plot. In report preparation, please focus on relevant pseudokinase literature of these simulated proteins." \
+  --working-dir ./agenticB5R1 \
   --subtask analysis reporter \
   --simtype multisim \
   --use-llm --no-human-loop
 
+ q96c45.pdb, q9bxu1.pdb, q9c0k7.pdb, q9y616.pdb
 
 ```

@@ -7,8 +7,10 @@ Creates execution plans with access to:
 - Field-specific expertise for detailed planning
 """
 import logging
+import json
 import yaml
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -19,8 +21,148 @@ from ..utils.plan_persistence import save_plan_artifacts
 from ..programmer import MDProgrammer
 from .tools_registry import get_tools_registry
 from .knowledge_loader import get_knowledge_loader
+from .planning_guidelines import (
+    detect_requested_metrics,
+    get_intent_preservation_block,
+    get_standard_output_filenames_block,
+    get_master_plan_tools_note,
+)
 
 logger = logging.getLogger(__name__)
+
+
+_SIMULATION_STAGE_AGENTS = frozenset({"preprocess", "simsetup", "hpcjob"})
+
+
+def _coerce_plan_text(value: Any, default: str = "") -> str:
+    """Normalize LLM plan fields (str, list, or dict) to a markdown-safe string."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip() or default
+    if isinstance(value, list):
+        parts = [_coerce_plan_text(item, default="") for item in value]
+        parts = [p for p in parts if p]
+        return "\n".join(parts) if parts else default
+    if isinstance(value, dict):
+        for key in ("prompt", "goal", "text", "description", "plan"):
+            if key in value and value[key]:
+                return _coerce_plan_text(value[key], default=default)
+        return json.dumps(value, indent=2, default=str)
+    return str(value).strip() or default
+
+
+def _is_post_simulation_subtask(state: Dict[str, Any]) -> bool:
+    """True when only analysis and/or reporting should run on completed data."""
+    subtask_type = state.get("subtask_type")
+    if subtask_type in ("analysis_only", "reporter_only"):
+        return True
+    if subtask_type == "multi_agent":
+        agents = set(state.get("agent_list") or [])
+        return not bool(agents & _SIMULATION_STAGE_AGENTS)
+    return False
+
+
+def _goal_requests_combined_analysis(goal: str, agent_list: List[str], subtask_type: Optional[str]) -> bool:
+    """Conservative intent detector for cross-simulation analysis."""
+    if subtask_type == "multi_agent" and not (set(agent_list or []) & {"analysis", "reporter"}):
+        return False
+
+    text = (goal or "").lower()
+    text = (
+        text.replace("\u2011", "-")
+        .replace("\u2012", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+    )
+
+    negative_patterns = [
+        r"\bno\s+(combined|cross[-\s]?simulation|comparative|comparison)\b",
+        r"\bdo\s+not\s+(compare|combine|aggregate)\b",
+        r"\bwithout\s+(combined|comparison|comparative)\b",
+        r"\bonly\s+per[-\s]?simulation\b",
+        r"\beach\s+simulation\s+separately\b",
+    ]
+    if any(re.search(p, text) for p in negative_patterns):
+        return False
+
+    positive_patterns = [
+        r"\bcombined\s+(analysis|report|comparison)\b",
+        r"\bcross[-\s]?simulation\b",
+        r"\bcomparative\s+(analysis|report|study|plots?)\b",
+        r"\bcompare\s+(the\s+)?(simulations|proteins|systems|cases|conditions)\b",
+        r"\bcomparison\s+(between|across|of)\b",
+        r"\bacross\s+(all\s+)?(simulations|proteins|systems|cases|conditions)\b",
+        r"\baggregate(d)?\s+(results|metrics|analysis)\b",
+        r"\bcommon\s+(trends|patterns|flexible regions|motions)\b",
+        r"\bconserved\s+(flexible regions|motions|dynamic patterns)\b",
+        r"\bapo\s*(/|vs|versus|and)\s*holo\b",
+        r"\bcase\s*(comparison|vs|versus)\b",
+    ]
+    return any(re.search(p, text) for p in positive_patterns)
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    """Parse booleans from strict JSON booleans or common string variants."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "y", "1"}:
+            return True
+        if normalized in {"false", "no", "n", "0", ""}:
+            return False
+    return default
+
+
+def _build_per_sim_analysis_prompt(
+    entry: Dict[str, Any],
+    *,
+    original_goal: str,
+    enriched_prompt: str,
+    agents_desc: str,
+) -> str:
+    """Deterministic per-simulation prompt for post-simulation analysis/reporter runs."""
+    protein = entry.get("protein_name") or entry.get("label", "system")
+    label = entry.get("label", "simulation")
+    case = entry.get("case_description", "default system")
+    wdir = entry.get("working_dir", "")
+    requirements = (original_goal or enriched_prompt or "").strip()
+
+    return (
+        f"Analyze the completed trajectory for {protein} using simulation label {label}. "
+        f"The system case is {case}, and the trajectory, topology, and energy outputs are in {wdir}/hpc/. "
+        f"Run only these workflow steps: {agents_desc}. "
+        f"Use the analysis requested by the user for this specific system; do not add extra metrics unless the goal asks broadly for protein dynamics without naming specific analyses. "
+        f"When the goal names specific metrics, restrict the analysis to those metrics and any directly required plots or tables. "
+        f"Write analysis outputs under {wdir}/analysis/ using standard basenames (e.g. rmsf.dat, rmsf.png) — no label prefix on filenames. "
+        f"After analysis, prepare a concise scientific report for this simulation using the generated outputs and relevant context. "
+        f"Project requirements: {requirements}"
+    )
+
+
+def _build_combined_analysis_plan_fallback(
+    state: Dict[str, Any],
+    expanded_entries: List[Dict[str, Any]],
+) -> str:
+    """Fallback combined plan when LLM decomposition is unavailable."""
+    original = (state.get("user_goal_original") or state.get("user_goal") or "").strip()
+    labels = ", ".join(e.get("label", "") for e in expanded_entries)
+    base = (
+        "Perform only the cross-simulation analysis requested by the user across "
+        f"these completed simulations: {labels}. Compare the requested metrics across "
+        "systems, generate aggregate plots or tables only when they support the stated "
+        "goal, and avoid adding unrelated calculations. Produce a consolidated report "
+        "that explains shared trends, meaningful differences, and limitations."
+    )
+    if original:
+        return f"{base}\n\nOriginal study goal for reference:\n{original}"
+    return base
 
 
 class MDPlanner:
@@ -199,6 +341,453 @@ class MDPlanner:
         else:
             logger.warning(f"Config not found: {self.config_path}, using defaults")
             return {"planner": {"templates": {}}}
+
+    def _detect_component_cases(self, prompt: str) -> List[Dict[str, str]]:
+        """Infer component-specific simulation cases from user goal text."""
+        p = (prompt or "").lower()
+        p = (
+            p.replace("\u2011", "-")
+            .replace("\u2012", "-")
+            .replace("\u2013", "-")
+            .replace("\u2014", "-")
+            .replace("\u2212", "-")
+        )
+
+        has_protein_only = bool(re.search(r"\bprotein[\s\-]*(only|alone)\b", p))
+        has_atp = "atp" in p
+        has_holo = "holo" in p
+        has_mg = bool(re.search(r"\bmg(?:2\+?|\u00b2\+?)?\b", p))
+        has_case_language = bool(
+            re.search(
+                r"two\s+different\s+cases?|two\s+systems\s+per\s+file|"
+                r"case\s*[:\-]|\bcase\s*1\b|\bcase\s*2\b|"
+                r"\(\s*1\s*\)|\(\s*2\s*\)|\b1\.\b|\b2\.\b",
+                p,
+            )
+        )
+
+        if has_case_language and has_protein_only and (has_atp or has_holo):
+            full_suffix = "ATP_MG" if has_mg else "ATP"
+            full_desc = "protein + ATP + MG" if has_mg else "protein + ATP"
+            full_directive = (
+                "Keep protein with ATP ligand and Mg ions from the source PDB."
+                if has_mg else
+                "Keep protein with ATP ligand from the source PDB."
+            )
+            return [
+                {
+                    "case_id": "protein_only",
+                    "suffix": "",
+                    "description": "protein only",
+                    "directive": "Use protein-only system. Remove ATP, ligands, and non-essential ions.",
+                },
+                {
+                    "case_id": "protein_with_ligand",
+                    "suffix": full_suffix,
+                    "description": full_desc,
+                    "directive": full_directive,
+                },
+            ]
+
+        return [
+            {
+                "case_id": "default",
+                "suffix": "",
+                "description": "default system from input PDB",
+                "directive": "Use the full biologically relevant system present in the input PDB.",
+            }
+        ]
+
+    def create_multi_sim_master_plan(self, state: MDState) -> MDState:
+        """Build per-sim prompts and optional combined analysis plan with planner tools context."""
+        from src.utils.pdb_paths import unique_pdb_paths
+        from ..utils import log_agent_action
+
+        enriched_prompt = state.get("enriched_prompt") or state.get("user_goal", "")
+        original_goal = (
+            state.get("user_goal_original")
+            or state.get("user_goal")
+            or enriched_prompt
+        )
+        pdb_list = unique_pdb_paths(state.get("pdb_list") or [])
+        state["pdb_list"] = pdb_list
+        agent_list = state.get("agent_list") or []
+        subtask_type = state.get("subtask_type")
+        post_sim_subtask = _is_post_simulation_subtask(state)
+
+        if not pdb_list:
+            logger.warning("PLANNER [multi-sim]: No pdb_list - cannot create master plan")
+            return state
+
+        base_working_dir = str(
+            Path(state.get("multi_sim_base_dir") or state.get("working_directory", "working_dir")).resolve()
+        )
+        state["multi_sim_base_dir"] = base_working_dir
+        from ..utils.conversation_logger import set_log_file
+        set_log_file(str(Path(base_working_dir) / "agent_conversation.log"))
+
+        self.tools_registry = get_tools_registry(refresh=True, working_directory=base_working_dir)
+        per_sim_tools_context = self.tools_registry.get_master_plan_per_sim_tools_context(
+            agent_list,
+        ) if agent_list else self.tools_registry.get_master_plan_per_sim_tools_context(
+            ["analysis", "reporter"],
+        )
+        combined_tools_context = self.tools_registry.get_combined_only_tools_context()
+        tools_note = get_master_plan_tools_note(agent_list)
+        intent_block = get_intent_preservation_block(original_goal)
+        filenames_block = get_standard_output_filenames_block()
+
+        protein_name_map: Dict[str, str] = {}
+        for match in re.finditer(
+            r'\b([A-Za-z0-9]{4,12})\s*:\s*([A-Za-z][A-Za-z0-9_\-]{1,30})',
+            enriched_prompt,
+        ):
+            key, value = match.group(1).lower(), match.group(2).strip()
+            if any(c.isdigit() for c in key) and value[0].isupper():
+                protein_name_map[key] = value
+        if protein_name_map:
+            logger.info(f"PLANNER [multi-sim]: Protein name map: {protein_name_map}")
+
+        component_cases = self._detect_component_cases(enriched_prompt)
+        expanded_entries: List[Dict[str, Any]] = []
+        for pdb in pdb_list:
+            uid = Path(pdb).stem
+            protein_name = protein_name_map.get(uid.lower(), uid.upper())
+            for case in component_cases:
+                suffix = case.get("suffix", "")
+                sim_label = f"{uid}_{suffix}" if suffix else uid
+                sim_dir = str((Path(base_working_dir) / sim_label).resolve())
+                expanded_entries.append(
+                    {
+                        "pdb": pdb,
+                        "uid": uid,
+                        "protein_name": protein_name,
+                        "label": sim_label,
+                        "working_dir": sim_dir,
+                        "case_id": case.get("case_id"),
+                        "case_description": case.get("description", "default system"),
+                        "case_directive": case.get("directive", "Use full system from PDB."),
+                    }
+                )
+
+        state["sim_working_dirs"] = [e["working_dir"] for e in expanded_entries]
+
+        all_pdb_analyses = state.get("all_pdb_analyses", [])
+        pdb_analysis_map: Dict[str, Dict[str, Any]] = {}
+        for idx, pdb in enumerate(pdb_list):
+            if idx < len(all_pdb_analyses):
+                pdb_analysis_map[Path(pdb).name] = all_pdb_analyses[idx]
+
+        sim_context_lines: List[str] = []
+        for i, entry in enumerate(expanded_entries, 1):
+            pdb_name = Path(entry["pdb"]).name
+            line = (
+                f"  {i}. label={entry['label']} | source={pdb_name} | "
+                f"case={entry['case_description']} | dir={entry['working_dir']}"
+            )
+            analysis = pdb_analysis_map.get(pdb_name)
+            if analysis:
+                comps = analysis.get("components_available", {})
+                comp_desc = []
+                if comps.get("protein"):
+                    comp_desc.append("protein")
+                if comps.get("ligand"):
+                    ligands = analysis.get("ligand", {}).get("residue_names", [])
+                    comp_desc.append(f"ligand({','.join(ligands[:2])})" if ligands else "ligand")
+                if comps.get("ions"):
+                    comp_desc.append("ions")
+                if comp_desc:
+                    line += f" | source_components={','.join(comp_desc)}"
+                if analysis.get("total_atoms"):
+                    line += f" | atoms={analysis['total_atoms']}"
+            sim_context_lines.append(line)
+
+        agents_desc = " -> ".join(agent_list) if agent_list else (subtask_type or "full pipeline")
+        name_map_lines = ""
+        if protein_name_map:
+            name_map_lines = (
+                "PROTEIN MAPPINGS:\n"
+                + "\n".join(f"  {uid}: {name}" for uid, name in protein_name_map.items())
+                + "\n\n"
+            )
+
+        default_combined = _goal_requests_combined_analysis(original_goal, agent_list, subtask_type)
+        decomposition_prompt = (
+            "You are the MD workflow Planner. Create the multi-simulation master plan using the "
+            "available per-simulation and combined-analysis tools below.\n\n"
+            f"OVERALL USER GOAL:\n{original_goal}\n\n"
+            f"ENRICHED CONTEXT:\n{enriched_prompt}\n\n"
+            f"SIMULATION ENTRIES ({len(expanded_entries)} total):\n"
+            + "\n".join(sim_context_lines)
+            + "\n\n"
+            + name_map_lines
+            + f"WORKFLOW PIPELINE FOR EACH SIMULATION: {agents_desc}\n\n"
+            + f"{tools_note}\n\n"
+            + f"PER-SIMULATION TOOLS (one section per workflow agent; excludes cross-sim tools):\n"
+            + f"{per_sim_tools_context}\n\n"
+            + f"CROSS-SIMULATION TOOLS ONLY (base-level; do NOT repeat per-sim tool lists):\n"
+            + f"{combined_tools_context}\n\n"
+            + f"{intent_block}\n\n"
+            + f"{filenames_block}\n\n"
+            "TASK: Return only valid JSON with keys:\n"
+            f"1) sim_prompts: list of {len(expanded_entries)} complete natural-language prompts, same order as entries.\n"
+            "2) run_combined_analysis: boolean; true only when the user explicitly or clearly asks for comparison, aggregation, cross-simulation trends, combined plots, or a combined report.\n"
+            "3) combined_analysis_plan: natural-language plan when run_combined_analysis is true; otherwise an empty string.\n\n"
+            "CRITICAL prompt requirements for sim_prompts:\n"
+            "- Each prompt must be a natural-language goal for one simulation, not a metadata record. Mention the label, source system, working directory, and relevant case in prose so agents have context.\n"
+            "- Preserve user intent exactly. If the user names specific analyses such as RMSF only, request only those analyses plus directly required plots/tables. Do not add RMSD, Rg, COM distance, DCCM, DSSP, SASA, or literature unless requested.\n"
+            "- If the user asks broadly for protein dynamics without naming metrics, choose a small justified set of dynamics analyses supported by the tools, such as RMSD/RMSF/Rg/DCCM or interaction distances when relevant to the biological question.\n"
+            "- For post-simulation workflows, do not mention preprocessing, system setup, force-field choice, box size, HPC submission, or simulation length because those stages are finished.\n"
+            "- Avoid comma-separated key=value prompt strings because downstream agents treat them as metadata stubs; write complete sentences with enough context for analysis and reporting.\n"
+            "- Do not copy and paste the same prompt for every entry. Vary the wording naturally and adapt details to protein name, label, case, source, residues, ligands, and requested metrics.\n"
+            f"- Mention only these workflow steps: {agents_desc}.\n\n"
+            "For run_combined_analysis, use the user goal as the source of truth. "
+            f"The conservative heuristic before this LLM call is {default_combined}; override it only if the goal text clearly supports a different choice.\n"
+            "Return only valid JSON."
+        )
+
+        sim_prompts_list = None
+        combined_plan = ""
+        run_combined_analysis = default_combined
+        try:
+            response = self.llm.prompt(decomposition_prompt, temperature=0.35, max_tokens=3600)
+            log_llm_interaction("planner.multi_sim_master", decomposition_prompt, response)
+            parsed = self._extract_json_from_response(response)
+            if parsed and "sim_prompts" in parsed:
+                sim_prompts_list = [
+                    _coerce_plan_text(item, default="")
+                    for item in parsed["sim_prompts"]
+                ]
+                run_combined_analysis = _coerce_bool(
+                    parsed.get("run_combined_analysis"),
+                    default=default_combined,
+                )
+                combined_plan = _coerce_plan_text(
+                    parsed.get("combined_analysis_plan", ""),
+                    default="",
+                )
+                logger.info(
+                    f"PLANNER [multi-sim]: LLM generated {len(sim_prompts_list)} per-sim prompts; "
+                    f"run_combined_analysis={run_combined_analysis}"
+                )
+
+                if len(sim_prompts_list) > 1:
+                    keys = []
+                    for text in sim_prompts_list:
+                        key = (_coerce_plan_text(text) or "").lower()
+                        key = re.sub(r"/[\w./\-]+", "<path>", key)
+                        key = re.sub(r"\b[\w\-]+\.pdb\b", "<pdb>", key)
+                        key = re.sub(r"\b[a-z0-9]{4,12}\b", "<tok>", key)
+                        key = re.sub(r"\b\d+\s*ns\b", "<time>", key)
+                        key = re.sub(r"\s+", " ", key).strip()
+                        keys.append(key)
+                    if len(set(keys)) <= max(1, len(keys) // 3):
+                        logger.warning(
+                            "PLANNER [multi-sim]: LLM sim_prompts are repetitive; "
+                            "switching to deterministic per-entry prompts"
+                        )
+                        sim_prompts_list = None
+        except Exception as exc:
+            logger.warning(f"PLANNER [multi-sim]: LLM decomposition failed: {exc}")
+
+        if not sim_prompts_list or len(sim_prompts_list) != len(expanded_entries):
+            logger.info(
+                "PLANNER [multi-sim]: Using deterministic prompt decomposition "
+                f"(post_sim_subtask={post_sim_subtask})"
+            )
+            sim_prompts_list = []
+            if post_sim_subtask:
+                for entry in expanded_entries:
+                    sim_prompts_list.append(
+                        _build_per_sim_analysis_prompt(
+                            entry,
+                            original_goal=original_goal,
+                            enriched_prompt=enriched_prompt,
+                            agents_desc=agents_desc,
+                        )
+                    )
+            else:
+                styles = ["Prepare", "Process", "Set up", "Generate setup for"]
+                for i, entry in enumerate(expanded_entries):
+                    pdb_name = Path(entry["pdb"]).name
+                    lead = styles[i % len(styles)]
+                    uniprot_hint = ""
+                    structure_requests = state.get("structure_requests") or {}
+                    uid_key = Path(entry["pdb"]).stem.lower()
+                    req = structure_requests.get(uid_key)
+                    if req and req.get("uniprot_id"):
+                        src = req.get("structure_source", "auto")
+                        uniprot_hint = (
+                            f" Download structure from {src} for UniProt "
+                            f"{req['uniprot_id']} if {pdb_name} is not present."
+                        )
+                    sim_prompts_list.append(
+                        (
+                            f"{lead} simulation for {entry['protein_name']} using source structure {pdb_name}. "
+                            f"Use simulation label {entry['label']} under {entry['working_dir']}. "
+                            f"The case requirement is {entry['case_description']}: {entry['case_directive']}"
+                            f"{uniprot_hint} "
+                            f"Run workflow steps: {agents_desc}."
+                        ).strip()
+                    )
+
+        if run_combined_analysis and not combined_plan:
+            combined_plan = _build_combined_analysis_plan_fallback(state, expanded_entries)
+        if not run_combined_analysis:
+            combined_plan = ""
+
+        sim_prompts = []
+        for entry, prompt_text in zip(expanded_entries, sim_prompts_list):
+            pdb = entry["pdb"]
+            prompt_body = _coerce_plan_text(prompt_text, default="")
+            if post_sim_subtask and len(prompt_body) < 240:
+                prompt_body = _build_per_sim_analysis_prompt(
+                    entry,
+                    original_goal=original_goal,
+                    enriched_prompt=enriched_prompt,
+                    agents_desc=agents_desc,
+                )
+            sim_prompts.append(
+                {
+                    "pdb": str(Path(pdb).resolve()) if Path(pdb).exists() else pdb,
+                    "label": entry["label"],
+                    "prompt": prompt_body,
+                    "analysis_prompt": prompt_body if post_sim_subtask else None,
+                    "task_scope": "analysis_reporter" if post_sim_subtask else "full_pipeline",
+                    "working_dir": entry["working_dir"],
+                    "case_id": entry.get("case_id"),
+                    "case_description": entry["case_description"],
+                    "case_directive": entry.get("case_directive"),
+                    "protein_name": entry.get("protein_name"),
+                }
+            )
+
+        state["sim_prompts"] = sim_prompts
+        state["run_combined_analysis"] = run_combined_analysis
+        state["combined_analysis_plan"] = _coerce_plan_text(combined_plan, default="")
+
+        logger.info(
+            f"PLANNER [multi-sim]: Master plan ready - {len(sim_prompts)} simulations, "
+            f"labels: {[s['label'] for s in sim_prompts]}, "
+            f"run_combined_analysis={run_combined_analysis}"
+        )
+        log_agent_action(
+            agent_name="planner",
+            action="Generated Multi-Simulation Master Plan",
+            details={
+                "num_simulations": len(sim_prompts),
+                "labels": [s["label"] for s in sim_prompts],
+                "component_cases": [c.get("description") for c in component_cases],
+                "agents": agents_desc,
+                "run_combined_analysis": run_combined_analysis,
+                "combined_plan_preview": (combined_plan or "")[:300],
+            },
+        )
+        self._save_multi_sim_master_plan(
+            base_working_dir=base_working_dir,
+            sim_prompts=sim_prompts,
+            combined_plan=combined_plan or "",
+            enriched_prompt=enriched_prompt,
+            agents_desc=agents_desc,
+            run_combined_analysis=run_combined_analysis,
+        )
+        return state
+
+    def _save_multi_sim_master_plan(
+        self,
+        *,
+        base_working_dir: str,
+        sim_prompts: List[Dict[str, Any]],
+        combined_plan: str,
+        enriched_prompt: str,
+        agents_desc: str,
+        run_combined_analysis: bool,
+    ) -> None:
+        """Persist overall multi-simulation master plan to {base}/planner/."""
+        plan_data = {
+            "title": "Multi-Simulation Master Plan",
+            "format": "master_plan",
+            "phase": "master",
+            "workflow_pipeline": agents_desc,
+            "task_scope": (
+                "analysis_reporter"
+                if any(s.get("task_scope") == "analysis_reporter" for s in sim_prompts)
+                else "full_pipeline"
+            ),
+            "enriched_prompt": enriched_prompt,
+            "sim_prompts": sim_prompts,
+            "run_combined_analysis": run_combined_analysis,
+            "combined_analysis_plan": combined_plan,
+            "num_simulations": len(sim_prompts),
+            "labels": [s.get("label") for s in sim_prompts],
+        }
+
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        md_lines = [
+            "# Multi-Simulation Master Plan",
+            "",
+            f"**Generated:** {ts}",
+            f"**Simulations:** {len(sim_prompts)}",
+            f"**Pipeline:** {agents_desc}",
+            f"**Task scope:** {plan_data.get('task_scope', 'full_pipeline')}",
+            f"**Combined analysis requested:** {'yes' if run_combined_analysis else 'no'}",
+            "",
+            "## Overall Goal",
+            "",
+            enriched_prompt or "_N/A_",
+            "",
+            "## Per-Simulation Prompts",
+            "",
+        ]
+        for idx, sim in enumerate(sim_prompts, 1):
+            md_lines += [
+                f"### {idx}. {sim.get('label', f'sim_{idx}')}",
+                "",
+                f"- **PDB:** {sim.get('pdb', 'N/A')}",
+                f"- **Directory:** {sim.get('working_dir', 'N/A')}",
+                f"- **Case:** {sim.get('case_description', 'N/A')}",
+                "",
+                _coerce_plan_text(sim.get("prompt"), default="_No prompt text._"),
+                "",
+            ]
+        md_lines += [
+            "## Combined Analysis Plan",
+            "",
+            _coerce_plan_text(
+                combined_plan,
+                default="_Not requested by the user goal._",
+            ),
+        ]
+
+        save_plan_artifacts(
+            base_working_dir,
+            "planner",
+            json_filename="master_plan.json",
+            md_filename="master_plan.md",
+            history_filename="execution_plans.jsonl",
+            plan_data=plan_data,
+            md_content="\n".join(md_lines),
+            phase="master",
+            label="overall",
+        )
+
+    def _extract_json_from_response(self, response: str) -> Optional[Dict[str, Any]]:
+        """Extract the first JSON object from an LLM response using brace counting."""
+        start = response.find("{")
+        if start == -1:
+            return None
+        depth = 0
+        for idx, char in enumerate(response[start:], start):
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(response[start: idx + 1])
+                    except json.JSONDecodeError:
+                        return None
+        return None
     
     def planner_node(self, state: MDState) -> MDState:
         """Main planner node - creates execution plan from structured prompt.
@@ -901,6 +1490,73 @@ Generate tool specifications now (ONLY for missing tools):"""
                 "tools_available": {}
             }
     
+    def _get_nl_format_instructions(
+        self,
+        subtask_type: Optional[str],
+        state: MDState,
+        user_goal: str = "",
+    ) -> str:
+        """Natural-language plan format rules; analysis workflows add intent preservation."""
+        goal_text = user_goal or state.get("user_goal_original") or state.get("user_goal") or ""
+        agent_list = state.get("agent_list") or []
+        analysis_in_scope = (
+            subtask_type == "analysis_only"
+            or (
+                subtask_type == "multi_agent"
+                and "analysis" in agent_list
+            )
+        )
+
+        scope_line = (
+            "- Match the USER GOAL scope exactly — do not add unrequested analyses or agents"
+            if analysis_in_scope
+            else "- Be comprehensive and explanatory"
+        )
+        closing = (
+            "Provide a minimal natural language plan that matches the USER GOAL scope exactly."
+            if analysis_in_scope
+            else "Provide a comprehensive natural language plan explaining the workflow."
+        )
+
+        instructions = f"""**OUTPUT FORMAT - MANDATORY:**
+
+You MUST provide your execution plan in NATURAL LANGUAGE format ONLY.
+
+✓ DO:
+- Write a detailed prose description of the execution plan
+- Organize into clear sections (Goal, Analysis, Execution Sequence, Expected Outcomes)
+- Explain which agents to use and why (use agent names explicitly!)
+- Describe what each agent should do in detail
+- Reference specific tools agents should consider using
+- Write in complete sentences and paragraphs
+{scope_line}
+
+✗ DO NOT:
+- Use JSON format (CRITICAL: No curly braces {{}}, no key-value pairs)
+- Use YAML format
+- Use structured data formats
+- Create step-by-step numbered lists without context
+- Write bullet points without explanation
+- Use schemas or templates
+- Output command sequences or file contents directly
+- Invoke run_complete_analysis or wrap_trajectory unless the USER GOAL explicitly requires them
+
+Write your plan as if explaining the workflow to another expert in molecular dynamics.
+Be thorough, clear, and provide reasoning for your decisions.
+
+CRITICAL: If you output JSON, YAML, or any structured format, the plan will be rejected and the workflow will fail.
+
+{closing}"""
+
+        if analysis_in_scope:
+            instructions += (
+                "\n\n"
+                + get_intent_preservation_block(goal_text)
+                + "\n\n"
+                + get_standard_output_filenames_block()
+            )
+        return instructions
+
     def _build_planning_prompt(
         self,
         structured_prompt: str,
@@ -916,34 +1572,10 @@ Generate tool specifications now (ONLY for missing tools):"""
         """Build planning prompt for execution plan creation."""
         
         per_sim_scope_note = self._get_per_sim_scope_note(state)
-        
-        # Common natural language format instructions for ALL plan types
-        nl_format_instructions = """**OUTPUT FORMAT - MANDATORY:**
-
-You MUST provide your execution plan in NATURAL LANGUAGE format ONLY.
-
-✓ DO:
-- Write a detailed prose description of the execution plan
-- Organize into clear sections (Goal, Analysis, Execution Sequence, Expected Outcomes)
-- Explain which agents to use and why (use agent names explicitly!)
-- Describe what each agent should do in detail
-- Reference specific tools agents should consider using
-- Write in complete sentences and paragraphs
-- Be comprehensive and explanatory
-
-✗ DO NOT:
-- Use JSON format (CRITICAL: No curly braces {}, no key-value pairs)
-- Use YAML format
-- Use structured data formats
-- Create step-by-step numbered lists without context
-- Write bullet points without explanation
-- Use schemas or templates
-- Output command sequences or file contents directly
-
-Write your plan as if explaining the workflow to another expert in molecular dynamics.
-Be thorough, clear, and provide reasoning for your decisions.
-
-CRITICAL: If you output JSON, YAML, or any structured format, the plan will be rejected and the workflow will fail."""
+        user_goal_text = structured_prompt or state.get("user_goal") or ""
+        nl_format_instructions = self._get_nl_format_instructions(
+            subtask_type, state, user_goal=user_goal_text
+        )
         
         if subtask_type == "analysis_only":
             working_dir = state.get("working_directory", ".")
@@ -974,15 +1606,17 @@ File Structure:
 
 **CRITICAL INSTRUCTIONS:**
 - FIRST: Check if the requested analysis is available in the tools list above
+- Plan ONLY the analyses explicitly requested in USER GOAL — do not add RMSD, Rg, SASA, DCCM, etc. unless requested
 - If a required analysis tool is missing (e.g., DSSP, SASA, hydrogen bonds, distance calculations, etc.), you MUST state "Missing tool for [analysis type]" explicitly
 - Use the analysis agent's Python tools listed above (calculate_rmsd, calculate_rmsf, etc.) when available
 - Do NOT assume tools exist - check the list carefully
 - Do NOT use bash/shell commands or GROMACS CLI tools (gmx rmsf, etc.)
+- Do NOT plan wrap_trajectory or run_complete_analysis unless USER GOAL explicitly requires them
 - The analysis agent will handle file discovery and tool execution
 - Specify WHICH tools to use and what analysis to perform
 - Let the analysis agent handle the implementation details
 
-**ANALYSIS TYPES TO CHECK FOR:**
+**ANALYSIS TYPES (only include if USER GOAL requests them):**
 If the user requests any of these analyses, verify a tool exists:
 - Secondary structure (DSSP)
 - Solvent accessible surface area (SASA)
@@ -998,9 +1632,7 @@ If the user requests any of these analyses, verify a tool exists:
 
 If any requested analysis is NOT in the available tools, state it clearly.
 
-{nl_format_instructions}
-
-Provide a comprehensive natural language plan explaining how the Analysis Agent should conduct the trajectory analysis."""
+{nl_format_instructions}"""
 
         elif subtask_type == "setup_only":
             return f"""Create a detailed natural language execution plan for MD simulation setup.
@@ -1191,6 +1823,7 @@ Working Directory: {working_dir}
 - Use the EXACT agent name phrases (e.g., "Preprocessing Agent", "Analysis Agent") so routing works
 - Each agent section should describe what it needs as input and what it will produce as output
 - The agents run in order: first agent's outputs become next agent's inputs
+- Analysis Agent: plan ONLY metrics explicitly requested in USER GOAL; Reporter Agent documents those results only
 
 {nl_format_instructions}
 
@@ -1214,7 +1847,7 @@ CRITICAL: Use the section headers EXACTLY as shown above with ** markers
 This allows each agent to extract ONLY its relevant instructions.
 Put ALL detailed steps, tool references, and execution logic under the correct agent header.
 
-Provide a comprehensive natural language plan following this structure."""
+Follow the OUTPUT FORMAT closing instruction above."""
 
         else:
             components = pdb_analysis.get("components_available", {})

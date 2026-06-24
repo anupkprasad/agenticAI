@@ -311,36 +311,54 @@ class ReporterAgent:
             if _want_energy or "energy" not in Path(p).name.lower()
         ]
 
-        # 2. Always add per-sim ligand COM distance plots if they exist.
-        _LIGAND_PLOT_NAMES = ("ligand_pocket_distance.png", "com_distance.png")
-        for s_dir in sim_dirs:
-            for _name in _LIGAND_PLOT_NAMES:
-                _p = Path(s_dir) / "analysis" / _name
-                if _p.exists() and str(_p) not in overlay_plots:
-                    overlay_plots.append(str(_p))
+        # 2. Add per-sim ligand COM distance plots only when the user requested them.
+        _want_com = any(kw in _goal_lower for kw in
+                         ("com", "center of mass", "center-of-mass", "ligand", "pocket",
+                          "binding site", "active site"))
+        if _want_com:
+            _LIGAND_PLOT_NAMES = ("ligand_pocket_distance.png", "com_distance.png")
+            for s_dir in sim_dirs:
+                for _name in _LIGAND_PLOT_NAMES:
+                    _p = Path(s_dir) / "analysis" / _name
+                    if _p.exists() and str(_p) not in overlay_plots:
+                        overlay_plots.append(str(_p))
 
-        # 3. Ensure DSSP comparison chart exists in combined analysis directory.
-        _analysis_dir = combined_info.get("analysis_dir") or str(Path(working_dir) / "analysis")
-        try:
-            Path(_analysis_dir).mkdir(parents=True, exist_ok=True)
-        except Exception:
-            _analysis_dir = reporter_dir
-        from src.reporter.combined_reporter import (
-            generate_dssp_comparison_chart,
-            run_combined_dssp_analysis,
-        )
-        _dssp_existing = Path(_analysis_dir) / "dssp_comparison.png"
+        # 3. DSSP comparison / activation-loop heatmaps — only when user requested DSSP.
+        from agentic.planner.planning_guidelines import detect_requested_metrics
+
         _goal_full = (_user_goal_text + " " + _enriched_text).strip()
-        if not _dssp_existing.exists():
-            run_combined_dssp_analysis(sim_dirs, labels, _analysis_dir, _goal_full)
-        _dssp_chart = generate_dssp_comparison_chart(
-            sim_dirs, labels, _analysis_dir, user_goal=_goal_full,
+        _requested_metrics = detect_requested_metrics(_goal_full)
+        _want_dssp = (
+            _requested_metrics is None and "dssp" in _goal_lower
+        ) or (
+            _requested_metrics is not None and "dssp" in _requested_metrics
         )
-        if _dssp_chart and _dssp_chart not in overlay_plots:
-            overlay_plots.append(_dssp_chart)
-        for _dssp_hm in sorted(Path(_analysis_dir).glob("dssp_activation_loop_*.png")):
-            if str(_dssp_hm) not in overlay_plots:
-                overlay_plots.append(str(_dssp_hm))
+        _analysis_dir = combined_info.get("analysis_dir") or str(Path(working_dir) / "analysis")
+        if _want_dssp:
+            try:
+                Path(_analysis_dir).mkdir(parents=True, exist_ok=True)
+            except Exception:
+                _analysis_dir = reporter_dir
+            from src.reporter.combined_reporter import (
+                generate_dssp_comparison_chart,
+                run_combined_dssp_analysis,
+            )
+            _dssp_existing = Path(_analysis_dir) / "dssp_comparison.png"
+            if not _dssp_existing.exists():
+                run_combined_dssp_analysis(sim_dirs, labels, _analysis_dir, _goal_full)
+            _dssp_chart = generate_dssp_comparison_chart(
+                sim_dirs, labels, _analysis_dir, user_goal=_goal_full,
+            )
+            if _dssp_chart and _dssp_chart not in overlay_plots:
+                overlay_plots.append(_dssp_chart)
+            for _dssp_hm in sorted(Path(_analysis_dir).glob("dssp_activation_loop_*.png")):
+                if str(_dssp_hm) not in overlay_plots:
+                    overlay_plots.append(str(_dssp_hm))
+        else:
+            logger.info(
+                "Skipping combined DSSP analysis — not requested in user goal "
+                "(detected metrics: %s)", _requested_metrics
+            )
 
         # 4. Add any per-sim figure type that the user explicitly requested.
         _USER_PLOT_KEYWORDS: Dict[str, tuple] = {

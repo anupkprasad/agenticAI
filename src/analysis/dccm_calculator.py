@@ -421,7 +421,10 @@ def plot_dccm_comparison(
     single multi-panel figure.  Residue axes are aligned across panels.
 
     A difference panel (last simulation minus first) is appended when exactly
-    two simulations are compared, to highlight divergent correlation patterns.
+    two simulations are compared **and** they share identical residue numbering
+    (e.g. apo vs holo of the same protein). For cross-protein comparisons
+    (JAK1 vs TYK2), each panel shows the full matrix and no Δ panel is drawn
+    because residue indices are not structurally equivalent.
 
     Args:
         dccm_files: Ordered list of DCCM CSV file paths (one per simulation).
@@ -467,14 +470,25 @@ def plot_dccm_comparison(
             return {"success": False,
                     "error": f"Failed to read {fpath}: {e}"}
 
-    # ── Align all matrices by common residue IDs ─────────────────────────────
-    try:
-        matrices, residue_ids = _align_dccm_matrices(matrices, residue_sets)
-    except ValueError as e:
-        return {"success": False, "error": str(e)}
-    n_residues = len(residue_ids)
+    # Same-protein runs (apo/holo, replicates) share residue IDs → align + optional Δ.
+    # Cross-protein comparisons keep each full matrix; no Δ panel.
+    same_numbering = (
+        len(residue_sets) >= 2
+        and all(set(residue_sets[0]) == set(rs) for rs in residue_sets[1:])
+    )
+    if same_numbering:
+        try:
+            matrices, residue_ids = _align_dccm_matrices(matrices, residue_sets)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        panel_residue_sets: List[List[int]] = [residue_ids] * len(matrices)
+        add_diff = len(matrices) == 2
+        n_residues = len(residue_ids)
+    else:
+        panel_residue_sets = residue_sets
+        add_diff = False
+        n_residues = max(len(rs) for rs in residue_sets)
 
-    add_diff = (len(matrices) == 2)
     n_panels = len(matrices) + (1 if add_diff else 0)
 
     fig, axes = plt.subplots(
@@ -484,13 +498,13 @@ def plot_dccm_comparison(
     if n_panels == 1:
         axes = [axes]
 
-    # Tick positions
-    n = n_residues
-    step = max(1, n // 8)
-    tick_pos = list(range(0, n, step))
-    tick_labels = [str(residue_ids[i]) for i in tick_pos]
-
-    for ax, mat, label in zip(axes[:len(matrices)], matrices, labels):
+    for ax, mat, label, res_ids in zip(
+        axes[: len(matrices)], matrices, labels, panel_residue_sets
+    ):
+        n = len(res_ids)
+        step = max(1, n // 8)
+        tick_pos = list(range(0, n, step))
+        tick_labels = [str(res_ids[i]) for i in tick_pos]
         im = ax.imshow(
             mat, cmap=cmap, vmin=vmin, vmax=vmax,
             aspect="auto", interpolation="nearest", origin="lower",
@@ -510,10 +524,13 @@ def plot_dccm_comparison(
     cbar = fig.colorbar(sm, ax=cbar_ax, fraction=0.046, pad=0.04)
     cbar.set_label("C$_{ij}$", fontsize=9)
 
-    # ── Optional difference panel (fixed scale — no auto-normalisation) ─────
+    # ── Optional difference panel (same protein / identical numbering only) ─
     if add_diff:
         diff = matrices[1] - matrices[0]
         ax_diff = axes[-1]
+        step = max(1, n_residues // 8)
+        tick_pos = list(range(0, n_residues, step))
+        tick_labels = [str(panel_residue_sets[0][i]) for i in tick_pos]
         im_diff = ax_diff.imshow(
             diff, cmap=cmap_diff, vmin=diff_vmin, vmax=diff_vmax,
             aspect="auto", interpolation="nearest", origin="lower",
@@ -527,8 +544,10 @@ def plot_dccm_comparison(
         cbar_diff = fig.colorbar(im_diff, ax=ax_diff, fraction=0.046, pad=0.04)
         cbar_diff.set_label("ΔC$_{ij}$", fontsize=9)
 
-    fig.suptitle("Dynamic Cross-Correlation Matrix Comparison", fontsize=13,
-                 fontweight="bold", y=1.02)
+    title = "Dynamic Cross-Correlation Matrix Comparison"
+    if len(matrices) == 2 and not add_diff:
+        title += " (cross-protein: no Δ panel — residue numbers are not equivalent)"
+    fig.suptitle(title, fontsize=13, fontweight="bold", y=1.02)
     plt.tight_layout()
     plt.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
@@ -538,8 +557,11 @@ def plot_dccm_comparison(
         "output_path": output_path,
         "n_panels": n_panels,
         "n_residues_aligned": n_residues,
+        "difference_panel": add_diff,
+        "same_residue_numbering": same_numbering,
         "message": (
-            f"DCCM comparison figure ({n_panels} panels, {n_residues} residues) "
+            f"DCCM comparison figure ({n_panels} panels, "
+            f"{'aligned ' if same_numbering else ''}{n_residues} residues) "
             f"saved to {output_path}"
         ),
     }

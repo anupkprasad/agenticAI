@@ -407,7 +407,7 @@ def run_combined_analysis(
     _metric_meta: Dict[str, Tuple[str, str, str]] = {
         "rmsd":   ("rmsd",   "Time (ns)", "RMSD (Å)"),
         "rmsf":   ("rmsf",   "Residue",   "RMSF (Å)"),
-        "rg":     ("rg",     "Time (ns)", "Rg (Å)"),
+        "rg":     ("gyration", "Time (ns)", "Rg (Å)"),
         "energy": ("energy", "Time (ns)", "Energy (kJ/mol)"),
         "sasa":   ("sasa",   "Time (ns)", "SASA (nm²)"),
         "hbond":  ("hbond",  "Time (ns)", "H-bonds"),
@@ -1259,10 +1259,20 @@ def run_combined_com_distance_analysis(
     missing: List[str] = []
 
     for sim_dir, label in zip(sim_dirs, labels):
-        if not is_holo_simulation(sim_dir, label):
+        hit = None
+        analysis_dir = Path(sim_dir) / "analysis"
+        if analysis_dir.is_dir():
+            hit = _find_com_distance_file(str(analysis_dir))
+
+        # Skip apo-only labels when no COM data exists; include any sim that
+        # already has per-sim ligand_pocket_distance output (UniProt labels like
+        # p29597 are holo but do not contain holo/atp in the directory name).
+        if not hit and not is_holo_simulation(sim_dir, label):
+            missing.append(label)
             continue
 
-        hit = _ensure_ligand_pocket_distance_csv(sim_dir)
+        if not hit:
+            hit = _ensure_ligand_pocket_distance_csv(sim_dir)
         if hit:
             found_files.append(hit)
             found_labels.append(label)

@@ -43,9 +43,19 @@ planner:
     use_dynamic_tools: true  # Discover tools from code, not config
     use_knowledge_base: true  # Load domain knowledge from /knowledge
     respect_user_exclusions: true  # CRITICAL: Honor "protein only", "no HPC", "no analysis" instructions
+    respect_user_analysis_scope: true  # CRITICAL: If user says "RMSF only", do not add RMSD/Rg/DCCM/etc.
     match_component_selection: true  # Only plan for components user explicitly selected
     enable_tool_creation: true  # Allow planner to invoke programmer for missing tools
     max_tool_creation_iterations: 2  # Max iterations of tool creation before giving up
+
+  # Standard per-simulation output basenames (same across all sims for combined overlay)
+  standard_output_filenames:
+    rmsd: {data: "rmsd.dat", plot: "rmsd.png"}
+    rmsf: {data: "rmsf.dat", plot: "rmsf.png"}
+    rg: {data: "gyration.dat", plot: "gyration.png"}
+    sasa: {data: "sasa.dat", plot: "sasa.png"}
+    energy: {data: "energy.dat", plot: "energy.png"}
+    note: "Do not prefix with simulation label — use these basenames under {label}/analysis/"
     
   # Output format for plans - ALWAYS NATURAL LANGUAGE
   output_format:
@@ -78,6 +88,9 @@ planner:
       - "Respect component selection (if 'protein only', exclude ligand parameterization)"
       - "User's explicit instructions override PDB structure content"
       - "Do not invent agents not in the available agents list"
+      - "If user names specific metrics (e.g. RMSF only), plan ONLY those metrics plus required plots/CSV"
+      - "Do not add wrap_trajectory or run_complete_analysis unless user explicitly requests them"
+      - "Use standard output basenames (rmsf.dat, rmsf.png) across simulations — no label prefix"
     
   # Context building
   context:

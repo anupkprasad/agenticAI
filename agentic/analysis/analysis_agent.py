@@ -12,7 +12,7 @@ import re
 import json
 import logging
 import shutil
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, FrozenSet
 from pathlib import Path
 
 from ..state import MDState
@@ -28,8 +28,33 @@ from .schemas import (
     AnalysisAgentInput, AnalysisAgentOutput
 )
 from .tools import AnalysisToolExecutor, get_tool_metadata, is_combined_analysis_tool
+from ..planner.planning_guidelines import (
+    detect_requested_metrics,
+    detect_requested_metrics_union,
+    detect_requested_metrics_for_sim,
+    detect_com_distance_mode,
+    collect_goal_texts_for_intent,
+    resolve_sims_for_combined_metric,
+    get_standard_output_filenames_block,
+    get_com_distance_tool_guide,
+    STANDARD_OUTPUT_FILES,
+)
 
 logger = logging.getLogger(__name__)
+
+_CALC_TOOL_TO_METRIC: Dict[str, str] = {
+    "calculate_rmsd": "rmsd",
+    "calculate_rmsf": "rmsf",
+    "calculate_radius_of_gyration": "rg",
+    "analyze_energy": "energy",
+    "calculate_sasa": "sasa",
+    "calculate_dccm": "dccm",
+    "analyze_secondary_structure": "dssp",
+    "calculate_ligand_pocket_distance": "com",
+    "calculate_com_distance": "com",
+}
+
+_PREP_TOOLS = frozenset({"wrap_trajectory", "run_complete_analysis"})
 
 # Optional heavy deps (graceful fallback)
 try:
@@ -310,37 +335,117 @@ class MDAnalysisAgent:
                 user_goal=_goal_text or None,
             )
 
+            combined_plan_text = (
+                (state.get("combined_analysis_plan") or "")
+                + " "
+                + (state.get("user_goal_original") or "")
+                + " "
+                + (state.get("master_enriched_prompt") or state.get("enriched_prompt") or "")
+            ).lower()
+            requested = detect_requested_metrics_union(
+                state.get("combined_analysis_plan") or "",
+                state.get("user_goal_original") or "",
+                state.get("master_enriched_prompt") or "",
+                state.get("enriched_prompt") or "",
+            )
+            if requested is None:
+                # Fall back to keyword scan on plan text only (not sim metadata blobs).
+                metric_patterns = {
+                    "rmsd": [r"\brmsd\b", r"root mean square deviation"],
+                    "rmsf": [r"\brmsf\b", r"root mean square fluctuation"],
+                    "rg": [r"\brg\b", r"radius of gyration", r"\bgyration\b"],
+                    "energy": [r"\benergy\b", r"\bedr\b"],
+                    "dccm": [r"\bdccm\b", r"cross[-\s]?correlation", r"correlated motion"],
+                    "com": [
+                        r"\bcom\b",
+                        r"center[-\s]?of[-\s]?mass",
+                        r"centre[-\s]?of[-\s]?mass",
+                        r"ligand[-\s]?pocket[-\s]?distance",
+                        r"ligand_pocket_distance",
+                    ],
+                    "dssp": [r"\bdssp\b", r"secondary[-\s]?structure"],
+                }
+                requested = frozenset(
+                    metric
+                    for metric, patterns in metric_patterns.items()
+                    if any(re.search(pattern, combined_plan_text) for pattern in patterns)
+                ) or None
+
+            explicit_metrics_requested = bool(requested)
+            broad_dynamics_request = any(
+                phrase in combined_plan_text
+                for phrase in (
+                    "protein dynamics",
+                    "dynamic behavior",
+                    "dynamic behaviour",
+                    "conformational dynamics",
+                    "shared dynamics",
+                    "dynamic patterns",
+                )
+            )
+
+            if explicit_metrics_requested and requested:
+                combined_metrics = [
+                    m for m in ("rmsd", "rmsf", "rg", "energy") if m in requested
+                ]
+            elif broad_dynamics_request:
+                combined_metrics = ["rmsd", "rmsf", "rg"]
+                requested = frozenset({"rmsd", "rmsf", "rg", "dccm"})
+            else:
+                combined_metrics = []
+                requested = requested or frozenset()
+
             # Skip all-simulation RMSF overlay when apo/holo pairs exist —
             # per-protein RMSF comparison is clearer for ligand-effect studies.
-            combined_metrics = ["rmsd", "rmsf", "rg", "energy"]
-            if apo_holo_pairs:
-                combined_metrics = ["rmsd", "rg", "energy"]
+            if apo_holo_pairs and "rmsf" in combined_metrics:
+                combined_metrics = [m for m in combined_metrics if m != "rmsf"]
 
-            result = run_combined_analysis.func(
-                sim_dirs=sim_dirs,
-                labels=labels,
-                working_dir=analysis_dir,
-                metrics=combined_metrics,
-            )
+            plots = []
+            tables = []
+            skipped = []
+            for metric in combined_metrics:
+                metric_dirs, metric_labels = self._sims_for_combined_metric(
+                    state, sim_dirs, labels, metric,
+                    label_name_map=_name_map_a or None,
+                )
+                if len(metric_dirs) < 2:
+                    logger.info(
+                        f"Combined {metric}: need ≥2 simulations; "
+                        f"matched {metric_labels}"
+                    )
+                    skipped.append(metric)
+                    continue
+                result = run_combined_analysis.func(
+                    sim_dirs=metric_dirs,
+                    labels=metric_labels,
+                    working_dir=analysis_dir,
+                    metrics=[metric],
+                )
+                plots.extend(result.get("plots", []))
+                tables.extend(result.get("tables", []))
+                skipped.extend(result.get("skipped", []))
 
-            plots = result.get("plots", [])
-            tables = result.get("tables", [])
-            skipped = result.get("skipped", [])
-
-            log_agent_action(
-                agent_name="analysis",
-                action="Combined Analysis Complete",
-                details={
-                    "plots": plots,
-                    "tables": tables,
-                    "skipped": skipped,
-                    "summary": result.get("summary", ""),
-                },
-            )
+            if combined_metrics:
+                log_agent_action(
+                    agent_name="analysis",
+                    action="Combined Analysis Complete",
+                    details={
+                        "metrics": combined_metrics,
+                        "plots": plots,
+                        "tables": tables,
+                        "skipped": skipped,
+                    },
+                )
+            else:
+                log_agent_action(
+                    agent_name="analysis",
+                    action="Combined Analysis Base Metrics Skipped",
+                    details={"reason": "No base overlay metrics requested"},
+                )
 
             # ── Per-protein RMSF apo vs holo ──────────────────────────────
             rmsf_apo_holo_plots: list = []
-            if apo_holo_pairs:
+            if apo_holo_pairs and "rmsf" in requested:
                 try:
                     rmsf_ah = run_combined_rmsf_apo_holo_analysis.func(
                         sim_dirs=sim_dirs,
@@ -364,7 +469,7 @@ class MDAnalysisAgent:
             # ── DCCM: per-protein apo | holo | Δ triptychs ────────────────
             dccm_plots: list = []
 
-            if apo_holo_pairs:
+            if "dccm" in requested and apo_holo_pairs:
                 try:
                     dccm_ah = run_combined_dccm_apo_holo_analysis.func(
                         sim_dirs=sim_dirs,
@@ -384,30 +489,43 @@ class MDAnalysisAgent:
                         logger.warning(f"DCCM apo/holo: {dccm_ah.get('message')}")
                 except Exception as _exc:
                     logger.warning(f"DCCM apo/holo analysis failed: {_exc}")
-            else:
-                # Fallback: all-simulation comparison when pairing is unavailable
-                try:
-                    dccm_cmp = run_combined_dccm_analysis.func(
-                        sim_dirs=sim_dirs,
-                        labels=labels,
-                        working_dir=analysis_dir,
-                        output_file="dccm_comparison.png",
+            elif "dccm" in requested:
+                dccm_dirs, dccm_labels = self._sims_for_combined_metric(
+                    state, sim_dirs, labels, "dccm", label_name_map=_name_map_a or None,
+                )
+                if len(dccm_dirs) < 2:
+                    logger.info(
+                        "DCCM comparison skipped: need ≥2 simulations with per-sim DCCM "
+                        f"in their goals; matched {dccm_labels}"
                     )
-                    if dccm_cmp.get("success"):
-                        dccm_plots.append(dccm_cmp["output_path"])
-                        log_agent_action(
-                            "analysis", "DCCM comparison generated",
-                            {"output": dccm_cmp.get("output_path")},
+                else:
+                    try:
+                        dccm_cmp = run_combined_dccm_analysis.func(
+                            sim_dirs=dccm_dirs,
+                            labels=dccm_labels,
+                            working_dir=analysis_dir,
+                            output_file="dccm_comparison.png",
                         )
-                    else:
-                        logger.warning(f"DCCM comparison: {dccm_cmp.get('message')}")
-                except Exception as _exc:
-                    logger.warning(f"DCCM comparison failed: {_exc}")
+                        if dccm_cmp.get("success"):
+                            dccm_plots.append(dccm_cmp["output_path"])
+                            log_agent_action(
+                                "analysis", "DCCM comparison generated",
+                                {
+                                    "output": dccm_cmp.get("output_path"),
+                                    "simulations": dccm_labels,
+                                },
+                            )
+                        else:
+                            logger.warning(f"DCCM comparison: {dccm_cmp.get('message')}")
+                    except Exception as _exc:
+                        logger.warning(f"DCCM comparison failed: {_exc}")
 
             # ── RMSF segment bar plots (from user-specified residue ranges) ─
             segment_plots: list = []
             try:
-                if apo_holo_pairs:
+                if "rmsf" not in requested:
+                    rmsf_seg = {"success": False, "message": "RMSF was not requested"}
+                elif apo_holo_pairs:
                     rmsf_seg = run_combined_rmsf_segment_apo_holo_analysis.func(
                         sim_dirs=sim_dirs,
                         labels=labels,
@@ -439,15 +557,44 @@ class MDAnalysisAgent:
             # ── ATP–pocket COM distance overlay (apo vs holo) ───────────────
             com_plot: Optional[str] = None
             try:
-                com_result = run_combined_com_distance_analysis.func(
-                    sim_dirs=sim_dirs,
-                    labels=labels,
-                    working_dir=analysis_dir,
-                )
+                if "com" not in requested:
+                    com_result = {"success": False, "message": "COM distance was not requested"}
+                else:
+                    com_dirs, com_labels = self._sims_for_combined_metric(
+                        state, sim_dirs, labels, "com",
+                        label_name_map=_name_map_a or None,
+                    )
+                    com_result = run_combined_com_distance_analysis.func(
+                        sim_dirs=com_dirs,
+                        labels=com_labels,
+                        working_dir=analysis_dir,
+                    )
                 if com_result.get("success"):
                     com_plot = com_result.get("output_path")
                     if com_plot and com_plot not in plots:
                         plots.append(com_plot)
+                    found_com_files = com_result.get("found_files") or []
+                    if len(found_com_files) >= 2:
+                        try:
+                            from .tools import compute_comparison_table
+                            com_labels = []
+                            for fpath in found_com_files:
+                                sim_root = str(Path(fpath).parent.parent)
+                                idx = sim_dirs.index(sim_root) if sim_root in sim_dirs else -1
+                                com_labels.append(
+                                    labels[idx] if 0 <= idx < len(labels) else Path(sim_root).name
+                                )
+                            table_result = compute_comparison_table.func(
+                                data_files=found_com_files,
+                                labels=com_labels,
+                                output_csv="ligand_pocket_distance_stats.csv",
+                                working_dir=analysis_dir,
+                            )
+                            com_table = table_result.get("output_path") or table_result.get("output_file")
+                            if com_table and com_table not in tables:
+                                tables.append(com_table)
+                        except Exception as table_exc:
+                            logger.warning(f"COM comparison table failed: {table_exc}")
                     log_agent_action(
                         "analysis", "COM distance overlay generated",
                         {
@@ -464,13 +611,16 @@ class MDAnalysisAgent:
             # ── DSSP: backfill missing per-sim runs, comparison chart, activation-loop heatmaps ─
             dssp_plots: list = []
             try:
-                from src.reporter.combined_reporter import run_combined_dssp_analysis
-                dssp_result = run_combined_dssp_analysis(
-                    sim_dirs=sim_dirs,
-                    labels=labels,
-                    output_dir=analysis_dir,
-                    user_goal=_goal_text,
-                )
+                if "dssp" not in requested:
+                    dssp_result = {"success": False, "message": "DSSP was not requested"}
+                else:
+                    from src.reporter.combined_reporter import run_combined_dssp_analysis
+                    dssp_result = run_combined_dssp_analysis(
+                        sim_dirs=sim_dirs,
+                        labels=labels,
+                        output_dir=analysis_dir,
+                        user_goal=_goal_text,
+                    )
                 dssp_plots = dssp_result.get("plots", [])
                 if dssp_plots:
                     plots.extend(p for p in dssp_plots if p not in plots)
@@ -1003,7 +1153,8 @@ class MDAnalysisAgent:
 
             log_agent_action("analysis", "Generated analysis plan", {
                 "steps": len(plan.steps),
-                "reasoning": plan.reasoning[:200]
+                "tools": [s.tool_name for s in plan.steps],
+                "reasoning": plan.reasoning,
             })
 
             # Persist structured plan to state for HITL inspection/modification
@@ -1117,9 +1268,11 @@ class MDAnalysisAgent:
             # Parse LLM response into structured plan
             plan_dict = self._extract_plan_json(content)
 
+            plan_dict = self._filter_plan_steps_by_intent(plan_dict, state, agent_input)
+
             # Post-process: inject mandatory steps the LLM may have omitted
-            # (e.g. calculate_ligand_pocket_distance when user goal mentions ATP/pocket)
             plan_dict = self._inject_mandatory_steps(plan_dict, agent_input, state)
+            plan_dict = self._filter_plan_steps_by_intent(plan_dict, state, agent_input)
 
             return AnalysisPlan(
                 reasoning=plan_dict.get("reasoning", content[:500]),
@@ -1140,7 +1293,110 @@ class MDAnalysisAgent:
             
         except Exception as e:
             logger.warning(f"LLM planning failed, using fallback: {e}")
-            return self._create_fallback_analysis_plan(agent_input)
+            return self._create_fallback_analysis_plan(agent_input, state)
+
+    def _intent_metrics(
+        self,
+        state: MDState,
+        agent_input: Optional[AnalysisAgentInput] = None,
+    ) -> Optional[FrozenSet[str]]:
+        """Requested metrics for the current simulation (per-sim goal takes precedence)."""
+        return detect_requested_metrics_for_sim(state, agent_input)
+
+    def _sims_for_combined_metric(
+        self,
+        state: MDState,
+        sim_dirs: List[str],
+        labels: List[str],
+        metric: str,
+        label_name_map: Optional[Dict[str, str]] = None,
+    ) -> tuple[List[str], List[str]]:
+        """Simulations that should participate in one combined metric (may be a subset)."""
+        return resolve_sims_for_combined_metric(
+            metric,
+            sim_dirs,
+            labels,
+            master_goal=state.get("user_goal_original") or "",
+            combined_plan=state.get("combined_analysis_plan") or "",
+            completed_sim_states=state.get("completed_sim_states") or [],
+            label_name_map=label_name_map,
+        )
+
+    def _filter_plan_steps_by_intent(
+        self,
+        plan_dict: Dict[str, Any],
+        state: MDState,
+        agent_input: Optional[AnalysisAgentInput] = None,
+    ) -> Dict[str, Any]:
+        """Remove analysis steps outside the explicit metric scope in user goals."""
+        requested = self._intent_metrics(state, agent_input)
+        if requested is None:
+            return plan_dict
+
+        allowed_data_files = {
+            STANDARD_OUTPUT_FILES[m]["data"]
+            for m in requested
+            if m in STANDARD_OUTPUT_FILES and "data" in STANDARD_OUTPUT_FILES[m]
+        }
+        allowed_plot_files = {
+            STANDARD_OUTPUT_FILES[m]["plot"]
+            for m in requested
+            if m in STANDARD_OUTPUT_FILES and "plot" in STANDARD_OUTPUT_FILES[m]
+        }
+
+        filtered: List[Dict[str, Any]] = []
+        for step in plan_dict.get("steps", []):
+            tool = step.get("tool_name", "")
+            if tool in _PREP_TOOLS:
+                continue
+            metric = _CALC_TOOL_TO_METRIC.get(tool)
+            if metric is not None:
+                if metric in requested:
+                    filtered.append(step)
+                continue
+            if tool in {"plot_md_data", "plot_multipanel", "plot_md_multipanel"}:
+                params = step.get("tool_params") or {}
+                data_files = params.get("data_files") or []
+                out_file = str(params.get("output_file", ""))
+                data_ok = any(
+                    df in allowed_data_files
+                    or any(m in str(df).lower() for m in requested)
+                    for df in data_files
+                )
+                plot_ok = out_file in allowed_plot_files or not out_file
+                if data_ok and plot_ok:
+                    filtered.append(step)
+                continue
+            filtered.append(step)
+
+        if filtered:
+            plan_dict["steps"] = filtered
+        plan_dict = self._dedupe_com_distance_steps(plan_dict, state, agent_input)
+        return plan_dict
+
+    def _dedupe_com_distance_steps(
+        self,
+        plan_dict: Dict[str, Any],
+        state: MDState,
+        agent_input: Optional[AnalysisAgentInput] = None,
+    ) -> Dict[str, Any]:
+        """Keep one COM-distance tool unless the user explicitly requested both."""
+        goal = " ".join(collect_goal_texts_for_intent(state, agent_input))
+        mode = detect_com_distance_mode(goal)
+        if mode == "both":
+            return plan_dict
+        drop = "calculate_com_distance" if mode == "pocket" else "calculate_ligand_pocket_distance"
+        steps = [
+            s for s in plan_dict.get("steps", [])
+            if s.get("tool_name") != drop
+        ]
+        if len(steps) != len(plan_dict.get("steps", [])):
+            logger.info(
+                "_dedupe_com_distance_steps: removed %s (COM mode=%s)",
+                drop, mode,
+            )
+        plan_dict["steps"] = steps
+        return plan_dict
 
     def _detect_ligand_resname(self, agent_input: AnalysisAgentInput, state: MDState) -> str:
         """Determine the ligand residue name to use for pocket-distance analysis.
@@ -1199,34 +1455,37 @@ class MDAnalysisAgent:
     def _inject_mandatory_steps(self, plan_dict: Dict[str, Any],
                                  agent_input: AnalysisAgentInput,
                                  state: MDState) -> Dict[str, Any]:
-        """Post-process the LLM plan to inject mandatory steps that the LLM may have omitted.
-
-        Currently handles:
-        - calculate_ligand_pocket_distance + plot_md_data when the user goal
-          mentions ligand/ATP/pocket/COM distance but the LLM left it out.
-        """
+        """Post-process the LLM plan to inject mandatory steps that the LLM may have omitted."""
         steps = plan_dict.get("steps", [])
+        requested = self._intent_metrics(state, agent_input)
+        narrow_scope = requested is not None
 
-        # --- Ligand pocket distance ---
+        # --- Ligand pocket distance / protein–ligand COM ---
         existing_tools = {s.get("tool_name", "") for s in steps}
+        user_goal_lower = (
+            state.get("user_goal")
+            or state.get("user_goal_original")
+            or agent_input.user_goal
+            or ""
+        ).lower()
+        com_mode = detect_com_distance_mode(user_goal_lower)
+        narrow_com = narrow_scope and "com" not in (requested or frozenset())
+
         if "calculate_ligand_pocket_distance" not in existing_tools:
-            # Check if user goal mentions ligand/COM/pocket keywords
-            user_goal = (
-                state.get("user_goal_original") or
-                state.get("user_goal") or
-                agent_input.user_goal or
-                ""
-            ).lower()
             ligand_keywords = [
                 "ligand", "atp", "adp", "amp", "gtp", "gdp", "nad",
-                "inhibitor", "pocket", "com distance", "center of mass",
-                "center-of-mass", "binding site", "catalytic pocket",
+                "inhibitor", "pocket", "binding site", "catalytic pocket",
                 "catalytic site", "active site",
             ]
-            needs_pocket_distance = any(kw in user_goal for kw in ligand_keywords)
+            needs_pocket_distance = com_mode in ("pocket", "both") and any(
+                kw in user_goal_lower for kw in ligand_keywords
+            )
 
-            # Also trigger if pdb_analysis shows a ligand is present
-            if not needs_pocket_distance:
+            if narrow_com:
+                needs_pocket_distance = False
+
+            # Also trigger if pdb_analysis shows a ligand is present (broad scope only)
+            if not needs_pocket_distance and not narrow_scope and com_mode != "protein_com":
                 pdb_analysis = state.get("pdb_analysis") or {}
                 ligand_info = pdb_analysis.get("ligand", {})
                 if isinstance(ligand_info, dict) and ligand_info.get("present"):
@@ -1285,25 +1544,69 @@ class MDAnalysisAgent:
                 logger.info(
                     "_inject_mandatory_steps: injected calculate_ligand_pocket_distance "
                     f"(ligand_selection='resname {ligand_resname.upper()}') — "
-                    "triggered by user_goal keywords"
+                    f"COM mode={com_mode}"
                 )
 
-        # --- DCCM ---
+        # --- Whole-protein COM distance (explicit selection1/selection2) ---
+        existing_tools = {s.get("tool_name", "") for s in steps}
+        if (
+            "calculate_com_distance" not in existing_tools
+            and com_mode in ("protein_com", "both")
+            and not narrow_com
+        ):
+            ligand_resname = self._detect_ligand_resname(agent_input, state)
+            topo_file = (
+                Path(agent_input.topology_file).name
+                if agent_input.topology_file else "md.gro"
+            )
+            traj_file = (
+                Path(agent_input.trajectory_file).name
+                if agent_input.trajectory_file else "md.xtc"
+            )
+            com_step = {
+                "name": "Calculate Protein–Ligand COM Distance",
+                "description": (
+                    f"Per-frame COM distance between the whole protein and "
+                    f"{ligand_resname.upper()}."
+                ),
+                "tool_name": "calculate_com_distance",
+                "tool_params": {
+                    "topology_file": topo_file,
+                    "trajectory_file": traj_file,
+                    "selection1": "protein",
+                    "selection2": f"resname {ligand_resname.upper()}",
+                    "label1": "Protein",
+                    "label2": ligand_resname.upper(),
+                    "output_file": "com_distance.csv",
+                },
+                "reason": "User requested whole-protein COM distance to the ligand.",
+            }
+            com_plot_step = {
+                "name": "Plot Protein–Ligand COM Distance",
+                "description": "Plot protein-to-ligand COM distance over time.",
+                "tool_name": "plot_md_data",
+                "tool_params": {
+                    "data_files": ["com_distance.csv"],
+                    "output_file": "com_distance.png",
+                    "x_col": 1,
+                    "y_col": 2,
+                    "xlabel": "Time (ns)",
+                    "ylabel": "COM Distance (Å)",
+                    "titles": f"Protein — {ligand_resname.upper()} COM Distance",
+                },
+                "reason": "Mandatory plot after calculate_com_distance.",
+            }
+            if self._is_holo_simulation(state, agent_input):
+                steps.extend([com_step, com_plot_step])
+                plan_dict["steps"] = steps
+                logger.info(
+                    "_inject_mandatory_steps: injected calculate_com_distance — "
+                    f"COM mode={com_mode}"
+                )
+
+        # --- DCCM --- only when the per-simulation goal explicitly requests it
         if "calculate_dccm" not in existing_tools:
-            user_goal_lower = (
-                state.get("user_goal_original") or
-                state.get("user_goal") or
-                agent_input.user_goal or
-                ""
-            ).lower()
-            dccm_keywords = [
-                "dccm", "cross-correlation", "cross correlation",
-                "correlated motion", "allosteric", "coupled motion",
-                "dynamics variation", "pseudokinase",
-                "dccm difference", "dccm diff", "effect of atp",
-                "ligand effect", "protein only", "protein+atp",
-            ]
-            needs_dccm = any(kw in user_goal_lower for kw in dccm_keywords)
+            needs_dccm = requested is not None and "dccm" in requested
 
             if needs_dccm:
                 topo_file = (
@@ -1373,8 +1676,10 @@ class MDAnalysisAgent:
                                 ylabels.append(yl)
                                 titles.append(tl)
                             break
-            # Inject multipanel only when ≥2 standard panels are available
-            if len(panel_files) >= 2:
+            # Inject multipanel only when ≥2 standard panels and scope is not single-metric
+            if narrow_scope and len(requested) < 2:
+                panel_files = []
+            elif len(panel_files) >= 2:
                 multipanel_step = {
                     "name": "Create Combined Metrics Plot",
                     "description": (
@@ -1454,7 +1759,14 @@ class MDAnalysisAgent:
 {registry_str}
 {pdb_info_str}
 
-**DETAILED INSTRUCTIONS FROM PLANNER:**
+**INTENT (HIGHEST PRIORITY — overrides planner if they conflict):**
+The User Goal defines which analyses to run. If the User Goal says "RMSF only" (or similar),
+your plan must include ONLY calculate_rmsf + plot_md_data for rmsf.dat/rmsf.png — do NOT add
+RMSD, Rg, SASA, hydrogen bonds, DCCM, wrap_trajectory, or run_complete_analysis.
+
+{get_standard_output_filenames_block()}
+
+**DETAILED INSTRUCTIONS FROM PLANNER (guidance only — do not exceed User Goal scope):**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {planner_instructions}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1485,25 +1797,15 @@ class MDAnalysisAgent:
     {{"tool_name": "calculate_rmsd", "tool_params": {{"output_file": "rmsd.dat", ...}}}},
     {{"tool_name": "plot_md_data",   "tool_params": {{"data_files": ["rmsd.dat"], "output_file": "rmsd.png", "xlabel": "Time (ns)", "ylabel": "RMSD (Å)"}}}}
 - Apply this pattern for RMSD, RMSF, Rg, energy, and any distance calculation.
-- **LIGAND POCKET DISTANCE (MANDATORY WHEN REQUESTED):**
-  If the **User Goal** above contains ANY of these keywords:
-  "ligand", "ATP", "ADP", "inhibitor", "pocket", "COM", "center of mass",
-  "center-of-mass", "binding site", "catalytic pocket", "active site", "distance"
-  — you MUST include calculate_ligand_pocket_distance → plot_md_data pair.
-  NOTE: The planner's instructions may NOT have explicitly mentioned this step.
-  You MUST follow the User Goal, not just the planner's text.
-  For ligand_selection use the residue name from the trajectory topology
-  (e.g. "resname ATP"). Use cutoff 5.0 (Å).
-- **DCCM — DYNAMIC CROSS-CORRELATION MATRIX (include when relevant):**
-  If the **User Goal** mentions ANY of: "DCCM", "cross-correlation", "correlated motion",
-  "allosteric", "coupled motions", "dynamics variation", "pseudokinase"
-  — include calculate_dccm (it generates its own heatmap PNG internally — no
-  separate plot_md_data step required for DCCM).
+{get_com_distance_tool_guide()}
+- **DCCM — only when the User Goal explicitly names DCCM for this simulation:**
+  Include calculate_dccm only if DCCM is requested in the User Goal for this run.
+  Do NOT add DCCM because the global project mentions it for other proteins.
   Use: selection="protein and name CA", frame_interval=5, output_prefix="dccm".
 
 Your task: Create a detailed, step-by-step execution plan that follows the planner's instructions above
 AND honours the original User Goal. When the User Goal requests ligand/pocket/COM distance analysis,
-include calculate_ligand_pocket_distance even if the planner did not explicitly mention it.
+include the correct COM tool from the guide above (not both unless both are requested).
 The plan should specify which tools to call and in what order to achieve the planner's objectives.
 ONLY include steps that use valid tools from the list above.
 
@@ -1671,119 +1973,122 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         except Exception:
             return None
 
-    def _create_fallback_analysis_plan(self, agent_input: AnalysisAgentInput) -> AnalysisPlan:
+    def _create_fallback_analysis_plan(
+        self,
+        agent_input: AnalysisAgentInput,
+        state: Optional[MDState] = None,
+    ) -> AnalysisPlan:
         """
         Create template-based fallback plan when LLM fails.
-        Uses standard MD analysis workflow.
-        File paths use filenames only — _execute_analysis_plan resolves them.
+        Respects explicit metric scope from the user goal when present.
         """
-        steps = []
+        steps: List[AnalysisStep] = []
 
-        # Extract just the filenames — the execution engine resolves full paths
         topo_name = Path(agent_input.topology_file).name if agent_input.topology_file else None
         traj_name = Path(agent_input.trajectory_file).name if agent_input.trajectory_file else None
         energy_name = Path(agent_input.energy_file).name if agent_input.energy_file else None
 
-        # Detect whether a ligand analysis was requested from the user goal text
-        _goal_lower = (agent_input.user_goal or "").lower()
-        _has_ligand_request = any(
-            kw in _goal_lower for kw in
-            ["ligand", "atp", "adp", "inhibitor", "pocket", "distance", "com distance", "binding"]
-        )
-        # Try to extract ligand residue name (e.g. "resname ATP") from the goal
-        import re as _re_fb
-        _lig_resname_match = _re_fb.search(
-            r'resname[\s:]+([A-Za-z0-9]{1,6})', _goal_lower
-        ) or _re_fb.search(
-            r'\b(ATP|ADP|LIG|INH|NAD|FAD|GTP|GDP|AMP|MG|ION)\b', agent_input.user_goal or ""
-        )
-        _lig_resname = _lig_resname_match.group(1).upper() if _lig_resname_match else "LIG"
+        _goal_lower = " ".join(collect_goal_texts_for_intent(state, agent_input)).lower()
+        requested = self._intent_metrics(state, agent_input)
+        if requested is None:
+            requested = frozenset({"rmsd", "rmsf", "rg"})
 
-        # Detect whether a DCCM analysis was requested from the user goal text
-        _has_dccm_request = any(
-            kw in _goal_lower for kw in
-            ["dccm", "cross-correlation", "cross correlation",
-             "correlated motion", "allosteric", "coupled motion",
-             "dynamics variation", "pseudokinase"]
-        )
         if traj_name and topo_name:
-            steps.extend([
-                AnalysisStep(
-                    name="Calculate RMSD",
-                    description="Calculate Root Mean Square Deviation to assess structural stability",
-                    tool_name="calculate_rmsd",
-                    tool_params={
-                        "topology_file": topo_name,
-                        "trajectory_file": traj_name,
-                        "selection": "protein and name CA",
-                        "output_file": "rmsd.dat",
-                    },
-                    reason="RMSD indicates structural stability over time"
-                ),
-                AnalysisStep(
-                    name="Plot RMSD",
-                    description="Plot RMSD time-series",
-                    tool_name="plot_md_data",
-                    tool_params={
-                        "data_files": ["rmsd.dat"],
-                        "output_file": "rmsd.png",
-                        "xlabel": "Time (ns)",
-                        "ylabel": "RMSD (Å)",
-                    },
-                    reason="Visualise RMSD stability"
-                ),
-                AnalysisStep(
-                    name="Calculate RMSF",
-                    description="Calculate Root Mean Square Fluctuation to identify flexible regions",
-                    tool_name="calculate_rmsf",
-                    tool_params={
-                        "topology_file": topo_name,
-                        "trajectory_file": traj_name,
-                        "selection": "protein and name CA",
-                        "output_file": "rmsf.dat",
-                    },
-                    reason="RMSF identifies flexible and rigid regions"
-                ),
-                AnalysisStep(
-                    name="Plot RMSF",
-                    description="Plot per-residue RMSF",
-                    tool_name="plot_md_data",
-                    tool_params={
-                        "data_files": ["rmsf.dat"],
-                        "output_file": "rmsf.png",
-                        "xlabel": "Residue",
-                        "ylabel": "RMSF (Å)",
-                    },
-                    reason="Visualise per-residue flexibility"
-                ),
-                AnalysisStep(
-                    name="Calculate Radius of Gyration",
-                    description="Calculate radius of gyration to assess protein compactness",
-                    tool_name="calculate_radius_of_gyration",
-                    tool_params={
-                        "topology_file": topo_name,
-                        "trajectory_file": traj_name,
-                        "selection": "protein",
-                        "output_file": "gyration.dat",
-                    },
-                    reason="Radius of gyration indicates protein compactness"
-                ),
-                AnalysisStep(
-                    name="Plot Radius of Gyration",
-                    description="Plot Rg time-series",
-                    tool_name="plot_md_data",
-                    tool_params={
-                        "data_files": ["gyration.dat"],
-                        "output_file": "gyration.png",
-                        "xlabel": "Time (ns)",
-                        "ylabel": "Rg (Å)",
-                    },
-                    reason="Visualise compactness over time"
-                ),
-            ])
+            if "rmsd" in requested:
+                steps.extend([
+                    AnalysisStep(
+                        name="Calculate RMSD",
+                        description="Calculate Root Mean Square Deviation to assess structural stability",
+                        tool_name="calculate_rmsd",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "selection": "protein and name CA",
+                            "output_file": "rmsd.dat",
+                        },
+                        reason="RMSD indicates structural stability over time",
+                    ),
+                    AnalysisStep(
+                        name="Plot RMSD",
+                        description="Plot RMSD time-series",
+                        tool_name="plot_md_data",
+                        tool_params={
+                            "data_files": ["rmsd.dat"],
+                            "output_file": "rmsd.png",
+                            "xlabel": "Time (ns)",
+                            "ylabel": "RMSD (Å)",
+                        },
+                        reason="Visualise RMSD stability",
+                    ),
+                ])
+            if "rmsf" in requested:
+                steps.extend([
+                    AnalysisStep(
+                        name="Calculate RMSF",
+                        description="Calculate Root Mean Square Fluctuation to identify flexible regions",
+                        tool_name="calculate_rmsf",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "selection": "protein and name CA",
+                            "output_file": "rmsf.dat",
+                        },
+                        reason="RMSF identifies flexible and rigid regions",
+                    ),
+                    AnalysisStep(
+                        name="Plot RMSF",
+                        description="Plot per-residue RMSF",
+                        tool_name="plot_md_data",
+                        tool_params={
+                            "data_files": ["rmsf.dat"],
+                            "output_file": "rmsf.png",
+                            "xlabel": "Residue",
+                            "ylabel": "RMSF (Å)",
+                        },
+                        reason="Visualise per-residue flexibility",
+                    ),
+                ])
+            if "rg" in requested:
+                steps.extend([
+                    AnalysisStep(
+                        name="Calculate Radius of Gyration",
+                        description="Calculate radius of gyration to assess protein compactness",
+                        tool_name="calculate_radius_of_gyration",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "selection": "protein",
+                            "output_file": "gyration.dat",
+                        },
+                        reason="Radius of gyration indicates protein compactness",
+                    ),
+                    AnalysisStep(
+                        name="Plot Radius of Gyration",
+                        description="Plot Rg time-series",
+                        tool_name="plot_md_data",
+                        tool_params={
+                            "data_files": ["gyration.dat"],
+                            "output_file": "gyration.png",
+                            "xlabel": "Time (ns)",
+                            "ylabel": "Rg (Å)",
+                        },
+                        reason="Visualise compactness over time",
+                    ),
+                ])
 
-            # Ligand pocket distance — holo simulations only (apo has no ligand)
-            if _has_ligand_request and self._is_holo_simulation(state, agent_input):
+            _has_ligand_request = "com" in requested or any(
+                kw in _goal_lower for kw in
+                ["ligand", "atp", "adp", "inhibitor", "pocket", "distance", "com distance", "binding"]
+            )
+            import re as _re_fb
+            _lig_resname_match = _re_fb.search(
+                r'resname[\s:]+([A-Za-z0-9]{1,6})', _goal_lower
+            ) or _re_fb.search(
+                r'\b(ATP|ADP|LIG|INH|NAD|FAD|GTP|GDP|AMP|MG|ION)\b', agent_input.user_goal or ""
+            )
+            _lig_resname = _lig_resname_match.group(1).upper() if _lig_resname_match else "LIG"
+
+            if _has_ligand_request and state and self._is_holo_simulation(state, agent_input):
                 steps.extend([
                     AnalysisStep(
                         name="Ligand Pocket Distance",
@@ -1800,7 +2105,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                             "cutoff": 5.0,
                             "output_file": "ligand_pocket_distance.csv",
                         },
-                        reason="Track whether ligand stays in binding pocket"
+                        reason="Track whether ligand stays in binding pocket",
                     ),
                     AnalysisStep(
                         name="Plot Ligand Pocket Distance",
@@ -1814,18 +2119,21 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                             "xlabel": "Time (ns)",
                             "ylabel": "COM Distance (Å)",
                         },
-                        reason="Visualise ligand displacement from catalytic pocket"
+                        reason="Visualise ligand displacement from catalytic pocket",
                     ),
                 ])
 
-            # DCCM — when user mentioned correlation/allosteric/pseudokinase
+            _has_dccm_request = "dccm" in requested or any(
+                kw in _goal_lower for kw in
+                ["dccm", "cross-correlation", "cross correlation",
+                 "correlated motion", "allosteric", "coupled motion"]
+            )
             if _has_dccm_request:
                 steps.append(AnalysisStep(
                     name="Calculate Dynamic Cross-Correlation Matrix (DCCM)",
                     description=(
                         "Compute normalised DCCM of Cα fluctuations to reveal correlated "
-                        "and anti-correlated residue motions. Generates dccm.csv and "
-                        "dccm_heatmap.png internally."
+                        "and anti-correlated residue motions."
                     ),
                     tool_name="calculate_dccm",
                     tool_params={
@@ -1837,20 +2145,17 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         "save_matrix_csv": True,
                         "create_heatmap": True,
                     },
-                    reason=(
-                        "DCCM reveals allosteric communication and correlated domain motions "
-                        "— key for differentiating pseudokinase dynamics"
-                    )
+                    reason="DCCM reveals allosteric communication patterns",
                 ))
 
-        if energy_name:
+        if energy_name and "energy" in requested:
             steps.extend([
                 AnalysisStep(
                     name="Analyze Energy",
                     description="Extract and analyze energy terms from simulation",
                     tool_name="analyze_energy",
                     tool_params={"energy_file": energy_name, "output_file": "energy.dat"},
-                    reason="Energy analysis assesses simulation stability"
+                    reason="Energy analysis assesses simulation stability",
                 ),
                 AnalysisStep(
                     name="Plot Energy",
@@ -1862,48 +2167,52 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         "xlabel": "Time (ns)",
                         "ylabel": "Energy (kJ/mol)",
                     },
-                    reason="Visualise thermodynamic equilibration"
+                    reason="Visualise thermodynamic equilibration",
                 ),
             ])
 
-        # Always add combined metrics panel when standard .dat files are available
-        if traj_name and topo_name:
-            _panel_files  = ["rmsd.dat", "rmsf.dat", "gyration.dat"]
-            _panel_xl     = ["Time (ns)", "Residue",   "Time (ns)"]
-            _panel_yl     = ["RMSD (Å)",  "RMSF (Å)",  "Rg (Å)"]
-            _panel_titles = ["RMSD",       "RMSF",       "Radius of Gyration"]
-            if energy_name:
-                _panel_files.append("energy.dat")
-                _panel_xl.append("Time (ns)")
-                _panel_yl.append("Energy (kJ/mol)")
-                _panel_titles.append("Energy")
-            steps.append(AnalysisStep(
-                name="Create Combined Metrics Plot",
-                description=(
-                    "Multi-panel summary figure of RMSD, RMSF, Rg "
-                    "(and energy if available) in one PNG."
-                ),
-                tool_name="plot_multipanel",
-                tool_params={
-                    "data_files": _panel_files,
-                    "output_file": "combined_metrics.png",
-                    "layout": "vertical",
-                    "titles": _panel_titles,
-                    "xlabels": _panel_xl,
-                    "ylabels": _panel_yl,
-                },
-                reason=(
-                    "Standard combined-overview plot present in every simulation folder "
-                    "for quick quality-control review."
-                ),
-            ))
+        if traj_name and topo_name and len(requested) >= 2:
+            _panel_files: List[str] = []
+            _panel_xl: List[str] = []
+            _panel_yl: List[str] = []
+            _panel_titles: List[str] = []
+            _panel_map = {
+                "rmsd": ("rmsd.dat", "Time (ns)", "RMSD (Å)", "RMSD"),
+                "rmsf": ("rmsf.dat", "Residue", "RMSF (Å)", "RMSF"),
+                "rg": ("gyration.dat", "Time (ns)", "Rg (Å)", "Radius of Gyration"),
+                "energy": ("energy.dat", "Time (ns)", "Energy (kJ/mol)", "Energy"),
+            }
+            for metric in ("rmsd", "rmsf", "rg", "energy"):
+                if metric in requested and metric in _panel_map:
+                    f, xl, yl, tl = _panel_map[metric]
+                    if metric != "energy" or energy_name:
+                        _panel_files.append(f)
+                        _panel_xl.append(xl)
+                        _panel_yl.append(yl)
+                        _panel_titles.append(tl)
+            if len(_panel_files) >= 2:
+                steps.append(AnalysisStep(
+                    name="Create Combined Metrics Plot",
+                    description="Multi-panel summary figure of requested metrics in one PNG.",
+                    tool_name="plot_multipanel",
+                    tool_params={
+                        "data_files": _panel_files,
+                        "output_file": "combined_metrics.png",
+                        "layout": "vertical",
+                        "titles": _panel_titles,
+                        "xlabels": _panel_xl,
+                        "ylabels": _panel_yl,
+                    },
+                    reason="Combined overview when multiple metrics were requested.",
+                ))
 
+        metrics_label = ", ".join(sorted(requested))
         return AnalysisPlan(
-            reasoning="Using standard MD analysis workflow (LLM fallback) with plotting",
-            overview="Standard trajectory analysis: RMSD, RMSF, Rg (+ ligand pocket distance and/or DCCM if requested) with plots",
+            reasoning=f"Intent-driven fallback plan for: {metrics_label}",
+            overview=f"Trajectory analysis: {metrics_label}",
             steps=steps,
             potential_issues=["Requires trajectory and topology files"],
-            recommendations=["Verify all files exist before execution"]
+            recommendations=["Verify all files exist before execution"],
         )
 
     def _execute_analysis_plan(self, agent_input: AnalysisAgentInput, 

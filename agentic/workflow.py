@@ -717,6 +717,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "multi_sim_phase": None,
             "pdb_list": None,
             "sim_prompts": None,
+            "run_combined_analysis": None,
             "combined_analysis_plan": None,
             "current_sim_index": 0,
             "completed_sim_states": None,
@@ -742,6 +743,9 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         if not Path(working_dir).is_absolute():
             working_dir = str(Path.cwd() / working_dir)
         state["working_directory"] = working_dir
+
+        if state.get("is_multi_simulation"):
+            state["multi_sim_base_dir"] = working_dir
         
         # In multi-sim mode, agent sub-directories live inside each per-simulation
         # directory (e.g. {basepath}/1A/analysis/).  Only shared dirs are created at
@@ -846,12 +850,17 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 "hpc_instructions", "analysis_instructions", "reporter_instructions",
             ]
 
-            # Multi-simulation progress bookkeeping must be restored so reruns
-            # continue from remaining simulations instead of restarting.
-            if state.get("is_multi_simulation") and not state.get("combined_only"):
+            # Multi-simulation progress bookkeeping is restored only for --resume.
+            # Fresh multi-sim runs regenerate the master plan and restart the loop.
+            if (
+                state.get("is_multi_simulation")
+                and not state.get("combined_only")
+                and state.get("resume_failed_only")
+            ):
                 restore_keys.extend([
                     "multi_sim_phase",
                     "sim_prompts",
+                    "run_combined_analysis",
                     "combined_analysis_plan",
                     "current_sim_index",
                     "completed_sim_states",
@@ -880,6 +889,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     "analysis_instructions",
                     "reporter_instructions",
                     "sim_prompts",
+                    "run_combined_analysis",
                     "combined_analysis_plan",
                     "multi_sim_phase",
                     "current_sim_index",
@@ -891,6 +901,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 if state.get("resume_failed_only") and state.get("is_multi_simulation"):
                     skip_stale_keys -= {
                         "sim_prompts",
+                        "run_combined_analysis",
                         "combined_analysis_plan",
                         "completed_sim_states",
                         "master_enriched_prompt",
@@ -926,10 +937,40 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     state["current_sim_index"] = 0
                     state["completed_sim_states"] = None
                     state["sim_prompts"] = None
+                    state["run_combined_analysis"] = None
                     state["combined_analysis_plan"] = None
                     state["master_enriched_prompt"] = None
                     state["user_goal_original"] = None
                     state["all_pdb_analyses"] = None
+
+            # Fresh multi-sim run (no --resume): never inherit a mid-loop checkpoint.
+            if (
+                state.get("is_multi_simulation")
+                and not state.get("combined_only")
+                and not state.get("resume_failed_only")
+                and saved_state
+            ):
+                state["multi_sim_base_dir"] = working_dir
+                state["multi_sim_phase"] = None
+                state["current_sim_index"] = 0
+                state["completed_sim_states"] = None
+                state["sim_prompts"] = None
+                state["run_combined_analysis"] = None
+                state["combined_analysis_plan"] = None
+                state["execution_plan"] = None
+                state["plan_executed"] = False
+                state["current_agent_idx"] = 0
+                state["enriched_prompt"] = None
+                state["rephrased_goal"] = None
+                state["master_enriched_prompt"] = None
+                state["analysis_results"] = {}
+                state["reporter_output"] = None
+                state["figures"] = []
+                state["input_validated"] = False
+                logger.info(
+                    "[multi-sim] Fresh run — cleared stale loop/checkpoint state; "
+                    "supervisor will enrich, build master plan, then enter per-sim loop"
+                )
             
             logger.info("Restored previous workflow state — supervisor will skip completed stages")
 
@@ -955,6 +996,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 ("reporter_instructions", None),
                 ("sim_prompts", None),
                 ("completed_sim_states", None),
+                ("run_combined_analysis", None),
                 ("combined_analysis_plan", None),
                 ("input_validated", True),
                 ("subtask_type_initialized", False),

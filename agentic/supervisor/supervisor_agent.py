@@ -85,9 +85,15 @@ def _should_run_combined_analysis(state: Dict[str, Any]) -> bool:
     """
     True when multi-sim should run cross-simulation analysis + reporter at basepath.
 
-    Respects ``--subtask``: combined analysis runs only when analysis or reporter
-    is in the agent list (or for full_task / analysis-only workflows).
+    Respects the planner's master-plan intent decision and ``--subtask``.
     """
+    if state.get("combined_only"):
+        return True
+    if state.get("run_combined_analysis") is False:
+        return False
+    if state.get("run_combined_analysis") is True:
+        return True
+
     subtask_type = state.get("subtask_type")
     if subtask_type == "multi_agent":
         agents = set(state.get("agent_list") or [])
@@ -121,6 +127,43 @@ def _build_per_sim_analysis_prompt(
     )
 
 
+def _get_multi_sim_base_dir(state: Dict[str, Any]) -> str:
+    """Return the canonical base directory for multi-simulation orchestration."""
+    base = state.get("multi_sim_base_dir") or state.get("working_directory") or "."
+    return str(Path(base).resolve())
+
+
+def _set_base_conversation_log(state: Dict[str, Any]) -> None:
+    """Route conversation logging to {base}/agent_conversation.log."""
+    log_path = str(Path(_get_multi_sim_base_dir(state)) / "agent_conversation.log")
+    set_log_file(log_path)
+
+
+def _normalize_multi_sim_paths(state: MDState) -> None:
+    """Rewrite sim_prompts paths to sit under the current multi_sim_base_dir."""
+    base = Path(_get_multi_sim_base_dir(state))
+    state["multi_sim_base_dir"] = str(base)
+    sim_prompts = state.get("sim_prompts") or []
+    for sp in sim_prompts:
+        label = sp.get("label")
+        if label:
+            sp["working_dir"] = str((base / label).resolve())
+        pdb_name = Path(sp.get("pdb") or "").name
+        if pdb_name:
+            sp["pdb"] = str((base / pdb_name).resolve())
+    if sim_prompts:
+        state["sim_working_dirs"] = [sp["working_dir"] for sp in sim_prompts]
+
+
+def _expected_sim_working_dir(state: MDState) -> Optional[str]:
+    """Return the working_dir for the simulation at current_sim_index."""
+    sim_prompts = state.get("sim_prompts") or []
+    idx = state.get("current_sim_index", 0)
+    if 0 <= idx < len(sim_prompts):
+        return sim_prompts[idx].get("working_dir")
+    return None
+
+
 def _build_combined_analysis_plan_fallback(
     state: Dict[str, Any],
     expanded_entries: List[Dict[str, Any]],
@@ -129,13 +172,12 @@ def _build_combined_analysis_plan_fallback(
     original = (state.get("user_goal_original") or state.get("user_goal") or "").strip()
     labels = ", ".join(e.get("label", "") for e in expanded_entries)
     base = (
-        "Perform combined cross-simulation analysis and reporting across all completed "
-        f"trajectories ({labels}).\n"
-        "1. Group comparisons by protein and apo vs holo (ligand-bound) case.\n"
-        "2. Generate per-protein overlay plots (RMSD, RMSF apo/holo, Rg) and summary statistics.\n"
-        "3. Compute DCCM comparisons and apo–holo ΔDCCM per pseudokinase.\n"
-        "4. Include active-site / segment RMSF bar plots where specified in the goal.\n"
-        "5. Produce a consolidated HTML report correlating simulation findings with literature.\n"
+        "Perform only the combined cross-simulation analysis requested by the user "
+        f"across these completed trajectories: {labels}. Compare the requested "
+        "metrics across systems, generate aggregate plots or tables only when they "
+        "support the stated goal, and avoid adding unrelated calculations. Produce "
+        "a consolidated report that explains shared trends, meaningful differences, "
+        "and limitations."
     )
     if original:
         return f"{base}\nOriginal study goal for reference:\n{original}"
@@ -230,6 +272,37 @@ class MDSupervisor:
 
         multi_sim_phase = state.get("multi_sim_phase")
 
+        if state.get("is_multi_simulation"):
+            if not state.get("multi_sim_base_dir"):
+                state["multi_sim_base_dir"] = str(
+                    Path(state.get("working_directory", ".")).resolve()
+                )
+            # Overall orchestration (enrichment, master plan, combined analysis)
+            # is logged at the base working directory.
+            if multi_sim_phase in (None, "combined_analysis"):
+                _set_base_conversation_log(state)
+            # Resume mid-loop with a mismatched working_directory (e.g. after
+            # --working-dir changed or stale checkpoint) — re-bind current sim.
+            if (
+                multi_sim_phase == "executing_sims"
+                and state.get("sim_prompts")
+                and not state.get("combined_only")
+            ):
+                _normalize_multi_sim_paths(state)
+                expected_wd = _expected_sim_working_dir(state)
+                current_wd = state.get("working_directory")
+                if (
+                    expected_wd
+                    and current_wd
+                    and Path(expected_wd).resolve() != Path(current_wd).resolve()
+                ):
+                    logger.warning(
+                        "SUPERVISOR [multi-sim]: working_directory mismatch "
+                        f"(current={current_wd}, expected={expected_wd}) — "
+                        "reinitializing current simulation context"
+                    )
+                    return self._start_next_sim(state)
+
         # ── Combined-only fast path (before any per-sim routing) ─────────
         # Per-simulation analysis/report already lives under {base}/{label}/.
         # Combined outputs belong in {base}/analysis/ and {base}/reporter/.
@@ -297,11 +370,11 @@ class MDSupervisor:
                 state["master_enriched_prompt"] = enriched
             logger.info(f"SUPERVISOR: Enrichment complete ({len(enriched)} chars)")
 
-        # ── Step 2.5: Multi-sim master planning (supervisor-side, no tools context) ─
-        # Build sim_prompts + combined_analysis_plan right after enrichment and
-        # before routing to the planner.  Replaces the old planner-side
-        # _create_multi_sim_master_plan which exposed the full tools context to
-        # the LLM unnecessarily.
+        # ── Step 2.5: Multi-sim master planning (planner owns tools context) ─
+        # Build sim_prompts plus an optional combined_analysis_plan right after
+        # enrichment.  The supervisor requests the master plan, but the planner
+        # decides from user intent and available tools whether combined analysis
+        # is part of this run.
         # Regenerate when a prior full-pipeline master plan is reused for analysis-only.
         if (state.get("is_multi_simulation")
                 and state.get("sim_prompts")
@@ -317,14 +390,16 @@ class MDSupervisor:
                 )
                 state["sim_prompts"] = None
                 state["combined_analysis_plan"] = None
+                state["run_combined_analysis"] = None
 
         if (state.get("is_multi_simulation")
                 and state.get("enriched_prompt")
                 and not state.get("sim_prompts")
                 and multi_sim_phase is None
                 and not state.get("combined_only")):
-            logger.info("SUPERVISOR [multi-sim]: Building master plan (per-sim prompts + combined plan)")
-            state = self._create_multi_sim_master_plan(state)
+            logger.info("SUPERVISOR [multi-sim]: Requesting planner master plan")
+            _set_base_conversation_log(state)
+            state = self.planner.create_multi_sim_master_plan(state)
             # Fall through to the detection block below which will start the per-sim loop.
 
         # ── Multi-sim: master plan present (sim_prompts set, no exec plan) ─
@@ -432,6 +507,7 @@ class MDSupervisor:
         state["current_agent_idx"] = 0
         state["current_sim_index"] = 0
         state["sim_prompts"] = None
+        state["run_combined_analysis"] = None
         state["completed_sim_states"] = None
         state["enriched_prompt"] = None
         state["rephrased_goal"] = None
@@ -498,6 +574,7 @@ class MDSupervisor:
         state["sim_working_dirs"] = [entry["working_dir"] for entry in discovered]
         state["current_sim_index"] = len(discovered)
         state["combined_only"] = True
+        state["run_combined_analysis"] = True
 
         if not state.get("combined_analysis_plan"):
             state["combined_analysis_plan"] = _build_combined_analysis_plan_fallback(
@@ -594,6 +671,7 @@ class MDSupervisor:
         3. Set current_sim_index to the first sim that still needs to run.
         4. Log the full skip / re-run plan.
         """
+        _normalize_multi_sim_paths(state)
         sim_prompts = state.get("sim_prompts") or []
         retry_labels: set = set(state.get("retry_labels") or [])
         existing = list(state.get("completed_sim_states") or [])
@@ -905,23 +983,12 @@ class MDSupervisor:
         """
         completed = state.get("completed_sim_states", [])
 
-        # basepath = parent of per-sim dirs (or explicit multi-sim base)
-        basepath = state.get("multi_sim_base_dir")
-        if not basepath:
-            sim_wds = state.get("sim_working_dirs")
-            if sim_wds:
-                basepath = str(Path(sim_wds[0]).parent.resolve())
-            elif completed:
-                basepath = str(Path(completed[0]["working_directory"]).parent.resolve())
-            elif state.get("sim_prompts"):
-                basepath = str(Path(state["sim_prompts"][0]["working_dir"]).parent.resolve())
-            else:
-                basepath = str(Path(state.get("working_directory", "")).resolve())
+        basepath = _get_multi_sim_base_dir(state)
+        state["multi_sim_base_dir"] = basepath
 
         logger.info(f"SUPERVISOR [multi-sim]: Combined analysis at basepath={basepath}")
 
-        # Switch log back to basepath
-        set_log_file(str(Path(basepath) / "agent_conversation.log"))
+        _set_base_conversation_log(state)
 
         # Build combined instructions
         sim_data_summary = self._build_sim_data_summary(completed)
@@ -942,7 +1009,7 @@ class MDSupervisor:
 
         # Preserve multi-sim bookkeeping + config
         preserved_keys = {
-            "is_multi_simulation", "sim_prompts", "combined_analysis_plan",
+            "is_multi_simulation", "sim_prompts", "run_combined_analysis", "combined_analysis_plan",
             "sim_working_dirs", "pdb_list", "completed_sim_states",
             "multi_sim_base_dir", "combined_only",
             "md_engine", "force_field", "water_model", "human_in_loop",
@@ -1063,7 +1130,7 @@ class MDSupervisor:
         Reset per-simulation fields while keeping multi-sim bookkeeping.
 
         Preserved: is_multi_simulation, multi_sim_phase, sim_prompts,
-                   combined_analysis_plan, current_sim_index,
+                   run_combined_analysis, combined_analysis_plan, current_sim_index,
                    completed_sim_states, sim_working_dirs, pdb_list,
                    md_engine, force_field, water_model, human_in_loop,
                    subtask_type, subtask_type_initialized, agent_list,
@@ -1073,7 +1140,7 @@ class MDSupervisor:
         preserved_keys = {
             # Multi-sim bookkeeping
             "is_multi_simulation", "multi_sim_phase", "sim_prompts",
-            "combined_analysis_plan", "current_sim_index",
+            "run_combined_analysis", "combined_analysis_plan", "current_sim_index",
             "completed_sim_states", "sim_working_dirs",
             "multi_sim_base_dir",
             "structure_requests",
@@ -1306,13 +1373,15 @@ class MDSupervisor:
         ]
 
     def _create_multi_sim_master_plan(self, state: MDState) -> MDState:
-        """Build per-sim prompts and combined analysis plan in the supervisor.
+        """Deprecated compatibility wrapper; planner owns multi-sim master plans."""
+        logger.warning(
+            "SUPERVISOR [multi-sim]: _create_multi_sim_master_plan is deprecated; "
+            "delegating to planner"
+        )
+        if self.planner is None:
+            self.planner = MDPlanner(llm_client=self.llm)
+        return self.planner.create_multi_sim_master_plan(state)
 
-        Called from ``supervisor_node`` right after prompt enrichment, before
-        routing to the planner. The master plan can expand each PDB into
-        multiple component-specific simulations (for example protein-only and
-        protein+ATP+MG), each with its own directory and prompt.
-        """
         import re as _re_nm
         from pathlib import Path as _Path
 
@@ -1745,9 +1814,10 @@ class MDSupervisor:
             agent_name="supervisor.input_validation",
             action=f"Starting Unified Input Validation ({subtask_type})",
             details={
-                "user_goal": state.get("user_goal", "")[:200],
-                "task_type": subtask_type
-            }
+                "user_goal": state.get("user_goal", ""),
+                "agent_list": state.get("agent_list") or [],
+                "task_type": subtask_type,
+            },
         )
         
         # Call unified validation function for all task types

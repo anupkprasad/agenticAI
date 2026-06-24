@@ -169,6 +169,7 @@ class MDState(TypedDict):
     multi_sim_phase: Optional[str]               # "planning" | "executing_sims" | "combined_analysis" | "combined_reporter" | None
     pdb_list: Optional[List[str]]                # Original PDB file paths from CLI / goal extraction
     sim_prompts: Optional[List[Dict[str, Any]]]  # Per-sim prompts from master planner [{prompt, pdb, label, working_dir}, ...]
+    run_combined_analysis: Optional[bool]        # Planner decision: run base-level combined analysis/report after per-sim loop
     combined_analysis_plan: Optional[str]        # LLM plan text for cross-simulation analysis
     current_sim_index: Optional[int]             # Index into sim_prompts (which sim is next)
     completed_sim_states: Optional[List[Dict[str, Any]]]  # Saved state snapshots after each sim completes

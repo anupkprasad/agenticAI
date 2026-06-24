@@ -132,7 +132,22 @@ uses the registry automatically.
 - Skipped simulations are recorded in `completed_sim_states` with `skipped=True`
   and a `skip_reason` string — they are not silent failures.
 - After all sims, `multi_sim_phase` advances to `combined_analysis` then
-  `combined_reporter` automatically.
+  `combined_reporter` automatically when the user goal requests it.
+- **`multi_sim_base_dir`** is the project root (`--working-dir`). Per-simulation
+  paths in `sim_prompts` are always `{base}/{label}/`.
+- **`--resume`** restores `sim_prompts`, `completed_sim_states`, and loop
+  progress. A normal re-run without `--resume` regenerates the master plan and
+  restarts the per-sim loop (see `docs/ARCHITECTURE.md` directory layout).
+
+### Conversation logs (multi-sim)
+
+| Log file | Scope |
+|----------|--------|
+| `{base}/agent_conversation.log` | User goal, base-level supervisor routing, prompt enrichment, **master plan** (planner), combined analysis/reporter |
+| `{base}/{label}/agent_conversation.log` | Per-simulation input validation, execution plan, analysis, reporter |
+
+The framework switches the active log with `set_log_file()` when entering or
+leaving the per-sim loop. Do not write per-sim agent output to the base log.
 
 ---
 

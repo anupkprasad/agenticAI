@@ -1766,6 +1766,21 @@ def run_combined_dssp_analysis(
     user_goal: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Backfill missing per-sim DSSP, then write comparison + activation-loop heatmaps."""
+    try:
+        from agentic.planner.planning_guidelines import detect_requested_metrics
+        requested = detect_requested_metrics(user_goal or "")
+        if requested is not None and "dssp" not in requested:
+            return {
+                "success": False,
+                "message": "DSSP was not requested in user goal",
+                "comparison_plot": None,
+                "activation_loop_heatmaps": [],
+                "plots": [],
+                "backfill": {"backfilled": [], "skipped": labels, "errors": []},
+            }
+    except ImportError:
+        pass
+
     ensure_result = ensure_per_sim_dssp(sim_dirs, labels)
     comparison = generate_dssp_comparison_chart(
         sim_dirs, labels, output_dir, user_goal=user_goal,

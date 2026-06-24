@@ -1662,6 +1662,7 @@ def main(argv=None):
 
         # Set multi-sim flags in config so _initialize_state picks them up
         config["is_multi_simulation"] = True
+        config["multi_sim_base_dir"] = working_dir
         # Resolve PDB paths: check working_dir first, then cwd, then keep as-is
         resolved_pdbs = []
         for p in pdb_list:

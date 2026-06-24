@@ -189,11 +189,22 @@ llm:
     9. extract_trajectory_metrics (no plot needed — gives trajectory metadata)
        - tool_params: {{"trajectory_file": "md.xtc", "topology_file": "md.gro"}}
 
-    **Ligand Pocket Distance (include when user mentions ligand/ATP/inhibitor/distance):**
+    **COM distance — choose ONE tool (do not run both unless the user asks for both):**
+
+    A) **Ligand pocket distance** — binding-site / catalytic pocket tracking (preferred for holo kinases):
     10. calculate_ligand_pocket_distance
+        - When: "ligand pocket distance", "ATP in the pocket", "binding site", "atoms within 5 Å of ATP"
         - tool_params: {{"topology_file": "md.gro", "trajectory_file": "md.xtc", "ligand_selection": "resname ATP", "cutoff": 5.0, "output_file": "ligand_pocket_distance.csv"}}
-    11. plot_md_data  ← REQUIRED plot for ligand pocket distance
-        - tool_params: {{"data_files": ["ligand_pocket_distance.csv"], "output_file": "ligand_pocket_distance.png", "xlabel": "Time (ns)", "ylabel": "COM Distance (Å)"}}
+    11. plot_md_data  ← REQUIRED plot
+        - tool_params: {{"data_files": ["ligand_pocket_distance.csv"], "output_file": "ligand_pocket_distance.png", "xlabel": "Time (ns)", "ylabel": "Pocket COM Distance (Å)"}}
+
+    B) **Whole-protein COM distance** — explicit two-group COM (NOT pocket-defined):
+    10b. calculate_com_distance
+        - When: "COM distance between the **whole protein** and ATP", domain–domain COM, chain–chain COM
+        - tool_params: {{"topology_file": "md.gro", "trajectory_file": "md.xtc", "selection1": "protein", "selection2": "resname ATP", "label1": "Protein", "label2": "ATP", "output_file": "com_distance.csv"}}
+        - Use selection1/selection2 — NOT ligand_selection
+    11b. plot_md_data
+        - tool_params: {{"data_files": ["com_distance.csv"], "output_file": "com_distance.png", "xlabel": "Time (ns)", "ylabel": "COM Distance (Å)"}}
 
     **DCCM (include when user mentions correlation, DCCM, allosteric, cross-correlation, coupled motions, pseudokinase):**
     12. calculate_dccm

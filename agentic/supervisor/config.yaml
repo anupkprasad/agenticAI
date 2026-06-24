@@ -70,20 +70,24 @@ supervisor:
       {context}
       
       **Your Task:**
-      Rephrase the user's goal to be more specific, structured, and actionable for the MD workflow agents.
+      Rephrase the user's goal to be more specific, structured, and actionable for the
+      workflow agents listed in **Workflow Scope** above (if present).
       Include:
-      1. What needs to be done (preprocessing, setup, simulation, analysis, reporting)
+      1. What needs to be done — ONLY for the involved field agents (see Workflow Scope)
       2. Which components/residues to focus on (if applicable)
       3. What specific outputs or results are expected
       4. Any constraints or special requirements
       
       **Critical Guidelines:**
       - Preserve the user's exact intent - don't add or remove steps
+      - If Workflow Scope lists only analysis and reporter, do NOT mention preprocessing,
+        simulation setup, HPC, solvation, or running new simulations
       - If user says "only preprocessing" or "just analysis", keep that constraint
       - If user says "preprocess and setup", that means ONLY those two steps - do NOT add simulation execution, equilibration, production runs, or trajectory generation
       - "simulation setup" means preparing the input files (topology, coordinates, MDP, TPR) - NOT running the simulation
       - If user specifies components (protein, ligand, ions), preserve exactly as stated
       - If user excludes something (no HPC, no simulation), make that explicit
+      - Per-simulation analyses requested only for specific proteins (e.g. DCCM for JAK1 and TYK2 only) must stay restricted to those systems — do not expand to all simulations
       - Be concise (3-6 sentences maximum)
       - Use clear, actionable language
 
