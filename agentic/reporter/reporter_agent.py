@@ -25,6 +25,84 @@ from .tools import ReporterToolExecutor, get_tool_metadata
 
 logger = logging.getLogger(__name__)
 
+# Glob patterns for combined cross-sim plots under {base}/analysis/
+_COMBINED_ANALYSIS_PLOT_GLOBS = (
+    "*overlay*.png",
+    "dccm_comparison.png",
+    "dccm_*comparison*.png",
+    "rmsf_segment*.png",
+    "com_distance*.png",
+    "dssp_comparison.png",
+    "dssp_activation_loop_*.png",
+)
+
+
+def resolve_combined_sim_context(state: Dict[str, Any]) -> tuple:
+    """Return (sim_dirs, labels) for combined report/analysis."""
+    completed = state.get("completed_sim_states") or []
+    sim_dirs = [s["working_directory"] for s in completed if s.get("working_directory")]
+    labels = [s.get("label", f"sim_{i}") for i, s in enumerate(completed)]
+    if sim_dirs:
+        return sim_dirs, labels
+
+    sim_prompts = state.get("sim_prompts") or []
+    base = state.get("multi_sim_base_dir") or state.get("working_directory", "")
+    sim_dirs = list(state.get("sim_working_dirs") or [])
+    if not sim_dirs and sim_prompts:
+        sim_dirs = [
+            sp.get("working_dir") or str(Path(base) / sp.get("label", f"sim_{i}"))
+            for i, sp in enumerate(sim_prompts)
+        ]
+    if not labels and sim_prompts:
+        labels = [sp.get("label", f"sim_{i}") for i, sp in enumerate(sim_prompts)]
+    return sim_dirs, labels
+
+
+def collect_combined_overlay_plots(
+    state: Dict[str, Any],
+    analysis_dir: str,
+    combined_info: Dict[str, Any],
+) -> List[str]:
+    """
+    Merge overlay plot paths from state, combined analysis results, and on-disk files.
+
+    HITL report regeneration often runs after state compaction dropped plot paths
+    or when completed_sim_states was not persisted — disk discovery keeps reports accurate.
+    """
+    plots: List[str] = []
+    seen: set = set()
+
+    def _add(path: Any) -> None:
+        if not path:
+            return
+        p = str(path)
+        if p in seen:
+            return
+        if Path(p).is_file():
+            seen.add(p)
+            plots.append(p)
+
+    for key in (
+        "overlay_plots",
+        "dccm_plots",
+        "rmsf_segment_plots",
+        "rmsf_apo_holo_plots",
+        "dssp_plots",
+    ):
+        for item in combined_info.get(key) or []:
+            _add(item)
+    _add(combined_info.get("com_distance_plot"))
+    for item in state.get("figures") or []:
+        _add(item)
+
+    adir = Path(analysis_dir)
+    if adir.is_dir():
+        for pattern in _COMBINED_ANALYSIS_PLOT_GLOBS:
+            for p in sorted(adir.glob(pattern)):
+                _add(p)
+
+    return plots
+
 
 class ReporterAgent:
     """LLM-driven reporter agent that generates scientific reports"""
@@ -280,10 +358,8 @@ class ReporterAgent:
         reporter_dir = str(Path(working_dir) / "reporter")
         Path(reporter_dir).mkdir(parents=True, exist_ok=True)
 
-        # Resolve per-sim dirs and labels
-        completed = state.get("completed_sim_states") or []
-        sim_dirs = [s["working_directory"] for s in completed if s.get("working_directory")]
-        labels = [s.get("label", f"sim_{i}") for i, s in enumerate(completed)]
+        # Resolve per-sim dirs and labels (fallback to sim_prompts when state is stale)
+        sim_dirs, labels = resolve_combined_sim_context(state)
 
         _user_goal_text = state.get("user_goal", "")
         _enriched_text = state.get("master_enriched_prompt") or state.get("enriched_prompt", "")
@@ -292,16 +368,28 @@ class ReporterAgent:
         if _label_name_map:
             labels = apply_label_name_map(labels, _label_name_map)
 
-        # Overlay plots produced by combined analysis
+        # Overlay plots — merge state, combined results, figures list, and on-disk files
         combined_info = (state.get("analysis_results") or {}).get("combined", {})
-        overlay_plots = list(combined_info.get("overlay_plots", []))
+        _analysis_dir = combined_info.get("analysis_dir") or str(Path(working_dir) / "analysis")
+        overlay_plots = collect_combined_overlay_plots(state, _analysis_dir, combined_info)
+        if overlay_plots:
+            logger.info(
+                "Combined report: using %d overlay plot(s) (disk + state)",
+                len(overlay_plots),
+            )
+        else:
+            logger.warning(
+                "Combined report: no overlay plots found in state or %s — "
+                "run combined analysis first or use: run combined analysis: <task>",
+                _analysis_dir,
+            )
 
         # ── Figure curation ──────────────────────────────────────────────
         _goal_lower = (_user_goal_text + " " + _enriched_text).lower()
         _has_dccm_comparison = any(
             "comparison" in Path(p).name.lower()
             for p in combined_info.get("dccm_plots", [])
-        )
+        ) or any("dccm" in Path(p).name.lower() and "comparison" in Path(p).name.lower() for p in overlay_plots)
 
         # 1. Remove energy overlay by default; include only if user mentions it.
         _want_energy = any(kw in _goal_lower for kw in

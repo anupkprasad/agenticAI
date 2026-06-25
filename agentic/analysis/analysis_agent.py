@@ -12,6 +12,7 @@ import re
 import json
 import logging
 import shutil
+from datetime import datetime
 from typing import Dict, Any, Optional, List, FrozenSet
 from pathlib import Path
 
@@ -94,12 +95,20 @@ class MDAnalysisAgent:
             "use_mdanalysis": True,
         }
 
-    def _get_analysis_tool_metadata(self, state: Optional[MDState] = None) -> Dict[str, Dict[str, Any]]:
-        """Per-simulation tool metadata for LLM planning (excludes combined-analysis tools)."""
-        working_dir = state.get("working_directory") if state else None
-        include_combined = bool(
-            state and state.get("multi_sim_phase") == "combined_analysis"
+    def _is_combined_hitl_context(self, state: Optional[MDState] = None) -> bool:
+        """True when HITL or workflow is at project-base cross-simulation scope."""
+        if not state:
+            return False
+        return bool(
+            state.get("hitl_view_combined")
+            or state.get("hitl_combined_execute")
+            or state.get("multi_sim_phase") in ("combined_analysis", "combined_reporter")
         )
+
+    def _get_analysis_tool_metadata(self, state: Optional[MDState] = None) -> Dict[str, Dict[str, Any]]:
+        """Tool metadata for LLM planning (includes combined tools at project base)."""
+        working_dir = state.get("working_directory") if state else None
+        include_combined = self._is_combined_hitl_context(state)
         return get_tool_metadata(
             working_directory=working_dir,
             include_combined=include_combined,
@@ -130,8 +139,8 @@ class MDAnalysisAgent:
 
     def _get_per_sim_tool_scope_note(self, state: Optional[MDState] = None) -> str:
         """Tell the analysis LLM to stay within this simulation's scope."""
-        if state and state.get("multi_sim_phase") == "combined_analysis":
-            return ""
+        if state and self._is_combined_hitl_context(state):
+            return self._get_combined_hitl_scope_note()
         note = (
             "**SCOPE — THIS SIMULATION ONLY:**\n"
             "- Use only per-trajectory analysis tools listed below.\n"
@@ -147,6 +156,259 @@ class MDAnalysisAgent:
                 if label:
                     note += f"- Current simulation: {label}\n"
         return note
+
+    def _get_combined_hitl_scope_note(self) -> str:
+        return (
+            "**SCOPE — COMBINED CROSS-SIMULATION (project base):**\n"
+            "- Use cross-simulation tools: run_combined_*, plot_combined_overlay, "
+            "collect_metric_files, compute_comparison_table.\n"
+            "- When the user names specific proteins or simulations (e.g. JAK1 and TYK2 only), "
+            "pass ONLY those sim_dirs and labels — do not include other simulations.\n"
+            "- Plan ONLY the metrics and deliverables the user requested; do not add Rg, COM, "
+            "DCCM, RMSD, or other analyses unless explicitly asked.\n"
+            "- For overlay plots use run_combined_analysis with a metrics list (e.g. [\"rmsf\"] "
+            "only) or collect_metric_files + plot_combined_overlay.\n"
+            "- Per-trajectory calculate_* tools are for single-sim rerun; prefer combined tools here.\n"
+        )
+
+    def _format_combined_sim_context_for_hitl(self, state: MDState) -> str:
+        """List simulation paths and display labels for combined HITL planning."""
+        from agentic.reporter.reporter_agent import resolve_combined_sim_context
+        from src.reporter.combined_reporter import _parse_label_name_map, apply_label_name_map
+
+        sim_dirs, labels = resolve_combined_sim_context(state)
+        if not sim_dirs:
+            return ""
+        text = " ".join(
+            filter(
+                None,
+                [
+                    state.get("user_goal_original"),
+                    state.get("master_enriched_prompt"),
+                    state.get("user_goal"),
+                ],
+            )
+        )
+        name_map = _parse_label_name_map(text)
+        if name_map:
+            labels = apply_label_name_map(labels, name_map)
+        lines = ["**Available simulations (use these exact paths in sim_dirs):**"]
+        for sim_dir, label in zip(sim_dirs, labels):
+            lines.append(f"  - {label}: {sim_dir}")
+        base = state.get("multi_sim_base_dir") or state.get("working_directory", ".")
+        lines.append(
+            f"**Combined output directory:** {Path(base) / 'analysis'} "
+            "(use working_dir='.' in combined tool_params)"
+        )
+        return "\n".join(lines)
+
+    def _normalize_hitl_plan_dict(self, plan_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Coerce LLM plan JSON to shapes expected by AnalysisPlan."""
+        overview = plan_dict.get("overview", "")
+        if isinstance(overview, list):
+            plan_dict["overview"] = "; ".join(str(x) for x in overview)
+        elif not isinstance(overview, str):
+            plan_dict["overview"] = str(overview) if overview else "HITL analysis task"
+        reasoning = plan_dict.get("reasoning", "")
+        if not isinstance(reasoning, str):
+            plan_dict["reasoning"] = str(reasoning) if reasoning else ""
+        for key in ("potential_issues", "recommendations"):
+            val = plan_dict.get(key)
+            if val is None:
+                plan_dict[key] = []
+            elif not isinstance(val, list):
+                plan_dict[key] = [str(val)]
+        return plan_dict
+
+    def _filter_sims_for_hitl_task(
+        self,
+        task: str,
+        sim_dirs: List[str],
+        labels: List[str],
+        name_map: Optional[Dict[str, str]] = None,
+    ) -> tuple:
+        """Return sim_dirs/labels subset when the HITL task names specific proteins/sims."""
+        task_lower = task.lower()
+        matched_dirs: List[str] = []
+        matched_labels: List[str] = []
+        for sim_dir, label in zip(sim_dirs, labels):
+            tokens = {label.lower(), Path(sim_dir).name.lower()}
+            if name_map:
+                for key, display in name_map.items():
+                    if key.lower() in tokens or display.lower() in tokens:
+                        tokens.update({key.lower(), display.lower()})
+            if any(len(t) >= 3 and t in task_lower for t in tokens):
+                matched_dirs.append(sim_dir)
+                matched_labels.append(label)
+        if matched_dirs:
+            return matched_dirs, matched_labels
+        return sim_dirs, labels
+
+    def _resolve_combined_tool_sim_dirs(
+        self,
+        state: MDState,
+        task: str,
+        tool_params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Fix sim_dirs/labels/working_dir for combined tools (ignore hallucinated paths)."""
+        from agentic.reporter.reporter_agent import resolve_combined_sim_context
+        from src.reporter.combined_reporter import _parse_label_name_map, apply_label_name_map
+
+        sim_dirs, labels = resolve_combined_sim_context(state)
+        text = " ".join(
+            filter(
+                None,
+                [task, state.get("user_goal_original"), state.get("master_enriched_prompt")],
+            )
+        )
+        name_map = _parse_label_name_map(text)
+        if name_map:
+            labels = apply_label_name_map(labels, name_map)
+        sim_dirs, labels = self._filter_sims_for_hitl_task(task, sim_dirs, labels, name_map)
+        params = dict(tool_params)
+        params["sim_dirs"] = sim_dirs
+        params["labels"] = labels
+        params["working_dir"] = self.file_manager.agent_dir if self.file_manager else "."
+        return params
+
+    def _task_prefers_existing_combined_data(self, task: str) -> bool:
+        lower = task.lower()
+        return any(
+            kw in lower
+            for kw in (
+                "already",
+                "existing",
+                "respective",
+                "raw data",
+                "just use",
+                "from their",
+                "from each",
+                "only create",
+                "overlay only",
+                "plot only",
+            )
+        )
+
+    def _sanitize_combined_hitl_plan(
+        self,
+        plan_dict: Dict[str, Any],
+        state: MDState,
+        task: str,
+    ) -> Dict[str, Any]:
+        """Drop per-sim recalc steps when data exists; fix combined tool paths/metrics."""
+        if not self._is_combined_hitl_context(state):
+            return plan_dict
+
+        from agentic.reporter.reporter_agent import resolve_combined_sim_context
+        from src.reporter.combined_reporter import _parse_label_name_map, apply_label_name_map
+
+        sim_dirs, labels = resolve_combined_sim_context(state)
+        text = " ".join(
+            filter(
+                None,
+                [task, state.get("user_goal_original"), state.get("master_enriched_prompt")],
+            )
+        )
+        name_map = _parse_label_name_map(text)
+        if name_map:
+            labels = apply_label_name_map(labels, name_map)
+        sim_dirs, labels = self._filter_sims_for_hitl_task(task, sim_dirs, labels, name_map)
+
+        requested = detect_requested_metrics(task) or frozenset()
+        recalc = any(
+            kw in task.lower()
+            for kw in ("recalculate", "recompute", "re-run", "rerun", "from trajectory", "from scratch")
+        )
+        prefer_existing = not recalc and (
+            self._task_prefers_existing_combined_data(task) or self._is_combined_hitl_context(state)
+        )
+        metrics = sorted(m for m in requested if m in {"rmsd", "rmsf", "rg", "energy", "sasa", "hbond"})
+        if not metrics and "rmsf" in task.lower():
+            metrics = ["rmsf"]
+
+        new_steps: List[Dict[str, Any]] = []
+        for step in plan_dict.get("steps") or []:
+            tool = step.get("tool_name") or ""
+            if prefer_existing and tool.startswith("calculate_"):
+                continue
+            if is_combined_analysis_tool(tool):
+                params = dict(step.get("tool_params") or {})
+                params["sim_dirs"] = sim_dirs
+                params["labels"] = labels
+                params["working_dir"] = "."
+                if metrics:
+                    params["metrics"] = metrics
+                step = {**step, "tool_params": params}
+                new_steps.append(step)
+            elif not tool.startswith("calculate_"):
+                new_steps.append(step)
+
+        has_combined = any(is_combined_analysis_tool(s.get("tool_name", "")) for s in new_steps)
+        if not has_combined and metrics:
+            new_steps.append({
+                "name": f"Combined {'/'.join(metrics)} overlay",
+                "description": (
+                    "Collect existing per-simulation analysis files and build cross-sim overlay plots."
+                ),
+                "tool_name": "run_combined_analysis",
+                "tool_params": {
+                    "sim_dirs": sim_dirs,
+                    "labels": labels,
+                    "working_dir": ".",
+                    "metrics": metrics,
+                },
+                "reason": "User requested combined plot from existing per-sim analysis data.",
+            })
+
+        plan_dict["steps"] = new_steps
+        return plan_dict
+
+    def _create_combined_hitl_fallback_plan(
+        self,
+        agent_input: AnalysisAgentInput,
+        state: MDState,
+    ) -> AnalysisPlan:
+        """Template plan for combined HITL — overlay existing per-sim analysis files."""
+        task = agent_input.user_goal or state.get("hitl_chat_task") or ""
+        requested = detect_requested_metrics(task) or frozenset()
+        metrics = sorted(m for m in requested if m in {"rmsd", "rmsf", "rg", "energy", "sasa", "hbond"})
+        if not metrics:
+            metrics = ["rmsf"] if "rmsf" in task.lower() else ["rmsf"]
+
+        from agentic.reporter.reporter_agent import resolve_combined_sim_context
+        from src.reporter.combined_reporter import _parse_label_name_map, apply_label_name_map
+
+        sim_dirs, labels = resolve_combined_sim_context(state)
+        text = " ".join(
+            filter(
+                None,
+                [task, state.get("user_goal_original"), state.get("master_enriched_prompt")],
+            )
+        )
+        name_map = _parse_label_name_map(text)
+        if name_map:
+            labels = apply_label_name_map(labels, name_map)
+        sim_dirs, labels = self._filter_sims_for_hitl_task(task, sim_dirs, labels, name_map)
+
+        step = AnalysisStep(
+            name=f"Combined {'/'.join(metrics)} overlay",
+            description="Overlay existing per-simulation metric files at project base.",
+            tool_name="run_combined_analysis",
+            tool_params={
+                "sim_dirs": sim_dirs,
+                "labels": labels,
+                "working_dir": ".",
+                "metrics": metrics,
+            },
+            reason="Combined HITL fallback using on-disk per-sim analysis outputs.",
+        )
+        return AnalysisPlan(
+            reasoning=f"Combined overlay from existing data for: {', '.join(labels)}",
+            overview=f"Combined {'/'.join(metrics)} comparison for {', '.join(labels)}",
+            steps=[step],
+            potential_issues=["Missing metric files under sim/analysis/ will skip that simulation"],
+            recommendations=["Verify rmsf.dat (or rmsf.png) exists in each sim analysis folder"],
+        )
 
     def analysis_node(self, state: MDState) -> MDState:
         """
@@ -263,6 +525,310 @@ class MDAnalysisAgent:
             state["error_triggered_hitl"] = True
         
         return state
+
+    # ── HITL in-chat task execution ─────────────────────────────────────
+
+    def init_for_hitl_execution(self, state: MDState) -> str:
+        """Initialize tool executor and paths for a HITL chat task (no graph routing)."""
+        working_dir = state.get("working_directory", "working_dir")
+        analysis_dir = (
+            state.get("analysis_dir")
+            or state.get("hitl_agent_output_directory")
+            or str(Path(working_dir) / "analysis")
+        )
+        Path(analysis_dir).mkdir(parents=True, exist_ok=True)
+        state["analysis_dir"] = analysis_dir
+        state["analysis_directory"] = analysis_dir
+
+        file_registry = state.get("file_registry") or {}
+        self.file_manager = SecureFileManager(
+            working_dir=working_dir,
+            agent_name="analysis",
+            file_registry=file_registry,
+        )
+        self.tool_executor = AnalysisToolExecutor(
+            config={
+                "working_directory": analysis_dir,
+                "include_combined_tools": bool(
+                    state.get("hitl_view_combined")
+                    or state.get("multi_sim_phase") == "combined_analysis"
+                    or state.get("hitl_combined_execute")
+                ),
+            }
+        )
+        self._copy_files_from_hpc_secure(state)
+        if not state.get("skip_pbc_wrap"):
+            self._wrap_trajectory_pbc(state, analysis_dir)
+
+        resolved = self._resolve_input_files(state)
+        if resolved.get("topology"):
+            state["topology"] = resolved["topology"]
+        if resolved.get("trajectory"):
+            state["trajectory_path"] = resolved["trajectory"]
+        if resolved.get("energy"):
+            state["energy_file"] = resolved["energy"]
+        if state.get("hpc_output_directory") is None:
+            if self._is_combined_hitl_context(state):
+                state["hpc_output_directory"] = ""
+            else:
+                state["hpc_output_directory"] = str(Path(working_dir) / "hpc")
+        return analysis_dir
+
+    def prepare_agent_input_for_hitl(self, state: MDState, task: str) -> AnalysisAgentInput:
+        """Build agent input with the HITL chat task as the sole user goal (no planner merge)."""
+        topology_file = state.get("topology")
+        hpc_dir = (
+            state.get("hpc_dir")
+            or state.get("hpc_output_directory")
+            or state.get("hpc_directory")
+        )
+        if not hpc_dir and not self._is_combined_hitl_context(state):
+            hpc_dir = str(Path(state.get("working_directory", "working_dir")) / "hpc")
+        hpc_dir = hpc_dir or ""
+        if hpc_dir and topology_file:
+            hpc_dir_path = Path(hpc_dir)
+            candidate = hpc_dir_path / Path(topology_file).name
+            if candidate.exists():
+                topology_file = str(candidate)
+
+        return AnalysisAgentInput(
+            working_directory=state.get("working_directory", "working_dir"),
+            hpc_output_dir=hpc_dir,
+            topology_file=topology_file,
+            trajectory_file=state.get("trajectory_path"),
+            energy_file=state.get("energy_file"),
+            analyses=[],
+            user_goal=task,
+            additional_instructions=None,
+        )
+
+    def run_hitl_analysis_workflow(self, task: str, state: MDState) -> AnalysisAgentOutput:
+        """Plan + execute a HITL chat task using the same logging path as normal analysis."""
+        state["hitl_chat_task"] = task
+        input_summary = {
+            "user_goal": task,
+            "topology_file": state.get("topology"),
+            "trajectory_file": state.get("trajectory_path"),
+        }
+        log_agent_start("analysis", "HITL Analysis Task", input_summary)
+
+        try:
+            agent_input = self.prepare_agent_input_for_hitl(state, task)
+            plan = self._create_hitl_analysis_plan_llm(agent_input, state, task)
+
+            log_agent_action("analysis", "Generated analysis plan", {
+                "steps": len(plan.steps),
+                "tools": [s.tool_name for s in plan.steps],
+                "reasoning": plan.reasoning,
+            })
+
+            exec_plan = state.get("execution_plan") or {}
+            exec_plan.setdefault("structured_plans", {})["analysis"] = plan.model_dump()
+            state["execution_plan"] = exec_plan
+
+            output = self.execute_plan_for_hitl(agent_input, plan, state)
+            self._save_hitl_execution_artifacts(plan, output.result, task)
+
+            success = output.success and len(output.result.issues) == 0
+            log_agent_completion("analysis", "HITL Analysis Task", state, success)
+            return output
+        finally:
+            state.pop("hitl_chat_task", None)
+
+    def create_hitl_analysis_plan(
+        self,
+        agent_input: AnalysisAgentInput,
+        state: MDState,
+        task: str,
+    ) -> AnalysisPlan:
+        """LLM JSON plan for a HITL task (always fresh, not planner-derived)."""
+        return self._create_hitl_analysis_plan_llm(agent_input, state, task)
+
+    def execute_plan_for_hitl(
+        self,
+        agent_input: AnalysisAgentInput,
+        plan: AnalysisPlan,
+        state: MDState,
+    ) -> AnalysisAgentOutput:
+        """Execute plan and merge results into state (HITL chat context)."""
+        result = self._execute_analysis_plan(agent_input, plan, state)
+        output = AnalysisAgentOutput(
+            success=result.success,
+            plan=plan,
+            result=result,
+            supervisor_update={
+                "analysis_results": result.results,
+                "analysis_directory": state.get("analysis_directory"),
+            },
+        )
+        self._update_state(state, output)
+        return output
+
+    def _create_hitl_analysis_plan_llm(
+        self,
+        agent_input: AnalysisAgentInput,
+        state: MDState,
+        task: str,
+    ) -> AnalysisPlan:
+        """LLM plan for HITL chat — task text only; no multisim intent filtering."""
+        prompt = self._build_hitl_planning_prompt(task, agent_input, state)
+        try:
+            response = self.llm.invoke([prompt])
+            content = response.content or ""
+
+            log_llm_interaction(
+                "analysis.hitl_planning",
+                prompt,
+                content,
+                is_mock=hasattr(self.llm, "_is_mock_mode") and self.llm._is_mock_mode,
+            )
+
+            plan_dict = self._extract_plan_json(content)
+            plan_dict = self._normalize_hitl_plan_dict(plan_dict)
+            plan_dict = self._sanitize_combined_hitl_plan(plan_dict, state, task)
+            return AnalysisPlan(
+                reasoning=plan_dict.get("reasoning", content[:500]),
+                overview=plan_dict.get("overview", "HITL analysis task"),
+                steps=[
+                    AnalysisStep(
+                        name=step.get("name", "unknown"),
+                        description=step.get("description", ""),
+                        tool_name=step.get("tool_name", ""),
+                        tool_params=step.get("tool_params", {}),
+                        reason=step.get("reason", ""),
+                    )
+                    for step in plan_dict.get("steps", [])
+                ],
+                potential_issues=plan_dict.get("potential_issues", []),
+                recommendations=plan_dict.get("recommendations", []),
+            )
+        except Exception as exc:
+            logger.warning("HITL LLM planning failed, using fallback: %s", exc)
+            if self._is_combined_hitl_context(state):
+                return self._create_combined_hitl_fallback_plan(agent_input, state)
+            return self._create_fallback_analysis_plan(agent_input, state)
+
+    def _build_hitl_planning_prompt(
+        self,
+        task: str,
+        agent_input: AnalysisAgentInput,
+        state: MDState,
+    ) -> str:
+        """Planning prompt where the HITL chat task is the only user intent."""
+        tool_metadata = self._get_analysis_tool_metadata(state)
+        tools_list_str = self._format_tools_list_for_prompt(tool_metadata)
+        pdb_info_str = self._format_pdb_info_for_llm(state)
+
+        topo_name = Path(agent_input.topology_file).name if agent_input.topology_file else "md.tpr"
+        traj_name = Path(agent_input.trajectory_file).name if agent_input.trajectory_file else "mdWrap.xtc"
+
+        scope_note = self._get_per_sim_tool_scope_note(state)
+        combined_context = ""
+        if self._is_combined_hitl_context(state):
+            combined_context = self._format_combined_sim_context_for_hitl(state)
+
+        return f"""You are the Analysis Agent in Human-in-the-Loop (HITL) mode.
+
+**USER REQUEST (sole intent — ignore any prior workflow or multisim goals):**
+{task}
+{scope_note}
+{combined_context}
+
+**Available Data:**
+- Topology File: {agent_input.topology_file or "Not available"} (use filename "{topo_name}" in tool_params)
+- Trajectory File: {agent_input.trajectory_file or "Not available"} (use filename "{traj_name}" in tool_params)
+- Energy File: {agent_input.energy_file or "Not available"}
+{pdb_info_str}
+
+**Available Tools:**
+{tools_list_str}
+
+**HITL PLANNING RULES:**
+- Plan ONLY what the user requested above — do not add RMSF, Rg, RMSD, COM distance, or other metrics unless explicitly asked.
+- Compound requests need multiple steps (one tool call per distinct deliverable).
+- For DSSP / secondary structure:
+  • Full protein: analyze_secondary_structure with selection="protein", output_prefix="dssp", create_heatmap=True
+  • Residue segment (e.g. 100–120): a second analyze_secondary_structure with selection="protein and resid 100:120",
+    output_prefix="dssp_res100_120", create_heatmap=True
+  • analyze_secondary_structure generates heatmaps internally — do NOT add a separate plot step for DSSP heatmaps.
+- For calculate_* metrics that produce .dat/.csv files, follow each with plot_md_data using the data filename only.
+- For combined cross-simulation overlays: use run_combined_analysis with metrics limited to what the user asked
+  (e.g. metrics=["rmsf"] only) and sim_dirs/labels restricted to the simulations the user named.
+- Per-simulation metric files already live under each sim's analysis/ folder (e.g. rmsf.dat). For combined
+  overlay requests, do NOT call calculate_rmsf/calculate_* — only run_combined_analysis (or collect_metric_files
+  + plot_combined_overlay) using those existing files.
+- Use the exact sim_dirs paths listed above — never invent paths from other projects.
+- overview MUST be a single string (not a JSON array).
+
+Output as JSON:
+{{
+  "reasoning": "How you will fulfill the user request",
+  "overview": "High-level summary",
+  "steps": [
+    {{
+      "name": "step name",
+      "description": "what it does",
+      "tool_name": "tool to call",
+      "tool_params": {{"param": "value"}},
+      "reason": "why this step is needed"
+    }}
+  ],
+  "potential_issues": [],
+  "recommendations": []
+}}
+"""
+
+    def _save_hitl_execution_artifacts(
+        self,
+        plan: AnalysisPlan,
+        result: AnalysisExecutionResult,
+        task: str,
+    ) -> None:
+        """Persist execution_plan.json, execution_report.md, and execution_log.txt."""
+        if not self.file_manager:
+            return
+
+        agent_dir = self.file_manager.agent_dir
+        stamp = datetime.now().isoformat(timespec="seconds")
+
+        plan_data = {
+            "timestamp": stamp,
+            "source": "hitl",
+            "task": task,
+            "reasoning": plan.reasoning,
+            "overview": plan.overview,
+            "steps": [
+                {
+                    "name": step.name,
+                    "description": step.description,
+                    "tool_name": step.tool_name,
+                    "tool_params": step.tool_params,
+                    "reason": step.reason,
+                }
+                for step in plan.steps
+            ],
+            "potential_issues": plan.potential_issues,
+            "recommendations": plan.recommendations,
+        }
+        plan_file = os.path.join(agent_dir, "execution_plan.json")
+        with open(plan_file, "w", encoding="utf-8") as fh:
+            json.dump(plan_data, fh, indent=2)
+
+        report = self._generate_execution_report(
+            plan, result.results, result.issues, result.warnings
+        )
+        report_file = os.path.join(agent_dir, "execution_report.md")
+        with open(report_file, "w", encoding="utf-8") as fh:
+            fh.write(report + "\n")
+
+        log_file = os.path.join(agent_dir, "execution_log.txt")
+        step_lines = [
+            f"  {i + 1}. {s.tool_name}: {s.name}" for i, s in enumerate(plan.steps)
+        ]
+        header = f"ANALYSIS EXECUTION — {stamp}\nTask: {task}\nSuccess: {result.success}\n"
+        body = header + "Plan steps:\n" + "\n".join(step_lines) + "\n\n" + result.execution_log
+        with open(log_file, "a", encoding="utf-8") as fh:
+            fh.write("\n" + "=" * 72 + "\n" + body + "\n")
 
     # ── Combined multi-sim analysis ───────────────────────────────────────
 
@@ -666,13 +1232,19 @@ class MDAnalysisAgent:
             ]
 
             log_agent_completion("analysis", "Combined Multi-Simulation Analysis", state, True)
-            state["next_node"] = "supervisor"
+            if state.get("human_in_loop"):
+                state["next_node"] = "human_analysis_check"
+            else:
+                state["next_node"] = "supervisor"
 
         except Exception as exc:
             import traceback
             logger.error(f"Combined analysis failed: {exc}\n{traceback.format_exc()}")
             state["errors"].append(f"Combined analysis error: {exc}")
-            state["next_node"] = "supervisor"   # Let supervisor decide what to do
+            if state.get("human_in_loop"):
+                state["next_node"] = "human_analysis_check"
+            else:
+                state["next_node"] = "supervisor"
 
         return state
 
@@ -1329,6 +1901,9 @@ class MDAnalysisAgent:
         agent_input: Optional[AnalysisAgentInput] = None,
     ) -> Dict[str, Any]:
         """Remove analysis steps outside the explicit metric scope in user goals."""
+        if state.get("hitl_chat_task"):
+            return plan_dict
+
         requested = self._intent_metrics(state, agent_input)
         if requested is None:
             return plan_dict
@@ -1456,6 +2031,9 @@ class MDAnalysisAgent:
                                  agent_input: AnalysisAgentInput,
                                  state: MDState) -> Dict[str, Any]:
         """Post-process the LLM plan to inject mandatory steps that the LLM may have omitted."""
+        if state.get("hitl_chat_task"):
+            return plan_dict
+
         steps = plan_dict.get("steps", [])
         requested = self._intent_metrics(state, agent_input)
         narrow_scope = requested is not None
@@ -1982,6 +2560,9 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         Create template-based fallback plan when LLM fails.
         Respects explicit metric scope from the user goal when present.
         """
+        if state and state.get("hitl_chat_task") and self._is_combined_hitl_context(state):
+            return self._create_combined_hitl_fallback_plan(agent_input, state)
+
         steps: List[AnalysisStep] = []
 
         topo_name = Path(agent_input.topology_file).name if agent_input.topology_file else None
@@ -2257,17 +2838,18 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     continue
 
                 if is_combined_analysis_tool(step.tool_name):
-                    skip_msg = (
-                        f"Skipping step {i+1} '{step.name}': '{step.tool_name}' is a "
-                        "cross-simulation tool and cannot run in per-simulation analysis"
-                    )
-                    execution_log.append(f"\n⚠ {skip_msg}")
-                    warnings.append(skip_msg)
-                    log_agent_action("analysis", f"Step {i+1}/{len(plan.steps)} skipped", {
-                        "step": step.name,
-                        "reason": f"Combined-analysis tool not allowed: {step.tool_name}"
-                    })
-                    continue
+                    if not self._is_combined_hitl_context(state):
+                        skip_msg = (
+                            f"Skipping step {i+1} '{step.name}': '{step.tool_name}' is a "
+                            "cross-simulation tool and cannot run in per-simulation analysis"
+                        )
+                        execution_log.append(f"\n⚠ {skip_msg}")
+                        warnings.append(skip_msg)
+                        log_agent_action("analysis", f"Step {i+1}/{len(plan.steps)} skipped", {
+                            "step": step.name,
+                            "reason": f"Combined-analysis tool not allowed: {step.tool_name}",
+                        })
+                        continue
                 
                 # Log step start
                 log_agent_action("analysis", f"Executing step {i+1}/{len(plan.steps)}", {
@@ -2282,6 +2864,10 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 
                 # Prepare tool parameters
                 tool_params = dict(step.tool_params) if step.tool_params else {}
+
+                if is_combined_analysis_tool(step.tool_name):
+                    task_text = state.get("hitl_chat_task") or agent_input.user_goal or ""
+                    tool_params = self._resolve_combined_tool_sim_dirs(state, task_text, tool_params)
                 
                 # SECURITY: Sanitize output parameters (LLM may specify full paths)
                 tool_params = sanitize_tool_output_params(tool_params)

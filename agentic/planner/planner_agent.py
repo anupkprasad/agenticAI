@@ -472,7 +472,7 @@ class MDPlanner:
 
         state["sim_working_dirs"] = [e["working_dir"] for e in expanded_entries]
 
-        all_pdb_analyses = state.get("all_pdb_analyses", [])
+        all_pdb_analyses = state.get("all_pdb_analyses") or []
         pdb_analysis_map: Dict[str, Dict[str, Any]] = {}
         for idx, pdb in enumerate(pdb_list):
             if idx < len(all_pdb_analyses):

@@ -142,6 +142,69 @@ Example comparative prompt:
 
 ---
 
+## Human-in-the-Loop (HITL)
+
+By default the workflow runs end-to-end without pauses (`--no-human-loop`).
+Omit `--no-human-loop` to enable **interactive checkpoints** after each major
+stage (preprocess, setup, HPC, analysis, reporter).
+
+### What you can do at a checkpoint
+
+The terminal opens a **bidirectional chat** with the active field agent:
+
+- **Ask questions** — e.g. “What RMSF files were generated?”, “Show the execution plan”
+- **Inspect files** — `show rmsf.dat`, `files`, `list analysis/`, `tools`, `agents`
+- **Switch field agent** — `switch analysis`, `switch reporter`, `switch setup`, …  
+  Reloads that agent’s domain tools and artifact paths (trajectories, per-sim `state.jsonl`, output dirs).
+- **Bind a simulation (multi-sim)** — `switch p23458 analysis` or `switch analysis p23458`  
+  Chat and tools use that sim’s directories; session is saved in `state.jsonl` (`hitl_active_agent`, `hitl_target_sim_label`).
+- **Delegate tasks** — the agent **runs** your request and returns to the same checkpoint:
+  - `run analysis: calculate Rg for JAK1`
+  - `run reporter: add a DCCM section to the report`
+  - `run: <task>` — uses the currently active agent
+  - Multi-sim: `run p23458 analysis: calculate RMSF`
+- **Execute in chat** — after `switch p29597 analysis`, describe the task in natural language
+  (e.g. `calculate DSSP and plot heatmap for residues 100–120`). The **Analysis agent** builds a
+  JSON execution plan (like the normal workflow), runs **all steps**, and writes:
+  - `{sim}/analysis/hitl_execution_plan.json` — structured plan
+  - `{sim}/analysis/execution_log.txt` — step-by-step log
+  - `{sim}/agent_conversation.log` — concise summary (no full JSON dumps)
+- **Get clarifications from the agent** — the LLM may ask follow-up questions when your request is ambiguous
+- **Recover from errors** — after max retries, use:
+  - `recommend: <advice>` — agent retries with your guidance
+  - `modify: <changes>` — same, with explicit change instructions
+  - `retry` — rerun the stage from scratch
+- **Proceed** — `approved` / `continue`
+- **Stop** — `exit` / `quit`
+
+At the **reporter** checkpoint you can also say `analysis: …` or `reporter: …` to
+re-run those stages with new instructions (full pipeline rerun, not just a single delegated task).
+
+### Multi-sim + HITL tips
+
+| Situation | Recommended command |
+|-----------|---------------------|
+| First run, pause after each sim’s analysis | `--simtype multisim --use-llm` (no `--no-human-loop`) |
+| Per-sim work already done; review combined report interactively | Re-run **without** `--no-human-loop` — framework auto-detects existing `analysis/` folders and enters combined-only review |
+| Retry only failed sims | Add `--resume` (optionally `--retry-labels p23458`) |
+| Re-run combined overlay + report only | `--combined-only --use-llm` |
+
+State is saved to `{working_dir}/supervisor/state.jsonl` (and per-sim copies under
+`{label}/supervisor/`). See [docs/CONVENTIONS.md](docs/CONVENTIONS.md) for resume semantics.
+
+Example (interactive analysis + report on completed trajectories):
+
+```bash
+python run_agenticAIWork.py \
+  --goal "Analysis only for p23458, p29597, q7rtn6, q96c45 …" \
+  --working-dir ./agenticB5R1 \
+  --subtask analysis reporter \
+  --simtype multisim \
+  --use-llm
+```
+
+---
+
 ## CLI Reference
 
 ```bash

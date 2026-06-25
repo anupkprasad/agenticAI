@@ -175,3 +175,13 @@ class MDState(TypedDict):
     completed_sim_states: Optional[List[Dict[str, Any]]]  # Saved state snapshots after each sim completes
     sim_working_dirs: Optional[List[str]]        # Per-sim working directories (e.g., base_dir/1abc/)
     multi_sim_base_dir: Optional[str]            # Base directory for multi-simulation checkpoint mirroring
+
+    # Human-in-the-loop session (persisted in state.jsonl across checkpoints)
+    hitl_active_agent: Optional[str]               # Field agent selected in HITL chat
+    hitl_target_sim_label: Optional[str]           # Multi-sim: bound simulation label (e.g. p23458)
+    hitl_sim_dirs: Optional[Dict[str, str]]        # Multi-sim: label -> working dir map
+    hitl_agent_working_directory: Optional[str]    # HITL view dir (sim root in multi-sim)
+    hitl_agent_output_directory: Optional[str]     # HITL tool output dir (e.g. .../analysis)
+    hitl_return_checkpoint: Optional[str]          # Return here after delegated agent run
+    hitl_delegate_agent: Optional[str]
+    hitl_delegate_task: Optional[str]

@@ -2,11 +2,54 @@
 import logging
 import re
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from .state import MDState
 from .utils import log_human_checkpoint
+from .hitl_router import (
+    parse_hitl_command,
+    parse_execute_feedback,
+    prepare_hitl_execution,
+    bind_agent_context,
+    restore_multi_sim_executing_working_directory,
+    sync_hitl_active_agent_for_checkpoint,
+    merge_hitl_context_into_state_jsonl,
+    CHECKPOINT_FOR_AGENT,
+    agents_in_workflow,
+    artifact_summary,
+    AGENT_DISPLAY,
+    HITL_EXECUTE_PREFIX,
+)
+from .multi_sim_progress import apply_hitl_continue
 
 logger = logging.getLogger(__name__)
+
+_CHECKPOINT_RETURN_NODE = {
+    "preprocess": "human_preprocess_check",
+    "setup": "human_setup_check",
+    "hpc": "human_hpc_check",
+    "analysis": "human_analysis_check",
+    "reporter": "human_reporter_check",
+}
+
+
+def _looks_like_combined_report_regen(text: str) -> bool:
+    """Natural-language requests to redo the combined HTML report."""
+    lower = text.lower().strip()
+    if not lower or lower.startswith(("run ", "execute ", "switch ", "continue", "approved")):
+        return False
+    wants_report = any(
+        kw in lower
+        for kw in ("report", "combined_report", "combined report", "html")
+    )
+    wants_change = any(
+        kw in lower
+        for kw in (
+            "recreate", "regenerate", "redo", "improve", "fix", "update",
+            "missing", "include", "add", "no rmsf", "no plot", "not good",
+        )
+    )
+    plot_terms = any(kw in lower for kw in ("rmsf", "plot", "overlay", "dccm", "comparison"))
+    return wants_report and (wants_change or plot_terms)
 
 
 def _list_files_in_dir(directory: str, extensions: list = None) -> List[str]:
@@ -26,11 +69,107 @@ def _list_files_in_dir(directory: str, extensions: list = None) -> List[str]:
 
 class HumanCheckpoints:
     """Handles human intervention points in the MD workflow."""
+
+    @staticmethod
+    def _route_hitl_command(
+        feedback: str,
+        state: MDState,
+        checkpoint_label: str,
+    ) -> Optional[MDState]:
+        """
+        Handle cross-agent switch and delegated execute commands.
+
+        Returns updated state if routed, else None to continue normal feedback handling.
+        """
+        return_node = _CHECKPOINT_RETURN_NODE.get(checkpoint_label, "human_reporter_check")
+
+        combined = False
+        parsed = parse_execute_feedback(feedback)
+        if not parsed:
+            parsed_cmd = parse_hitl_command(
+                feedback, state, default_agent=checkpoint_label
+            )
+            if parsed_cmd and parsed_cmd.get("type") == "execute":
+                combined = bool(parsed_cmd.get("combined"))
+                parsed = (
+                    parsed_cmd["agent"],
+                    parsed_cmd["task"],
+                    parsed_cmd.get("sim_label"),
+                )
+
+        if parsed:
+            agent, task, sim_label = parsed
+            logger.info(
+                "HITL execute: %s (sim=%s, combined=%s) — %s",
+                agent, sim_label or "default", combined, task[:80],
+            )
+            return prepare_hitl_execution(
+                state, agent, task, return_node, sim_label=sim_label, combined=combined
+            )
+
+        cmd = parse_hitl_command(feedback, state, default_agent=checkpoint_label)
+        if cmd and cmd.get("type") in ("switch", "switch_chat"):
+            agent = cmd["agent"]
+            if cmd.get("combined"):
+                state["hitl_view_combined"] = True
+                state.pop("hitl_target_sim_label", None)
+            bind_agent_context(
+                state,
+                agent,
+                sim_label=cmd.get("sim_label"),
+                for_execution=False,
+            )
+            if cmd["type"] == "switch":
+                state["next_node"] = CHECKPOINT_FOR_AGENT[agent]
+                state.setdefault("warnings", []).append(
+                    f"HITL switched to {AGENT_DISPLAY.get(agent, agent)} checkpoint"
+                )
+            else:
+                state["hitl_active_agent"] = agent
+                state["next_node"] = return_node
+                state.pop("human_feedback", None)
+                state.setdefault("warnings", []).append(
+                    f"HITL in-chat switch to {AGENT_DISPLAY.get(agent, agent)}"
+                )
+            merge_hitl_context_into_state_jsonl(state)
+            return state
+
+        if (
+            checkpoint_label == "reporter"
+            and _looks_like_combined_report_regen(feedback)
+            and (
+                state.get("multi_sim_phase") in ("combined_reporter", "combined_analysis", "complete")
+                or state.get("hitl_view_combined")
+                or state.get("run_combined_analysis")
+            )
+        ):
+            from agentic.hitl_router import is_combined_workflow_phase
+
+            combined = bool(
+                state.get("hitl_view_combined")
+                or is_combined_workflow_phase(state)
+                or state.get("run_combined_analysis")
+            )
+            logger.info("HITL: routing natural-language report request to combined reporter")
+            return prepare_hitl_execution(
+                state,
+                "reporter",
+                feedback,
+                return_node,
+                combined=combined,
+            )
+
+        return None
     
     @staticmethod
     def _process_feedback(feedback: str, state: MDState, checkpoint_label: str,
                           retry_node: str, clear_keys: List[str] = None) -> MDState:
         """Common feedback processing logic for all checkpoints."""
+        routed = HumanCheckpoints._route_hitl_command(feedback, state, checkpoint_label)
+        if routed is not None:
+            log_human_checkpoint(checkpoint_label, {}, "hitl_route", feedback)
+            return routed
+
         log_human_checkpoint(checkpoint_label, {}, feedback.lower(), feedback)
         logger.info(f"Received human feedback for {checkpoint_label}: {feedback}")
         
@@ -39,8 +178,12 @@ class HumanCheckpoints:
         
         lower = feedback.lower()
         if "approved" in lower or "continue" in lower:
-            state["human_feedback"] = f"{checkpoint_label}_approved"
-            state["next_node"] = "supervisor"
+            if state.get("is_multi_simulation") and state.get("sim_prompts"):
+                apply_hitl_continue(state, checkpoint_label)
+            else:
+                restore_multi_sim_executing_working_directory(state)
+                state["next_node"] = "supervisor"
+            state.pop("human_feedback", None)
         elif "retry" in lower or "redo" in lower:
             # Clear previous results and retry
             for key in (clear_keys or []):
@@ -84,9 +227,13 @@ class HumanCheckpoints:
             state["next_node"] = retry_node
         else:
             # Default: treat any other text as approval with a note
-            state["human_feedback"] = f"{checkpoint_label}_approved"
             state.setdefault("warnings", []).append(f"Human note ({checkpoint_label}): {feedback}")
-            state["next_node"] = "supervisor"
+            if state.get("is_multi_simulation") and state.get("sim_prompts"):
+                apply_hitl_continue(state, checkpoint_label)
+            else:
+                restore_multi_sim_executing_working_directory(state)
+                state["next_node"] = "supervisor"
+            state.pop("human_feedback", None)
         
         return state
     
@@ -252,6 +399,10 @@ class HumanCheckpoints:
             state["next_node"] = "human_reporter_check"
             return state
 
+        routed = HumanCheckpoints._route_hitl_command(feedback, state, "reporter")
+        if routed is not None:
+            return routed
+
         log_human_checkpoint("reporter", {}, feedback.lower(), feedback)
         logger.info(f"Reporter checkpoint — human decision: {feedback}")
         state.pop("human_feedback", None)
@@ -262,7 +413,10 @@ class HumanCheckpoints:
         if any(w in lower for w in ("done", "exit", "quit", "finish", "ok", "approved",
                                      "good", "satisfied", "continue", "proceed")):
             state["human_final_decision"] = "done"
-            state["next_node"] = "supervisor"
+            if state.get("is_multi_simulation") and state.get("sim_prompts"):
+                apply_hitl_continue(state, "reporter")
+            else:
+                state["next_node"] = "supervisor"
             return state
 
         # ── re-run reporter ────────────────────────────────────────────
@@ -332,14 +486,25 @@ class HumanCheckpoints:
         for informed decisions.
         """
         error_triggered = bool(state.get("error_triggered_hitl"))
-        
+
+        active_agent = sync_hitl_active_agent_for_checkpoint(state, checkpoint_type)
+        bind_agent_context(
+            state,
+            active_agent,
+            sim_label=state.get("hitl_target_sim_label"),
+            for_execution=False,
+        )
+
         summary: Dict[str, Any] = {
             "checkpoint_type": checkpoint_type,
             "error_triggered": error_triggered,
             "current_state": {},
             "issues_found": [],
-            "recommendations": []
+            "recommendations": [],
+            "available_agents": agents_in_workflow(state),
+            "active_agent": active_agent,
         }
+        summary["artifacts"] = artifact_summary(state, active_agent)
         
         if checkpoint_type == "preprocess":
             preprocess_dir = state.get("preprocess_dir", "")
@@ -408,12 +573,20 @@ class HumanCheckpoints:
             analysis_dir = state.get("analysis_dir", "")
             generated = _list_files_in_dir(analysis_dir)
             figures = state.get("figures", [])
-            
+            combined_info = (state.get("analysis_results") or {}).get("combined", {})
+
             summary["current_state"] = {
                 "analysis_results": list(state.get("analysis_results", {}).keys()),
                 "figures": [Path(f).name for f in figures] if figures else [],
                 "generated_files": generated,
             }
+            if combined_info:
+                summary["current_state"]["combined"] = {
+                    "overlay_plots": len(combined_info.get("overlay_plots") or []),
+                    "labels": combined_info.get("labels") or [],
+                    "analysis_dir": combined_info.get("analysis_dir"),
+                }
+                summary["scope"] = "combined"
             conclusions = state.get("conclusions", "")
             if conclusions:
                 summary["current_state"]["conclusions"] = conclusions[:500]
@@ -424,6 +597,12 @@ class HumanCheckpoints:
                 "Check that all requested analyses were completed",
                 "Verify analysis results make physical sense",
             ]
+
+        elif checkpoint_type == "reporter":
+            rep = HumanCheckpoints.get_reporter_check_summary(state)
+            summary["current_state"] = rep.get("current_state", {})
+            summary["issues_found"] = rep.get("issues_found", [])
+            summary["recommendations"] = rep.get("recommendations", [])
         
         # Add errors from the workflow so far
         errors = state.get("errors", [])
@@ -433,12 +612,32 @@ class HumanCheckpoints:
         # Adjust recommendations for error-triggered checkpoints
         if error_triggered:
             summary["recommendations"] = [
+                "Chat: ask questions or answer agent clarifications before deciding",
+                "Switch agent: 'switch analysis' or 'switch reporter'",
+                "Delegate task: 'run analysis: calculate RMSF' or 'run: <task>'",
+                "Multi-sim: 'run p23458 analysis: calculate Rg'",
                 "Use 'recommend: <your advice>' to guide the agent on how to fix the issue",
                 "Use 'retry' to let the agent try again from scratch",
                 "Use 'modify: <instructions>' to specify exact changes",
                 "Use 'show <filename>' to inspect generated files",
-                "Use 'continue' to skip this agent and proceed",
+                "Use 'approved' / 'continue' to accept and proceed",
             ] + summary["recommendations"]
+        else:
+            summary["recommendations"] = [
+                "Switch to another field agent: switch analysis | switch reporter | switch setup …",
+                "Multi-sim sim binding: switch p23458 analysis | switch analysis p23458",
+                "Combined (base level): switch combined analysis | switch combined reporter",
+                "Ask the active agent to run a task: run analysis: <instructions> | run: <task>",
+                "Multi-sim per-label run: run p23458 analysis: <instructions>",
+                "Combined run: run combined analysis: <instructions> | run combined reporter: <task>",
+            ] + summary["recommendations"]
+            if summary.get("scope") == "combined" or state.get("multi_sim_phase", "").startswith("combined"):
+                summary["recommendations"] = [
+                    "You are at the COMBINED (cross-simulation) phase — outputs go to {base}/analysis and {base}/reporter",
+                    "switch combined analysis — review/edit cross-sim overlays at project base",
+                    "switch combined reporter — review combined HTML report",
+                    "run combined analysis: <task> — e.g. overlay RMSF across all sims",
+                ] + summary["recommendations"]
 
         return summary
 
@@ -482,7 +681,11 @@ class HumanCheckpoints:
                 "'done' / 'approved' — accept results and proceed",
                 "'reporter' — regenerate the HTML report (optionally: 'reporter: <instructions>')",
                 "'analysis: <instructions>' — re-run analysis with new instructions then re-report",
-                "'preprocess' / 'setup' / 'hpc' — switch to that agent's HITL checkpoint to iterate, then reporter re-runs automatically",
+                "'switch analysis' — chat as Analysis agent (reload tools/artifacts)",
+                "'run analysis: <task>' — delegate task to Analysis agent, return here after",
+                "'run p23458 analysis: <task>' — run on one simulation (multi-sim)",
+                "'preprocess' / 'setup' / 'hpc' — switch to that agent's HITL checkpoint",
+                "'agents' — list field agents and artifact directories",
                 "'show <filename>' — inspect a file",
                 "'files' — list all generated files",
             ],

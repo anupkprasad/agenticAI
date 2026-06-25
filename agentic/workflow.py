@@ -20,8 +20,60 @@ from .hpc import MDHPCAgent
 from .analysis import MDAnalysisAgent
 from .planner import MDPlanner
 from .reporter import ReporterAgent
+from .utils.state_persistence import compact_state_for_persistence
 
 logger = logging.getLogger(__name__)
+
+_MULTISIM_SKIP_DIRS = frozenset({
+    "supervisor", "planner", "programmer", "analysis", "reporter",
+})
+
+
+def _discover_multisim_labels(base_dir: str) -> list:
+    """Return subdirectory labels that look like per-simulation workspaces."""
+    base = Path(base_dir)
+    if not base.is_dir():
+        return []
+    labels: list = []
+    for d in sorted(base.iterdir()):
+        if not d.is_dir() or d.name in _MULTISIM_SKIP_DIRS:
+            continue
+        if (d / "supervisor" / "state.jsonl").exists() or (d / "analysis").is_dir():
+            labels.append(d.name)
+    return labels
+
+
+def _multisim_per_sim_analysis_complete(base_dir: str) -> bool:
+    """True when every discovered sim label has non-empty analysis output."""
+    labels = _discover_multisim_labels(base_dir)
+    if not labels:
+        return False
+    for label in labels:
+        adir = Path(base_dir) / label / "analysis"
+        if not adir.is_dir():
+            return False
+        if not any(adir.iterdir()):
+            return False
+    return True
+
+
+def _multisim_per_sim_workflow_complete(base_dir: str, progress: Optional[Dict[str, Any]] = None) -> bool:
+    """True when every sim has finished required agents (progress-aware)."""
+    from agentic.multi_sim_progress import multisim_workflow_incomplete
+
+    if progress:
+        return not multisim_workflow_incomplete(progress)
+    state_path = Path(base_dir) / "supervisor" / "state.jsonl"
+    if state_path.is_file():
+        try:
+            entry = json.loads(state_path.read_text(encoding="utf-8"))
+            saved_progress = (entry.get("state") or {}).get("multi_sim_progress")
+            if saved_progress:
+                return not multisim_workflow_incomplete(saved_progress)
+        except Exception:
+            pass
+    return _multisim_per_sim_analysis_complete(base_dir)
+
 
 class MDWorkflow:
     """
@@ -289,7 +341,15 @@ class MDWorkflow:
             report = self._generate_fallback_report(state)
         
         state["final_report"] = report
-        state["workflow_status"] = "completed"
+        if state.get("is_multi_simulation"):
+            from agentic.multi_sim_progress import multisim_workflow_incomplete
+
+            if multisim_workflow_incomplete(state.get("multi_sim_progress")):
+                state["workflow_status"] = "in_progress:interrupted"
+            else:
+                state["workflow_status"] = "completed"
+        else:
+            state["workflow_status"] = "completed"
         
         # Save execution report and state to working_dir/supervisor/
         self._save_execution_report(state, report, stage="final_report")
@@ -551,23 +611,52 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
     def _save_workflow_state(self, state: MDState):
         """Save serializable workflow state to working_dir/supervisor/state.jsonl."""
         try:
+            if state.get("is_multi_simulation") and state.get("sim_prompts"):
+                from agentic.multi_sim_progress import ensure_multi_sim_progress
+
+                ensure_multi_sim_progress(state)
+
             working_dir = state.get("working_directory", ".")
             supervisor_dir = Path(working_dir) / "supervisor"
             supervisor_dir.mkdir(parents=True, exist_ok=True)
             state_path = supervisor_dir / "state.jsonl"
             
             # Build a serializable snapshot of the state
+            snapshot = compact_state_for_persistence(dict(state))
             serializable_state = {}
-            for key, value in state.items():
+            for key, value in snapshot.items():
                 try:
                     json.dumps(value, default=str)
                     serializable_state[key] = value
                 except (TypeError, ValueError):
                     serializable_state[key] = str(value)
+
+            # Never mark completed in state file while multisim loop is incomplete
+            persist_status = state.get("workflow_status", "unknown")
+            if (
+                state.get("is_multi_simulation")
+                and persist_status == "completed"
+            ):
+                from agentic.multi_sim_progress import multisim_workflow_incomplete
+
+                if multisim_workflow_incomplete(state.get("multi_sim_progress")):
+                    persist_status = state.get("workflow_status") or "in_progress:checkpoint"
+                    if not str(persist_status).startswith("in_progress"):
+                        persist_status = "in_progress:checkpoint"
+
+            # HITL: keep multi-sim base working_directory stable when view is per-sim
+            if (
+                state.get("is_multi_simulation")
+                and state.get("multi_sim_base_dir")
+                and state.get("hitl_target_sim_label")
+            ):
+                serializable_state["working_directory"] = str(
+                    Path(state["multi_sim_base_dir"]).resolve()
+                )
             
             entry = {
                 "timestamp": datetime.now().isoformat(),
-                "workflow_status": state.get("workflow_status", "unknown"),
+                "workflow_status": persist_status,
                 "state": serializable_state,
             }
             
@@ -822,6 +911,36 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             )
             is_completed_snapshot = str(saved_status).startswith("completed")
 
+            # Auto-resume interrupted multi-sim runs from base/per-sim state files.
+            if (
+                state.get("is_multi_simulation")
+                and not state.get("combined_only")
+                and not state.get("resume_failed_only")
+            ):
+                from agentic.multi_sim_progress import multisim_workflow_incomplete
+
+                saved_progress = saved_state.get("multi_sim_progress")
+                if multisim_workflow_incomplete(saved_progress):
+                    state["resume_failed_only"] = True
+                    is_completed_snapshot = False
+                    logger.info(
+                        "[multi-sim] Incomplete progress in saved state — "
+                        "auto-resuming (q7rtn6/q96c45 etc. need not use --resume)"
+                    )
+                elif str(saved_status).startswith("in_progress") and saved_state.get("sim_prompts"):
+                    state["resume_failed_only"] = True
+                    is_completed_snapshot = False
+                    logger.info(
+                        "[multi-sim] in_progress snapshot with sim_prompts — auto-resuming"
+                    )
+
+            # Multi-simulation loop bookkeeping: restore when resuming (explicit or auto).
+            multisim_loop_restore = (
+                state.get("is_multi_simulation")
+                and not state.get("combined_only")
+                and state.get("resume_failed_only")
+            )
+
             # Restore artifact paths and completed-stage outputs so agents
             # can skip already-finished work.  Control-flow and retry counters
             # are intentionally NOT restored — the workflow re-evaluates routing
@@ -848,15 +967,14 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 # Agent instructions
                 "preprocessing_instructions", "setup_instructions",
                 "hpc_instructions", "analysis_instructions", "reporter_instructions",
+                # HITL session (agent switch / sim binding across checkpoints)
+                "hitl_active_agent", "hitl_target_sim_label", "hitl_sim_dirs",
+                "hitl_agent_working_directory", "hitl_agent_output_directory",
+                "multi_sim_progress",
             ]
 
-            # Multi-simulation progress bookkeeping is restored only for --resume.
-            # Fresh multi-sim runs regenerate the master plan and restart the loop.
-            if (
-                state.get("is_multi_simulation")
-                and not state.get("combined_only")
-                and state.get("resume_failed_only")
-            ):
+            # Multi-simulation progress bookkeeping is restored when resuming.
+            if multisim_loop_restore:
                 restore_keys.extend([
                     "multi_sim_phase",
                     "sim_prompts",
@@ -868,6 +986,10 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     "multi_sim_base_dir",
                     "master_enriched_prompt",
                     "all_pdb_analyses",
+                    "user_goal_original",
+                    "enriched_prompt",
+                    "rephrased_goal",
+                    "structured_prompt",
                 ])
 
             # For a completed snapshot or a different subtask signature,
@@ -907,7 +1029,11 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                         "master_enriched_prompt",
                         "all_pdb_analyses",
                         "enriched_prompt",
+                        "rephrased_goal",
                         "structured_prompt",
+                        "user_goal_original",
+                        "multi_sim_phase",
+                        "current_sim_index",
                     }
                 restore_keys = [k for k in restore_keys if k not in skip_stale_keys]
                 logger.info(
@@ -920,17 +1046,26 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 if key in saved_state and saved_state[key] is not None:
                     state[key] = saved_state[key]
 
+            if state.get("is_multi_simulation"):
+                from agentic.multi_sim_progress import (
+                    rebuild_progress_from_disk,
+                    sync_state_from_progress,
+                )
+
+                if state.get("multi_sim_progress"):
+                    sync_state_from_progress(state)
+                elif state.get("sim_prompts"):
+                    rebuild_progress_from_disk(state, working_dir)
+
             if state.get("is_multi_simulation") and (is_completed_snapshot or not same_subtask_signature):
                 if state.get("resume_failed_only"):
-                    # Resume mode: keep sim_prompts + completed_sim_states so the
-                    # supervisor can detect already-succeeded sims and skip them.
-                    # Only reset the execution phase so the supervisor re-enters the
-                    # per-sim loop and calls _setup_resume_mode.
+                    # Resume: keep sim_prompts + progress; re-enter per-sim loop.
                     state["multi_sim_phase"] = None
                     state["execution_plan"] = None
+                    state["plan_executed"] = False
                     logger.info(
-                        "[resume] Multi-sim state preserved (sim_prompts + completed_sim_states "
-                        "kept) — supervisor will retry failed simulations only"
+                        "[resume] Multi-sim state preserved — supervisor will continue "
+                        "from multi_sim_progress"
                     )
                 else:
                     state["multi_sim_phase"] = None
@@ -941,7 +1076,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     state["combined_analysis_plan"] = None
                     state["master_enriched_prompt"] = None
                     state["user_goal_original"] = None
-                    state["all_pdb_analyses"] = None
+                    state["all_pdb_analyses"] = []
 
             # Fresh multi-sim run (no --resume): never inherit a mid-loop checkpoint.
             if (
@@ -973,6 +1108,23 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 )
             
             logger.info("Restored previous workflow state — supervisor will skip completed stages")
+
+        # HITL re-run after per-sim work already exists: skip the full per-sim loop
+        # and enter combined analysis + reporter (with human checkpoints).
+        if (
+            state.get("human_in_loop")
+            and state.get("is_multi_simulation")
+            and not state.get("combined_only")
+            and not state.get("resume_failed_only")
+            and _multisim_per_sim_workflow_complete(
+                working_dir, state.get("multi_sim_progress")
+            )
+        ):
+            state["combined_only"] = True
+            logger.info(
+                "[hitl] Per-simulation analysis outputs found on disk — "
+                "auto-enabling combined-only mode for interactive review"
+            )
 
         # --combined-only reruns must not inherit per-sim routing from a saved state.
         if state.get("combined_only"):
@@ -1057,6 +1209,16 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             initial_state["errors"].append(f"Workflow error: {str(e)}")
             return initial_state
 
+    def _next_after_field_agent(self, state: MDState, default: str = "supervisor") -> str:
+        """After a field agent runs, return to HITL checkpoint if this was a delegated task."""
+        return_checkpoint = state.pop("hitl_return_checkpoint", None)
+        if return_checkpoint:
+            state.pop("hitl_delegate_agent", None)
+            state.pop("hitl_delegate_task", None)
+            logger.info("HITL delegated run complete — returning to %s", return_checkpoint)
+            return return_checkpoint
+        return state.get("next_node", default)
+
     def run_with_human_feedback(
         self,
         user_goal: str,
@@ -1094,28 +1256,45 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             elif current_node == "preprocess":
                 state = self.preprocessor.preprocess_node(state)
                 self._save_progress(state, "preprocess")
-                current_node = state.get("next_node", "supervisor")
+                current_node = self._next_after_field_agent(state)
 
             elif current_node == "setup":
                 state = self.setup_agent.setup_node(state)
                 self._save_progress(state, "setup")
-                current_node = state.get("next_node", "supervisor")
+                current_node = self._next_after_field_agent(state)
 
             elif current_node == "hpc":
                 state = self.hpc_agent.hpc_node(state)
                 self._save_progress(state, "hpc")
-                current_node = state.get("next_node", "supervisor")
+                current_node = self._next_after_field_agent(state)
 
             elif current_node == "analysis":
                 state = self.analysis_agent.analysis_node(state)
+                if (
+                    state.get("is_multi_simulation")
+                    and state.get("sim_prompts")
+                    and state.get("next_node") == "human_analysis_check"
+                ):
+                    from agentic.multi_sim_progress import record_agent_finished
+
+                    record_agent_finished(state, "analysis")
                 self._save_progress(state, "analysis")
-                current_node = state.get("next_node", "supervisor")
+                current_node = self._next_after_field_agent(state)
 
             elif current_node == "reporter":
                 state = self.reporter_agent.reporter_node(state)
+                if (
+                    state.get("is_multi_simulation")
+                    and state.get("sim_prompts")
+                    and state.get("next_node") == "human_reporter_check"
+                ):
+                    from agentic.multi_sim_progress import record_agent_finished
+
+                    record_agent_finished(state, "reporter")
                 self._save_progress(state, "reporter")
-                # Route to reporter checkpoint for human review
-                current_node = state.get("next_node", "human_reporter_check")
+                current_node = self._next_after_field_agent(
+                    state, state.get("next_node", "human_reporter_check")
+                )
 
             elif current_node == "human_preprocess_check":
                 feedback = self._collect_human_feedback(state, "preprocess", feedback_handler)

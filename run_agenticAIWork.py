@@ -25,15 +25,34 @@ from src.utils.chat_tools import (
     TOOL_CALL_PATTERN as _TOOL_PATTERN,
     TOOL_INTENT_PATTERNS,
     MAX_TOOL_ROUNDS as _MAX_TOOL_ROUNDS,
+    MAX_TASK_TOOL_ROUNDS as _MAX_TASK_TOOL_ROUNDS,
     TOOL_INSTRUCTIONS as _TOOL_INSTRUCTIONS,
     resolve_path as _resolve_path,
     read_file_tool as _read_file_snippet,
     list_dir_tool as _list_dir_safe,
     write_file_tool as _write_file_safe,
     extract_tool_intent as _extract_tool_intent,
+    extract_tool_call_line as _extract_tool_call_line,
     execute_tool_call as _execute_tool_call,
     execute_domain_tool as _execute_domain_tool,
+    append_execution_log as _append_execution_log,
 )
+from agentic.hitl_router import (
+    parse_hitl_command,
+    format_execute_command,
+    bind_agent_context,
+    sync_hitl_active_agent_for_checkpoint,
+    merge_hitl_context_into_state_jsonl,
+    hitl_view_working_directory,
+    hitl_agent_output_directory,
+    format_hitl_directory_context,
+    format_hitl_pwd_lines,
+    hitl_agent_dirs,
+    agents_in_workflow,
+    artifact_summary,
+    AGENT_DISPLAY,
+)
+from agentic.hitl_agent_runner import run_hitl_agent_task
 
 # Set up logging
 logging.basicConfig(
@@ -150,8 +169,230 @@ def _build_qa_context(summary: Dict[str, Any]) -> str:
         parts.append("\nRecommendations:")
         for r in recs:
             parts.append(f"  - {r}")
+
+    if summary.get("available_agents"):
+        parts.append(f"\nWorkflow field agents: {', '.join(summary['available_agents'])}")
+    if summary.get("artifacts"):
+        parts.append(f"\nActive agent artifacts: {summary['artifacts']}")
     
     return "\n".join(parts)
+
+
+def _sync_hitl_chat_context(
+    state: Dict[str, Any],
+    active_agent: str,
+    summary: Dict[str, Any],
+) -> Tuple[str, str, str, Dict[str, str], str]:
+    """Refresh HITL paths and Q&A context after switch or state reload."""
+    working_dir = hitl_view_working_directory(state)
+    output_dir = hitl_agent_output_directory(state, active_agent)
+    agent_dirs = hitl_agent_dirs(state, working_dir)
+    agent_label = AGENT_DISPLAY.get(
+        active_agent,
+        _AGENT_DISPLAY_NAMES.get(active_agent, active_agent.title() + " Agent"),
+    )
+    qa_context = (
+        _build_qa_context(summary)
+        + "\n\n"
+        + format_hitl_directory_context(state, active_agent)
+    )
+    return working_dir, output_dir, agent_dirs, qa_context, agent_label
+
+_TASK_EXECUTION_RE = re.compile(
+    r"\b("
+    r"calculate|compute|run|perform|execute|plot|generate|create|analyse|analyze|"
+    r"dssp|secondary\s+structure|rmsf|rmsd|radius\s+of\s+gyration|rg|sasa|dccm|"
+    r"com\s+distance|energy|wrap|heatmap"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_QUESTION_ONLY_RE = re.compile(
+    r"^(who are you|what(?:'s| is) your name|what tools|what files|list files|"
+    r"show me|explain|describe|why |how many|what did you)\b",
+    re.IGNORECASE,
+)
+
+_PWD_QUESTION_RE = re.compile(
+    r"^(?:what(?:'s| is)\s+(?:your\s+)?(?:the\s+)?(?:current\s+)?(?:working\s+)?"
+    r"(?:dir(?:ectory)?|folder|path)|"
+    r"(?:your\s+)?(?:current\s+)?(?:working\s+)?(?:dir(?:ectory)?|folder|path)|"
+    r"pwd|cwd)\s*\??$",
+    re.IGNORECASE,
+)
+
+
+def _is_pwd_question(text: str) -> bool:
+    """True for pwd/cwd and natural-language directory questions (typo-tolerant)."""
+    raw = text.strip()
+    if not raw:
+        return False
+    t = raw.rstrip("?").lower().strip()
+    if t in ("pwd", "cwd", "your current directory", "current directory"):
+        return True
+    if _PWD_QUESTION_RE.match(raw):
+        return True
+    if re.search(r"\bwhat\b", t) and re.search(r"\b(dir\w*|folder|path)\b", t):
+        return True
+    if re.search(r"\b(curr+\w*|working|your)\b", t) and re.search(
+        r"\b(dir\w*|folder|path)\w*\b", t
+    ):
+        return True
+    return False
+
+_COT_MARKERS = (
+    "we need to decide",
+    "according to the rule",
+    "thus we should",
+    "let's assume",
+    "the tool likely requires",
+    "we must answer accordingly",
+    "we should produce",
+    "we can guess",
+    "the spec not provided",
+)
+
+
+def _is_task_execution_request(user_input: str, domain_tools: Optional[Dict[str, Any]]) -> bool:
+    """True when the user wants the agent to run analysis/tools (not just Q&A)."""
+    if not domain_tools:
+        return False
+    text = user_input.strip()
+    if _QUESTION_ONLY_RE.search(text):
+        return False
+    if parse_hitl_command(text):
+        return False
+    return bool(_TASK_EXECUTION_RE.search(text))
+
+
+def _looks_like_chain_of_thought(text: str) -> bool:
+    low = text.lower()
+    if len(text) > 400 and ">>CALL:" not in text:
+        return True
+    return any(m in low for m in _COT_MARKERS)
+
+
+def _strip_chain_of_thought(text: str) -> str:
+    """Remove leaked LLM reasoning; keep >>CALL: lines and concise answers."""
+    if not text:
+        return text
+    m = _extract_tool_call_line(text)
+    if m:
+        return m.group(0).strip()
+    lines = []
+    for line in text.splitlines():
+        ls = line.strip().lower()
+        if ls.startswith(">>call:"):
+            lines.append(line.strip())
+            continue
+        if any(m in ls for m in _COT_MARKERS):
+            continue
+        if ls.startswith(("correct:", "wrong:", "example response", "example:")):
+            continue
+        lines.append(line)
+    cleaned = "\n".join(lines).strip()
+    return cleaned or text[:300].strip()
+
+
+def _discover_md_input_paths(working_dir: str) -> Dict[str, str]:
+    """Find topology/trajectory paths under a simulation working directory."""
+    wd = Path(working_dir)
+    hpc = wd / "hpc"
+    paths: Dict[str, str] = {"working_dir": str(wd / "analysis")}
+    if not hpc.is_dir():
+        return paths
+    for name in ("md.tpr", "npt.tpr", "em.tpr", "topol.tpr"):
+        p = hpc / name
+        if p.is_file():
+            paths["topology_file"] = str(p.resolve())
+            break
+    for name in ("md.xtc", "mdWrap.xtc", "md.trr", "npt.xtc", "em.xtc"):
+        p = hpc / name
+        if p.is_file():
+            paths["trajectory_file"] = str(p.resolve())
+            break
+    return paths
+
+
+def _hitl_execution_log_path(agent_dirs: Dict[str, str], active_agent: str) -> str:
+    agent_dir = agent_dirs.get(active_agent) or agent_dirs.get("analysis") or ""
+    if not agent_dir:
+        return ""
+    return str(Path(agent_dir) / "execution_log.txt")
+
+
+def _hitl_conversation_log_path(sim_root: str) -> str:
+    if not sim_root:
+        return ""
+    return str(Path(sim_root) / "agent_conversation.log")
+
+
+def _format_md_paths_for_prompt(working_dir: str) -> str:
+    paths = _discover_md_input_paths(working_dir)
+    if not paths.get("topology_file") and not paths.get("trajectory_file"):
+        return ""
+    lines = ["MD INPUT FILES (use these paths in tool calls):"]
+    for key in ("topology_file", "trajectory_file", "working_dir"):
+        if paths.get(key):
+            lines.append(f"  {key}: {paths[key]}")
+    return "\n".join(lines)
+
+
+def _try_direct_task_execution(
+    user_input: str,
+    domain_tools: Dict[str, Any],
+    working_dir: str,
+    log_path: str = "",
+    output_dir: str = "",
+    conversation_log_path: str = "",
+) -> Optional[str]:
+    """Deterministic fallback when the LLM fails to emit >>CALL: for known tasks."""
+    low = user_input.lower()
+    paths = _discover_md_input_paths(working_dir)
+    topo = paths.get("topology_file")
+    traj = paths.get("trajectory_file")
+    out_dir = paths.get("working_dir", str(Path(working_dir) / "analysis"))
+
+    tool_name = None
+    kwargs: Dict[str, Any] = {}
+    if any(k in low for k in ("dssp", "secondary structure", "secondary-structure")):
+        tool_name = "analyze_secondary_structure"
+        if topo and traj:
+            kwargs = {
+                "topology_file": topo,
+                "trajectory_file": traj,
+                "working_dir": out_dir,
+                "selection": "protein",
+                "output_prefix": "dssp",
+            }
+    elif "rmsf" in low and "calculate_rmsf" in domain_tools:
+        tool_name = "calculate_rmsf"
+    elif re.search(r"\brmsd\b", low) and "calculate_rmsd" in domain_tools:
+        tool_name = "calculate_rmsd"
+    elif re.search(r"\b(rg|radius of gyration|gyration)\b", low):
+        tool_name = "calculate_radius_of_gyration"
+
+    if not tool_name or tool_name not in domain_tools:
+        return None
+    if not kwargs and topo and traj:
+        kwargs = {
+            "topology_file": topo,
+            "trajectory_file": traj,
+            "working_dir": out_dir,
+        }
+    if not kwargs:
+        return None
+
+    tool_line = f">>CALL: {tool_name} | " + " | ".join(f"{k}={v}" for k, v in kwargs.items())
+    print(f"  [executing: {tool_name} (direct)]", flush=True)
+    result = _execute_tool_call(
+        tool_line, working_dir, {}, domain_tools,
+        log_path=log_path or None,
+        user_request=user_input,
+        output_dir=output_dir or None,
+        conversation_log_path=conversation_log_path or None,
+    )
+    return f"Executed {tool_name}.\n{result}"
 
 
 # _read_file_snippet, _resolve_path, _list_dir_safe, _write_file_safe
@@ -348,7 +589,9 @@ PLAN_UPDATE:setup
 For (A), just answer the question directly. Do NOT include a sentinel.
 
 Context:
-- Working directory: {state.get("working_directory", ".")}
+- Simulation directory: {state.get("hitl_agent_working_directory") or state.get("working_directory", ".")}
+- Agent output directory: {state.get("hitl_agent_output_directory") or state.get("analysis_dir", "")}
+- Multi-sim project base (routing only): {state.get("multi_sim_base_dir") or state.get("working_directory", ".")}
 - Force field: {state.get("force_field", "amber99sb-ildn")}
 - Water model: {state.get("water_model", "tip3p")}
 - Temperature: {state.get("temperature", 300.0)} K
@@ -672,7 +915,8 @@ def _load_agent_domain_tools(checkpoint_type: str, working_dir: str = "") -> Tup
     elif checkpoint_type == "setup":
         lines.append("  >>CALL: build_simulation_system | working_dir=simsetup | system_type=protein-only")
     elif checkpoint_type == "analysis":
-        lines.append("  >>CALL: calculate_rmsd | tpr_file=em.tpr | xtc_file=md.xtc | output_dir=analysis")
+        lines.append("  >>CALL: calculate_rmsd | tpr_file=hpc/md.tpr | xtc_file=hpc/mdWrap.xtc | output_dir=analysis")
+        lines.append("  >>CALL: analyze_secondary_structure | topology_file=hpc/md.tpr | trajectory_file=hpc/mdWrap.xtc | working_dir=analysis")
     elif checkpoint_type == "hpc":
         lines.append("  >>CALL: estimate_simulation_time | system_size=50000 | simulation_ns=100")
 
@@ -693,6 +937,10 @@ def _llm_qa_with_tools(
     domain_tools: Optional[Dict[str, Any]] = None,
     domain_tool_instructions: str = "",
     agent_name: str = "MD Workflow",
+    execution_mode: bool = False,
+    log_path: str = "",
+    output_dir: str = "",
+    conversation_log_path: str = "",
 ) -> Optional[str]:
     """Run LLM Q&A with tool-calling loop.
     
@@ -706,7 +954,10 @@ def _llm_qa_with_tools(
     
     key_files_context = ""
     if state_snapshot:
-        key_files_context += f"\n\nLATEST WORKFLOW STATE (from state.jsonl):\n{state_snapshot}"
+        key_files_context += (
+            f"\n\nLATEST WORKFLOW STATE (from state.jsonl — "
+            f"prefer HITL ACTIVE CONTEXT above for directory paths):\n{state_snapshot}"
+        )
     if exec_report:
         key_files_context += f"\n\nEXECUTION REPORT (execution_report.md):\n{exec_report}"
     
@@ -720,13 +971,22 @@ def _llm_qa_with_tools(
     system_prompt = (
         f"You are the {agent_name} in a molecular dynamics simulation workflow. "
         f"Your name is '{agent_name}'. When asked your name or role, identify yourself as the {agent_name}. "
-        "The user is reviewing results at a human checkpoint in an MD workflow. "
-        "IMPORTANT: The current workflow state is provided in the CHECKPOINT CONTEXT below. "
-        "ALWAYS try to answer the question from the state and context FIRST. "
-        "Only call a tool if the state context does not contain enough detail to answer. "
-        "Be concise and specific. "
-        "Do NOT tell the user to approve or continue \u2014 just answer their question.\n"
-        "PLAN QUESTIONS — use the following rules:\n"
+        + (
+            "The user wants you to EXECUTE an analysis task using your domain tools. "
+            "You MUST call the appropriate domain tool(s) immediately — do NOT explain your reasoning. "
+            "Use the MD INPUT FILES paths provided below. After tools succeed, summarize output files created. "
+            "Do NOT ask clarifying questions unless topology/trajectory files are truly missing.\n"
+            if execution_mode else
+            "The user is reviewing results at a human checkpoint in an MD workflow. "
+            "IMPORTANT: HITL ACTIVE CONTEXT in the prompt defines your simulation and output directories. "
+            "When asked for the current/working directory, report Simulation directory and Agent output directory "
+            "from HITL ACTIVE CONTEXT — NOT the multi-sim project base from state.jsonl. "
+            "Try to answer from the checkpoint context FIRST. "
+            "Only call a tool if the context does not contain enough detail. "
+            "Be concise. If the request is ambiguous, ask ONE clear follow-up question. "
+            "Do NOT tell the user to approve or continue.\n"
+        )
+        + "PLAN QUESTIONS — use the following rules:\n"
         "  * 'full plan', 'execution plan', 'planner plan', 'overall plan' "
         "    → reproduce the EXACT text from execution_plan.full_plan in the workflow state. "
         "    This is the planner's complete natural-language narrative. Show it verbatim.\n"
@@ -784,27 +1044,33 @@ def _llm_qa_with_tools(
             import json as _j3
             _exec_plan_section += f"  structured_plans:\n{_j3.dumps(_sp, indent=4)}\n"
 
+    _md_paths_section = _format_md_paths_for_prompt(working_dir)
+    _out_dir_note = ""
+    if output_dir:
+        _out_dir_note = f"\nAGENT OUTPUT DIRECTORY (write all analysis outputs here): {output_dir}\n"
     prompt_text = f"""CHECKPOINT CONTEXT:
 {qa_context}
 {key_files_context}
 {_exec_plan_section}
+{_md_paths_section}
+{_out_dir_note}
 {history_text}
 
 {_tool_inventory}
 USER QUESTION: {user_question}
 
-If you can answer from the context above, give a FINAL ANSWER directly.
+{"TASK: Execute the requested analysis using domain tools NOW." if execution_mode else "If you can answer from the context above, give a FINAL ANSWER directly."}
 TOOL CALL RULE — if you need a tool: your ENTIRE response must be ONLY the bare >>CALL: line.
+  CORRECT:   >>CALL: analyze_secondary_structure | topology_file=hpc/md.tpr | trajectory_file=hpc/mdWrap.xtc | working_dir=analysis
   CORRECT:   >>CALL: read_file | rmsf.dat
   WRONG:     Use ">>CALL: read_file | rmsf.dat" or I will call read_file...
 No reasoning. No quotes around the call. No explanation. Nothing else."""
     
-    # Choose LLM call method: prefer prompt_raw to avoid tool-call parser
     llm_call = getattr(llm, 'prompt_raw', None) or llm.prompt
+    max_rounds = _MAX_TASK_TOOL_ROUNDS if execution_mode else _MAX_TOOL_ROUNDS
     
-    # Tool-calling loop
     response = ""
-    for round_idx in range(_MAX_TOOL_ROUNDS):
+    for round_idx in range(max_rounds):
         try:
             response = llm_call(prompt_text, system=system_prompt)
         except Exception as e:
@@ -814,24 +1080,32 @@ No reasoning. No quotes around the call. No explanation. Nothing else."""
             return None  # Signal mock mode
         
         # Check if response contains a tool call
-        tool_match = _TOOL_PATTERN.search(response)
+        tool_match = _extract_tool_call_line(response) or _TOOL_PATTERN.search(response)
         if not tool_match:
-            # No explicit >>CALL: — check if the LLM described wanting to call a tool
-            synthetic_call = _extract_tool_intent(response)
+            synthetic_call = _extract_tool_intent(response, domain_tools)
             if synthetic_call:
-                # LLM intended to call a tool but didn't use the format
-                tool_match = _TOOL_PATTERN.search(synthetic_call)
+                tool_match = _extract_tool_call_line(synthetic_call) or _TOOL_PATTERN.search(synthetic_call)
                 if tool_match:
-                    # Use the synthetic call line as if the LLM emitted it
                     response = synthetic_call
             
             if not tool_match:
-                # No tool call at all — this is the final answer
-                return response.strip()
+                if execution_mode and domain_tools:
+                    direct = _try_direct_task_execution(
+                        user_question, domain_tools, working_dir, log_path,
+                        output_dir=output_dir, conversation_log_path=conversation_log_path,
+                    )
+                    if direct:
+                        return direct
+                return _strip_chain_of_thought(response.strip())
         
-        # Execute the tool
         tool_line = tool_match.group(0)
-        tool_result = _execute_tool_call(tool_line, working_dir, agent_dirs, domain_tools)
+        tool_result = _execute_tool_call(
+            tool_line, working_dir, agent_dirs, domain_tools,
+            log_path=log_path or None,
+            user_request=user_question,
+            output_dir=output_dir or None,
+            conversation_log_path=conversation_log_path or None,
+        )
         
         # Show the user what tool was called (transparency)
         tool_name = tool_match.group(1)
@@ -860,7 +1134,14 @@ If you still need more information, output ONLY a tool call line — nothing els
     # Exhausted rounds.  If the last response is still a raw >>CALL: line the LLM
     # never gave a plain answer.  Make one final call with tools disabled.
     final_text = response.strip() if response else ""
-    if _TOOL_PATTERN.search(final_text) or not final_text:
+    if _extract_tool_call_line(final_text) or _TOOL_PATTERN.search(final_text) or not final_text:
+        if execution_mode and domain_tools:
+            direct = _try_direct_task_execution(
+                user_question, domain_tools, working_dir, log_path,
+                output_dir=output_dir, conversation_log_path=conversation_log_path,
+            )
+            if direct:
+                return direct
         try:
             no_tool_prompt = (
                 f"USER QUESTION: {user_question}\n\n"
@@ -878,7 +1159,7 @@ If you still need more information, output ONLY a tool call line — nothing els
     # Strip any residual >>CALL: lines the model insists on emitting
     clean_lines = [l for l in final_text.splitlines()
                    if not l.strip().startswith(">>CALL:")]
-    final_text = "\n".join(clean_lines).strip()
+    final_text = _strip_chain_of_thought("\n".join(clean_lines).strip())
     return final_text or "[Could not determine answer]"
 
 
@@ -896,12 +1177,19 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
     state = summary.pop("_state", {})
     
     checkpoint_type = summary["checkpoint_type"]
-    agent_label = _AGENT_DISPLAY_NAMES.get(checkpoint_type, checkpoint_type.title() + " Agent")
+    active_agent = summary.get("active_agent") or checkpoint_type
+    available_agents = summary.get("available_agents") or agents_in_workflow(state)
+    agent_label = AGENT_DISPLAY.get(active_agent, _AGENT_DISPLAY_NAMES.get(active_agent, active_agent.title() + " Agent"))
     error_triggered = summary.get("error_triggered", False)
 
-    # Load agent-specific domain tools for this checkpoint
-    working_dir = state.get("working_directory", ".")
-    domain_tools, domain_tool_instructions = _load_agent_domain_tools(checkpoint_type, working_dir)
+    sync_hitl_active_agent_for_checkpoint(state, checkpoint_type)
+    bind_agent_context(
+        state,
+        active_agent,
+        sim_label=state.get("hitl_target_sim_label"),
+        for_execution=False,
+    )
+    sim_label = state.get("hitl_target_sim_label")
     
     # --- Display banner ---
     print("\n" + "="*60, flush=True)
@@ -942,19 +1230,19 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
         print(f"  - {rec}", flush=True)
     
     # --- Build persistent context for Q&A ---
-    qa_context = _build_qa_context(summary)
     conversation_history: List[Dict[str, str]] = []
-    
-    # Working directory for file lookups (already set above for domain tools)
-    agent_dirs = {
-        "preprocess": state.get("preprocess_dir", ""),
-        "simsetup": state.get("simsetup_dir", ""),
-        "hpc": state.get("hpc_dir", ""),
-        "analysis": state.get("analysis_dir", ""),
-    }
+    working_dir, output_dir, agent_dirs, qa_context, agent_label = _sync_hitl_chat_context(
+        state, active_agent, summary
+    )
+    domain_tools, domain_tool_instructions = _load_agent_domain_tools(active_agent, working_dir)
     
     print("\n" + "-"*60, flush=True)
-    print(f"{agent_label} — ask questions or give a command:", flush=True)
+    print(f"{agent_label} — ask questions, switch agents, or delegate tasks:", flush=True)
+    agents_line = ", ".join(available_agents) if available_agents else "all"
+    print(f"  Active agent: {active_agent}  |  Workflow agents: {agents_line}", flush=True)
+    if sim_label:
+        print(f"  Bound simulation: {sim_label}  (sim: {working_dir})", flush=True)
+    print(f"  Agent output directory: {output_dir}", flush=True)
     # Indicate whether state was loaded
     _state_snap = _load_last_state_snapshot(working_dir)
     if _state_snap:
@@ -965,6 +1253,18 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
     print("  'files' — list generated files", flush=True)
     print("  'list <dir>' — list directory contents", flush=True)
     print("  'tools' — show detailed tool descriptions", flush=True)
+    print("  'agents' — list workflow field agents and artifact directories", flush=True)
+    print("  'pwd' — show simulation and agent output directories", flush=True)
+    print("  Ask questions freely — the assistant can read state.jsonl, plans, and output files.", flush=True)
+    print("  The assistant may ask you clarifying questions before you approve.", flush=True)
+    print("  ---", flush=True)
+    print("  'switch analysis' / 'switch reporter' — chat as another field agent (reloads tools)", flush=True)
+    print("  'switch p23458 analysis' — bind a specific simulation (multi-sim)", flush=True)
+    print("  'switch combined analysis' — cross-simulation work at project base", flush=True)
+    print("  'run analysis: <task>' — execute task with Analysis agent, return here after", flush=True)
+    print("  'run p23458 analysis: <task>' — run on one simulation (multi-sim)", flush=True)
+    print("  'run combined analysis: <task>' — combined/cross-sim analysis at base level", flush=True)
+    print("  'run: <task>' — execute with the active agent (full plan + execute)", flush=True)
     print("  ---", flush=True)
     print("  'approved' / 'continue' — proceed to next step", flush=True)
     print("  'retry' — redo this step from scratch", flush=True)
@@ -984,6 +1284,69 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
         
         if not user_input:
             continue
+
+        # --- Agent list ---
+        if user_input.lower().strip() == "agents":
+            print("\nField agents in this workflow:", flush=True)
+            for key in available_agents:
+                bind_agent_context(state, key)
+                art = artifact_summary(state, key)
+                nfiles = len(art.get("files") or [])
+                print(
+                    f"  • {AGENT_DISPLAY.get(key, key)} ({key}) — "
+                    f"{art.get('agent_directory', '?')} [{nfiles} files]",
+                    flush=True,
+                )
+            if state.get("hitl_sim_dirs"):
+                print("\n  Per-simulation directories:", flush=True)
+                for lbl, path in state["hitl_sim_dirs"].items():
+                    print(f"    {lbl}: {path}", flush=True)
+            bind_agent_context(state, active_agent)
+            domain_tools, domain_tool_instructions = _load_agent_domain_tools(
+                active_agent, working_dir
+            )
+            print("", flush=True)
+            continue
+
+        # --- In-chat agent switch / delegated execute (before action detection) ---
+        hitl_cmd = parse_hitl_command(user_input, state, default_agent=active_agent)
+        if hitl_cmd and hitl_cmd.get("type") == "switch_chat":
+            active_agent = hitl_cmd["agent"]
+            if hitl_cmd.get("combined"):
+                state["hitl_view_combined"] = True
+                state.pop("hitl_target_sim_label", None)
+            state["hitl_active_agent"] = active_agent
+            bind_agent_context(
+                state,
+                active_agent,
+                sim_label=hitl_cmd.get("sim_label"),
+                for_execution=False,
+            )
+            working_dir, output_dir, agent_dirs, qa_context, agent_label = (
+                _sync_hitl_chat_context(state, active_agent, summary)
+            )
+            sim_label = state.get("hitl_target_sim_label")
+            domain_tools, domain_tool_instructions = _load_agent_domain_tools(
+                active_agent, working_dir
+            )
+            merge_hitl_context_into_state_jsonl(state)
+            sim_note = f" (sim {sim_label})" if sim_label else ""
+            print(
+                f"\n>> Switched to {agent_label}{sim_note}. Domain tools and artifacts reloaded.",
+                flush=True,
+            )
+            print(f"   Simulation: {working_dir}", flush=True)
+            print(f"   Output dir: {output_dir}\n", flush=True)
+            print(f"Assistant: I am the {agent_label}.\n", flush=True)
+            continue
+        if hitl_cmd and hitl_cmd.get("type") == "execute":
+            cmd = format_execute_command(
+                hitl_cmd["agent"],
+                hitl_cmd["task"],
+                hitl_cmd.get("sim_label"),
+            )
+            print(f"\n>> Delegating: {cmd}\n", flush=True)
+            return cmd
         
         # --- Check for action commands ---
         if _is_action(user_input):
@@ -992,6 +1355,11 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
             print(f"\n>> Action: {action}\n", flush=True)
             return action
         
+        # --- pwd / current directory (deterministic — no LLM) ---
+        if _is_pwd_question(user_input):
+            print("\n" + "\n".join(format_hitl_pwd_lines(state, active_agent)) + "\n", flush=True)
+            continue
+
         # --- Handle 'files' command ---
         if user_input.lower() == "files":
             print("\nGenerated files by agent:", flush=True)
@@ -1066,12 +1434,33 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
         # holds and will pass forward to the next node on retry.
         _live_state = _load_full_state_from_jsonl(working_dir)
         if _live_state:
+            _hitl_preserve = {
+                k: state[k] for k in (
+                    "hitl_active_agent", "hitl_checkpoint_type", "hitl_target_sim_label",
+                    "hitl_last_per_sim_label",
+                    "hitl_sim_dirs", "hitl_agent_working_directory",
+                    "hitl_agent_output_directory",
+                ) if k in state
+            }
             state.update(_live_state)
+            state.update(_hitl_preserve)
+            active_agent = state.get("hitl_active_agent") or active_agent
+            bind_agent_context(
+                state,
+                active_agent,
+                sim_label=state.get("hitl_target_sim_label"),
+                for_execution=False,
+            )
+            working_dir, output_dir, agent_dirs, qa_context, agent_label = (
+                _sync_hitl_chat_context(state, active_agent, summary)
+            )
+            domain_tools, domain_tool_instructions = _load_agent_domain_tools(
+                active_agent, working_dir
+            )
 
-        # --- All remaining input goes through the LLM router ---
-        # The LLM decides whether the human wants to:
-        #   (A) ask a question / inspect results  → answered via _llm_qa_with_tools
-        #   (B) update a structured plan          → handled via _llm_route_or_replan
+        log_path = _hitl_execution_log_path(agent_dirs, active_agent)
+        conversation_log_path = _hitl_conversation_log_path(working_dir)
+        is_task = _is_task_execution_request(user_input, domain_tools)
 
         if not (llm and getattr(llm, 'available', False)):
             print(f"\n  [LLM not available — cannot process requests in mock mode]", flush=True)
@@ -1084,26 +1473,52 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
             (state.get("execution_plan") or {}).get("structured_plans")
         )
 
+        if is_task and domain_tools:
+            print(f"\n>> Running {agent_label} plan + execute …\n", flush=True)
+            hitl_result = run_hitl_agent_task(active_agent, user_input, state, llm)
+            answer = hitl_result.message
+            if answer is None:
+                print(f"\n  [Could not execute task]\n", flush=True)
+            else:
+                print(f"\nAssistant: {answer}\n", flush=True)
+                conversation_history.append({"q": user_input, "a": answer[:300]})
+            continue
+
         if _has_structured_plans:
             route_result = _llm_route_or_replan(llm, user_input, state, working_dir, agent_name=agent_label, domain_tools=domain_tools)
             if route_result is None:
-                # Mock / LLM unavailable
                 print(f"\n  [LLM unavailable — cannot process request]", flush=True)
                 print(f"  Try: 'show <filename>' or 'files' to inspect results manually.\n", flush=True)
                 continue
-            # If the LLM decided this was a plan update, route_result is the confirmation msg.
-            # If it's a plain answer but the LLM embedded a >>CALL: line (or described
-            # wanting to call a tool), _llm_route_or_replan has no execution loop — delegate
-            # to _llm_qa_with_tools which does.
-            _has_tool_call = _TOOL_PATTERN.search(route_result) or _extract_tool_intent(route_result)
-            if _has_tool_call and not route_result.startswith("Plan updated"):
+            if _looks_like_chain_of_thought(route_result) and domain_tools:
                 route_result = _llm_qa_with_tools(
                     llm, user_input, qa_context,
                     conversation_history, working_dir, agent_dirs,
                     domain_tools=domain_tools,
                     domain_tool_instructions=domain_tool_instructions,
                     agent_name=agent_label,
-                ) or route_result
+                    execution_mode=_is_task_execution_request(user_input, domain_tools),
+                    log_path=log_path,
+                    output_dir=output_dir,
+                    conversation_log_path=conversation_log_path,
+                ) or _strip_chain_of_thought(route_result)
+            else:
+                _has_tool_call = (
+                    _extract_tool_call_line(route_result)
+                    or _TOOL_PATTERN.search(route_result)
+                    or _extract_tool_intent(route_result, domain_tools)
+                )
+                if _has_tool_call and not route_result.startswith("Plan updated"):
+                    route_result = _llm_qa_with_tools(
+                        llm, user_input, qa_context,
+                        conversation_history, working_dir, agent_dirs,
+                        domain_tools=domain_tools,
+                        domain_tool_instructions=domain_tool_instructions,
+                        agent_name=agent_label,
+                        log_path=log_path,
+                        output_dir=output_dir,
+                        conversation_log_path=conversation_log_path,
+                    ) or route_result
             print(f"\nAssistant: {route_result}\n", flush=True)
             conversation_history.append({"q": user_input, "a": route_result[:200]})
         else:
@@ -1114,6 +1529,9 @@ def interactive_feedback_handler(summary: Dict[str, Any]) -> str:
                 domain_tools=domain_tools,
                 domain_tool_instructions=domain_tool_instructions,
                 agent_name=agent_label,
+                log_path=log_path,
+                output_dir=output_dir,
+                conversation_log_path=conversation_log_path,
             )
             if answer is None:
                 print(f"\n  [LLM unavailable — cannot answer questions in mock mode]", flush=True)

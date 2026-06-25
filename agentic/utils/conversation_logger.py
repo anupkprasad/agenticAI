@@ -10,6 +10,75 @@ from datetime import datetime
 from typing import Any, Dict, Optional, List
 from pathlib import Path
 
+
+def _compact_analysis_result(name: str, result: Any) -> str:
+    """One-line summary of a single analysis tool result (no raw arrays)."""
+    if not isinstance(result, dict):
+        text = str(result)
+        return text[:160] + "…" if len(text) > 160 else text
+    if result.get("success") is False:
+        return f"FAILED: {str(result.get('error', ''))[:120]}"
+    parts: List[str] = []
+    for key in ("n_frames", "n_residues"):
+        if key in result:
+            parts.append(f"{key}={result[key]}")
+    for key in ("mean_rmsd", "mean_rmsf", "mean_rg"):
+        if key in result and isinstance(result[key], (int, float)):
+            parts.append(f"{key}={result[key]:.2f}")
+    if isinstance(result.get("ss_percentages"), dict):
+        ss = result["ss_percentages"]
+        top = sorted(ss.items(), key=lambda x: -float(x[1]))[:3]
+        parts.append(
+            "ss%="
+            + ",".join(f"{k}:{float(v):.1f}" for k, v in top)
+        )
+    out = result.get("output_files")
+    if isinstance(out, dict):
+        names = [Path(str(v)).name for v in out.values()][:8]
+        if names:
+            parts.append(f"files={names}")
+    elif result.get("message"):
+        parts.append(str(result["message"])[:100])
+    return " | ".join(parts) if parts else "ok"
+
+
+def _compact_field_for_log(
+    logger: logging.Logger, field: str, value: Any, max_len: int = 200
+) -> None:
+    """Log a field value compactly (used by log_agent_completion)."""
+    if field == "analysis_results" and isinstance(value, dict):
+        logger.info(f"     • {field}: {len(value)} analyses")
+        for name, result in value.items():
+            logger.info(f"       - {name}: {_compact_analysis_result(name, result)}")
+        return
+
+    if isinstance(value, dict):
+        logger.info(f"     • {field}: {len(value)} items")
+        for k, v in value.items():
+            if isinstance(v, dict):
+                logger.info(f"       - {k}: {_compact_analysis_result(str(k), v)}")
+            else:
+                text = str(v)
+                if len(text) > max_len:
+                    text = text[:max_len] + "…"
+                logger.info(f"       - {k}: {text}")
+        return
+
+    if isinstance(value, list):
+        logger.info(f"     • {field}: {len(value)} items")
+        if value and all(isinstance(x, str) for x in value[:5]):
+            preview = ", ".join(Path(x).name for x in value[:8])
+            if len(value) > 8:
+                preview += f", … (+{len(value) - 8} more)"
+            logger.info(f"       {preview}")
+        return
+
+    text = str(value)
+    if len(text) > max_len:
+        text = text[:max_len] + "…"
+    logger.info(f"     • {field}: {text}")
+
+
 class ConversationLogger:
     """
     Centralized logger that captures all conversations and actions in the MD workflow.
@@ -269,14 +338,7 @@ class ConversationLogger:
         for field in output_fields:
             value = output_data.get(field)
             if value:
-                if isinstance(value, dict):
-                    self.logger.info(f"     • {field}: {len(value)} items")
-                    for k, v in value.items():
-                        self.logger.info(f"       - {k}: {v}")
-                elif isinstance(value, list):
-                    self.logger.info(f"     • {field}: {len(value)} items")
-                else:
-                    self.logger.info(f"     • {field}: {value}")
+                _compact_field_for_log(self.logger, field, value)
         
         # Log any issues
         issues = output_data.get('preprocessing_issues', []) or output_data.get('setup_issues', [])

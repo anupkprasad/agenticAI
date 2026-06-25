@@ -139,6 +139,39 @@ uses the registry automatically.
   progress. A normal re-run without `--resume` regenerates the master plan and
   restarts the per-sim loop (see `docs/ARCHITECTURE.md` directory layout).
 
+### Workflow state files (`state.jsonl`)
+
+The framework persists a JSON checkpoint at `{working_dir}/supervisor/state.jsonl`.
+In multi-sim mode, each simulation also mirrors state under
+`{base}/{label}/supervisor/state.jsonl` while that sim is active.
+
+| File | Scope | Purpose |
+|------|--------|---------|
+| `{base}/supervisor/state.jsonl` | Project root | Overall routing: enrichment, master plan, combined phase, final report |
+| `{base}/{label}/supervisor/state.jsonl` | One simulation | Per-sim progress: validation, execution plan, analysis/reporter outputs, errors |
+
+**Startup behaviour:**
+
+1. If `state.jsonl` exists, the workflow loads the latest snapshot and restores
+   artifact paths (trajectories, analysis results, plans) so agents can skip
+   completed work.
+2. **Fresh re-run** (no flags): multi-sim loop bookkeeping is cleared; master plan
+   is regenerated; per-sim analyses may re-run.
+3. **`--resume`**: restores `sim_prompts` / `completed_sim_states`; skips sims
+   already marked successful; retries failures only.
+4. **`--combined-only`**: discovers sims from per-sim `analysis_summary.jsonl`;
+   runs combined analysis + reporter only.
+5. **Human-in-the-loop re-run** when all per-sim `analysis/` folders already
+   contain data: auto-enables combined-only mode so you can chat at analysis /
+   reporter checkpoints without re-running every simulation.
+
+Control-flow fields (`multi_sim_phase`, retry counters) are reset on a normal
+re-run unless `--resume` is set. Always check `workflow_status` and `errors` in
+`state.jsonl` when debugging a partial run.
+
+Also mirrored: `execution_report.md` in each `supervisor/` directory (human-readable
+progress summary).
+
 ### Conversation logs (multi-sim)
 
 | Log file | Scope |

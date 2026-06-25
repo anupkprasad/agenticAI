@@ -131,8 +131,15 @@ def analyze_secondary_structure(
                 "success": False,
                 "error": f"Trajectory file not found: {trajectory_file}"
             }
+
+        # All outputs go under working_dir (matches analysis agent chdir behaviour)
+        if working_dir:
+            out_base = Path(working_dir)
+            out_base.mkdir(parents=True, exist_ok=True)
+        else:
+            out_base = Path.cwd()
         
-        logger.info(f"Running DSSP analysis on {trajectory_file}")
+        logger.info(f"Running DSSP analysis on {trajectory_file} (output dir: {out_base})")
         
         # Load universe
         u = mda.Universe(topology_file, trajectory_file)
@@ -210,7 +217,7 @@ def analyze_secondary_structure(
         
         # Save raw DSSP data
         if save_raw_data:
-            raw_data_file = f"{output_prefix}_raw_data.dat"
+            raw_data_file = str(out_base / f"{output_prefix}_raw_data.dat")
             with open(raw_data_file, 'w') as f:
                 f.write("# DSSP Secondary Structure Assignment\n")
                 f.write(f"# Topology: {topology_file}\n")
@@ -229,7 +236,7 @@ def analyze_secondary_structure(
             logger.info(f"Raw DSSP data saved to {raw_data_file}")
         
         # Save percentage data
-        percentage_file = f"{output_prefix}_percentages.dat"
+        percentage_file = str(out_base / f"{output_prefix}_percentages.dat")
         with open(percentage_file, 'w') as f:
             f.write("# Secondary Structure Percentages Over Time\n")
             # Build header
@@ -247,7 +254,7 @@ def analyze_secondary_structure(
         
         # Create heatmap
         if create_heatmap and HAS_PLOTTING:
-            heatmap_file = f"{output_prefix}_heatmap.png"
+            heatmap_file = str(out_base / f"{output_prefix}_heatmap.png")
             
             # Convert DSSP codes to numeric values for heatmap
             # H=1, B=2, E=3, G=4, I=5, T=6, S=7, -=8
@@ -287,7 +294,7 @@ def analyze_secondary_structure(
         
         # Create time series plot
         if create_time_series and HAS_PLOTTING:
-            timeseries_file = f"{output_prefix}_timeseries.png"
+            timeseries_file = str(out_base / f"{output_prefix}_timeseries.png")
             
             fig, ax = plt.subplots(figsize=(12, 6))
             
@@ -349,7 +356,7 @@ Average Secondary Structure Content:
             summary_text += f"  - {file_type:15s}: {file_path}\n"
         
         # Save summary
-        summary_file = f"{output_prefix}_summary.txt"
+        summary_file = str(out_base / f"{output_prefix}_summary.txt")
         with open(summary_file, 'w') as f:
             f.write(summary_text)
         output_files['summary'] = summary_file
@@ -396,7 +403,7 @@ Average Secondary Structure Content:
         if working_dir:
             try:
                 append_analysis_summary(
-                    working_dir=working_dir,
+                    working_dir=str(out_base),
                     analysis_type="DSSP_SecondaryStructure",
                     statistics={
                         "n_frames": int(n_frames),

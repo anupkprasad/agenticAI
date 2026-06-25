@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -40,15 +42,20 @@ logger = logging.getLogger(__name__)
 BUILTIN_TOOL_NAMES: frozenset = frozenset({"read_file", "list_dir", "write_file", "grep_file"})
 
 # Pattern that matches a >>CALL: invocation anywhere in the LLM response.
-# Does NOT require the line-start anchor so it also catches calls the LLM
-# embeds inside reasoning text like: Use ">>CALL: read_file | rmsf.dat".
-# Trailing quotes / ? are excluded from the captured args via the lookahead.
+# Captures the full argument string (supports key=value and JSON objects).
 TOOL_CALL_PATTERN = re.compile(
-    r">>CALL:\s*(\w+)\s*\|\s*([^\n\"'?]+?)(?=[\"'?\s]*(?:\n|$))",
+    r">>CALL:\s*(\w+)\s*\|\s*(.+?)(?:\s*$|\s*\n)",
+    re.MULTILINE,
+)
+
+# Secondary pattern: find >>CALL: lines embedded in reasoning (greedy args to EOL)
+TOOL_CALL_LINE_PATTERN = re.compile(
+    r">>CALL:\s*(\w+)\s*\|\s*(.+)$",
     re.MULTILINE,
 )
 
 MAX_TOOL_ROUNDS: int = 4
+MAX_TASK_TOOL_ROUNDS: int = 10
 
 # File extensions the LLM is likely to reference in intent patterns
 _FILE_EXTS = r"pdb|gro|top|itp|mdp|log|txt|xvg|edr|xtc|trr|json|jsonl|csv|sh|slurm|out|py|yaml|yml"
@@ -79,6 +86,11 @@ TOOL_INTENT_PATTERNS: List[re.Pattern] = [
         r"(?:let(?:'s| me|us)|I(?:'ll| will)|we(?:'ll| need to| should| can| will)"
         r"|need to|should|must|going to)\s+"
         r"(?:list|show|browse|check)\s+(?:the\s+)?(?:files|directory|dir|folder|contents|that|it)",
+        re.IGNORECASE,
+    ),
+    # Domain tool intent: "call analyze_secondary_structure" / "use calculate_rmsf"
+    re.compile(
+        r"(?:call|use|invoke|run)\s+([a-z][a-z0-9_]{2,})",
         re.IGNORECASE,
     ),
 ]
@@ -320,20 +332,46 @@ def grep_file_tool(
 # Tool intent extraction (LLM forgot to use >>CALL: format)
 # ---------------------------------------------------------------------------
 
-def extract_tool_intent(response: str) -> Optional[str]:
+def extract_tool_call_line(response: str) -> Optional[re.Match]:
+    """Return the first >>CALL: match in *response*, preferring a clean single line."""
+    for pattern in (TOOL_CALL_LINE_PATTERN, TOOL_CALL_PATTERN):
+        m = pattern.search(response)
+        if m:
+            return m
+    return None
+
+
+def extract_tool_intent(
+    response: str,
+    domain_tools: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
     """If the LLM described wanting to call a tool without using the ``>>CALL:``
     format, extract the intent and return a synthetic ``>>CALL:`` line.
     Returns ``None`` if no tool intent was detected.
     """
+    m = extract_tool_call_line(response)
+    if m:
+        return m.group(0).strip()
+
+    domain_tools = domain_tools or {}
+    _known_exts = (
+        ".pdb", ".gro", ".xtc", ".trr", ".tpr", ".mdp", ".dat", ".csv",
+        ".json", ".jsonl", ".txt", ".log", ".top", ".itp", ".edr", ".xvg",
+    )
     for pattern in TOOL_INTENT_PATTERNS:
         m = pattern.search(response)
-        if m:
-            groups = m.groups()
-            if groups and groups[0]:
-                filepath = groups[0].strip().rstrip(".")
-                return f">>CALL: read_file | {filepath}"
-            # list_dir intent with no specific path
-            return ">>CALL: list_dir | ."
+        if not m:
+            continue
+        groups = m.groups()
+        if groups and groups[0]:
+            token = groups[0].strip().rstrip(".")
+            if token in domain_tools:
+                return f">>CALL: {token} |"
+            low = token.lower()
+            if any(low.endswith(ext) for ext in _known_exts):
+                return f">>CALL: read_file | {token}"
+            return f">>CALL: read_file | {token}"
+        return ">>CALL: list_dir | ."
     return None
 
 
@@ -341,16 +379,20 @@ def extract_tool_intent(response: str) -> Optional[str]:
 # Domain tool executor
 # ---------------------------------------------------------------------------
 
-def execute_domain_tool(
-    tool_name: str,
-    args_str: str,
-    tool: Any,
-    working_dir: str,
-) -> str:
-    """Execute a LangChain StructuredTool with ``key=value`` arguments parsed
-    from *args_str* (pipe-separated).  File-like values are resolved relative
-    to *working_dir* if they exist there.
-    """
+def parse_tool_kwargs(args_str: str, tool: Any) -> Dict[str, Any]:
+    """Parse >>CALL: arguments as key=value pairs or a JSON object."""
+    args_str = args_str.strip()
+    if not args_str:
+        return {}
+
+    if args_str.startswith("{"):
+        try:
+            parsed = json.loads(args_str)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
     kwargs: Dict[str, Any] = {}
     parts = [p.strip() for p in args_str.split("|")]
     for part in parts:
@@ -358,7 +400,6 @@ def execute_domain_tool(
             key, _, value = part.partition("=")
             kwargs[key.strip()] = value.strip()
         elif len(parts) == 1 and part:
-            # Single positional arg — map to first required schema field
             if hasattr(tool, "args_schema") and tool.args_schema:
                 schema = tool.args_schema.schema()
                 required = schema.get("required", [])
@@ -366,9 +407,44 @@ def execute_domain_tool(
                 first_key = required[0] if required else (props[0] if props else None)
                 if first_key:
                     kwargs[first_key] = part
+    return kwargs
 
+
+def append_execution_log(log_path: str, block: str) -> None:
+    """Append a timestamped block to an agent execution_log.txt."""
+    try:
+        p = Path(log_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().isoformat(timespec="seconds")
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n{'=' * 72}\nHITL CHAT EXECUTION — {stamp}\n{'=' * 72}\n")
+            fh.write(block.rstrip() + "\n")
+    except Exception as exc:
+        logger.warning("Could not append execution log %s: %s", log_path, exc)
+
+
+def _sim_root_for_paths(working_dir: str, output_dir: Optional[str] = None) -> Path:
+    """Simulation root for resolving hpc/ and relative input paths."""
+    base = Path(output_dir or working_dir)
+    if base.name in ("analysis", "hpc", "preprocess", "simsetup", "reporter"):
+        return base.parent
+    return base
+
+
+def execute_domain_tool(
+    tool_name: str,
+    args_str: str,
+    tool: Any,
+    working_dir: str,
+    output_dir: Optional[str] = None,
+) -> str:
+    """Execute a LangChain StructuredTool with ``key=value`` or JSON arguments."""
+    kwargs = parse_tool_kwargs(args_str, tool)
     if not kwargs:
         return f"(no arguments provided for {tool_name}. Use: >>CALL: {tool_name} | key=value)"
+
+    exec_dir = output_dir or working_dir
+    sim_root = _sim_root_for_paths(working_dir, output_dir)
 
     _FILE_LIKE_EXTS = (
         ".pdb", ".gro", ".top", ".itp", ".mdp",
@@ -379,17 +455,42 @@ def execute_domain_tool(
         if isinstance(val, str) and val.lower().endswith(_FILE_LIKE_EXTS):
             p = Path(val)
             if not p.is_absolute():
-                candidate = Path(working_dir) / val
-                if candidate.exists():
-                    kwargs[key] = str(candidate)
+                for candidate in (
+                    sim_root / val,
+                    sim_root / "hpc" / Path(val).name,
+                    Path(working_dir) / val,
+                    Path(exec_dir) / val,
+                ):
+                    if candidate.exists():
+                        kwargs[key] = str(candidate.resolve())
+                        break
+                else:
+                    candidate = sim_root / val
+                    if candidate.exists():
+                        kwargs[key] = str(candidate.resolve())
 
+    # Ensure tools that accept working_dir write into the agent output directory
+    if exec_dir:
+        if "working_dir" in kwargs or hasattr(tool, "args_schema"):
+            try:
+                schema = tool.args_schema.schema() if tool.args_schema else {}
+                if "working_dir" in schema.get("properties", {}):
+                    kwargs["working_dir"] = exec_dir
+            except Exception:
+                kwargs.setdefault("working_dir", exec_dir)
+
+    original_cwd = os.getcwd()
     try:
+        Path(exec_dir).mkdir(parents=True, exist_ok=True)
+        os.chdir(exec_dir)
         result = tool.invoke(kwargs)
         if isinstance(result, dict):
             return json.dumps(result, indent=2, default=str)
         return str(result)
     except Exception as exc:
         return f"(error executing {tool_name}: {exc})"
+    finally:
+        os.chdir(original_cwd)
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +502,10 @@ def execute_tool_call(
     working_dir: str,
     agent_dirs: Dict[str, str],
     domain_tools: Optional[Dict[str, Any]] = None,
+    log_path: Optional[str] = None,
+    user_request: str = "",
+    output_dir: Optional[str] = None,
+    conversation_log_path: Optional[str] = None,
 ) -> str:
     """Parse one ``>>CALL:`` line and dispatch to the appropriate tool.
 
@@ -408,40 +513,91 @@ def execute_tool_call(
       1. Built-in file tools  (read_file, list_dir, write_file, grep_file)
       2. Agent domain tools   (StructuredTool objects from domain registry)
     """
-    m = TOOL_CALL_PATTERN.match(line.strip())
+    m = extract_tool_call_line(line) or TOOL_CALL_PATTERN.match(line.strip())
     if not m:
         return "(invalid tool call format)"
 
     tool_name = m.group(1)
-    args_str = m.group(2).strip()
+    args_str = m.group(2).strip().strip('"').strip("'")
+
+    result = ""
 
     # --- Built-in tools ---
     if tool_name == "read_file":
         resolved = resolve_path(args_str, working_dir, agent_dirs)
         if resolved is None:
-            return (
+            result = (
                 f"(file not found: {args_str}. "
                 "Use >>CALL: list_dir | . to browse the working directory.)"
             )
-        return read_file_tool(str(resolved))
+        else:
+            result = read_file_tool(str(resolved))
 
-    if tool_name == "list_dir":
-        return list_dir_tool(args_str, working_dir)
+    elif tool_name == "list_dir":
+        result = list_dir_tool(args_str, working_dir)
 
-    if tool_name == "write_file":
+    elif tool_name == "write_file":
         parts = args_str.split("|", 1)
         if len(parts) < 2:
-            return "(write_file requires: filepath | content)"
-        return write_file_tool(parts[0].strip(), parts[1].strip(), working_dir)
+            result = "(write_file requires: filepath | content)"
+        else:
+            result = write_file_tool(parts[0].strip(), parts[1].strip(), working_dir)
 
-    if tool_name == "grep_file":
+    elif tool_name == "grep_file":
         parts = [p.strip() for p in args_str.split("|", 1)]
         pattern = parts[0]
         filepath = parts[1] if len(parts) > 1 else "."
-        return grep_file_tool(pattern, filepath, working_dir, agent_dirs)
+        result = grep_file_tool(pattern, filepath, working_dir, agent_dirs)
 
-    # --- Agent domain tools ---
-    if domain_tools and tool_name in domain_tools:
-        return execute_domain_tool(tool_name, args_str, domain_tools[tool_name], working_dir)
+    elif domain_tools and tool_name in domain_tools:
+        result = execute_domain_tool(
+            tool_name, args_str, domain_tools[tool_name], working_dir,
+            output_dir=output_dir,
+        )
 
-    return f"(unknown tool: {tool_name})"
+    else:
+        result = f"(unknown tool: {tool_name})"
+
+    if log_path and tool_name not in ("read_file", "list_dir", "grep_file"):
+        clean_call = line.strip().split("\n")[0][:500]
+        append_execution_log(
+            log_path,
+            f"User request: {(user_request or '(chat)')[:300]}\n"
+            f"Output directory: {output_dir or working_dir}\n"
+            f"Tool call: {clean_call}\n"
+            f"Result summary: { _summarize_tool_result(result) }",
+        )
+    if conversation_log_path and tool_name not in ("read_file", "list_dir", "grep_file"):
+        clean_call = line.strip().split("\n")[0][:500]
+        append_execution_log(
+            conversation_log_path,
+            f"Tool: {tool_name}\n"
+            f"Call: {clean_call}\n"
+            f"Summary: {_summarize_tool_result(result)}",
+        )
+    return result
+
+
+def _summarize_tool_result(result: str) -> str:
+    """Compact one-line summary for logs (no full JSON dumps)."""
+    if not result:
+        return "(empty)"
+    text = result.strip()
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                if data.get("success") is False:
+                    return f"FAILED: {str(data.get('error', data))[:200]}"
+                parts = [f"success={data.get('success', True)}"]
+                if data.get("output_files"):
+                    names = list(data["output_files"].values())[:5]
+                    parts.append(f"files={names}")
+                elif data.get("message"):
+                    parts.append(str(data["message"])[:120])
+                return " | ".join(parts)
+        except json.JSONDecodeError:
+            pass
+    if len(text) > 300:
+        return text[:300] + "…"
+    return text
