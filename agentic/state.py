@@ -33,6 +33,7 @@ class MDState(TypedDict):
     production_ns: Optional[float] # Requested production simulation length (ns)
     extended_minimization: Optional[bool]  # Two-stage minim for remodelled/strained structures
     human_in_loop: bool
+    hitl_mode: Optional[str]  # None (off), "error", or "all"
     
     # Subtask-specific workflow
     subtask_type: Optional[str]    # "analysis_only", "setup_only", "preprocess_only", "reporter_only", "multi_agent", None
@@ -166,7 +167,7 @@ class MDState(TypedDict):
 
     # ── Multi-Simulation Mode ─────────────────────────────────────────────
     is_multi_simulation: Optional[bool]          # True when running multiple PDBs
-    multi_sim_phase: Optional[str]               # "planning" | "executing_sims" | "combined_analysis" | "combined_reporter" | None
+    multi_sim_phase: Optional[str]               # "planning" | "hpc_pool" | "executing_sims" | "combined_analysis" | "combined_reporter" | None
     pdb_list: Optional[List[str]]                # Original PDB file paths from CLI / goal extraction
     sim_prompts: Optional[List[Dict[str, Any]]]  # Per-sim prompts from master planner [{prompt, pdb, label, working_dir}, ...]
     run_combined_analysis: Optional[bool]        # Planner decision: run base-level combined analysis/report after per-sim loop
@@ -175,6 +176,14 @@ class MDState(TypedDict):
     completed_sim_states: Optional[List[Dict[str, Any]]]  # Saved state snapshots after each sim completes
     sim_working_dirs: Optional[List[str]]        # Per-sim working directories (e.g., base_dir/1abc/)
     multi_sim_base_dir: Optional[str]            # Base directory for multi-simulation checkpoint mirroring
+
+    # Cross-sim HPC pool (SLURM job queue across simulations)
+    hpc_pool: Optional[Dict[str, Any]]
+    allowed_hpc_jobs: Optional[int]
+    hpc_check_interval_sec: Optional[int]
+    hpc_check_interval: Optional[str]
+    post_hpc_analysis_only: Optional[bool]
+    hpc_pool_phase_complete: Optional[bool]
 
     # Human-in-the-loop session (persisted in state.jsonl across checkpoints)
     hitl_active_agent: Optional[str]               # Field agent selected in HITL chat

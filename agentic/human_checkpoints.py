@@ -20,6 +20,7 @@ from .hitl_router import (
     HITL_EXECUTE_PREFIX,
 )
 from .multi_sim_progress import apply_hitl_continue
+from .hitl_config import hitl_should_interact
 
 logger = logging.getLogger(__name__)
 
@@ -308,7 +309,7 @@ class HumanCheckpoints:
                 feedback, state, "preprocessing", "preprocess",
                 clear_keys=["cleaned_pdb", "topology", "preprocessing_report", "preprocessing_issues"]
             )
-        elif not state.get("human_in_loop"):
+        elif not hitl_should_interact(state):
             # Non-interactive: auto-approve and continue
             state["next_node"] = "supervisor"
             return state
@@ -328,13 +329,64 @@ class HumanCheckpoints:
                 feedback, state, "setup", "setup",
                 clear_keys=["coordinates", "mdp_files", "setup_report", "setup_issues"]
             )
-        elif not state.get("human_in_loop"):
+        elif not hitl_should_interact(state):
             state["next_node"] = "supervisor"
             return state
         else:
             state["next_node"] = "human_setup_check"
             return state
     
+    @staticmethod
+    def human_hpc_pool_check(state: MDState) -> MDState:
+        """
+        HITL checkpoint while cross-sim HPC jobs run or after submit/SLURM failures.
+
+        Supports: continue / retry / resubmit / status
+        """
+        from agentic.multi_sim_hpc_pool import (
+            clear_hitl_pause,
+            init_hpc_pool,
+            pool_summary,
+            _sync_jobs_from_slurm,
+        )
+
+        feedback = state.get("human_feedback", "")
+        if feedback:
+            lower = feedback.lower().strip()
+            if any(w in lower for w in ("status", "summary", "pool")):
+                state["hpc_pool_status_summary"] = pool_summary(state)
+                state.pop("human_feedback", None)
+                state["next_node"] = "human_hpc_pool_check"
+                return state
+            if any(
+                w in lower
+                for w in (
+                    "continue", "proceed", "retry", "resubmit", "ok", "approved",
+                    "go", "resume",
+                )
+            ):
+                clear_hitl_pause(state)
+                pool = init_hpc_pool(state)
+                _sync_jobs_from_slurm(state, pool, force=True)
+                state.pop("human_feedback", None)
+                state["next_node"] = "supervisor"
+                log_human_checkpoint("hpc_pool", {}, lower, feedback)
+                return state
+            state.setdefault("warnings", []).append(
+                f"HPC pool checkpoint note: {feedback}"
+            )
+            state.pop("human_feedback", None)
+            state["next_node"] = "supervisor"
+            return state
+
+        if not hitl_should_interact(state):
+            state["next_node"] = "supervisor"
+            return state
+
+        state["hpc_pool_status_summary"] = pool_summary(state)
+        state["next_node"] = "human_hpc_pool_check"
+        return state
+
     @staticmethod
     def human_hpc_check(state: MDState) -> MDState:
         """
@@ -347,7 +399,7 @@ class HumanCheckpoints:
                 feedback, state, "hpc", "hpc",
                 clear_keys=[]
             )
-        elif not state.get("human_in_loop"):
+        elif not hitl_should_interact(state):
             state["next_node"] = "supervisor"
             return state
         else:
@@ -366,7 +418,7 @@ class HumanCheckpoints:
                 feedback, state, "analysis", "analysis",
                 clear_keys=["analysis_results", "figures", "conclusions"]
             )
-        elif not state.get("human_in_loop"):
+        elif not hitl_should_interact(state):
             state["next_node"] = "supervisor"
             return state
         else:
@@ -378,8 +430,9 @@ class HumanCheckpoints:
         """Human checkpoint after the reporter agent.
 
         Behaves like all other checkpoints:
-        - Skipped automatically when human_in_loop=False (--no-human-loop).
-        - Pauses for interactive review when human_in_loop=True.
+        - Skipped automatically when HITL is off (default).
+        - Pauses for interactive review when ``--HITL all`` is set, or on errors
+          when ``--HITL error`` is set.
 
         In HITL mode supports:
             'done' / 'approved'               → proceed to final_report
@@ -390,7 +443,7 @@ class HumanCheckpoints:
         feedback = state.get("human_feedback", "")
 
         # ── Non-interactive: auto-approve and continue to supervisor ──
-        if not state.get("human_in_loop") and not feedback:
+        if not hitl_should_interact(state) and not feedback:
             state["next_node"] = "supervisor"
             return state
 

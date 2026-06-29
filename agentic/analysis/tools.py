@@ -39,6 +39,13 @@ from src.analysis.dccm_calculator import (
     plot_dccm_comparison,
     plot_dccm_difference,
 )
+from src.analysis.pca_analyzer import (
+    calculate_trajectory_pca,
+    plot_pca_projection,
+    calculate_free_energy_landscape,
+    apply_pca_tool_defaults,
+    PCA_TOOL_DEFAULTS,
+)
 from src.analysis.trajectory_wrapper import wrap_trajectory
 from src.analysis.combined_analysis import (
     collect_metric_files,
@@ -83,6 +90,9 @@ __all__ = [
     "plot_dccm_comparison",
     "plot_dccm_difference",
     "wrap_trajectory",
+    "calculate_trajectory_pca",
+    "plot_pca_projection",
+    "calculate_free_energy_landscape",
     # Combined (multi-sim) tools
     "collect_metric_files",
     "plot_combined_overlay",
@@ -146,6 +156,9 @@ _PER_SIM_ANALYSIS_TOOLS = [
     plot_dccm_comparison,
     plot_dccm_difference,
     wrap_trajectory,
+    calculate_trajectory_pca,
+    plot_pca_projection,
+    calculate_free_energy_landscape,
 ]
 
 _COMBINED_ANALYSIS_TOOLS = [
@@ -307,6 +320,9 @@ class AnalysisToolExecutor:
             "plot_dccm_comparison": plot_dccm_comparison,
             "plot_dccm_difference": plot_dccm_difference,
             "wrap_trajectory": wrap_trajectory,
+            "calculate_trajectory_pca": calculate_trajectory_pca,
+            "plot_pca_projection": plot_pca_projection,
+            "calculate_free_energy_landscape": calculate_free_energy_landscape,
         }
         if include_combined:
             self.tools.update({
@@ -489,6 +505,22 @@ class AnalysisToolExecutor:
                 kwargs.pop(k)
             if aliases_applied:
                 logger.info(f"Aliased parameters for {tool_name}: {aliases_applied}")
+
+        if tool_name in PCA_TOOL_DEFAULTS:
+            user_goal = self.config.get("user_goal") or ""
+            before = {k: kwargs.get(k) for k in PCA_TOOL_DEFAULTS[tool_name]}
+            kwargs = apply_pca_tool_defaults(tool_name, kwargs, user_goal)
+            changed = {
+                k: (before.get(k), kwargs[k])
+                for k in PCA_TOOL_DEFAULTS[tool_name]
+                if before.get(k) is not None and before.get(k) != kwargs[k]
+            }
+            if changed:
+                logger.info(
+                    "Applied canonical PCA/FEL defaults for %s (overrode plan params: %s)",
+                    tool_name,
+                    changed,
+                )
         
         try:
             logger.info(f"Executing analysis tool: {tool_name}")

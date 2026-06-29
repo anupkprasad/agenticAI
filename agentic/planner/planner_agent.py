@@ -22,6 +22,7 @@ from ..programmer import MDProgrammer
 from .tools_registry import get_tools_registry
 from .knowledge_loader import get_knowledge_loader
 from .planning_guidelines import (
+    detect_combined_only_metrics,
     detect_requested_metrics,
     get_intent_preservation_block,
     get_standard_output_filenames_block,
@@ -133,6 +134,14 @@ def _build_per_sim_analysis_prompt(
     case = entry.get("case_description", "default system")
     wdir = entry.get("working_dir", "")
     requirements = (original_goal or enriched_prompt or "").strip()
+    combined_only = detect_combined_only_metrics(requirements)
+    combined_note = ""
+    if combined_only:
+        names = ", ".join(sorted(combined_only))
+        combined_note = (
+            f" Do NOT compute {names} for this simulation — the user requested those "
+            "metrics in combined/cross-simulation analysis only (handled at project base)."
+        )
 
     return (
         f"Analyze the completed trajectory for {protein} using simulation label {label}. "
@@ -142,7 +151,7 @@ def _build_per_sim_analysis_prompt(
         f"When the goal names specific metrics, restrict the analysis to those metrics and any directly required plots or tables. "
         f"Write analysis outputs under {wdir}/analysis/ using standard basenames (e.g. rmsf.dat, rmsf.png) — no label prefix on filenames. "
         f"After analysis, prepare a concise scientific report for this simulation using the generated outputs and relevant context. "
-        f"Project requirements: {requirements}"
+        f"Project requirements: {requirements}{combined_note}"
     )
 
 
@@ -962,8 +971,14 @@ class MDPlanner:
         """
         logger.info("PLANNER: Creating plan with dynamic tools and knowledge")
         
-        # NEW: Detect subtask type for smarter planning
-        subtask_type = state.get("subtask_type")
+        # HPC pool prep: preprocess + simsetup only — never analysis/HPC/programmer tools.
+        if state.get("hpc_pool_prep_only"):
+            subtask_type = "multi_agent"
+            state["subtask_type"] = subtask_type
+            state["agent_list"] = ["preprocess", "simsetup"]
+            logger.info("PLANNER [hpc_pool]: Forcing prep-only plan (preprocess + simsetup)")
+        else:
+            subtask_type = state.get("subtask_type")
         if subtask_type:
             logger.info(f"PLANNER: Planning for subtask type: {subtask_type}")
         
@@ -1065,7 +1080,10 @@ class MDPlanner:
         Returns:
             Complete execution plan
         """
-        tool_creation_enabled = self.config.get("planner", {}).get("behavior", {}).get("enable_tool_creation", True)
+        tool_creation_enabled = (
+            self.config.get("planner", {}).get("behavior", {}).get("enable_tool_creation", True)
+            and not state.get("hpc_pool_prep_only")
+        )
         max_iterations = self.config.get("planner", {}).get("behavior", {}).get("max_tool_creation_iterations", 2)
         
         current_prompt = initial_prompt
@@ -1573,6 +1591,37 @@ CRITICAL: If you output JSON, YAML, or any structured format, the plan will be r
         
         per_sim_scope_note = self._get_per_sim_scope_note(state)
         user_goal_text = structured_prompt or state.get("user_goal") or ""
+        if state.get("hpc_pool_prep_only"):
+            working_dir = state.get("working_directory", ".")
+            return f"""Create a detailed natural language execution plan for MD preprocessing and simulation setup ONLY.
+
+USER GOAL:
+{structured_prompt}
+
+PDB File: {pdb_path}
+Working Directory: {working_dir}
+
+TASK: HPC-pool prep phase — run ONLY Preprocessing Agent then Setup Agent.
+DO NOT include HPC, Analysis, or Reporter agents.
+DO NOT plan trajectory analysis, RMSF, SASA, DCCM, or any post-simulation metrics.
+DO NOT reference other simulations or their trajectories.
+DO NOT request programmer tool creation.
+
+**Available Preprocessing Agent Tools:**
+{self._get_tools_context(agent_name="preprocess")}
+
+**Available Setup Agent Tools:**
+{self._get_tools_context(agent_name="simsetup")}
+
+{per_sim_scope_note}
+
+**CRITICAL:**
+- All outputs must be written under {working_dir}/preprocess/ and {working_dir}/simsetup/
+- End with simsetup producing system.gro, topol.top, and production MDP files
+- No SLURM submission
+
+{self._get_nl_format_instructions("multi_agent", state, user_goal=user_goal_text)}"""
+
         nl_format_instructions = self._get_nl_format_instructions(
             subtask_type, state, user_goal=user_goal_text
         )
@@ -2062,7 +2111,9 @@ When you indicate missing tools, the Programmer Agent will be automatically invo
         # This ensures the correct agent is included even if not explicitly mentioned in prose
         subtask_type = state.get("subtask_type")
         
-        if subtask_type == "analysis_only":
+        if state.get("hpc_pool_prep_only"):
+            agent_mentions = {"preprocessing_agent": True, "setup_agent": True}
+        elif subtask_type == "analysis_only":
             # Analysis-only workflow - only analysis agent
             agent_mentions = {"analysis_agent": True}
         elif subtask_type == "setup_only":

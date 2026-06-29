@@ -17,6 +17,7 @@ from typing import Dict, Any, Optional, List, FrozenSet
 from pathlib import Path
 
 from ..state import MDState
+from ..hitl_config import hitl_should_interact
 from ..llm import LLMClient
 from ..utils import (
     log_supervisor_routing, log_agent_start, log_llm_interaction,
@@ -38,6 +39,7 @@ from ..planner.planning_guidelines import (
     resolve_sims_for_combined_metric,
     get_standard_output_filenames_block,
     get_com_distance_tool_guide,
+    get_pca_fel_tool_guide,
     STANDARD_OUTPUT_FILES,
 )
 
@@ -53,6 +55,8 @@ _CALC_TOOL_TO_METRIC: Dict[str, str] = {
     "analyze_secondary_structure": "dssp",
     "calculate_ligand_pocket_distance": "com",
     "calculate_com_distance": "com",
+    "calculate_trajectory_pca": "pca",
+    "calculate_free_energy_landscape": "fel",
 }
 
 _PREP_TOOLS = frozenset({"wrap_trajectory", "run_complete_analysis"})
@@ -472,6 +476,7 @@ class MDAnalysisAgent:
             self.tool_executor = AnalysisToolExecutor(config={
                 "working_directory": analysis_dir,
                 "include_combined_tools": False,
+                "user_goal": state.get("user_goal_original") or state.get("user_goal", ""),
             })
             
             # Copy files from HPC output directory if needed (using secure file manager)
@@ -500,7 +505,7 @@ class MDAnalysisAgent:
                     e for e in state.get("errors", [])
                     if not (e.startswith("Analysis failed:") or e.startswith("Analysis error:"))
                 ]
-                if state.get("human_in_loop"):
+                if hitl_should_interact(state):
                     state["next_node"] = "human_analysis_check"
                 else:
                     state["next_node"] = "supervisor"
@@ -554,6 +559,7 @@ class MDAnalysisAgent:
                     or state.get("multi_sim_phase") == "combined_analysis"
                     or state.get("hitl_combined_execute")
                 ),
+                "user_goal": state.get("user_goal_original") or state.get("user_goal", ""),
             }
         )
         self._copy_files_from_hpc_secure(state)
@@ -842,7 +848,12 @@ Output as JSON:
         """
         from .tools import run_combined_analysis, collect_metric_files
 
-        working_dir = state.get("working_directory", "working_dir")
+        from agentic.multi_sim_paths import resolve_multi_sim_base_dir
+
+        working_dir = resolve_multi_sim_base_dir(state)
+        if state.get("is_multi_simulation"):
+            state["multi_sim_base_dir"] = working_dir
+            state["working_directory"] = working_dir
         analysis_dir = str(Path(working_dir) / "analysis")
         Path(analysis_dir).mkdir(parents=True, exist_ok=True)
         state["analysis_dir"] = analysis_dir
@@ -850,8 +861,17 @@ Output as JSON:
 
         # Resolve per-sim directories and labels from completed_sim_states
         completed = state.get("completed_sim_states") or []
-        sim_dirs = [s["working_directory"] for s in completed if s.get("working_directory")]
-        labels = [s.get("label", f"sim_{i}") for i, s in enumerate(completed)]
+        sim_dirs: List[str] = []
+        labels: List[str] = []
+        seen_labels: set = set()
+        for snap in completed:
+            label = snap.get("label")
+            wd = snap.get("working_directory")
+            if not label or not wd or label in seen_labels:
+                continue
+            seen_labels.add(label)
+            sim_dirs.append(wd)
+            labels.append(label)
 
         # Fall back to sim_working_dirs from planner if no completed states yet
         if not sim_dirs:
@@ -1232,7 +1252,7 @@ Output as JSON:
             ]
 
             log_agent_completion("analysis", "Combined Multi-Simulation Analysis", state, True)
-            if state.get("human_in_loop"):
+            if hitl_should_interact(state):
                 state["next_node"] = "human_analysis_check"
             else:
                 state["next_node"] = "supervisor"
@@ -1241,10 +1261,8 @@ Output as JSON:
             import traceback
             logger.error(f"Combined analysis failed: {exc}\n{traceback.format_exc()}")
             state["errors"].append(f"Combined analysis error: {exc}")
-            if state.get("human_in_loop"):
-                state["next_node"] = "human_analysis_check"
-            else:
-                state["next_node"] = "supervisor"
+            state["next_node"] = "human_analysis_check"
+            state["error_triggered_hitl"] = True
 
         return state
 
@@ -2310,6 +2328,13 @@ Output as JSON:
         tool_metadata = self._get_analysis_tool_metadata(state)
         tools_list_str = self._format_tools_list_for_prompt(tool_metadata)
         scope_note = self._get_per_sim_tool_scope_note(state)
+
+        goal_text = " ".join(collect_goal_texts_for_intent(state, agent_input)).lower()
+        _pca_fel_block = (
+            get_pca_fel_tool_guide()
+            if any(k in goal_text for k in ("pca", "principal component", "free energy landscape", "fel", "energy landscape", "essential dynamics"))
+            else ""
+        )
         
         # Extract file registry information
         file_registry = state.get("file_registry", {})
@@ -2376,6 +2401,7 @@ RMSD, Rg, SASA, hydrogen bonds, DCCM, wrap_trajectory, or run_complete_analysis.
     {{"tool_name": "plot_md_data",   "tool_params": {{"data_files": ["rmsd.dat"], "output_file": "rmsd.png", "xlabel": "Time (ns)", "ylabel": "RMSD (Å)"}}}}
 - Apply this pattern for RMSD, RMSF, Rg, energy, and any distance calculation.
 {get_com_distance_tool_guide()}
+{_pca_fel_block}
 - **DCCM — only when the User Goal explicitly names DCCM for this simulation:**
   Include calculate_dccm only if DCCM is requested in the User Goal for this run.
   Do NOT add DCCM because the global project mentions it for other proteins.

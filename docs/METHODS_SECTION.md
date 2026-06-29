@@ -68,7 +68,7 @@ Workflow orchestration is implemented in **Python 3.11** using **LangGraph v1.0.
   │   FINAL REPORT  │
   └─────────────────┘
 
-  [checkpoint?] = optional human approval gate (--no-human-loop to skip)
+  [checkpoint?] = optional human approval gate (--HITL all / --HITL error)
   All agents return state to SUPERVISOR before next step.
 ```
 
@@ -338,7 +338,7 @@ Produces the final deliverable: a self-contained interactive HTML report. Operat
 
 ### 2.2.9 Human Checkpoint (`agentic/human_checkpoints.py`)
 
-Optional approval gate inserted after preprocessing, simulation setup, and HPC completion. Normalises free-text user responses via fuzzy phrase matching (`approved` / `retry` / `reject`). On `retry`, regex-based parameter extractors patch the updated plan with new simulation parameters before re-routing. The checkpoints are disabled with `--no-human-loop` for fully automatic execution.
+Optional approval gate inserted after preprocessing, simulation setup, and HPC completion. Normalises free-text user responses via fuzzy phrase matching (`approved` / `retry` / `reject`). On `retry`, regex-based parameter extractors patch the updated plan with new simulation parameters before re-routing. Checkpoints are off by default; enable with `--HITL all` (every stage) or `--HITL error` (failures only).
 
 ---
 
@@ -536,8 +536,7 @@ python run_agenticAIWork.py \
   --goal "<natural-language MD objective>" \
   --working-dir <project_dir> \
   --subtask preprocess simsetup hpcjob analysis reporter \
-  --simtype multisim \
-  --use-llm --no-human-loop
+  --simtype multisim
 ```
 
 **Subtask modes** allow isolated pipeline stages: `preprocess`, `simsetup`, `hpcjob`, `analysis`, `reporter`.

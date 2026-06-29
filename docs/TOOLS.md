@@ -81,6 +81,9 @@ Primary library: **MDAnalysis v2.10.0**
 | `calculate_com_distance` | Centre-of-mass distance between two atom groups |
 | `calculate_ligand_pocket_distance` | ATP–pocket distance (pocket = atoms within 5 Å of ligand at frame 0) |
 | `calculate_dccm` | Dynamic cross-correlation matrix of Cα fluctuations |
+| `calculate_trajectory_pca` | PCA on aligned coordinates; writes ``pca_projections.dat`` |
+| `plot_pca_projection` | PC1 vs PC2 (or PCx/PCy) scatter coloured by time |
+| `calculate_free_energy_landscape` | F = −kT ln P from PC1/PC2 histogram (kJ/mol contour map) |
 | `plot_dccm_difference` | Element-wise DCCM difference between two simulations (apo–holo) |
 | `plot_md_data` | Single-trace time-series plot |
 | `plot_md_multipanel` | Multi-panel figure |

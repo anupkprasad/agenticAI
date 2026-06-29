@@ -23,7 +23,7 @@ from src.hpc.file_copy import copy_simulation_files
 from src.hpc.time_estimator import estimate_simulation_time
 from src.hpc.script_creator import create_slurm_script
 from src.hpc.job_submitter import submit_job
-from src.hpc.job_monitor import check_job_status
+from src.hpc.job_monitor import check_job_status, list_my_slurm_jobs
 from src.hpc.results_downloader import download_results
 
 # Export all tools
@@ -33,6 +33,7 @@ __all__ = [
     "create_slurm_script",
     "submit_job",
     "check_job_status",
+    "list_my_slurm_jobs",
     "download_results",
     "HPCToolExecutor"
 ]
@@ -68,6 +69,7 @@ class HPCToolExecutor:
             "create_slurm_script": create_slurm_script,
             "submit_job": submit_job,
             "check_job_status": check_job_status,
+            "list_my_slurm_jobs": list_my_slurm_jobs,
             "download_results": download_results
         }
         

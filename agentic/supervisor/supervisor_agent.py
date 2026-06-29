@@ -103,6 +103,108 @@ def _should_run_combined_analysis(state: Dict[str, Any]) -> bool:
     return False
 
 
+def _build_per_sim_prep_prompt(
+    entry: Dict[str, Any],
+    *,
+    original_goal: str,
+    enriched_prompt: str,
+) -> str:
+    """Fallback per-simulation prompt when the master plan has no ``prompt`` text."""
+    protein = entry.get("protein_name") or entry.get("label", "system")
+    label = entry.get("label", "simulation")
+    case = entry.get("case_description", "default system")
+    wdir = entry.get("working_dir", "")
+    requirements = (original_goal or enriched_prompt or "").strip()
+
+    return (
+        f"Prepare MD simulation for {protein} (label: {label}; case: {case}). "
+        f"Source structure is in {wdir}. "
+        f"Run preprocessing and simsetup only — build topology, solvate/ionize as needed, "
+        f"and generate MDP inputs for production MD. Do not submit SLURM/HPC jobs. "
+        f"Project requirements: {requirements}"
+    )
+
+
+def _upsert_completed_sim_snapshot(
+    completed: List[Dict[str, Any]], snapshot: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Replace an existing per-sim snapshot or append a new one."""
+    label = snapshot.get("label")
+    sim_index = snapshot.get("sim_index")
+    for i, existing in enumerate(completed):
+        if existing.get("label") == label or existing.get("sim_index") == sim_index:
+            completed[i] = snapshot
+            return completed
+    completed.append(snapshot)
+    return completed
+
+
+def _dedupe_completed_sim_states(
+    completed: List[Dict[str, Any]],
+    sim_prompts: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Keep one snapshot per simulation label (last wins), in master-plan order."""
+    by_label: Dict[str, Dict[str, Any]] = {}
+    for snap in completed:
+        label = snap.get("label")
+        if label:
+            by_label[label] = snap
+    if sim_prompts:
+        ordered: List[Dict[str, Any]] = []
+        for sp in sim_prompts:
+            label = sp.get("label")
+            if label and label in by_label:
+                ordered.append(by_label[label])
+        return ordered
+    return list(by_label.values())
+
+
+def _pool_prep_simsetup_ready(state: Dict[str, Any], wd: str) -> bool:
+    """True when simsetup outputs exist on disk or valid coordinates are in state."""
+    from agentic.multi_sim_hpc_pool import _sim_setup_ready
+
+    if wd and _sim_setup_ready(wd):
+        return True
+    coords = state.get("coordinates")
+    return bool(coords and _artifact_in_sim_dir(str(coords), wd))
+
+
+def _resolve_per_sim_goal(
+    state: Dict[str, Any],
+    sim_info: Dict[str, Any],
+    *,
+    phase: str,
+) -> str:
+    """Pick the per-simulation user goal from the master plan when available."""
+    if phase == "hpc_pool_prep":
+        master = (sim_info.get("prompt") or sim_info.get("setup_prompt") or "").strip()
+        if master:
+            return (
+                "HPC pool — phase 1/3 (preprocess + simsetup only for this simulation). "
+                "Full pipeline continues with parallel HPC (phase 2) then per-sim "
+                "analysis/reporter (phase 3) and combined analysis.\n\n"
+                "Workflow scope for this phase: preprocessing and simulation setup only. "
+                "Do not run HPC submission, MD production, analysis, or reporting yet — "
+                "the cross-simulation pool handles HPC and post-production work.\n\n"
+                f"{master}"
+            )
+        return _build_per_sim_prep_prompt(
+            {
+                "protein_name": sim_info.get("protein_name") or sim_info.get("label"),
+                "label": sim_info.get("label"),
+                "case_description": sim_info.get("case_description", ""),
+                "working_dir": sim_info.get("working_dir", ""),
+            },
+            original_goal=state.get("user_goal_original") or state.get("user_goal", ""),
+            enriched_prompt=state.get("master_enriched_prompt")
+            or state.get("enriched_prompt", ""),
+        )
+    master = (sim_info.get("prompt") or sim_info.get("analysis_prompt") or "").strip()
+    if master:
+        return master
+    return sim_info.get("prompt") or ""
+
+
 def _build_per_sim_analysis_prompt(
     entry: Dict[str, Any],
     *,
@@ -127,10 +229,20 @@ def _build_per_sim_analysis_prompt(
     )
 
 
+def _artifact_in_sim_dir(path: Optional[str], working_dir: Optional[str]) -> bool:
+    """True when *path* lives under the active simulation working directory."""
+    if not path or not working_dir:
+        return False
+    p = str(Path(path).resolve())
+    wd = str(Path(working_dir).resolve())
+    return p == wd or p.startswith(wd + os.sep)
+
+
 def _get_multi_sim_base_dir(state: Dict[str, Any]) -> str:
     """Return the canonical base directory for multi-simulation orchestration."""
-    base = state.get("multi_sim_base_dir") or state.get("working_directory") or "."
-    return str(Path(base).resolve())
+    from agentic.multi_sim_paths import resolve_multi_sim_base_dir
+
+    return resolve_multi_sim_base_dir(state)
 
 
 def _set_base_conversation_log(state: Dict[str, Any]) -> None:
@@ -157,13 +269,19 @@ def _normalize_multi_sim_paths(state: MDState) -> None:
 
 def _expected_sim_working_dir(state: MDState) -> Optional[str]:
     """Return the working_dir for the active simulation (progress-aware)."""
-    progress = state.get("multi_sim_progress") or {}
-    label = progress.get("active_sim_label")
+    from agentic.multi_sim_progress import resolve_active_sim_label
+
+    label = resolve_active_sim_label(state)
     if label:
+        progress = state.get("multi_sim_progress") or {}
         rec = (progress.get("sims") or {}).get(label) or {}
         wd = rec.get("working_dir")
         if wd:
             return wd
+        sim_prompts = state.get("sim_prompts") or []
+        for sp in sim_prompts:
+            if sp.get("label") == label:
+                return sp.get("working_dir")
     sim_prompts = state.get("sim_prompts") or []
     idx = state.get("current_sim_index", 0)
     if 0 <= idx < len(sim_prompts):
@@ -279,6 +397,32 @@ class MDSupervisor:
 
         multi_sim_phase = state.get("multi_sim_phase")
 
+        if state.get("is_multi_simulation"):
+            from agentic.multi_sim_hpc_pool import reconcile_post_hpc_with_pool
+
+            if reconcile_post_hpc_with_pool(state):
+                multi_sim_phase = state.get("multi_sim_phase")
+
+        # ── Cross-sim HPC pool (prep sequential, SLURM jobs parallel) ───
+        if multi_sim_phase == "hpc_pool":
+            self._ensure_hpc_pool_prep_context(state)
+            if state.get("hpc_pool_prep_only") or state.get("post_hpc_analysis_only"):
+                from agentic.multi_sim_progress import ensure_per_sim_working_directory
+
+                ensure_per_sim_working_directory(state)
+
+            if state.get("plan_executed") and (
+                state.get("hpc_pool_prep_only") or not state.get("post_hpc_analysis_only")
+            ):
+                return self._finish_hpc_pool_prep_sim(state)
+
+            if state.get("hpc_pool_prep_only") and not state.get("plan_executed"):
+                logger.info(
+                    "SUPERVISOR [hpc_pool]: Per-sim prep in progress — continuing pipeline"
+                )
+            elif not state.get("execution_plan") or state.get("plan_executed"):
+                return self._apply_hpc_pool_tick(state)
+
         if state.pop("_hitl_start_combined", None):
             logger.info("SUPERVISOR [multi-sim]: HITL continue — starting combined analysis")
             return self._setup_combined_analysis(state)
@@ -297,14 +441,25 @@ class MDSupervisor:
                 state["multi_sim_base_dir"] = str(
                     Path(state.get("working_directory", ".")).resolve()
                 )
-            # Overall orchestration (enrichment, master plan, combined analysis)
-            # is logged at the base working directory.
-            if multi_sim_phase in (None, "combined_analysis"):
-                _set_base_conversation_log(state)
+            # Overall orchestration (enrichment, master plan, combined analysis, HPC pool)
+            # is logged at the base working directory — except during active per-sim prep.
+            if multi_sim_phase in (None, "combined_analysis", "hpc_pool"):
+                if (
+                    (state.get("hpc_pool_prep_only") or state.get("post_hpc_analysis_only"))
+                    and multi_sim_phase not in ("combined_analysis", "combined_reporter")
+                ):
+                    from agentic.multi_sim_progress import ensure_per_sim_working_directory
+
+                    ensure_per_sim_working_directory(state)
+                    wd = _expected_sim_working_dir(state) or state.get("working_directory")
+                    if wd:
+                        set_log_file(str(Path(wd) / "agent_conversation.log"))
+                else:
+                    _set_base_conversation_log(state)
             # Resume mid-loop with a mismatched working_directory (e.g. after
             # --working-dir changed or stale checkpoint) — re-bind current sim.
             if (
-                multi_sim_phase == "executing_sims"
+                multi_sim_phase in ("executing_sims", "hpc_pool")
                 and state.get("sim_prompts")
                 and not state.get("combined_only")
             ):
@@ -374,6 +529,8 @@ class MDSupervisor:
         # ── Per-sim or combined workflow complete ─────────────────────────
         # Must check BEFORE step 1 so that plan_executed=True routes correctly.
         if state.get("plan_executed"):
+            if multi_sim_phase == "hpc_pool" and not state.get("post_hpc_analysis_only"):
+                return self._finish_hpc_pool_prep_sim(state)
             if multi_sim_phase == "executing_sims":
                 logger.info("SUPERVISOR [multi-sim]: Per-sim cycle complete — advancing")
                 return self._advance_multi_sim(state)
@@ -398,16 +555,21 @@ class MDSupervisor:
 
         # ── Step 2: Prompt enrichment (single call per sim/phase) ─────────
         if state.get("input_validated") and not state.get("enriched_prompt"):
-            logger.info("SUPERVISOR: Input validated, enriching prompt")
-            enriched = enrich_prompt_unified(state, self.llm, self.supervisor_config)
-            state["enriched_prompt"] = enriched
-            state["rephrased_goal"] = enriched
-            # For multi-sim: save master prompt once so it survives per-sim state resets.
-            # The combined reporter uses this to show the user's actual goal, not the
-            # combined_analysis_plan dump.
-            if state.get("is_multi_simulation") and not state.get("master_enriched_prompt"):
-                state["master_enriched_prompt"] = enriched
-            logger.info(f"SUPERVISOR: Enrichment complete ({len(enriched)} chars)")
+            if state.get("hpc_pool_prep_only"):
+                logger.info("SUPERVISOR [hpc_pool]: Using prep-only goal (skip full enrichment)")
+                state["enriched_prompt"] = state.get("user_goal", "")
+                state["rephrased_goal"] = state["enriched_prompt"]
+            else:
+                logger.info("SUPERVISOR: Input validated, enriching prompt")
+                enriched = enrich_prompt_unified(state, self.llm, self.supervisor_config)
+                state["enriched_prompt"] = enriched
+                state["rephrased_goal"] = enriched
+                # For multi-sim: save master prompt once so it survives per-sim state resets.
+                # The combined reporter uses this to show the user's actual goal, not the
+                # combined_analysis_plan dump.
+                if state.get("is_multi_simulation") and not state.get("master_enriched_prompt"):
+                    state["master_enriched_prompt"] = enriched
+                logger.info(f"SUPERVISOR: Enrichment complete ({len(enriched)} chars)")
 
         # ── Step 2.5: Multi-sim master planning (planner owns tools context) ─
         # Build sim_prompts plus an optional combined_analysis_plan right after
@@ -471,8 +633,18 @@ class MDSupervisor:
                 and not state.get("execution_plan")
                 and multi_sim_phase is None
                 and not state.get("combined_only")):
-            logger.info("SUPERVISOR [multi-sim]: Master plan ready — starting per-sim loop")
+            logger.info("SUPERVISOR [multi-sim]: Master plan ready — starting workflow")
+            from agentic.multi_sim_hpc_pool import (
+                should_use_hpc_pool,
+                init_hpc_pool,
+            )
             from agentic.multi_sim_progress import init_multi_sim_progress
+
+            if should_use_hpc_pool(state):
+                logger.info("SUPERVISOR [multi-sim]: Using cross-sim HPC pool")
+                state["multi_sim_phase"] = "hpc_pool"
+                init_hpc_pool(state)
+                return self._apply_hpc_pool_tick(state)
 
             state["multi_sim_phase"] = "executing_sims"
             if state.get("resume_failed_only"):
@@ -490,6 +662,49 @@ class MDSupervisor:
                 state["completed_sim_states"] = []
             init_multi_sim_progress(state)
             return self._start_next_sim(state)
+
+        # Post-HPC analysis loop after cross-sim pool completes
+        if (
+            state.get("is_multi_simulation")
+            and state.get("sim_prompts")
+            and state.get("post_hpc_analysis_only")
+            and state.get("hpc_pool_phase_complete")
+            and multi_sim_phase == "executing_sims"
+        ):
+            from agentic.multi_sim_progress import (
+                all_post_hpc_artifacts_on_disk,
+                bind_workflow_to_sim,
+                first_incomplete_post_hpc_sim,
+                sync_post_hpc_progress_from_disk,
+            )
+
+            sync_post_hpc_progress_from_disk(state)
+            sim_prompts = state.get("sim_prompts") or []
+            current_idx = state.get("current_sim_index", 0)
+
+            if current_idx >= len(sim_prompts) or all_post_hpc_artifacts_on_disk(state):
+                if _should_run_combined_analysis(state):
+                    logger.info(
+                        "SUPERVISOR [multi-sim]: All per-sim post-HPC work complete "
+                        "— starting combined analysis"
+                    )
+                    return self._setup_combined_analysis(state)
+
+            if (
+                not state.get("execution_plan")
+                and not state.get("plan_executed")
+                and not state.get("input_validated")
+            ):
+                next_label = first_incomplete_post_hpc_sim(state)
+                if next_label:
+                    bind_workflow_to_sim(state, next_label)
+                logger.info(
+                    "SUPERVISOR [multi-sim]: Post-HPC pool — starting analysis/reporter "
+                    "at sim %s (index %s)",
+                    next_label or "?",
+                    state.get("current_sim_index"),
+                )
+                return self._start_next_sim(state)
 
         # ── Step 3: Create execution plan ────────────────────────────────
         if not state.get("execution_plan") and state.get("enriched_prompt"):
@@ -513,6 +728,14 @@ class MDSupervisor:
             # target in _route_from_supervisor — handle the advancement here so
             # the returned state always carries a valid next_node for LangGraph.
             if state.get("plan_executed"):
+                if state.get("multi_sim_phase") == "hpc_pool" and not state.get(
+                    "post_hpc_analysis_only"
+                ):
+                    logger.info(
+                        "SUPERVISOR [hpc_pool]: Per-sim prep cycle complete — "
+                        "returning to pool"
+                    )
+                    return self._finish_hpc_pool_prep_sim(state)
                 if state.get("multi_sim_phase") == "executing_sims":
                     logger.info(
                         "SUPERVISOR [multi-sim]: Per-sim cycle complete — "
@@ -700,6 +923,13 @@ class MDSupervisor:
                         "job_status": s.get("job_status"),
                         "trajectory_path": s.get("trajectory_path"),
                         "topology": s.get("topology"),
+                        "energy_file": s.get("energy_file"),
+                        "analysis_directory": s.get("analysis_directory")
+                        or s.get("analysis_dir")
+                        or str(Path(sim_dir) / "analysis"),
+                        "analysis_results": s.get("analysis_results"),
+                        "reporter_output": s.get("reporter_output"),
+                        "figures": list(s.get("figures") or []),
                         "errors": list(s.get("errors", [])),
                         "_source": "disk_rebuild",
                     }
@@ -782,6 +1012,136 @@ class MDSupervisor:
         state["current_sim_index"] = first_to_run
         return state
 
+    def _mark_post_hpc_agent_done(self, state: MDState, agent: str) -> None:
+        """Record per-sim agent completion in multi_sim_progress during post-HPC loop."""
+        if not state.get("post_hpc_analysis_only"):
+            return
+        from agentic.multi_sim_progress import mark_agent_status, workflow_sim_label_for_hitl
+
+        label = workflow_sim_label_for_hitl(state)
+        if label:
+            mark_agent_status(state, label, agent, "done")
+
+    def _ensure_hpc_pool_prep_context(self, state: MDState) -> None:
+        """Limit per-sim work to preprocess + simsetup while in ``hpc_pool`` phase."""
+        if state.get("multi_sim_phase") != "hpc_pool" or state.get("post_hpc_analysis_only"):
+            return
+        state["hpc_pool_prep_only"] = True
+        state["hpc_pool_agent_filter"] = ["preprocessing", "simsetup"]
+        state["subtask_type"] = "multi_agent"
+        state["agent_list"] = ["preprocess", "simsetup"]
+
+    def _clear_stale_cross_sim_artifacts(self, state: MDState) -> None:
+        """Drop completion markers from another simulation directory."""
+        wd = state.get("working_directory")
+        for key in (
+            "cleaned_pdb", "coordinates", "topology", "job_id", "job_script",
+            "trajectory_path",
+        ):
+            val = state.get(key)
+            if val and not _artifact_in_sim_dir(str(val), wd):
+                state[key] = None
+
+        # analysis_results is a dict (tool outputs), not a file path — validate via directory.
+        if state.get("analysis_results"):
+            analysis_dir = state.get("analysis_directory") or state.get("analysis_dir")
+            if analysis_dir and wd and not _artifact_in_sim_dir(analysis_dir, wd):
+                state["analysis_results"] = {}
+                state["analysis_directory"] = None
+                state["analysis_dir"] = None
+
+        # reporter_output is a dict — validate via report file path when present.
+        reporter_out = state.get("reporter_output")
+        if isinstance(reporter_out, dict):
+            report_path = (
+                reporter_out.get("html_report")
+                or reporter_out.get("report_path")
+                or reporter_out.get("output_file")
+            )
+            if report_path and wd and not _artifact_in_sim_dir(str(report_path), wd):
+                state["reporter_output"] = None
+        elif reporter_out and wd:
+            if not _artifact_in_sim_dir(str(reporter_out), wd):
+                state["reporter_output"] = None
+
+    def _finish_hpc_pool_prep_sim(self, state: MDState) -> MDState:
+        """Mark prep done for the active sim and return to the cross-sim pool."""
+        from agentic.multi_sim_hpc_pool import mark_prep_done, _sim_setup_ready
+
+        sim_label = (state.get("sim_case") or {}).get("label")
+        wd = state.get("working_directory")
+        if not sim_label:
+            idx = state.get("current_sim_index", 0)
+            sim_prompts = state.get("sim_prompts") or []
+            if sim_prompts and 0 <= idx < len(sim_prompts):
+                sim_label = sim_prompts[idx].get("label")
+                wd = wd or sim_prompts[idx].get("working_dir")
+        if sim_label and wd and not _pool_prep_simsetup_ready(state, wd):
+            logger.warning(
+                "SUPERVISOR [hpc_pool]: Prep incomplete for %s (simsetup not ready) — "
+                "retrying simsetup with existing plan",
+                sim_label,
+            )
+            state["plan_executed"] = False
+            pool_agents = state.get("hpc_pool_agent_filter") or ["preprocessing", "simsetup"]
+            if "simsetup" in pool_agents:
+                state["current_agent_idx"] = pool_agents.index("simsetup")
+            elif "preprocessing" in pool_agents:
+                state["current_agent_idx"] = pool_agents.index("preprocessing")
+            else:
+                state["current_agent_idx"] = 0
+            self._ensure_hpc_pool_prep_context(state)
+            self._clear_stale_cross_sim_artifacts(state)
+            state["next_node"] = "supervisor"
+            return state
+        if sim_label:
+            mark_prep_done(state, sim_label)
+            logger.info("SUPERVISOR [hpc_pool]: Prep complete for %s", sim_label)
+        state["plan_executed"] = False
+        state["execution_plan"] = None
+        state["current_agent_idx"] = 0
+        state.pop("hpc_pool_agent_filter", None)
+        state.pop("hpc_pool_prep_only", None)
+        base = state.get("multi_sim_base_dir") or state.get("working_directory")
+        if base:
+            state["working_directory"] = str(Path(base).resolve())
+        _set_base_conversation_log(state)
+        return self._apply_hpc_pool_tick(state)
+
+    def _apply_hpc_pool_tick(self, state: MDState) -> MDState:
+        """
+        Run HPC pool tick and resolve internal supervisor hand-offs.
+
+        ``hpc_pool_supervisor_tick`` may set ``next_node='supervisor'`` when the
+        next step is prep start or post-HPC analysis. LangGraph cannot route to
+        the supervisor node, so those transitions are handled here.
+        """
+        from agentic.multi_sim_hpc_pool import hpc_pool_supervisor_tick
+
+        state = hpc_pool_supervisor_tick(state)
+        while state.get("next_node") == "supervisor":
+            prep_label = state.pop("hpc_pool_needs_prep_start", None)
+            if prep_label:
+                sim_prompts = state.get("sim_prompts") or []
+                idx = next(
+                    (i for i, sp in enumerate(sim_prompts) if sp.get("label") == prep_label),
+                    0,
+                )
+                state["current_sim_index"] = idx
+                state["hpc_pool_prep_only"] = True
+                state["hpc_pool_agent_filter"] = ["preprocessing", "simsetup"]
+                logger.info("HPC pool: starting prep for %s", prep_label)
+                return self._start_next_sim(state)
+            if state.pop("hpc_pool_post_hpc_start", None):
+                logger.info("HPC pool: all jobs done — starting post-HPC analysis")
+                return self._start_next_sim(state)
+            logger.error(
+                "HPC pool tick returned next_node=supervisor with no hand-off flag"
+            )
+            state["next_node"] = "hpc_pool_wait"
+            break
+        return state
+
     # ── Per-simulation loop ───────────────────────────────────────────────
 
     def _start_next_sim(self, state: MDState) -> MDState:
@@ -798,13 +1158,15 @@ class MDSupervisor:
         sim_info = sim_prompts[current_idx]
         sim_label = sim_info.get("label", f"sim_{current_idx}")
         sim_pdb = sim_info.get("pdb", "")
-        post_sim_subtask = _is_post_simulation_subtask(state)
+        post_sim_subtask = _is_post_simulation_subtask(state) or state.get("post_hpc_analysis_only")
+        sim_working_dir = sim_info.get("working_dir", "")
         sim_goal = (
             sim_info.get("analysis_prompt")
             or sim_info.get("prompt")
             or ""
         )
-        sim_working_dir = sim_info.get("working_dir", "")
+        if state.get("hpc_pool_prep_only"):
+            sim_goal = _resolve_per_sim_goal(state, sim_info, phase="hpc_pool_prep")
 
         # ── Resume mode: skip sims that already succeeded ─────────────────
         if state.get("resume_failed_only"):
@@ -845,17 +1207,74 @@ class MDSupervisor:
         # Reset per-sim state, set working_directory to {basepath}/{label}/
         state = self._reset_state_for_new_sim(state, sim_goal, sim_working_dir, sim_pdb)
 
+        if state.get("post_hpc_analysis_only"):
+            state.pop("hpc_pool_prep_only", None)
+            state.pop("hpc_pool_agent_filter", None)
+            state["subtask_type"] = "multi_agent"
+            state["agent_list"] = ["analysis", "reporter"]
+
+        if state.get("hpc_pool_prep_only"):
+            for key in (
+                "job_id", "job_script", "job_status", "trajectory_path", "energy_file",
+                "hpc_report", "hpc_output_directory", "analysis_results", "figures",
+                "conclusions", "reporter_output", "enriched_prompt", "execution_plan",
+                "preprocessing_instructions", "setup_instructions", "hpc_instructions",
+                "analysis_instructions", "reporter_instructions",
+                "cleaned_pdb", "coordinates", "topology",
+            ):
+                state[key] = None
+            state["hpc_pool_prep_only"] = True
+            state["hpc_pool_agent_filter"] = ["preprocessing", "simsetup"]
+            state["subtask_type"] = "multi_agent"
+            state["agent_list"] = ["preprocess", "simsetup"]
+            self._clear_stale_cross_sim_artifacts(state)
+
+        from agentic.multi_sim_hpc_pool import _sim_setup_ready
+
+        if state.get("hpc_pool_prep_only") and sim_working_dir and not _sim_setup_ready(
+            sim_working_dir
+        ):
+            progress = state.get("multi_sim_progress") or {}
+            rec = (progress.get("sims") or {}).get(sim_label)
+            if rec:
+                pool_agents = state.get("hpc_pool_agent_filter") or [
+                    "preprocessing",
+                    "simsetup",
+                ]
+                rec.setdefault("agents", {})
+                for agent in pool_agents:
+                    rec["agents"][agent] = "pending"
+                rec["status"] = "pending"
+                state["multi_sim_progress"] = progress
+            state["plan_executed"] = False
+            state["current_agent_idx"] = 0
+
         from agentic.multi_sim_progress import ensure_multi_sim_progress, sync_state_from_progress
 
         progress = ensure_multi_sim_progress(state)
         if progress:
             progress["active_sim_label"] = sim_label
+            if state.get("hpc_pool_prep_only"):
+                progress["phase"] = "hpc_pool"
+                state["multi_sim_phase"] = "hpc_pool"
             from agentic.multi_sim_progress import _next_pending_agent
 
             next_agent = _next_pending_agent(progress, sim_label)
+            if state.get("hpc_pool_prep_only") and state.get("hpc_pool_agent_filter"):
+                pool_agents = state["hpc_pool_agent_filter"]
+                next_agent = next(
+                    (a for a in pool_agents if (progress.get("sims") or {})
+                     .get(sim_label, {}).get("agents", {}).get(a) != "done"),
+                    pool_agents[0] if pool_agents else next_agent,
+                )
             progress["active_agent"] = next_agent
             state["multi_sim_progress"] = progress
             sync_state_from_progress(state)
+            if state.get("hpc_pool_prep_only"):
+                state["multi_sim_phase"] = "hpc_pool"
+            from agentic.multi_sim_progress import ensure_per_sim_working_directory
+
+            ensure_per_sim_working_directory(state)
 
         # Copy PDB into per-sim directory so validator can find it (setup stages only).
         pdb_name = Path(sim_pdb).name if sim_pdb else ""
@@ -889,6 +1308,10 @@ class MDSupervisor:
                 state["raw_pdb"] = None
         else:
             state["user_goal"] = sim_goal
+
+        # Per-sim loops must not carry the full pdb_list (triggers master validation).
+        state["pdb_list"] = []
+        state["all_pdb_analyses"] = []
 
         # Propagate per-structure download metadata for preprocess agent
         structure_requests = state.get("structure_requests") or {}
@@ -993,7 +1416,7 @@ class MDSupervisor:
             "warnings": list(state.get("warnings", [])),
         }
         completed = list(state.get("completed_sim_states") or [])
-        completed.append(snapshot)
+        completed = _upsert_completed_sim_snapshot(completed, snapshot)
         state["completed_sim_states"] = completed
 
         current_idx += 1
@@ -1003,6 +1426,26 @@ class MDSupervisor:
             sim_label,
             reason,
         )
+
+        if state.get("multi_sim_phase") == "hpc_pool" and state.get("hpc_pool_prep_only"):
+            pool = state.get("hpc_pool") or {}
+            rec = (pool.get("sims") or {}).get(sim_label)
+            if rec:
+                rec["prep_status"] = "failed"
+                rec["error"] = reason
+            pool["awaiting_hitl"] = True
+            pool["hitl_reason"] = f"Prep failed for {sim_label}: {reason}"
+            state["hpc_pool"] = pool
+            state.pop("hpc_pool_prep_only", None)
+            state["plan_executed"] = False
+            state["execution_plan"] = None
+            state["current_agent_idx"] = 0
+            state.pop("hpc_pool_agent_filter", None)
+            base = state.get("multi_sim_base_dir") or state.get("working_directory")
+            if base:
+                state["working_directory"] = str(Path(base).resolve())
+            _set_base_conversation_log(state)
+            return self._apply_hpc_pool_tick(state)
 
         if current_idx >= len(sim_prompts):
             if _should_run_combined_analysis(state):
@@ -1075,10 +1518,51 @@ class MDSupervisor:
           planner creates a combined execution plan
           analysis and reporter agents run in {basepath}/
         """
-        completed = state.get("completed_sim_states", [])
-
         basepath = _get_multi_sim_base_dir(state)
         state["multi_sim_base_dir"] = basepath
+
+        # Idempotent: combined analysis already finished — go to reporter.
+        if (
+            state.get("multi_sim_phase") == "combined_analysis"
+            and state.get("analysis_results")
+        ):
+            logger.info(
+                "SUPERVISOR [multi-sim]: Combined analysis already complete — "
+                "routing to combined reporter"
+            )
+            state["multi_sim_phase"] = "combined_reporter"
+            state["working_directory"] = basepath
+            state["post_hpc_analysis_only"] = False
+            state["current_agent_idx"] = 1
+            state["plan_executed"] = False
+            state["subtask_type"] = "analysis_only"
+            state["agent_list"] = ["analysis", "reporter"]
+            state["reporter_dir"] = str(Path(basepath) / "reporter")
+            state["analysis_dir"] = str(Path(basepath) / "analysis")
+            state["analysis_directory"] = str(Path(basepath) / "analysis")
+            _set_base_conversation_log(state)
+            state["next_node"] = "reporter"
+            log_supervisor_routing(
+                state, "reporter", "Combined analysis done — starting combined report"
+            )
+            return state
+
+        completed = state.get("completed_sim_states", [])
+        sim_prompts = state.get("sim_prompts") or []
+        from agentic.multi_sim_progress import sync_post_hpc_progress_from_disk
+
+        sync_post_hpc_progress_from_disk(state)
+        completed = _dedupe_completed_sim_states(completed, sim_prompts)
+        if len(completed) < len(sim_prompts):
+            logger.info(
+                "SUPERVISOR [multi-sim]: completed_sim_states has %s/%s entries — "
+                "rebuilding from per-sim state on disk",
+                len(completed),
+                len(sim_prompts),
+            )
+            completed = self._rebuild_completed_states_from_disk(state)
+            completed = _dedupe_completed_sim_states(completed, sim_prompts)
+            state["completed_sim_states"] = completed
 
         logger.info(f"SUPERVISOR [multi-sim]: Combined analysis at basepath={basepath}")
 
@@ -1109,11 +1593,18 @@ class MDSupervisor:
             "md_engine", "force_field", "water_model", "human_in_loop",
             "subtask_type", "subtask_type_initialized", "agent_list",
             "required_inputs",
+            "pipeline_subtask_type",
+            "hpc_pool", "hpc_pool_phase_complete",
             # Master prompt — preserved so combined reporter shows supervisor's rephrased goal
             "master_enriched_prompt",
             # Original --goal text — shown verbatim in the combined report
             "user_goal_original",
         }
+        if not state.get("pipeline_subtask_type"):
+            if state.get("hpc_pool"):
+                state["pipeline_subtask_type"] = "full_task"
+            elif state.get("subtask_type") and state.get("subtask_type") != "analysis_only":
+                state["pipeline_subtask_type"] = state["subtask_type"]
         preserved = {k: state[k] for k in preserved_keys if k in state}
 
         # Reset per-sim artifacts
@@ -1148,6 +1639,8 @@ class MDSupervisor:
                 state[key] = None
 
         state.update(preserved)
+        state["completed_sim_states"] = completed
+        state["post_hpc_analysis_only"] = False
 
         # Set up combined analysis context
         state["multi_sim_phase"] = "combined_analysis"
@@ -1177,6 +1670,8 @@ class MDSupervisor:
         # State update preserves dir fields for combined (SecureFileManager will
         # create them at basepath level when agents run)
         state["analysis_dir"] = str(Path(basepath) / "analysis")
+        state["analysis_directory"] = str(Path(basepath) / "analysis")
+        state["reporter_dir"] = str(Path(basepath) / "reporter")
         state["preprocess_dir"] = str(Path(basepath) / "preprocess")
         state["simsetup_dir"] = str(Path(basepath) / "simsetup")
         state["hpc_dir"] = str(Path(basepath) / "hpc")
@@ -1211,7 +1706,12 @@ class MDSupervisor:
         if phase == "executing_sims":
             return self._start_next_sim(state)
         elif phase == "combined_analysis":
-            return self._setup_combined_analysis(state)
+            logger.warning(
+                "SUPERVISOR [multi-sim]: _handle_multi_sim_phase(combined_analysis) "
+                "— delegating to normal supervisor routing"
+            )
+            state["next_node"] = "supervisor"
+            return state
         else:
             logger.error(f"SUPERVISOR [multi-sim]: Unknown phase '{phase}'")
             state["next_node"] = "final_report"
@@ -1249,6 +1749,10 @@ class MDSupervisor:
             "master_enriched_prompt",
             # Original --goal text — shown verbatim in the combined report
             "user_goal_original",
+            # HPC pool prep context (must survive per-sim reset)
+            "hpc_pool_prep_only", "hpc_pool_agent_filter", "hpc_pool",
+            "allowed_hpc_jobs", "hpc_check_interval_sec", "hpc_check_interval",
+            "max_concurrent", "production_ns",
         }
 
         # Save values to preserve
@@ -1378,7 +1882,7 @@ class MDSupervisor:
             "file_registry": dict(state.get("file_registry", {})),
         }
 
-        completed.append(snapshot)
+        completed = _upsert_completed_sim_snapshot(completed, snapshot)
         state["completed_sim_states"] = completed
 
         # Also persist state.jsonl in per-sim supervisor/ directory
@@ -1901,6 +2405,10 @@ class MDSupervisor:
         to handle both PDB-based tasks and analysis-only tasks.
         """
         from .tools import validate_and_enrich_inputs
+
+        from agentic.multi_sim_progress import ensure_per_sim_working_directory
+
+        ensure_per_sim_working_directory(state)
         
         subtask_type = state.get("subtask_type", "full_task")
         
@@ -2068,10 +2576,19 @@ class MDSupervisor:
         This enforces predictable, sequential execution regardless of plan.
         """
         logger.info("FIELD_AGENT_ASSIGNMENT: Using strict agent execution order")
+
+        self._ensure_hpc_pool_prep_context(state)
+        self._clear_stale_cross_sim_artifacts(state)
         
         # Get the required agents in strict order for this task
-        subtask_type = state.get("subtask_type", "full_task")
+        subtask_type = state.get("subtask_type") or "full_task"
         required_agents = get_agent_execution_order(subtask_type, state)
+
+        agent_filter = state.get("hpc_pool_agent_filter")
+        if agent_filter:
+            required_agents = [a for a in required_agents if a in agent_filter]
+        elif state.get("post_hpc_analysis_only"):
+            required_agents = [a for a in required_agents if a in ("analysis", "reporter")]
         
         logger.info(f"FIELD_AGENT_ASSIGNMENT: Required agents for {subtask_type}: {required_agents}")
         
@@ -2079,6 +2596,56 @@ class MDSupervisor:
         current_agent_idx = state.get("current_agent_idx", 0)
         
         if current_agent_idx >= len(required_agents):
+            from agentic.multi_sim_hpc_pool import _sim_setup_ready
+
+            wd = state.get("working_directory") or ""
+            if state.get("hpc_pool_prep_only") and wd and not _pool_prep_simsetup_ready(state, wd):
+                setup_idx = (
+                    required_agents.index("simsetup")
+                    if "simsetup" in required_agents
+                    else max(len(required_agents) - 1, 0)
+                )
+                retry_count = state.get("setup_retry_count", 0)
+                if retry_count >= 3:
+                    sim_label = "unknown"
+                    sim_idx = state.get("current_sim_index", 0)
+                    sim_prompts = state.get("sim_prompts") or []
+                    if isinstance(sim_prompts, list) and 0 <= sim_idx < len(sim_prompts):
+                        sim_label = sim_prompts[sim_idx].get("label", sim_label)
+                    pool = state.get("hpc_pool") or {}
+                    rec = (pool.get("sims") or {}).get(sim_label)
+                    if rec:
+                        rec["prep_status"] = "failed"
+                        rec["error"] = "SimSetup failed after 3 retries"
+                    pool["awaiting_hitl"] = True
+                    pool["hitl_reason"] = f"SimSetup failed after 3 retries for {sim_label}"
+                    state["hpc_pool"] = pool
+                    state.pop("hpc_pool_prep_only", None)
+                    state["plan_executed"] = False
+                    state["execution_plan"] = None
+                    state["current_agent_idx"] = 0
+                    state.pop("hpc_pool_agent_filter", None)
+                    base = state.get("multi_sim_base_dir") or state.get("working_directory")
+                    if base:
+                        state["working_directory"] = str(Path(base).resolve())
+                    _set_base_conversation_log(state)
+                    return self._apply_hpc_pool_tick(state)
+                else:
+                    logger.warning(
+                        "FIELD_AGENT_ASSIGNMENT: HPC pool prep incomplete — "
+                        "retry simsetup (attempt %s)",
+                        retry_count + 1,
+                    )
+                    state["current_agent_idx"] = setup_idx
+                    state["next_node"] = "setup"
+                    state["setup_retry_count"] = retry_count + 1
+                    log_supervisor_routing(
+                        state,
+                        "setup",
+                        "Simsetup not ready — retry without replanning",
+                    )
+                    return state
+
             # All agents complete
             logger.info("FIELD_AGENT_ASSIGNMENT: All required agents completed")
             state["plan_executed"] = True
@@ -2102,6 +2669,17 @@ class MDSupervisor:
                 log_supervisor_routing(state, "final_report", "Multi-sim workflow complete")
                 return state
 
+            if (
+                state.get("multi_sim_phase") == "hpc_pool"
+                and not state.get("post_hpc_analysis_only")
+            ):
+                logger.info(
+                    "FIELD_AGENT_ASSIGNMENT: HPC pool prep done — returning to supervisor"
+                )
+                state["plan_executed"] = True
+                state["next_node"] = "supervisor"
+                return state
+
             state["next_node"] = "final_report"
             log_supervisor_routing(state, "final_report", "All workflow tasks complete")
             return state
@@ -2112,6 +2690,13 @@ class MDSupervisor:
         
         # Execute based on agent type with completion checks
         if current_agent == "preprocessing":
+            if state.get("cleaned_pdb") and not _artifact_in_sim_dir(
+                state.get("cleaned_pdb"), state.get("working_directory")
+            ):
+                logger.warning(
+                    "FIELD_AGENT_ASSIGNMENT: Ignoring cleaned_pdb outside active sim dir"
+                )
+                state["cleaned_pdb"] = None
             if state.get("cleaned_pdb"):
                 logger.info("FIELD_AGENT_ASSIGNMENT: Preprocessing already complete, moving to next agent")
                 state["current_agent_idx"] = current_agent_idx + 1
@@ -2131,6 +2716,13 @@ class MDSupervisor:
             return state
         
         elif current_agent == "simsetup":
+            if state.get("coordinates") and not _artifact_in_sim_dir(
+                state.get("coordinates"), state.get("working_directory")
+            ):
+                logger.warning(
+                    "FIELD_AGENT_ASSIGNMENT: Ignoring coordinates outside active sim dir"
+                )
+                state["coordinates"] = None
             if state.get("coordinates"):
                 logger.info("FIELD_AGENT_ASSIGNMENT: SimSetup already complete, moving to next agent")
                 state["current_agent_idx"] = current_agent_idx + 1
@@ -2139,6 +2731,31 @@ class MDSupervisor:
             # Check retry limit
             retry_count = state.get("setup_retry_count", 0)
             if retry_count >= 3:
+                if state.get("multi_sim_phase") == "hpc_pool" and state.get("hpc_pool_prep_only"):
+                    sim_label = "unknown"
+                    sim_idx = state.get("current_sim_index", 0)
+                    sim_prompts = state.get("sim_prompts") or []
+                    if isinstance(sim_prompts, list) and 0 <= sim_idx < len(sim_prompts):
+                        sim_label = sim_prompts[sim_idx].get("label", sim_label)
+                    pool = state.get("hpc_pool") or {}
+                    rec = (pool.get("sims") or {}).get(sim_label)
+                    if rec:
+                        rec["prep_status"] = "failed"
+                        rec["error"] = "SimSetup failed after 3 retries"
+                    pool["awaiting_hitl"] = True
+                    pool["hitl_reason"] = f"SimSetup failed after 3 retries for {sim_label}"
+                    state["hpc_pool"] = pool
+                    state.pop("hpc_pool_prep_only", None)
+                    state["plan_executed"] = False
+                    state["execution_plan"] = None
+                    state["current_agent_idx"] = 0
+                    state.pop("hpc_pool_agent_filter", None)
+                    base = state.get("multi_sim_base_dir") or state.get("working_directory")
+                    if base:
+                        state["working_directory"] = str(Path(base).resolve())
+                    _set_base_conversation_log(state)
+                    return self._apply_hpc_pool_tick(state)
+
                 if state.get("is_multi_simulation") and state.get("multi_sim_phase") == "executing_sims":
                     sim_label = "unknown"
                     sim_idx = state.get("current_sim_index", 0)
@@ -2216,6 +2833,7 @@ class MDSupervisor:
         elif current_agent == "analysis":
             if state.get("analysis_results"):
                 logger.info("FIELD_AGENT_ASSIGNMENT: Analysis already complete, moving to next agent")
+                self._mark_post_hpc_agent_done(state, "analysis")
                 state["current_agent_idx"] = current_agent_idx + 1
                 return self._assign_field_agent_tasks(state)
             
@@ -2235,6 +2853,7 @@ class MDSupervisor:
         elif current_agent == "reporter":
             if state.get("reporter_output"):
                 logger.info("FIELD_AGENT_ASSIGNMENT: Reporter already complete, moving to next agent")
+                self._mark_post_hpc_agent_done(state, "reporter")
                 state["current_agent_idx"] = current_agent_idx + 1
                 return self._assign_field_agent_tasks(state)
             

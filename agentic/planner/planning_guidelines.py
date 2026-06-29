@@ -22,6 +22,8 @@ STANDARD_OUTPUT_FILES: Dict[str, Dict[str, str]] = {
     "dccm": {"data_prefix": "dccm", "plot": "dccm_heatmap.png"},
     "dssp": {"data_prefix": "dssp", "plot": "dssp.png"},
     "com": {"data": "ligand_pocket_distance.csv", "plot": "ligand_pocket_distance.png"},
+    "pca": {"data": "pca_projections.dat", "plot": "pca_pc1_pc2.png"},
+    "fel": {"data": "fel_pc1_pc2_grid.csv", "plot": "fel_pc1_pc2.png"},
 }
 
 _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
@@ -40,6 +42,18 @@ _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
         r"atp[-\s]?(?:to[-\s]?)?(?:protein[-\s]?)?(?:pocket[-\s]?)?distance",
     ),
     "energy": (r"\benergy\b", r"\bedr\b"),
+    "pca": (
+        r"\bpca\b",
+        r"principal component",
+        r"essential dynamics",
+        r"collective motion",
+    ),
+    "fel": (
+        r"free[-\s]?energy landscape",
+        r"\bfel\b",
+        r"energy landscape",
+        r"conformational landscape",
+    ),
 }
 
 _EXCLUSIVE_PATTERNS = (
@@ -154,6 +168,44 @@ def detect_requested_metrics(goal: str) -> Optional[FrozenSet[str]]:
     return frozenset(found) if found else None
 
 
+def detect_combined_only_metrics(goal: str) -> FrozenSet[str]:
+    """
+    Metrics the user scoped to combined/cross-simulation analysis only.
+
+    Example: "ligand pocket distance in cross simulations only" → ``com`` is
+    excluded from per-simulation analysis plans (combined phase backfills or
+    overlays from trajectories when possible).
+    """
+    text = (goal or "").lower()
+    text = (
+        text.replace("\u2011", "-")
+        .replace("\u2012", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+    )
+    combined_only: Set[str] = set()
+
+    cross_scope = bool(
+        re.search(
+            r"cross[-\s]?sim(?:ulation)?s?|combined analysis|across (?:all )?simulations",
+            text,
+        )
+    )
+    if not cross_scope:
+        return frozenset()
+
+    # Ligand-pocket / COM distance explicitly for cross-sim comparison only
+    if re.search(
+        r"ligand[-\s]?pocket|pocket[-\s]?distance|binding[-\s]?site distance",
+        text,
+    ):
+        combined_only.add("com")
+
+    # "compare RMSF in cross simulations" still requires per-sim RMSF files — not combined-only
+    return frozenset(combined_only)
+
+
 def detect_requested_metrics_for_sim(
     state: Optional[Dict[str, Any]] = None,
     agent_input: Optional[Any] = None,
@@ -178,11 +230,49 @@ def detect_requested_metrics_for_sim(
     for text in per_sim_texts:
         metrics = detect_requested_metrics(text)
         if metrics is not None:
-            return metrics
+            return _apply_combined_only_exclusions(metrics, state, agent_input)
 
-    return detect_requested_metrics_union(
+    union = detect_requested_metrics_union(
         *collect_goal_texts_for_intent(state, agent_input)
     )
+    return _apply_combined_only_exclusions(union, state, agent_input)
+
+
+def _apply_combined_only_exclusions(
+    metrics: Optional[FrozenSet[str]],
+    state: Optional[Dict[str, Any]] = None,
+    agent_input: Optional[Any] = None,
+) -> Optional[FrozenSet[str]]:
+    if metrics is None:
+        return None
+    master = (state.get("user_goal_original") or "") if state else ""
+    if not master.strip() and state:
+        master = state.get("user_goal") or ""
+    combined_only = detect_combined_only_metrics(master)
+    if not combined_only:
+        return metrics
+    trimmed = frozenset(metrics - combined_only)
+    return trimmed if trimmed else frozenset()
+
+
+def get_pca_fel_tool_guide() -> str:
+    """Prompt block for PCA + free-energy landscape workflow."""
+    return """**PCA & FREE-ENERGY LANDSCAPE (when user asks for dynamics / FEL / essential dynamics):**
+
+| Step | Tool | Output |
+|------|------|--------|
+| 1 | `calculate_trajectory_pca` | `pca_projections.dat`, `pca_variance.dat` |
+| 2 | `plot_pca_projection` | `pca_pc1_pc2.png` (PC1 vs PC2, coloured by time) |
+| 3 | `calculate_free_energy_landscape` | `fel_pc1_pc2.png`, `fel_pc1_pc2_grid.csv` |
+
+Rules:
+- **Always use these defaults** unless the user goal explicitly requests different values:
+  `selection="protein and name CA"`, `n_components=10`, `frame_interval=1`,
+  `reference_frame=0`, `pc_x=1`, `pc_y=2`, `bins=50`, `temperature_k=310`.
+- Do NOT pass different `frame_interval` or `n_components` in tool_params unless the user asked.
+- FEL uses F = −kT ln P(PC1, PC2) with `temperature_k` (default 310 K); minimum set to 0 kJ/mol.
+- Prefer ≥ 50 frames for a meaningful landscape; warn the user if the trajectory is very short.
+- Run all three steps when the user requests "free energy landscape" or "conformational landscape"."""
 
 
 def get_intent_preservation_block(user_goal: str = "") -> str:

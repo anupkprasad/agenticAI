@@ -12,7 +12,8 @@ agent:
     - "Compute radius of gyration for protein compactness"
     - "Analyze energy terms (potential, kinetic, temperature, pressure)"
     - "Extract trajectory metrics and statistics"
-    - "Generate analysis reports and visualizations"
+    - "Compute DCCM (dynamic cross-correlation) for correlated motion"
+    - "PCA and free-energy landscape (FEL) for conformational dynamics"
   
   # Directory management
   working_directory: "working_dir/analysis"  # All analysis outputs go here
@@ -92,6 +93,34 @@ tools:
       - "Time range"
       - "File size"
       - "Sampling frequency"
+
+  calculate_trajectory_pca:
+    description: "Principal component analysis on aligned Cα coordinates"
+    defaults:
+      selection: "protein and name CA"
+      n_components: 10
+      frame_interval: 1
+      reference_frame: 0
+      projections_file: "pca_projections.dat"
+      variance_file: "pca_variance.dat"
+    workflow: "Run before plot_pca_projection and calculate_free_energy_landscape"
+
+  plot_pca_projection:
+    description: "Scatter plot of two principal components (typically PC1 vs PC2)"
+    defaults:
+      pc_x: 1
+      pc_y: 2
+      output_file: "pca_pc1_pc2.png"
+
+  calculate_free_energy_landscape:
+    description: "Free energy F = -kT ln P from PC1/PC2 density (kJ/mol, min=0)"
+    defaults:
+      pc_x: 1
+      pc_y: 2
+      bins: 50
+      temperature_k: 310.0
+      output_plot: "fel_pc1_pc2.png"
+      output_grid: "fel_pc1_pc2_grid.csv"
 
 # LLM-powered analysis planning configuration
 llm:

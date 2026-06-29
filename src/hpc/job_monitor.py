@@ -130,3 +130,82 @@ def check_job_status(
             "success": False,
             "error": f"Status check failed: {e}"
         }
+
+
+def _parse_sq_me_output(stdout: str) -> list:
+    """Parse ``sq --me`` or similar tabular SLURM queue output."""
+    lines = [ln for ln in stdout.strip().splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return []
+    header = lines[0].upper()
+    jobs = []
+    for line in lines[1:]:
+        parts = line.split()
+        if not parts:
+            continue
+        job_id = parts[0]
+        state = "UNKNOWN"
+        name = parts[1] if len(parts) > 1 else ""
+        if "STATE" in header:
+            try:
+                state_idx = header.split().index("STATE")
+                if state_idx < len(parts):
+                    state = parts[state_idx]
+            except ValueError:
+                pass
+        else:
+            for token in parts:
+                if token in (
+                    "RUNNING", "PENDING", "COMPLETING", "COMPLETED",
+                    "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL",
+                ):
+                    state = token
+                    break
+        jobs.append({"job_id": job_id, "name": name, "state": state, "raw": line})
+    return jobs
+
+
+@tool
+def list_my_slurm_jobs(
+    remote_host: Optional[str] = None,
+    remote_user: Optional[str] = None,
+    ssh_key_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    List current user's SLURM jobs (``sq --me`` alias or ``squeue -u $USER``).
+
+    Returns:
+        Dict with ``success``, ``jobs`` (list of {job_id, name, state}), ``command``.
+    """
+    import os
+    import shutil
+
+    commands = []
+    if shutil.which("sq"):
+        commands.append(["sq", "--me"])
+    commands.append(["squeue", "-u", os.environ.get("USER", ""), "-o", "%.18i %.9P %.8j %.8T %.10M %.6D %R"])
+
+    last_err = ""
+    for cmd in commands:
+        if not cmd[0] or (cmd[0] == "squeue" and not cmd[2]):
+            continue
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode == 0 and result.stdout.strip():
+                jobs = _parse_sq_me_output(result.stdout)
+                return {
+                    "success": True,
+                    "jobs": jobs,
+                    "command": " ".join(cmd),
+                    "message": f"Found {len(jobs)} job(s) in queue",
+                }
+            last_err = result.stderr.strip() or f"exit {result.returncode}"
+        except Exception as exc:
+            last_err = str(exc)
+            logger.warning("list_my_slurm_jobs %s failed: %s", cmd, exc)
+
+    return {
+        "success": False,
+        "jobs": [],
+        "error": last_err or "Could not list SLURM jobs",
+    }

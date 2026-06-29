@@ -34,12 +34,80 @@ def _sim_succeeded(sim: Dict[str, Any]) -> bool:
 
 def _expected_simulation_count(final_state: Dict[str, Any], pdb_list: List[str]) -> int:
     sim_prompts = final_state.get("sim_prompts") or []
+    source_count = len(final_state.get("pdb_list") or pdb_list)
+    if sim_prompts and source_count:
+        return max(len(sim_prompts), source_count)
     if sim_prompts:
         return len(sim_prompts)
     sim_dirs = final_state.get("sim_working_dirs") or []
     if sim_dirs:
         return len(sim_dirs)
     return len(pdb_list)
+
+
+def _missing_planned_simulations(
+    final_state: Dict[str, Any], pdb_list: List[str]
+) -> List[str]:
+    """PDB stems requested but absent from ``sim_prompts``."""
+    requested = {
+        Path(p).stem.lower()
+        for p in (final_state.get("pdb_list") or pdb_list or [])
+        if p
+    }
+    planned = {
+        str(sp.get("label", "")).lower()
+        for sp in (final_state.get("sim_prompts") or [])
+        if sp.get("label")
+    }
+    return sorted(requested - planned)
+
+
+def _hpc_status_to_summary(hpc_status: Optional[str]) -> str:
+    if hpc_status in ("completed", "skipped"):
+        return "success"
+    if hpc_status == "failed":
+        return "failed"
+    if hpc_status in ("submitted", "running"):
+        return "submitted"
+    if hpc_status == "pending":
+        return "pending"
+    return "unknown"
+
+
+def _simulations_from_hpc_pool(final_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    pool = final_state.get("hpc_pool") or {}
+    pool_sims = pool.get("sims") or {}
+    rows: List[Dict[str, Any]] = []
+    for sp in final_state.get("sim_prompts") or []:
+        label = sp.get("label")
+        rec = pool_sims.get(label) or {}
+        prep = rec.get("prep_status")
+        hpc = rec.get("hpc_status")
+        if prep in ("done", "skipped") and hpc in ("completed", "skipped"):
+            status = "success"
+        elif hpc == "failed" or prep == "failed":
+            status = "failed"
+        elif hpc in ("submitted", "running"):
+            status = "submitted"
+        elif prep == "pending":
+            status = "not_started"
+        else:
+            status = _hpc_status_to_summary(hpc)
+        rows.append(
+            {
+                "label": label,
+                "status": status,
+                "success": status == "success",
+                "skipped": prep == "skipped" or hpc == "skipped",
+                "skip_reason": rec.get("skip_reason"),
+                "working_directory": sp.get("working_dir") or rec.get("working_dir"),
+                "job_id": rec.get("job_id"),
+                "job_status": hpc,
+                "prep_status": prep,
+                "errors": [rec["error"]] if rec.get("error") else [],
+            }
+        )
+    return rows
 
 
 def build_run_summary(
@@ -55,6 +123,7 @@ def build_run_summary(
     config = config or {}
     completed = list(final_state.get("completed_sim_states") or [])
     is_multi = bool(final_state.get("is_multi_simulation"))
+    missing = _missing_planned_simulations(final_state, pdb_list) if is_multi else []
     total = _expected_simulation_count(final_state, pdb_list) if is_multi else 1
 
     simulations: List[Dict[str, Any]] = []
@@ -78,24 +147,41 @@ def build_run_summary(
                 }
             )
     elif is_multi:
-        # Infer from sim_prompts when snapshots missing
-        for sp in final_state.get("sim_prompts") or []:
-            simulations.append(
-                {
-                    "label": sp.get("label"),
-                    "status": "unknown",
-                    "working_directory": sp.get("working_dir"),
-                    "case_description": sp.get("case_description"),
-                }
-            )
+        simulations = _simulations_from_hpc_pool(final_state)
+        progress = final_state.get("multi_sim_progress") or {}
+        progress_sims = progress.get("sims") or {}
+        if simulations and progress_sims:
+            for row in simulations:
+                label = row.get("label")
+                rec = progress_sims.get(label) or {}
+                agents = rec.get("agents") or {}
+                if agents.get("analysis") == "done" and agents.get("reporter") == "done":
+                    row["status"] = "success"
+                    row["success"] = True
+                elif agents.get("analysis") == "done":
+                    row["status"] = "in_progress"
+        if not simulations:
+            for sp in final_state.get("sim_prompts") or []:
+                simulations.append(
+                    {
+                        "label": sp.get("label"),
+                        "status": "unknown",
+                        "working_directory": sp.get("working_dir"),
+                        "case_description": sp.get("case_description"),
+                    }
+                )
 
-    n_success = sum(1 for s in simulations if s.get("status") == "success" or s.get("success"))
+    n_success = sum(
+        1 for s in simulations if s.get("status") == "success" or s.get("success")
+    )
     n_skipped = sum(1 for s in simulations if s.get("skipped") or s.get("status") == "skipped")
-    n_failed = sum(1 for s in simulations if s.get("status") == "failed")
-    if not simulations and completed:
-        n_success = sum(1 for s in completed if _sim_succeeded(s))
-        n_skipped = sum(1 for s in completed if s.get("skipped"))
-        n_failed = len(completed) - n_success - n_skipped
+    n_failed = sum(
+        1 for s in simulations
+        if s.get("status") in ("failed", "not_started")
+        or (s.get("status") not in ("success", "skipped", "submitted", "pending", "unknown")
+            and not s.get("success"))
+    )
+    n_submitted = sum(1 for s in simulations if s.get("status") == "submitted")
 
     combined_dir = str(Path(working_dir) / "combinedAnalysis")
     analysis_dir = final_state.get("analysis_directory") or str(Path(working_dir) / "analysis")
@@ -105,14 +191,25 @@ def build_run_summary(
         "working_directory": working_dir,
         "mode": "multi_simulation" if is_multi else "single_simulation",
         "goal": goal,
-        "subtask": config.get("subtask") or final_state.get("subtask_type"),
+        "subtask": (
+            config.get("subtask")
+            or final_state.get("pipeline_subtask_type")
+            or (
+                "full_task"
+                if is_multi and final_state.get("hpc_pool")
+                else final_state.get("subtask_type")
+            )
+        ),
         "source_pdbs": [Path(p).name for p in (final_state.get("pdb_list") or pdb_list)],
         "domain_context": final_state.get("domain_context"),
         "structure_request": final_state.get("structure_request"),
         "counts": {
             "total_simulations": total,
+            "planned_simulations": len(final_state.get("sim_prompts") or []),
             "source_pdbs": len(final_state.get("pdb_list") or pdb_list),
+            "missing_from_plan": missing,
             "completed_success": n_success,
+            "submitted_running": n_submitted,
             "skipped": n_skipped,
             "failed": n_failed,
             "snapshots_recorded": len(completed),
@@ -144,14 +241,24 @@ def format_run_summary_terminal(summary: Dict[str, Any]) -> str:
     if mode == "multi_simulation":
         src = counts.get("source_pdbs", 0)
         total = counts.get("total_simulations", 0)
-        if src and total > src:
+        planned = counts.get("planned_simulations", total)
+        missing = counts.get("missing_from_plan") or []
+        if src and total > planned:
+            lines.append(
+                f"  Simulations: {total} requested ({planned} in master plan, "
+                f"{src} source PDB(s))"
+            )
+        elif src and total > src:
             lines.append(
                 f"  Simulations: {total} total "
                 f"({src} source structure(s) × component cases)"
             )
         else:
             lines.append(f"  Simulations: {total} total")
+        if missing:
+            lines.append(f"  Not in master plan: {', '.join(missing)}")
         lines.append(f"  Succeeded: {counts.get('completed_success', 0)}")
+        lines.append(f"  Submitted: {counts.get('submitted_running', 0)}")
         lines.append(f"  Skipped:   {counts.get('skipped', 0)}")
         lines.append(f"  Failed:    {counts.get('failed', 0)}")
 

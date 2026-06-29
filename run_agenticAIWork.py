@@ -1796,14 +1796,20 @@ def main(argv=None):
                        help=("One or more field agents to run, e.g. --subtask analysis reporter. "
                              "Valid values: preprocess simsetup hpcjob analysis reporter. "
                              "Omit to run the full pipeline."))
-    parser.add_argument("--use-llm", action="store_true", 
-                       help="Use LLM for intelligent planning (recommended)")
+    parser.add_argument("--no-llm", action="store_true",
+                       help="Disable LLM planning (deterministic fallback; not recommended)")
     parser.add_argument("--llm-model", default="gpt-oss:20b",
                        help="LLM model to use")
     parser.add_argument("--llm-base-url", default="http://localhost:11434",
                        help="LLM API base URL")
-    parser.add_argument("--no-human-loop", action="store_true",
-                       help="Skip human checkpoints (auto-approve)")
+    parser.add_argument("--HITL", dest="hitl", default=None,
+                       choices=["error", "all"],
+                       help=("Human-in-the-loop: 'error' pauses only on failures; "
+                             "'all' pauses at every workflow checkpoint. "
+                             "Default: fully automatic (no HITL)."))
+    # Deprecated — kept for backward compatibility with older scripts/docs
+    parser.add_argument("--use-llm", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-human-loop", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--force-field", default="amber99sb-ildn",
                        help="Force field to use")
     parser.add_argument("--water-model", default="tip3p", 
@@ -1812,6 +1818,16 @@ def main(argv=None):
                        help="Base working directory (agents use subdirs: working_dir/preprocess/, working_dir/hpc/, etc.)")
     parser.add_argument("--max-concurrent", type=int, default=4,
                        help="Maximum concurrent simulations in multi-sim mode (default: 4)")
+    parser.add_argument("--allowed-hpc-jobs", type=int, default=5,
+                       help=(
+                           "Max concurrent SLURM jobs in cross-sim HPC pool mode "
+                           "(default: 5). Used when preprocess+HPC+analysis run together."
+                       ))
+    parser.add_argument("--hpc-check-interval", default="2h",
+                       help=(
+                           "SLURM poll interval during HPC pool wait "
+                           "(e.g. 2h, 120m, 7200). Default: 2h"
+                       ))
     parser.add_argument("--resume", action="store_true",
                        help=(
                            "Resume a multi-sim run by re-running only the simulations that "
@@ -1835,6 +1851,25 @@ def main(argv=None):
                        ))
 
     args = parser.parse_args(argv)
+
+    if args.no_human_loop and args.hitl:
+        parser.error("Cannot use both --no-human-loop and --HITL")
+    if args.no_human_loop:
+        print(
+            "Note: --no-human-loop is deprecated (non-HITL is the default).",
+            flush=True,
+        )
+    if args.use_llm:
+        print(
+            "Note: --use-llm is deprecated (LLM is enabled by default). "
+            "Use --no-llm to disable.",
+            flush=True,
+        )
+
+    from agentic.hitl_config import resolve_hitl_from_cli
+
+    human_in_loop, hitl_mode = resolve_hitl_from_cli(args.hitl)
+    use_llm = not args.no_llm
 
     # -------------------------------------------------------------------------
     # Early path validation — fail fast with a clear error before any agent runs
@@ -1887,17 +1922,22 @@ def main(argv=None):
     # -------------------------------------------------------------------------
     llm_client = LLMClient(
         model=args.llm_model,
-        base_url=args.llm_base_url if args.use_llm else None
+        base_url=args.llm_base_url if use_llm else None
     )
     # Configuration
     config = {
         "force_field": args.force_field,
         "water_model": args.water_model,
-        "human_in_loop": not args.no_human_loop,
+        "human_in_loop": human_in_loop,
+        "hitl_mode": hitl_mode,
+        "use_llm": use_llm,
         "working_directory": args.working_dir,
         "resume_failed_only": getattr(args, "resume", False),
         "retry_labels": list(getattr(args, "retry_labels", None) or []),
         "combined_only": getattr(args, "combined_only", False),
+        "allowed_hpc_jobs": getattr(args, "allowed_hpc_jobs", 5),
+        "max_concurrent": getattr(args, "max_concurrent", 4),
+        "hpc_check_interval": getattr(args, "hpc_check_interval", "2h"),
     }
     
     # Pass subtask type directly in config
@@ -2099,9 +2139,29 @@ def main(argv=None):
 
         config["pdb_list"] = unique_pdb_paths(resolved_pdbs)
 
+        _goal_pdb_names = {
+            Path(p).name.lower() for p in _extract_pdb_paths_from_goal(goal)
+        }
+        _resolved_names = {Path(p).name.lower() for p in config["pdb_list"]}
+        _missing_pdbs = sorted(_goal_pdb_names - _resolved_names)
+        if _missing_pdbs:
+            print(
+                f"\n  Warning: goal mentions {len(_missing_pdbs)} PDB(s) not found under "
+                f"{working_dir}: {', '.join(_missing_pdbs)}",
+                flush=True,
+            )
+            print(
+                "  Those systems will be omitted from the master plan until the files exist.",
+                flush=True,
+            )
+
         feedback_handler = None
         if config["human_in_loop"]:
-            print("\n  HUMAN-IN-THE-LOOP MODE: You will be prompted at checkpoints", flush=True)
+            _hitl = config.get("hitl_mode") or "all"
+            if _hitl == "error":
+                print("\n  HITL mode: pause on errors only (--HITL error)", flush=True)
+            else:
+                print("\n  HITL mode: all checkpoints (--HITL all)", flush=True)
             feedback_handler = interactive_feedback_handler
 
         workflow = MDWorkflow(llm_client)
@@ -2173,8 +2233,11 @@ def main(argv=None):
         print(f"Subtask Mode: {agents_label}", flush=True)
     
     if config["human_in_loop"]:
-        print("\n⚠️  HUMAN-IN-THE-LOOP MODE: You will be prompted at checkpoints", flush=True)
-        print("    Use --no-human-loop for automatic execution\n", flush=True)
+        _hitl = config.get("hitl_mode") or "all"
+        if _hitl == "error":
+            print("\n  HITL mode: pause on errors only (--HITL error)", flush=True)
+        else:
+            print("\n  HITL mode: all checkpoints (--HITL all)", flush=True)
     
     try:
         if config["human_in_loop"]:

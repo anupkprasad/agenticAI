@@ -10,6 +10,71 @@ from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
+_PER_SIM_PHASES = frozenset({"executing_sims", "hpc_pool"})
+
+
+def _is_per_sim_execution(state: Dict[str, Any]) -> bool:
+    """True when validating a single simulation, not multi-sim master planning."""
+    if state.get("multi_sim_phase") in _PER_SIM_PHASES:
+        return True
+    if state.get("hpc_pool_prep_only") or state.get("post_hpc_analysis_only"):
+        return True
+    return False
+
+
+def _resolve_current_pdb_path(
+    state: Dict[str, Any],
+    user_goal: str,
+    working_directory: str,
+) -> str:
+    """Resolve the PDB for the active simulation (never the first .pdb in a long goal)."""
+    from pathlib import Path
+
+    raw = state.get("raw_pdb")
+    if raw and os.path.isfile(raw):
+        return raw
+
+    sim_prompts = state.get("sim_prompts") or []
+    idx = state.get("current_sim_index", 0)
+    if sim_prompts and 0 <= idx < len(sim_prompts):
+        sp = sim_prompts[idx]
+        sim_pdb = sp.get("pdb") or ""
+        if sim_pdb and os.path.isfile(sim_pdb):
+            return sim_pdb
+        pdb_name = Path(sim_pdb).name if sim_pdb else sp.get("label", "") + ".pdb"
+        for base in (
+            sp.get("working_dir"),
+            working_directory,
+            state.get("multi_sim_base_dir"),
+        ):
+            if not base:
+                continue
+            candidate = Path(base) / pdb_name
+            if candidate.is_file():
+                return str(candidate.resolve())
+
+    label = (state.get("sim_case") or {}).get("label")
+    if label:
+        for base in (working_directory, state.get("multi_sim_base_dir")):
+            if not base:
+                continue
+            candidate = Path(base) / f"{label}.pdb"
+            if candidate.is_file():
+                return str(candidate.resolve())
+
+    match = re.search(r"([\w\-]+\.pdb)", user_goal, re.IGNORECASE)
+    if match:
+        pdb_filename = match.group(1)
+        pdb_path = os.path.join(working_directory, pdb_filename)
+        if os.path.isfile(pdb_path):
+            return pdb_path
+        base = state.get("multi_sim_base_dir") or working_directory
+        candidate = os.path.join(base, pdb_filename)
+        if os.path.isfile(candidate):
+            return candidate
+
+    return ""
+
 
 def validate_and_enrich_inputs(
     state: Dict[str, Any],
@@ -98,7 +163,10 @@ def _analyze_pdb_if_available(
     if pdb_list != state.get("pdb_list"):
         state["pdb_list"] = pdb_list
     multi_sim_phase = state.get("multi_sim_phase")
-    is_multi_sim_master_planning = len(pdb_list) > 1 and multi_sim_phase != "executing_sims"
+    is_multi_sim_master_planning = (
+        len(pdb_list) > 1
+        and not _is_per_sim_execution(state)
+    )
     
     if is_multi_sim_master_planning:
         # Multi-simulation MASTER PLANNING: analyze ALL PDbs in the list
@@ -172,13 +240,9 @@ def _analyze_pdb_if_available(
         
         return state
     
-    # Per-sim or single-simulation mode: extract and analyze only current PDB from goal or working_dir
-    # In per-sim mode, the PDB has been copied to working_directory and raw_pdb points to it
-    # Step 1: Extract PDB filename from user goal
-    pdb_pattern = r'([\w\-]+\.pdb)'
-    match = re.search(pdb_pattern, user_goal, re.IGNORECASE)
-    
-    if not match:
+    # Per-sim or single-simulation mode: analyze only the current simulation PDB.
+    pdb_path = _resolve_current_pdb_path(state, user_goal, working_directory)
+    if not pdb_path:
         # Try UniProt-based structure request (preprocess agent will download)
         from src.preprocess.structure_request_parser import parse_structure_request
 
@@ -220,14 +284,16 @@ def _analyze_pdb_if_available(
                 "skipping PDB structure analysis"
             )
         return state
-    
-    pdb_filename = match.group(1)
-    pdb_path = os.path.join(working_directory, pdb_filename)
+
+    pdb_filename = os.path.basename(pdb_path)
     state["raw_pdb"] = pdb_path
-    
+
     # Check if we're in per-sim execution
-    if multi_sim_phase == "executing_sims":
-        logger.info(f"INPUT_VALIDATION [PER-SIM]: Analyzing current simulation PDB: {pdb_filename}")
+    if _is_per_sim_execution(state):
+        logger.info(
+            "INPUT_VALIDATION [PER-SIM]: Analyzing current simulation PDB: %s",
+            pdb_filename,
+        )
     else:
         logger.info(f"INPUT_VALIDATION: Extracted PDB filename: {pdb_filename}")
     logger.info(f"INPUT_VALIDATION: Using working directory: {working_directory}")
@@ -611,7 +677,7 @@ def _validate_multi_agent_inputs(
         # a hard error at this stage.
         is_multi_sim_master = (
             bool(state.get("is_multi_simulation"))
-            and state.get("multi_sim_phase") != "executing_sims"
+            and not _is_per_sim_execution(state)
             and len(state.get("pdb_list") or []) > 1
         )
         if is_multi_sim_master:

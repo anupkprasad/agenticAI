@@ -37,7 +37,8 @@ Input Validation → Supervisor → Planner →
            └──────────────────────────────────►  run_summary.md / .json
 ```
 
-Human Checks are optional (disabled with `--no-human-loop`).
+Human Checks are optional. Enable with **`--HITL all`** (every checkpoint) or
+**`--HITL error`** (failures only). Default: fully automatic.
 `run_summary.md` and `run_summary.json` are always written to the base
 working directory at workflow exit.
 
@@ -318,7 +319,8 @@ Normalises free-text responses via fuzzy phrase matching:
 - `retry` → extract parameters, patch plan, re-execute
 - `reject` → stop workflow
 
-Disabled with `--no-human-loop`.
+Enabled with **`--HITL all`**. With **`--HITL error`**, only failure paths pause.
+Default: checkpoints are skipped (fully automatic).
 
 ## Planner Detail: Interactive Plan Modification
 
@@ -365,11 +367,12 @@ python run_agenticAIWork.py \
   --pdb-list A.pdb B.pdb ...    # Explicit PDB list (multi-sim)
   --simtype multisim|singlesim   # Simulation mode (default: singlesim)
   --subtask preprocess simsetup hpcjob analysis reporter
-  --max-concurrent 4             # (legacy; supervisor loop is sequential)
-  --use-llm                      # Enable LLM routing
+  --no-llm                       # Disable LLM (off by default: LLM on)
   --llm-base-url URL             # Ollama endpoint
   --llm-model gpt-oss:20b        # LLM model name
-  --no-human-loop                # Disable human checkpoints
+  --HITL error|all               # Human-in-the-loop (default: off)
+  --allowed-hpc-jobs 5           # Cross-sim HPC pool concurrency
+  --hpc-check-interval 2h      # SLURM poll interval during pool wait
   --force-field amber99sb-ildn   # Override force field
   --water-model tip3p            # Override water model
 ```

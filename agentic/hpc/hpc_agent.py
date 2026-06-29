@@ -13,6 +13,7 @@ from typing import Dict, Any, Optional, List
 from pathlib import Path
 
 from ..state import MDState
+from ..hitl_config import hitl_should_interact
 from ..llm import LLMClient
 from ..utils import (
     log_agent_start, log_llm_interaction, log_agent_action,
@@ -221,7 +222,7 @@ class MDHPCAgent:
                 e for e in state.get("errors", [])
                 if not (e.startswith("HPC agent failed:") or e.startswith("HPC execution failed"))
             ]
-            if state.get("human_in_loop"):
+            if hitl_should_interact(state):
                 state["next_node"] = "human_hpc_check"
             else:
                 state["next_node"] = "supervisor"

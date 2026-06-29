@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional
 from pathlib import Path
 
 from ..state import MDState
+from ..hitl_config import hitl_should_interact
 from ..llm import LLMClient
 from ..utils import (
     log_agent_start, log_llm_interaction, log_agent_action, 
@@ -141,7 +142,7 @@ class PreprocessingAgent:
                     e for e in state.get("errors", [])
                     if not (e.startswith("Preprocessing failed:") or e.startswith("Preprocessing error:"))
                 ]
-                if state.get("human_in_loop"):
+                if hitl_should_interact(state):
                     state["next_node"] = "human_preprocess_check"
                 else:
                     state["next_node"] = "supervisor"

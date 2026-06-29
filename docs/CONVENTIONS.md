@@ -161,9 +161,21 @@ In multi-sim mode, each simulation also mirrors state under
    already marked successful; retries failures only.
 4. **`--combined-only`**: discovers sims from per-sim `analysis_summary.jsonl`;
    runs combined analysis + reporter only.
-5. **Human-in-the-loop re-run** when all per-sim `analysis/` folders already
-   contain data: auto-enables combined-only mode so you can chat at analysis /
-   reporter checkpoints without re-running every simulation.
+5. **`--HITL all` re-run** when all per-sim `analysis/` folders already contain data:
+   auto-enables combined-only mode so you can chat at analysis / reporter checkpoints
+   without re-running every simulation. (Default runs are fully automatic; use
+   `--HITL all` or `--HITL error` to enable checkpoints.)
+
+### Human-in-the-loop (CLI)
+
+| Flag | Default | Behaviour |
+|------|---------|-----------|
+| *(none)* | — | Fully automatic; checkpoints are skipped |
+| `--HITL error` | — | Pause on stage failures, max retries, or HPC pool submit/SLURM errors |
+| `--HITL all` | — | Pause after preprocess, setup, HPC, analysis, reporter (and HPC pool when active) |
+
+State fields: `human_in_loop` (bool), `hitl_mode` (`error` \| `all`), `error_triggered_hitl`
+(set when a failure routes to a checkpoint in `--HITL error` mode).
 
 Control-flow fields (`multi_sim_phase`, retry counters) are reset on a normal
 re-run unless `--resume` is set. Always check `workflow_status` and `errors` in

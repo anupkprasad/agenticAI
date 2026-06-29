@@ -11,7 +11,7 @@ troubleshooting. For a short overview, see [README.md](README.md).
 1. [How a run works](#1-how-a-run-works)
 2. [Prerequisites](#2-prerequisites)
 3. [Core CLI flags](#3-core-cli-flags)
-4. [Workflow recipes](#4-workflow-recipes)
+4. [Workflow recipes](#4-workflow-recipes) (including [HPC pool](#48-full-multi-sim-pipeline-with-hpc-pool))
 5. [Artifacts — what gets produced](#5-artifacts--what-gets-produced)
 6. [Simulation parameters](#6-simulation-parameters)
 7. [LLM setup](#7-llm-setup)
@@ -45,7 +45,15 @@ finished trajectories). In **multi-simulation** mode (`--simtype multisim`),
 the supervisor loops over each simulation directory, then runs **combined
 analysis** and a **combined HTML report** at the base `--working-dir`.
 
-**Human checkpoints** are optional. Add `--no-human-loop` for fully automatic runs.
+When the full pipeline runs in multi-sim mode (preprocess through reporter),
+the **cross-sim HPC pool** uses three explicit stages:
+
+1. **Prep all** — preprocess + simsetup for every PDB (sequential).
+2. **HPC pool** — submit and monitor up to `--allowed-hpc-jobs` SLURM jobs in parallel.
+3. **Post-HPC all** — per-sim analysis + reporter, then combined outputs at `{base}/`.
+
+**Human checkpoints** are optional. By default the workflow is fully automatic.
+Use `--HITL error` to pause only on failures, or `--HITL all` for every checkpoint.
 
 ---
 
@@ -56,11 +64,13 @@ conda env create -f environment.yml
 conda activate ollama_env
 ```
 
-Optional (LLM mode): start an Ollama-compatible endpoint and confirm it responds:
+Optional: confirm your LLM endpoint is reachable (LLM is **on by default**):
 
 ```bash
 curl -s http://127.0.0.1:11434/api/tags
 ```
+
+Use `--no-llm` only for offline or deterministic fallback runs.
 
 GROMACS is included in the conda environment. For phosphorylated proteins with
 CHARMM36, install `charmm36-jul2022.ff` separately (see README **Force Fields**).
@@ -81,12 +91,14 @@ python run_agenticAIWork.py --goal "..." [options]
 | `--simtype` | `singlesim` (default) or `multisim` |
 | `--pdb-list` | Explicit PDB list for multi-sim |
 | `--sim-dirs` | Existing per-sim directories (analysis-only multi-sim) |
-| `--use-llm` | Enable LLM routing and planning |
+| `--no-llm` | Disable LLM planning (deterministic fallback) |
 | `--llm-model` | Model name (default `gpt-oss:20b`) |
 | `--llm-base-url` | Endpoint URL (default `http://localhost:11434`) |
-| `--no-human-loop` | Skip approval checkpoints |
+| `--HITL` | `error` or `all` — enable human-in-the-loop (default: off) |
 | `--force-field` | Override force field (default `amber99sb-ildn`) |
 | `--water-model` | Override water model (default `tip3p`) |
+| `--allowed-hpc-jobs` | Max concurrent SLURM jobs in cross-sim HPC pool (default `5`) |
+| `--hpc-check-interval` | Poll interval during HPC pool wait (default `2h`) |
 | `--resume` | Multi-sim: skip succeeded sims, retry failures |
 | `--retry-labels` | Force-retry specific simulation labels |
 | `--combined-only` | Multi-sim: skip per-sim loop; run combined analysis + report only |
@@ -106,8 +118,7 @@ python run_agenticAIWork.py \
   --goal "Preprocess and setup MD for my_protein.pdb for 50 ns, then submit to HPC" \
   --working-dir /work/s1 \
   --subtask preprocess simsetup hpcjob \
-  --simtype singlesim \
-  --use-llm --no-human-loop
+  --simtype singlesim
 ```
 
 ### 4.2 UniProt accession (no local PDB)
@@ -123,8 +134,7 @@ python run_agenticAIWork.py \
           Submit both jobs to HPC." \
   --working-dir /work/erbb3 \
   --subtask preprocess simsetup hpcjob \
-  --simtype multisim \
-  --use-llm --no-human-loop
+  --simtype multisim
 ```
 
 **Domain by name or residue range:**
@@ -150,8 +160,7 @@ python run_agenticAIWork.py \
   --pdb-list p21860.pdb q8iv63.pdb q8nb16.pdb q8wz42.pdb \
   --working-dir /work/pseudo \
   --subtask preprocess simsetup hpcjob \
-  --simtype multisim \
-  --use-llm --no-human-loop
+  --simtype multisim
 ```
 
 ### 4.4 Component-case expansion (apo vs holo from same PDB)
@@ -166,8 +175,7 @@ python run_agenticAIWork.py \
           Total 6 simulations. Preprocess, setup, and submit to HPC." \
   --working-dir /work/pseudo \
   --subtask preprocess simsetup hpcjob \
-  --simtype multisim \
-  --use-llm --no-human-loop
+  --simtype multisim
 ```
 
 Expected layout: `p21860/`, `p21860_ATP_MG/`, `q8iv63/`, `q8iv63_ATP_MG/`, …
@@ -181,8 +189,7 @@ python run_agenticAIWork.py \
   --goal "Simulation is complete in /work/s1/hpc. Compute RMSD, RMSF, Rg,
           DCCM, DSSP, and generate the report." \
   --working-dir /work/s1 \
-  --subtask analysis reporter \
-  --use-llm --no-human-loop
+  --subtask analysis reporter
 ```
 
 **Multi-simulation** (full per-sim loop, then combined report):
@@ -195,8 +202,7 @@ python run_agenticAIWork.py \
           Generate combined comparison report with literature." \
   --working-dir /work/pseudo \
   --subtask analysis reporter \
-  --simtype multisim \
-  --use-llm --no-human-loop
+  --simtype multisim
 ```
 
 **Analysis from existing directories** (`--sim-dirs`):
@@ -207,8 +213,7 @@ python run_agenticAIWork.py \
   --sim-dirs /work/pseudo/p21860 /work/pseudo/p21860_ATP_MG \
   --working-dir /work/pseudo \
   --subtask analysis reporter \
-  --simtype multisim \
-  --use-llm --no-human-loop
+  --simtype multisim
 ```
 
 ### 4.6 Combined analysis + report only (`--combined-only`)
@@ -223,7 +228,6 @@ python run_agenticAIWork.py \
   --working-dir /work/pseudo \
   --subtask analysis reporter \
   --simtype multisim \
-  --use-llm --no-human-loop \
   --combined-only
 ```
 
@@ -239,6 +243,34 @@ files and writes combined outputs under `{working-dir}/analysis/` and
 | Setup + HPC (preprocess done) | `simsetup hpcjob` |
 | Analysis + report | `analysis reporter` |
 | Full pipeline | omit (all agents) |
+
+### 4.8 Full multi-sim pipeline with HPC pool
+
+When you omit `--subtask`, the supervisor runs preprocess → simsetup → HPC →
+analysis → reporter for every simulation, using the **cross-sim HPC pool**:
+
+1. **Prep (sequential)** — each sim runs preprocess and simsetup one at a time.
+2. **HPC pool (parallel)** — up to `--allowed-hpc-jobs` SLURM jobs run at once.
+3. **Poll** — the workflow sleeps and re-checks SLURM every `--hpc-check-interval`.
+4. **Post-HPC (sequential)** — per-sim analysis and reporter, then combined analysis + report.
+
+```bash
+python run_agenticAIWork.py \
+  --goal "Run 1 ns MD for p23458 (JAK1), p29597 (TYK2), q7rtn6 (STRAA).
+          Compare RMSF and ligand pocket distance across simulations.
+          DCCM for JAK1 and TYK2 only." \
+  --working-dir ./my_study \
+  --simtype multisim \
+  --allowed-hpc-jobs 4 \
+  --hpc-check-interval 3m
+```
+
+If the process is interrupted during HPC, restart with the same `--working-dir`
+and `--resume`. Pool state in `supervisor/state.jsonl` restores job IDs and prep
+status. See [docs/HPC_POOL.md](docs/HPC_POOL.md).
+
+Use `--HITL error` to pause on SLURM submit failures or terminal job states;
+use `--HITL all` to review after every stage.
 
 ---
 
@@ -333,8 +365,7 @@ python run_agenticAIWork.py \
   --working-dir work_ff \
   --subtask preprocess simsetup \
   --force-field amber99sb-ildn \
-  --water-model tip3p \
-  --use-llm --no-human-loop
+  --water-model tip3p
 ```
 
 Defaults: `amber99sb-ildn`, TIP3P, 310 K, 1 bar, 0.15 M NaCl — unless
@@ -348,22 +379,23 @@ added salt"*). See README for a published MLKL validation example.
 
 ## 7. LLM setup
 
+LLM planning is **enabled by default**. Point `--llm-base-url` and `--llm-model`
+at your Ollama-compatible endpoint.
+
 ### Local Ollama
 
 ```bash
 python run_agenticAIWork.py \
   --goal "Setup MD for protein.pdb" \
   --working-dir working_dir \
-  --use-llm \
   --llm-base-url http://127.0.0.1:11434 \
-  --llm-model gpt-oss:20b \
-  --no-human-loop
+  --llm-model gpt-oss:20b
 ```
 
 ### Remote / private endpoint
 
 ```bash
---use-llm --llm-base-url http://your-host:11434 --llm-model gpt-oss:20b
+--llm-base-url http://your-host:11434 --llm-model gpt-oss:20b
 ```
 
 ### Key-based providers
@@ -373,10 +405,11 @@ Ollama-compatible API and point `--llm-base-url` at that proxy.
 
 ### Without LLM
 
-Heuristic routing still works for simple goals:
+Use `--no-llm` for deterministic heuristic routing (offline testing or when no
+endpoint is available):
 
 ```bash
-python run_agenticAIWork.py --goal "..." --no-human-loop
+python run_agenticAIWork.py --goal "..." --no-llm
 ```
 
 ---
@@ -404,7 +437,6 @@ python run_agenticAIWork.py \
   --working-dir pseudo \
   --subtask preprocess simsetup hpcjob \
   --simtype multisim \
-  --use-llm --no-human-loop \
   --resume
 ```
 
@@ -416,7 +448,6 @@ python run_agenticAIWork.py \
   --working-dir pseudo \
   --subtask preprocess simsetup hpcjob \
   --simtype multisim \
-  --use-llm --no-human-loop \
   --resume \
   --retry-labels p21860_ATP_MG q8nb16_ATP_MG
 ```

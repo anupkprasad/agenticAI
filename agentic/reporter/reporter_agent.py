@@ -354,7 +354,12 @@ class ReporterAgent:
 
         import traceback
 
-        working_dir = state.get("working_directory", "working_dir")
+        from agentic.multi_sim_paths import resolve_multi_sim_base_dir
+
+        working_dir = resolve_multi_sim_base_dir(state)
+        if state.get("is_multi_simulation"):
+            state["multi_sim_base_dir"] = working_dir
+            state["working_directory"] = working_dir
         reporter_dir = str(Path(working_dir) / "reporter")
         Path(reporter_dir).mkdir(parents=True, exist_ok=True)
 

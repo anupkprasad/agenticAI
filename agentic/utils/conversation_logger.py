@@ -87,9 +87,10 @@ class ConversationLogger:
     Creates a comprehensive record of the entire workflow execution.
     """
     
-    def __init__(self, log_file: str = "agent_conversation.log"):
+    def __init__(self, log_file: str = "agent_conversation.log", *, continue_session: bool = False):
         self.log_file = log_file
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._continue_session = continue_session
         
         # Track last routing to avoid duplicates
         self._last_routing = None
@@ -115,8 +116,8 @@ class ConversationLogger:
         # Store handler for flushing
         self.file_handler = handler
         
-        # Start session
-        self._log_session_start()
+        if not self._continue_session:
+            self._log_session_start()
         self._flush()
     
     def _flush(self):
@@ -395,24 +396,38 @@ class ConversationLogger:
 # Global conversation logger instance
 _conversation_logger: Optional[ConversationLogger] = None
 _log_file_override: Optional[str] = None
+_continue_session_override: Optional[bool] = None
 
 def get_conversation_logger(log_file: str = "md_conversation.log") -> ConversationLogger:
     """Get or create the global conversation logger instance."""
-    global _conversation_logger, _log_file_override
+    global _conversation_logger, _log_file_override, _continue_session_override
     
     # Use the override if set
     if _log_file_override:
         log_file = _log_file_override
     
-    if _conversation_logger is None or _conversation_logger.log_file != log_file:
-        _conversation_logger = ConversationLogger(log_file)
+    continue_session = _continue_session_override
+    if continue_session is None:
+        log_path = Path(log_file)
+        continue_session = log_path.is_file() and log_path.stat().st_size > 0
+
+    if (
+        _conversation_logger is None
+        or _conversation_logger.log_file != log_file
+        or getattr(_conversation_logger, "_continue_session", False) != continue_session
+    ):
+        _conversation_logger = ConversationLogger(log_file, continue_session=continue_session)
     return _conversation_logger
 
-def set_log_file(log_file: str):
-    """Set the log file path for the conversation logger."""
-    global _log_file_override
+def set_log_file(log_file: str, continue_session: Optional[bool] = None):
+    """Set the log file path for the conversation logger.
+
+    When *continue_session* is omitted, an existing non-empty log file is appended
+    to without emitting a new ``NEW MD WORKFLOW SESSION`` banner.
+    """
+    global _log_file_override, _continue_session_override
     _log_file_override = log_file
-    # Reset the global logger so it will be recreated with the new file
+    _continue_session_override = continue_session
     global _conversation_logger
     _conversation_logger = None
 

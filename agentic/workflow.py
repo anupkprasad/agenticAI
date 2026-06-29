@@ -151,9 +151,11 @@ class MDWorkflow:
         workflow.add_node("human_preprocess_check", self._wrap_node("human_preprocess_check", self.checkpoints.human_preprocess_check))
         workflow.add_node("human_setup_check", self._wrap_node("human_setup_check", self.checkpoints.human_setup_check))
         workflow.add_node("human_hpc_check", self._wrap_node("human_hpc_check", self.checkpoints.human_hpc_check))
+        workflow.add_node("human_hpc_pool_check", self._wrap_node("human_hpc_pool_check", self.checkpoints.human_hpc_pool_check))
         workflow.add_node("human_analysis_check", self._wrap_node("human_analysis_check", self.checkpoints.human_analysis_check))
         workflow.add_node("human_reporter_check", self._wrap_node("human_reporter_check", self.checkpoints.human_reporter_check))
         workflow.add_node("final_report", self._wrap_node("final_report", self._final_report_node))
+        workflow.add_node("hpc_pool_wait", self._wrap_node("hpc_pool_wait", self._hpc_pool_wait_node))
         
         # Set entry point
         workflow.set_entry_point("supervisor")
@@ -172,9 +174,23 @@ class MDWorkflow:
                 "analysis": "analysis",
                 "reporter": "reporter",
                 "human_reporter_check": "human_reporter_check",
+                "human_hpc_pool_check": "human_hpc_pool_check",
+                "hpc_pool_wait": "hpc_pool_wait",
                 "final_report": "final_report",
                 END: END
             }
+        )
+        
+        workflow.add_conditional_edges(
+            "hpc_pool_wait",
+            lambda state: state.get("next_node", "supervisor"),
+            {"supervisor": "supervisor"},
+        )
+
+        workflow.add_conditional_edges(
+            "human_hpc_pool_check",
+            lambda state: state.get("next_node", "supervisor"),
+            {"supervisor": "supervisor", "human_hpc_pool_check": "human_hpc_pool_check"},
         )
         
         # ========== INPUT VALIDATION ==========
@@ -278,7 +294,7 @@ class MDWorkflow:
         )
         
         # ========== FIELD AGENTS - REPORTER ==========
-        # Reporter routes to human_reporter_check (auto-skipped when --no-human-loop).
+        # Reporter routes to human_reporter_check (auto-skipped unless --HITL).
         workflow.add_conditional_edges(
             "reporter",
             lambda state: state.get("next_node", "human_reporter_check"),
@@ -289,7 +305,7 @@ class MDWorkflow:
         )
 
         # ========== REPORTER CHECKPOINT ==========
-        # Skipped when --no-human-loop (routes supervisor → final_report).
+        # Skipped unless --HITL (routes supervisor → final_report).
         # In HITL mode: supports reporter re-run, analysis re-run, checkpoint switching.
         workflow.add_conditional_edges(
             "human_reporter_check",
@@ -322,7 +338,8 @@ class MDWorkflow:
         
         valid_nodes = [
             "input_validation", "planner", "preprocess", "setup", 
-            "hpc", "analysis", "reporter", "human_reporter_check", "final_report"
+            "hpc", "analysis", "reporter", "human_reporter_check",
+            "human_hpc_pool_check", "hpc_pool_wait", "final_report"
         ]
         
         if next_node in valid_nodes:
@@ -331,6 +348,36 @@ class MDWorkflow:
         
         logger.warning(f"Invalid next_node: {next_node}, defaulting to final_report")
         return "final_report"
+    
+    def _hpc_pool_wait_node(self, state: MDState) -> MDState:
+        """Sleep until the next SLURM poll while cross-sim HPC jobs run."""
+        import time
+        from agentic.multi_sim_hpc_pool import init_hpc_pool, pool_summary
+
+        pool = init_hpc_pool(state)
+        interval = int(pool.get("check_interval_sec") or state.get("hpc_check_interval_sec") or 7200)
+        summary = state.get("hpc_pool_status_summary") or pool_summary(state)
+        from agentic.multi_sim_hpc_pool import log_pool_to_base
+
+        log_pool_to_base(
+            state,
+            f"Pool sleep — next SLURM check in {interval}s",
+            pool=pool,
+            extra={"summary": summary},
+        )
+        logger.info(
+            "HPC pool: sleeping %ss before next SLURM check\n%s",
+            interval,
+            summary,
+        )
+        print(
+            f"\n--- HPC pool status (next check in {interval // 60} min) ---\n"
+            f"{summary}\n",
+            flush=True,
+        )
+        time.sleep(interval)
+        state["next_node"] = "supervisor"
+        return state
     
     def _final_report_node(self, state: MDState) -> MDState:
         """Generate enhanced final workflow report using LLM when available."""
@@ -723,6 +770,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "production_ns": None,
             "extended_minimization": config.get("extended_minimization", False),
             "human_in_loop": False,
+            "hitl_mode": None,
             "preprocessing_issues": [],
             "setup_issues": [],
             "mdp_files": {},
@@ -816,6 +864,12 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "resume_failed_only": None,
             "retry_labels": None,
             "_resume_succeeded_labels": None,
+            "hpc_pool": None,
+            "allowed_hpc_jobs": None,
+            "hpc_check_interval_sec": None,
+            "hpc_check_interval": None,
+            "post_hpc_analysis_only": False,
+            "hpc_pool_phase_complete": False,
         }
 
         if config:
@@ -969,8 +1023,13 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 "hpc_instructions", "analysis_instructions", "reporter_instructions",
                 # HITL session (agent switch / sim binding across checkpoints)
                 "hitl_active_agent", "hitl_target_sim_label", "hitl_sim_dirs",
-                "hitl_agent_working_directory", "hitl_agent_output_directory",
+                "hitl_agent_working_directory",                 "hitl_agent_output_directory",
                 "multi_sim_progress",
+                "hpc_pool",
+                "allowed_hpc_jobs",
+                "hpc_check_interval_sec",
+                "post_hpc_analysis_only",
+                "hpc_pool_phase_complete",
             ]
 
             # Multi-simulation progress bookkeeping is restored when resuming.
@@ -1054,6 +1113,9 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
 
                 if state.get("multi_sim_progress"):
                     sync_state_from_progress(state)
+                    from agentic.multi_sim_progress import ensure_per_sim_working_directory
+
+                    ensure_per_sim_working_directory(state)
                 elif state.get("sim_prompts"):
                     rebuild_progress_from_disk(state, working_dir)
 
@@ -1109,10 +1171,21 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             
             logger.info("Restored previous workflow state — supervisor will skip completed stages")
 
+            from agentic.multi_sim_hpc_pool import resume_hpc_pool_if_needed, reconcile_post_hpc_with_pool
+
+            if reconcile_post_hpc_with_pool(state):
+                logger.info(
+                    "[resume] Cleared premature post-HPC state — HPC pool still active"
+                )
+            elif state.get("hpc_pool") or state.get("multi_sim_phase") == "hpc_pool":
+                if resume_hpc_pool_if_needed(state):
+                    logger.info("[resume] Re-entered cross-sim HPC pool from saved state")
+
         # HITL re-run after per-sim work already exists: skip the full per-sim loop
         # and enter combined analysis + reporter (with human checkpoints).
         if (
             state.get("human_in_loop")
+            and state.get("hitl_mode") == "all"
             and state.get("is_multi_simulation")
             and not state.get("combined_only")
             and not state.get("resume_failed_only")
@@ -1232,6 +1305,8 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
 
         state = self._initialize_state(user_goal, config)
         state["human_in_loop"] = True
+        if not state.get("hitl_mode"):
+            state["hitl_mode"] = "all"
         current_node = "supervisor"
         steps = 0
 
@@ -1324,6 +1399,21 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 state["human_feedback"] = feedback
                 state = self.checkpoints.human_hpc_check(state)
                 self._save_progress(state, "human_hpc_check")
+                current_node = state.get("next_node", "supervisor")
+
+            elif current_node == "human_hpc_pool_check":
+                feedback = self._collect_human_feedback(state, "hpc_pool", feedback_handler)
+                if self._should_stop(feedback, state, "hpc_pool"):
+                    current_node = "final_report"
+                    continue
+                state["human_feedback"] = feedback
+                state = self.checkpoints.human_hpc_pool_check(state)
+                self._save_progress(state, "human_hpc_pool_check")
+                current_node = state.get("next_node", "supervisor")
+
+            elif current_node == "hpc_pool_wait":
+                state = self._hpc_pool_wait_node(state)
+                self._save_progress(state, "hpc_pool_wait")
                 current_node = state.get("next_node", "supervisor")
 
             elif current_node == "human_analysis_check":

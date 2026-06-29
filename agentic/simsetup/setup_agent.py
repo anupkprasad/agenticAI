@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional
 from pathlib import Path
 
 from ..state import MDState
+from ..hitl_config import hitl_should_interact
 from ..llm import LLMClient
 from ..utils import (
     log_agent_start, log_llm_interaction, log_agent_action, 
@@ -137,13 +138,12 @@ class SimulationSetupAgent:
                     e for e in state.get("errors", [])
                     if not (e.startswith("Setup failed:") or e.startswith("Setup error:"))
                 ]
-                if state.get("human_in_loop"):
+                if hitl_should_interact(state):
                     state["next_node"] = "human_setup_check"
                 else:
                     state["next_node"] = "supervisor"
             else:
                 state["errors"].append(f"Setup failed: {agent_output.result.report}")
-                # Error-triggered HITL
                 state["next_node"] = "human_setup_check"
                 state["error_triggered_hitl"] = True
             

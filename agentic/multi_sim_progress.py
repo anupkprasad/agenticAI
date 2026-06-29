@@ -94,6 +94,132 @@ def init_multi_sim_progress(state: Dict[str, Any]) -> Dict[str, Any]:
     return progress
 
 
+def reset_post_hpc_progress(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Reset base-level progress for the sequential post-HPC analysis/reporter loop.
+
+    Unlike ``init_multi_sim_progress``, this does not preserve stale agent status
+    or active_sim_label from a prior interrupted run.
+    """
+    sim_prompts = state.get("sim_prompts") or []
+    agents = ["analysis", "reporter"]
+    sim_order: List[str] = []
+    sims: Dict[str, Any] = {}
+    for idx, sp in enumerate(sim_prompts):
+        label = sp.get("label") or f"sim_{idx}"
+        sim_order.append(label)
+        sims[label] = {
+            "index": idx,
+            "working_dir": sp.get("working_dir") or "",
+            "agents": {a: "pending" for a in agents},
+            "status": "pending",
+        }
+
+    progress: Dict[str, Any] = {
+        "version": 1,
+        "sim_order": sim_order,
+        "required_agents": agents,
+        "phase": "executing_sims",
+        "active_sim_label": sim_order[0] if sim_order else None,
+        "active_agent": "analysis" if agents else None,
+        "sims": sims,
+        "hitl_paused_at": None,
+    }
+    if state.get("run_combined_analysis"):
+        progress["combined"] = {"analysis": "pending", "reporter": "pending"}
+
+    state["multi_sim_progress"] = progress
+    state["current_sim_index"] = 0
+    state["completed_sim_states"] = []
+    state["current_agent_idx"] = 0
+    state["plan_executed"] = False
+    if sim_order:
+        bind_workflow_to_sim(state, sim_order[0])
+    return progress
+
+
+def first_incomplete_post_hpc_sim(state: Dict[str, Any]) -> Optional[str]:
+    """Return the label of the first sim with pending post-HPC agents."""
+    progress = state.get("multi_sim_progress") or {}
+    agents = progress.get("required_agents") or ["analysis", "reporter"]
+    for label in progress.get("sim_order") or []:
+        rec = _sim_record(progress, label)
+        if not rec:
+            continue
+        agent_map = rec.get("agents") or {}
+        if any(agent_map.get(a) != "done" for a in agents):
+            return label
+    return None
+
+
+def all_per_sim_agents_done(state: Dict[str, Any]) -> bool:
+    """True when every planned simulation finished all required agents."""
+    progress = state.get("multi_sim_progress") or {}
+    agents = progress.get("required_agents") or _required_agents(state)
+    for label in progress.get("sim_order") or []:
+        rec = _sim_record(progress, label)
+        if not rec:
+            return False
+        agent_map = rec.get("agents") or {}
+        if any(agent_map.get(a) != "done" for a in agents):
+            return False
+    return bool(progress.get("sim_order"))
+
+
+def per_sim_post_hpc_artifacts_ready(working_dir: str) -> bool:
+    """True when per-sim analysis summary and HTML report exist on disk."""
+    wd = Path(working_dir)
+    analysis_ok = (wd / "analysis" / "analysis_summary.jsonl").is_file()
+    reporter_dir = wd / "reporter"
+    reporter_ok = reporter_dir.is_dir() and any(reporter_dir.glob("*.html"))
+    return analysis_ok and reporter_ok
+
+
+def sync_post_hpc_progress_from_disk(state: Dict[str, Any]) -> None:
+    """Align multi_sim_progress with on-disk post-HPC artifacts."""
+    if not state.get("post_hpc_analysis_only"):
+        return
+    progress = ensure_multi_sim_progress(state)
+    if not progress:
+        return
+    agents = progress.get("required_agents") or ["analysis", "reporter"]
+    if set(agents) != {"analysis", "reporter"}:
+        return
+    for label in progress.get("sim_order") or []:
+        rec = _sim_record(progress, label)
+        if not rec:
+            continue
+        wd = rec.get("working_dir") or ""
+        if not wd:
+            base = state.get("multi_sim_base_dir") or state.get("working_directory")
+            wd = str(Path(base) / label)
+        agent_map = rec.setdefault("agents", {})
+        analysis_ok = (Path(wd) / "analysis" / "analysis_summary.jsonl").is_file()
+        reporter_ok = per_sim_post_hpc_artifacts_ready(wd)
+        if analysis_ok:
+            agent_map["analysis"] = "done"
+        if reporter_ok:
+            agent_map["reporter"] = "done"
+        if all(agent_map.get(a) == "done" for a in agents):
+            rec["status"] = "done"
+    state["multi_sim_progress"] = progress
+
+
+def all_post_hpc_artifacts_on_disk(state: Dict[str, Any]) -> bool:
+    """True when every planned sim has analysis summary + reporter HTML on disk."""
+    sim_prompts = state.get("sim_prompts") or []
+    if not sim_prompts:
+        return False
+    for sp in sim_prompts:
+        wd = sp.get("working_dir") or ""
+        if not wd:
+            base = state.get("multi_sim_base_dir") or state.get("working_directory")
+            wd = str(Path(base) / (sp.get("label") or ""))
+        if not per_sim_post_hpc_artifacts_ready(wd):
+            return False
+    return True
+
+
 def ensure_multi_sim_progress(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if state.get("multi_sim_progress"):
         return state["multi_sim_progress"]
@@ -345,6 +471,93 @@ def _route_after_per_sim_continue(
     return None
 
 
+def resolve_active_sim_label(state: Dict[str, Any]) -> Optional[str]:
+    """Best-effort label for the simulation currently being prepared or executed."""
+    sim_case = state.get("sim_case") or {}
+    if sim_case.get("label") and (
+        state.get("hpc_pool_prep_only")
+        or state.get("post_hpc_analysis_only")
+        or state.get("multi_sim_phase") == "executing_sims"
+    ):
+        return sim_case["label"]
+
+    if state.get("hpc_pool_prep_only"):
+        from agentic.multi_sim_hpc_pool import _next_prep_label
+
+        pool = state.get("hpc_pool") or {}
+        pending = _next_prep_label(pool, state.get("sim_prompts") or [])
+        if pending:
+            return pending
+
+    progress = state.get("multi_sim_progress") or {}
+    if progress.get("active_sim_label"):
+        return progress["active_sim_label"]
+
+    sim_prompts = state.get("sim_prompts") or []
+    idx = state.get("current_sim_index", 0)
+    if sim_prompts and 0 <= idx < len(sim_prompts):
+        return sim_prompts[idx].get("label")
+    return None
+
+
+def ensure_per_sim_working_directory(state: Dict[str, Any]) -> bool:
+    """
+    Align ``working_directory`` with the active per-sim context.
+
+    Prevents stale ``multi_sim_progress.active_sim_label`` from routing prep
+    for sim N+1 into sim N's directory after checkpoint restore or sync.
+    """
+    if not state.get("is_multi_simulation") or state.get("combined_only"):
+        return False
+
+    phase = state.get("multi_sim_phase")
+    if phase == "hpc_pool":
+        if not state.get("hpc_pool_prep_only") and not state.get("post_hpc_analysis_only"):
+            return False
+    elif phase != "executing_sims":
+        return False
+
+    label = resolve_active_sim_label(state)
+    if not label:
+        return False
+
+    sim_prompts = state.get("sim_prompts") or []
+    idx = next(
+        (i for i, sp in enumerate(sim_prompts) if sp.get("label") == label),
+        None,
+    )
+    if idx is None:
+        return False
+
+    sp = sim_prompts[idx]
+    base = state.get("multi_sim_base_dir") or state.get("working_directory") or "."
+    expected_wd = sp.get("working_dir") or str(Path(base) / label)
+    expected_wd = str(Path(expected_wd).resolve())
+    current_wd = str(Path(state.get("working_directory", ".")).resolve())
+
+    if current_wd == expected_wd:
+        state["current_sim_index"] = idx
+        return False
+
+    bind_workflow_to_sim(state, label)
+    state["current_sim_index"] = idx
+    progress = state.get("multi_sim_progress") or {}
+    if progress:
+        progress["active_sim_label"] = label
+        state["multi_sim_progress"] = progress
+
+    from agentic.utils.conversation_logger import set_log_file
+
+    set_log_file(str(Path(expected_wd) / "agent_conversation.log"))
+    logger.warning(
+        "Re-bound working_directory to %s for active sim %s (was %s)",
+        expected_wd,
+        label,
+        current_wd,
+    )
+    return True
+
+
 def bind_workflow_to_sim(state: Dict[str, Any], sim_label: str) -> None:
     """Point workflow routing fields at *sim_label* without wiping artifacts."""
     progress = ensure_multi_sim_progress(state)
@@ -388,8 +601,12 @@ def sync_state_from_progress(state: Dict[str, Any]) -> None:
     else:
         state["plan_executed"] = False
     phase = progress.get("phase")
-    if phase:
+    if phase and state.get("multi_sim_phase") != "hpc_pool":
         state["multi_sim_phase"] = phase
+    elif state.get("multi_sim_phase") == "hpc_pool":
+        progress["phase"] = "hpc_pool"
+        state["multi_sim_progress"] = progress
+    ensure_per_sim_working_directory(state)
 
 
 def apply_hitl_continue(state: Dict[str, Any], checkpoint_type: str) -> None:

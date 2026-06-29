@@ -47,14 +47,17 @@ agents:
 
 ### Running the Workflow
 ```bash
-# Basic test mode
-python run_agenticAIWork.py --goal "Run MD simulation of test.pdb" --no-human-loop
+# Default: LLM on, fully automatic
+python run_agenticAIWork.py --goal "Run MD simulation of test.pdb"
 
-# With LLM routing
-python run_agenticAIWork.py --goal "My PDB is preprocessed" --use-llm --llm-base-url http://localhost:11434
+# Custom LLM endpoint
+python run_agenticAIWork.py --goal "My PDB is preprocessed" --llm-base-url http://localhost:11434
 
-# With human checkpoints
-python run_agenticAIWork.py --goal "Complex simulation setup" --use-llm
+# Human checkpoints
+python run_agenticAIWork.py --goal "Complex simulation setup" --HITL all
+
+# Offline / deterministic routing
+python run_agenticAIWork.py --goal "..." --no-llm
 ```
 
 ### Testing

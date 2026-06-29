@@ -38,8 +38,10 @@ Given a natural-language goal and either a PDB file or a UniProt accession, the 
 - **LLM-driven scientific inference** — the Planner selects analysis observables
   from goal semantics; the Analysis agent selects tools per trajectory; the
   Reporter synthesises a literature-grounded narrative.
-- **Human checkpoints** — optional approval gates after preprocessing, setup, and
-  HPC stages; disabled with `--no-human-loop`.
+- **Human checkpoints** — optional approval gates after preprocessing, setup, HPC,
+  analysis, and reporter. Enable with `--HITL all` or pause on failures with `--HITL error`.
+- **Cross-sim HPC pool** — multi-sim full pipeline preps sequentially, submits up to N
+  SLURM jobs in parallel, then runs post-HPC analysis/reporter (see `docs/HPC_POOL.md`).
 - **Graceful LLM fallback** — deterministic heuristic routing when LLM unavailable.
 - **Run audit trail** — `agent_conversation.log`, `execution_plan.md`,
   `execution_report.md`, `run_summary.md`, and `run_summary.json` at the
@@ -96,24 +98,22 @@ docs/                           # Project documentation (you are here)
 conda env create -f environment.yml
 conda activate ollama_env
 
-# 2. Basic run from a local PDB (no LLM, no human checkpoints)
+# 2. Basic run from a local PDB (LLM on by default, no HITL)
 python run_agenticAIWork.py \
     --goal "Run MD simulation of my_protein.pdb" \
-    --working-dir /work/run1 \
-    --no-human-loop
+    --working-dir /work/run1
 
 # 3. From a UniProt accession (downloads AlphaFold, extracts domain)
 python run_agenticAIWork.py \
     --goal "Study ATP binding dynamics of UniProt P21860 ERBB3 kinase domain" \
     --working-dir /work/erbb3 \
     --subtask preprocess simsetup hpcjob \
-    --simtype multisim \
-    --use-llm --no-human-loop
+    --simtype multisim
 
-# 4. With LLM routing (Ollama must be running)
+# 4. Custom LLM endpoint (Ollama must be running)
 python run_agenticAIWork.py \
     --goal "Simulate the kinase-ligand complex" \
-    --use-llm --llm-base-url http://localhost:11434
+    --llm-base-url http://localhost:11434
 
 # 5. Multi-protein comparative study (explicit PDB list)
 python run_agenticAIWork.py \
@@ -121,10 +121,15 @@ python run_agenticAIWork.py \
     --pdb-list p21860.pdb q8iv63.pdb \
     --working-dir /work/pseudo \
     --subtask preprocess simsetup hpcjob \
-    --simtype multisim \
-    --use-llm --no-human-loop
+    --simtype multisim
 
-# 6. Subtask mode (run only specific agents)
+# 6. Interactive checkpoints
+python run_agenticAIWork.py \
+    --goal "..." \
+    --working-dir /work/run1 \
+    --HITL all
+
+# 7. Subtask mode (run only specific agents)
 python run_agenticAIWork.py \
     --subtask analysis reporter \
     --goal "Analyse existing trajectory in /work/run1/hpc" \
@@ -141,10 +146,12 @@ python run_agenticAIWork.py \
 | `--pdb-list` | *(none)* | Explicit PDB file list for multi-sim |
 | `--sim-dirs` | *(none)* | Existing sim dirs for analysis-only multi-sim |
 | `--subtask` | *(all)* | Agents to run: `preprocess simsetup hpcjob analysis reporter` |
-| `--use-llm` | `False` | Enable LLM-powered routing and planning |
+| `--no-llm` | `False` | Disable LLM-powered routing and planning |
 | `--llm-model` | `gpt-oss:20b` | Ollama model name |
 | `--llm-base-url` | `http://127.0.0.1:11434` | Ollama server URL |
-| `--no-human-loop` | `False` | Skip human approval checkpoints |
+| `--HITL` | off | `error` or `all` — enable human-in-the-loop |
+| `--allowed-hpc-jobs` | `5` | Max concurrent SLURM jobs in cross-sim HPC pool |
+| `--hpc-check-interval` | `2h` | SLURM poll interval during HPC pool wait |
 | `--force-field` | `amber99sb-ildn` | GROMACS force field override |
 | `--water-model` | `tip3p` | Water model override |
 | `--prompt` | *(none)* | Override enriched prompt |
