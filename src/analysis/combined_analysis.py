@@ -1777,3 +1777,166 @@ def run_combined_rmsf_segment_apo_holo_analysis(
         "message": f"Generated {len(plots)} per-protein apo/holo segment bar plot(s)",
     }
 
+
+_BINDING_RMSF_CONFIG: Dict[str, Dict[str, str]] = {
+    "pocket_rmsf": {
+        "file_pattern": "pocket_rmsf",
+        "output_file": "pocket_rmsf_overlay.png",
+        "title": "Pocket RMSF — all simulations",
+        "xlabel": "Pocket residue index",
+        "ylabel": "RMSF (Å)",
+    },
+    "ligand_rmsf": {
+        "file_pattern": "ligand_rmsf",
+        "output_file": "ligand_rmsf_overlay.png",
+        "title": "Ligand RMSF — all simulations",
+        "xlabel": "Ligand atom index",
+        "ylabel": "RMSF (Å)",
+    },
+}
+
+
+def _find_binding_rmsf_file(sim_dir: str, profile_type: str) -> Optional[str]:
+    cfg = _BINDING_RMSF_CONFIG.get(profile_type, {})
+    pattern = cfg.get("file_pattern", profile_type)
+    for root in (str(Path(sim_dir) / "analysis"), sim_dir):
+        hit = _find_metric_file(root, pattern)
+        if hit:
+            return hit
+    return None
+
+
+def _plot_rmsf_profiles_overlay(
+    profiles: List[Tuple[str, Dict[str, Any]]],
+    output_path: Path,
+    *,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    figsize: Tuple[int, int] = (10, 5),
+    dpi: int = 200,
+) -> bool:
+    """Overlay pocket/ligand RMSF profiles (ordinal x) for multiple simulations."""
+    if not HAS_MATPLOTLIB or not profiles:
+        return False
+
+    fig, ax = plt.subplots(figsize=figsize)
+    default_colors = [
+        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+        "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
+    ]
+    for i, (label, profile) in enumerate(profiles):
+        color = default_colors[i % len(default_colors)]
+        ax.plot(
+            profile["x_positions"],
+            profile["y_values"],
+            label=label,
+            color=color,
+            linewidth=1.4,
+            alpha=0.88,
+        )
+
+    ax.set_xlabel(xlabel, fontsize=11)
+    ax.set_ylabel(ylabel, fontsize=11)
+    ax.set_title(title, fontsize=12, fontweight="bold")
+    ax.legend(loc="best", fontsize=8, ncol=min(len(profiles), 2))
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+@tool
+def run_combined_binding_rmsf_overlay(
+    sim_dirs: List[str],
+    labels: List[str],
+    working_dir: str,
+    profile_type: str = "pocket_rmsf",
+    output_file: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Overlay pocket or ligand RMSF profiles across holo simulations.
+
+    Each simulation contributes one line (ordinal pocket-residue or ligand-atom
+    index on x). Residue IDs / atom names differ per protein, so x is the
+    index within that pocket/ligand selection, not a shared sequence number.
+
+    Args:
+        sim_dirs: Per-simulation working directories.
+        labels: Legend labels (prefer protein display names).
+        working_dir: Combined analysis output directory.
+        profile_type: ``pocket_rmsf`` or ``ligand_rmsf``.
+        output_file: Optional PNG filename override.
+
+    Standard outputs: ``pocket_rmsf_overlay.png``, ``ligand_rmsf_overlay.png``.
+    """
+    from src.analysis.data_plotter import _parse_rmsf_profile_dat
+
+    if profile_type not in _BINDING_RMSF_CONFIG:
+        return {
+            "success": False,
+            "error": f"Unknown profile_type {profile_type!r}; use pocket_rmsf or ligand_rmsf",
+        }
+
+    cfg = _BINDING_RMSF_CONFIG[profile_type]
+    Path(working_dir).mkdir(parents=True, exist_ok=True)
+    out_name = output_file or cfg["output_file"]
+    output_path = Path(working_dir) / out_name
+
+    profiles: List[Tuple[str, Dict[str, Any]]] = []
+    missing: List[str] = []
+
+    for sim_dir, label in zip(sim_dirs, labels):
+        hit = _find_binding_rmsf_file(sim_dir, profile_type)
+        if not hit and not is_holo_simulation(sim_dir, label):
+            missing.append(label)
+            continue
+        if not hit:
+            missing.append(label)
+            continue
+        profile = _parse_rmsf_profile_dat(hit)
+        if not profile:
+            missing.append(label)
+            continue
+        profiles.append((label, profile))
+
+    if len(profiles) < 1:
+        return {
+            "success": False,
+            "message": f"No {profile_type} data found for overlay. Missing: {missing}",
+            "missing": missing,
+        }
+
+    ok = _plot_rmsf_profiles_overlay(
+        profiles,
+        output_path,
+        title=cfg["title"],
+        xlabel=cfg["xlabel"],
+        ylabel=cfg["ylabel"],
+    )
+    if not ok:
+        return {"success": False, "error": "matplotlib unavailable or plot failed"}
+
+    try:
+        from src.analysis.summary_logger import append_analysis_summary
+        append_analysis_summary(
+            working_dir=working_dir,
+            analysis_type=f"Combined_{profile_type}",
+            statistics={"n_simulations": len(profiles)},
+            files={"overlay_plot": str(output_path.resolve())},
+            metadata={"simulations": [p[0] for p in profiles], "missing": missing},
+        )
+    except Exception as exc:
+        logger.warning("run_combined_binding_rmsf_overlay: summary failed: %s", exc)
+
+    return {
+        "success": True,
+        "message": f"{profile_type} overlay: {len(profiles)} simulation(s) → {out_name}",
+        "output_path": str(output_path.resolve()),
+        "output_file": out_name,
+        "missing": missing,
+        "profile_type": profile_type,
+        "n_simulations": len(profiles),
+    }
+

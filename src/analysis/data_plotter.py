@@ -66,6 +66,238 @@ def _infer_analysis_type(output_file: str, data_files: List[str], working_dir: O
     return None
 
 
+_NON_NUMERIC_HEADER_TOKENS = frozenset({
+    "resname", "atomname", "name", "chain", "segid", "element",
+})
+
+
+def _try_float(token: str) -> Optional[float]:
+    try:
+        return float(token)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_numeric_header(name: str) -> bool:
+    """Return True when a header column should be treated as numeric."""
+    normalized = name.strip().lower().replace("(", " ").replace(")", " ")
+    tokens = normalized.split()
+    if not tokens:
+        return False
+    if any(t in _NON_NUMERIC_HEADER_TOKENS for t in tokens):
+        return False
+    if "name" in normalized and "index" not in normalized:
+        return False
+    return True
+
+
+def _parse_mixed_numeric_dat(
+    file_path: str,
+    header_cols: List[str],
+    row_parts: List[List[str]],
+) -> Tuple[List[List[float]], List[str]]:
+    """
+    Parse tab/space .dat files with string columns (ResName, AtomName, etc.).
+
+    Keeps only numeric columns for plotting (e.g. Residue + RMSF).
+    """
+    if not row_parts:
+        return [], header_cols
+
+    numeric_indices: List[int] = []
+    if header_cols:
+        for i, name in enumerate(header_cols):
+            if _is_numeric_header(name):
+                numeric_indices.append(i)
+    if not numeric_indices:
+        # Infer from first data row: keep fields that parse as float.
+        numeric_indices = [
+            i for i, token in enumerate(row_parts[0])
+            if _try_float(token) is not None
+        ]
+
+    if not numeric_indices:
+        return [], header_cols
+
+    data_columns = [[] for _ in numeric_indices]
+    column_names = [
+        header_cols[i] if i < len(header_cols) else f"Column {i + 1}"
+        for i in numeric_indices
+    ]
+
+    for parts in row_parts:
+        for col_idx, src_idx in enumerate(numeric_indices):
+            if src_idx >= len(parts):
+                continue
+            val = _try_float(parts[src_idx])
+            if val is not None:
+                data_columns[col_idx].append(val)
+
+    return data_columns, column_names
+
+
+def _split_data_line(line: str, is_csv: bool) -> List[str]:
+    if is_csv:
+        return [p.strip() for p in line.split(",")]
+    if "\t" in line:
+        return [p.strip() for p in line.split("\t")]
+    return line.split()
+
+
+def _header_index(header_cols: List[str], *keywords: str) -> Optional[int]:
+    lower = [h.lower() for h in header_cols]
+    for kw in keywords:
+        for i, name in enumerate(lower):
+            if kw in name:
+                return i
+    return None
+
+
+def _parse_rmsf_profile_dat(file_path: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse pocket/ligand RMSF .dat files that mix numeric and string columns.
+
+    Returns profile metadata for categorical x-axis plotting.
+    """
+    header_cols: List[str] = []
+    rows: List[List[str]] = []
+
+    with open(file_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("@"):
+                continue
+            if line.startswith("#"):
+                header_text = line[1:].strip()
+                header_cols = _split_data_line(header_text, is_csv=False)
+                continue
+            parts = _split_data_line(line, is_csv=False)
+            if parts:
+                rows.append(parts)
+
+    if not rows:
+        return None
+
+    stem = Path(file_path).stem.lower()
+    if not header_cols:
+        return None
+
+    rmsf_idx = _header_index(header_cols, "rmsf")
+    if rmsf_idx is None:
+        rmsf_idx = len(header_cols) - 1
+
+    is_pocket = (
+        "pocket_rmsf" in stem
+        or _header_index(header_cols, "residue") is not None
+    )
+    is_ligand = (
+        "ligand_rmsf" in stem
+        or _header_index(header_cols, "atomname") is not None
+    )
+
+    if is_pocket and not is_ligand:
+        resid_idx = _header_index(header_cols, "residue")
+        resname_idx = _header_index(header_cols, "resname")
+        if resid_idx is None or resname_idx is None:
+            return None
+        x_tick_labels: List[str] = []
+        y_values: List[float] = []
+        for parts in rows:
+            resid = _try_float(parts[resid_idx])
+            rmsf = _try_float(parts[rmsf_idx]) if rmsf_idx < len(parts) else None
+            if resid is None or rmsf is None:
+                continue
+            resname = parts[resname_idx] if resname_idx < len(parts) else ""
+            x_tick_labels.append(f"{int(resid)}{resname}")
+            y_values.append(rmsf)
+        if not y_values:
+            return None
+        x_positions = list(range(len(y_values)))
+        return {
+            "kind": "pocket",
+            "x_positions": x_positions,
+            "x_tick_labels": x_tick_labels,
+            "y_values": y_values,
+            "default_plot_type": "line",
+        }
+
+    if is_ligand:
+        atomname_idx = _header_index(header_cols, "atomname")
+        if atomname_idx is None:
+            return None
+        x_tick_labels = []
+        y_values = []
+        for parts in rows:
+            if atomname_idx >= len(parts):
+                continue
+            rmsf = _try_float(parts[rmsf_idx]) if rmsf_idx < len(parts) else None
+            if rmsf is None:
+                continue
+            x_tick_labels.append(parts[atomname_idx])
+            y_values.append(rmsf)
+        if not y_values:
+            return None
+        x_positions = list(range(len(y_values)))
+        return {
+            "kind": "ligand",
+            "x_positions": x_positions,
+            "x_tick_labels": x_tick_labels,
+            "y_values": y_values,
+            "default_plot_type": "bar",
+        }
+
+    return None
+
+
+def _plot_rmsf_profile_on_axes(
+    ax,
+    profile: Dict[str, Any],
+    *,
+    plot_type: str,
+    color: Optional[str],
+    label: str,
+) -> None:
+    """Draw pocket or ligand RMSF with categorical / residue-id x ticks."""
+    x_pos = profile["x_positions"]
+    y_vals = profile["y_values"]
+    tick_labels = profile["x_tick_labels"]
+    kind = profile["kind"]
+    use_bar = plot_type == "bar" or (plot_type == "line" and kind == "ligand" and profile.get("default_plot_type") == "bar")
+
+    if use_bar:
+        ax.bar(x_pos, y_vals, label=label, color=color or "#1f77b4", alpha=0.85)
+    else:
+        ax.plot(
+            x_pos,
+            y_vals,
+            label=label,
+            color=color or "#1f77b4",
+            linewidth=2,
+            marker="o",
+            markersize=4,
+        )
+
+    ax.set_xticks(x_pos)
+    if kind == "pocket":
+        rotation = 45
+        ha = "center"
+    elif kind == "ligand":
+        rotation = 90
+        ha = "right"
+    else:
+        rotation = 0
+        ha = "center"
+    fontsize = 7 if len(tick_labels) > 20 else 8
+    ax.set_xticklabels(
+        tick_labels,
+        rotation=rotation,
+        ha=ha,
+        fontsize=fontsize,
+    )
+    if kind == "pocket":
+        ax.set_xlim(-0.5, len(x_pos) - 0.5)
+
+
 def parse_data_file(file_path: str) -> Tuple[List[List[float]], List[str]]:
     """
     Parse data file (.xvg, .dat, .csv) and extract columns.
@@ -78,6 +310,8 @@ def parse_data_file(file_path: str) -> Tuple[List[List[float]], List[str]]:
     """
     data_columns = []
     column_names = []
+    mixed_row_parts: List[List[str]] = []
+    mixed_header: List[str] = []
     
     # Detect delimiter from file extension
     is_csv = file_path.lower().endswith('.csv')
@@ -107,16 +341,14 @@ def parse_data_file(file_path: str) -> Tuple[List[List[float]], List[str]]:
             # Skip comment lines
             if line.startswith('#'):
                 # Try to extract column names from header
-                if 'Frame' in line or 'Time' in line or 'Residue' in line:
-                    parts = line[1:].strip().split('\t')
-                    column_names = [p.strip() for p in parts]
+                header_text = line[1:].strip()
+                if any(k in header_text for k in ("Frame", "Time", "Residue", "Atom", "RMSF")):
+                    parts = header_text.split('\t') if '\t' in header_text else header_text.split()
+                    mixed_header = [p.strip() for p in parts]
+                    column_names = list(mixed_header)
                 continue
             
-            # Split based on delimiter
-            if is_csv:
-                parts = [p.strip() for p in line.split(',')]
-            else:
-                parts = line.split()
+            parts = _split_data_line(line, is_csv)
             
             # Parse data
             try:
@@ -132,10 +364,13 @@ def parse_data_file(file_path: str) -> Tuple[List[List[float]], List[str]]:
                         data_columns[i].append(val)
                         
             except ValueError:
-                # First non-parseable line is likely the header row
-                if not column_names and not data_columns:
-                    column_names = parts
+                mixed_row_parts.append(parts)
                 continue
+
+    if not data_columns and mixed_row_parts:
+        data_columns, column_names = _parse_mixed_numeric_dat(
+            file_path, mixed_header or column_names, mixed_row_parts
+        )
     
     # Set default column names if not found
     if not column_names:
@@ -257,7 +492,32 @@ def plot_data(
             colors = [f"C{i}" for i in range(len(data_files))]
         
         # Plot each data file (use absolute paths)
+        n_plotted = 0
         for idx, (abs_file, rel_file) in enumerate(zip(abs_data_files, data_files)):
+            profile = _parse_rmsf_profile_dat(abs_file)
+            if profile:
+                if labels is not None and idx < len(labels):
+                    label = labels[idx]
+                else:
+                    label = Path(rel_file).stem
+                color = colors[idx] if idx < len(colors) else None
+                effective_plot_type = plot_type
+                if plot_type == "line" and profile.get("default_plot_type") == "bar":
+                    effective_plot_type = "bar"
+                _plot_rmsf_profile_on_axes(
+                    ax,
+                    profile,
+                    plot_type=effective_plot_type,
+                    color=color,
+                    label=label,
+                )
+                n_plotted += 1
+                if idx == 0 and not xlabel:
+                    xlabel = "Residue" if profile["kind"] == "pocket" else "Atom"
+                if idx == 0 and not ylabel:
+                    ylabel = "RMSF (Å)"
+                continue
+
             # Parse data
             data_columns, column_names = parse_data_file(abs_file)
             
@@ -271,6 +531,13 @@ def plot_data(
                     xi, yi = 1, 2
                 else:
                     xi, yi = 0, 1
+            elif x_col is None and y_col is None and len(data_columns) >= 2:
+                lower_names = [c.lower() for c in column_names]
+                yi = next(
+                    (i for i, name in enumerate(lower_names) if "rmsf" in name),
+                    1,
+                )
+                xi = 0
             else:
                 xi = x_col if x_col is not None else 0
                 yi = y_col if y_col is not None else 1
@@ -281,6 +548,9 @@ def plot_data(
             
             x_data = data_columns[xi]
             y_data = data_columns[yi]
+            if not x_data or not y_data:
+                logger.warning(f"No plottable numeric data in {rel_file}, skipping")
+                continue
             
             # Determine label
             if labels is not None and idx < len(labels):
@@ -298,12 +568,26 @@ def plot_data(
                 ax.scatter(x_data, y_data, label=label, color=color, alpha=0.6)
             elif plot_type == "bar":
                 ax.bar(x_data, y_data, label=label, color=color, alpha=0.7)
+            n_plotted += 1
             
             # Auto-detect axis labels from first file
             if idx == 0 and not xlabel and xi < len(column_names):
                 xlabel = column_names[xi]
             if idx == 0 and not ylabel and yi < len(column_names):
                 ylabel = column_names[yi]
+
+        if n_plotted == 0:
+            plt.close(fig)
+            if working_dir:
+                os.chdir(original_dir)
+            return {
+                "success": False,
+                "error": (
+                    "No plottable numeric data found in input file(s). "
+                    "Check column format (mixed string/numeric RMSF .dat files "
+                    "need Residue/RMSF columns)."
+                ),
+            }
         
         # Set labels
         if xlabel:

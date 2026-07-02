@@ -66,6 +66,8 @@ These modules enable starting from a UniProt accession with no local PDB file.
 
 ## Trajectory Analysis
 
+> **Full tool reference (calculations, theory, outputs):** [ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md)
+
 Primary library: **MDAnalysis v2.10.0**
 
 ### Per-simulation tools (`agentic/analysis/tools.py`)
@@ -84,6 +86,12 @@ Primary library: **MDAnalysis v2.10.0**
 | `calculate_trajectory_pca` | PCA on aligned coordinates; writes ``pca_projections.dat`` |
 | `plot_pca_projection` | PC1 vs PC2 (or PCx/PCy) scatter coloured by time |
 | `calculate_free_energy_landscape` | F = −kT ln P from PC1/PC2 histogram (kJ/mol contour map) |
+| `analyze_fel_landscape_features` | FEL classification metrics: minima, basin depth/area, barriers, entropy |
+| `calculate_protein_ligand_contacts` | Protein–ligand H-bond and heavy-atom contact counts per frame |
+| `calculate_pocket_sasa` | SASA of binding-pocket residue subset (requires `.tpr`) |
+| `analyze_ligand_residence` | Bound/unbound residence times and unbinding event counts |
+| `calculate_pocket_rmsf` | Per-residue RMSF for pocket Cα atoms |
+| `calculate_ligand_rmsf` | Per-atom RMSF of ligand (ATP) heavy atoms |
 | `plot_dccm_difference` | Element-wise DCCM difference between two simulations (apo–holo) |
 | `plot_md_data` | Single-trace time-series plot |
 | `plot_md_multipanel` | Multi-panel figure |
@@ -103,6 +111,8 @@ Primary library: **MDAnalysis v2.10.0**
 | `run_combined_dccm_difference` | Cross-simulation DCCM difference heatmap |
 | `run_combined_rmsf_segment_analysis` | RMSF bar chart for user-defined residue window |
 | `run_combined_com_distance_analysis` | COM distance overlay across simulations |
+| `collect_fel_features_table` | Aggregate `fel_features.json` from all sims into one classification CSV |
+| `collect_classification_features_table` | Full binding + FEL feature matrix (raw + z-score) for ML/clustering |
 | `plot_combined_rmsf_segment_bars` | Stacked segment RMSF bar chart |
 
 ### Additional analysis libraries

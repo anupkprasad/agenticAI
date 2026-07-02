@@ -23,6 +23,7 @@ from .tools_registry import get_tools_registry
 from .knowledge_loader import get_knowledge_loader
 from .planning_guidelines import (
     detect_combined_only_metrics,
+    detect_classification_requested,
     detect_requested_metrics,
     get_intent_preservation_block,
     get_standard_output_filenames_block,
@@ -30,6 +31,11 @@ from .planning_guidelines import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_pdb_analysis(pdb_analysis: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return a dict for PDB analysis; state may store explicit ``None``."""
+    return pdb_analysis if isinstance(pdb_analysis, dict) else {}
 
 
 _SIMULATION_STAGE_AGENTS = frozenset({"preprocess", "simsetup", "hpcjob"})
@@ -96,6 +102,10 @@ def _goal_requests_combined_analysis(goal: str, agent_list: List[str], subtask_t
         r"\bcomparison\s+(between|across|of)\b",
         r"\bacross\s+(all\s+)?(simulations|proteins|systems|cases|conditions)\b",
         r"\baggregate(d)?\s+(results|metrics|analysis)\b",
+        r"\bclassif(y|ication)\b",
+        r"\bcluster(ing|ed|s)?\b",
+        r"\bunsupervised\b",
+        r"\boverlay\b",
         r"\bcommon\s+(trends|patterns|flexible regions|motions)\b",
         r"\bconserved\s+(flexible regions|motions|dynamic patterns)\b",
         r"\bapo\s*(/|vs|versus|and)\s*holo\b",
@@ -121,6 +131,51 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+_METRIC_PHRASES: Dict[str, str] = {
+    "com": "ligand pocket distance",
+    "contacts": "protein–ATP contacts",
+    "pocket_sasa": "pocket SASA",
+    "residence": "ligand residence and unbinding",
+    "pocket_rmsf": "pocket RMSF",
+    "ligand_rmsf": "ligand RMSF",
+    "pca": "PCA on Cα",
+    "fel": "free-energy landscape at 310 K and FEL basin features",
+    "rmsd": "RMSD",
+    "rmsf": "protein RMSF",
+    "rg": "radius of gyration",
+    "sasa": "SASA",
+    "energy": "energy",
+    "dccm": "DCCM",
+    "dssp": "secondary structure (DSSP)",
+}
+
+
+def _strip_markdown_json_fence(text: str) -> str:
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    return text
+
+
+def _salvage_sim_prompts_from_response(response: str) -> Optional[List[str]]:
+    """Extract sim_prompt strings from truncated or malformed LLM JSON."""
+    text = _strip_markdown_json_fence(response)
+    match = re.search(r'"sim_prompts"\s*:\s*\[', text, re.IGNORECASE)
+    if not match:
+        return None
+    tail = text[match.end():]
+    prompts: List[str] = []
+    for item_match in re.finditer(r'"((?:[^"\\]|\\.)*)"', tail):
+        try:
+            prompt = json.loads(f'"{item_match.group(1)}"')
+        except json.JSONDecodeError:
+            continue
+        if len(prompt.strip()) > 40:
+            prompts.append(prompt)
+    return prompts if prompts else None
+
+
 def _build_per_sim_analysis_prompt(
     entry: Dict[str, Any],
     *,
@@ -133,25 +188,42 @@ def _build_per_sim_analysis_prompt(
     label = entry.get("label", "simulation")
     case = entry.get("case_description", "default system")
     wdir = entry.get("working_dir", "")
-    requirements = (original_goal or enriched_prompt or "").strip()
-    combined_only = detect_combined_only_metrics(requirements)
-    combined_note = ""
-    if combined_only:
-        names = ", ".join(sorted(combined_only))
-        combined_note = (
-            f" Do NOT compute {names} for this simulation — the user requested those "
-            "metrics in combined/cross-simulation analysis only (handled at project base)."
+    pdb_name = Path(entry.get("pdb", "")).name or f"{label}.pdb"
+
+    per_sim_metrics = detect_requested_metrics(original_goal or enriched_prompt or "")
+    if per_sim_metrics:
+        metrics_text = ", ".join(
+            _METRIC_PHRASES.get(m, m) for m in sorted(per_sim_metrics)
+        )
+        analyses_clause = f"Run these analyses: {metrics_text}."
+    else:
+        analyses_clause = (
+            "Run the per-simulation analyses named in the project goal for this system."
         )
 
     return (
-        f"Analyze the completed trajectory for {protein} using simulation label {label}. "
-        f"The system case is {case}, and the trajectory, topology, and energy outputs are in {wdir}/hpc/. "
-        f"Run only these workflow steps: {agents_desc}. "
-        f"Use the analysis requested by the user for this specific system; do not add extra metrics unless the goal asks broadly for protein dynamics without naming specific analyses. "
-        f"When the goal names specific metrics, restrict the analysis to those metrics and any directly required plots or tables. "
-        f"Write analysis outputs under {wdir}/analysis/ using standard basenames (e.g. rmsf.dat, rmsf.png) — no label prefix on filenames. "
-        f"After analysis, prepare a concise scientific report for this simulation using the generated outputs and relevant context. "
-        f"Project requirements: {requirements}{combined_note}"
+        f"For the {protein} protein (label {label}), analyze the completed trajectory "
+        f"in {wdir} ({case} from {pdb_name}). "
+        f"Trajectory and topology are in {wdir}/hpc/ (md.tpr, mdWrap.xtc). "
+        f"Workflow steps: {agents_desc}. "
+        f"{analyses_clause} "
+        f"Write outputs under {wdir}/analysis/ using standard basenames "
+        f"(e.g. rmsf.dat, ligand_pocket_distance.csv) — no label prefix on filenames. "
+        f"After analysis, prepare a concise scientific report for this simulation."
+    )
+
+
+def _is_mock_or_error_llm_response(text: str) -> bool:
+    """Return True when the LLM response is a mock/error sentinel string."""
+    msg = (text or "").strip().lower()
+    if not msg:
+        return True
+    return (
+        msg.startswith("mock_llm_response:")
+        or "http_error" in msg
+        or "no reachable llm endpoints" in msg
+        or msg.startswith("llm_error:")
+        or msg.startswith("http_llm_error:")
     )
 
 
@@ -162,16 +234,33 @@ def _build_combined_analysis_plan_fallback(
     """Fallback combined plan when LLM decomposition is unavailable."""
     original = (state.get("user_goal_original") or state.get("user_goal") or "").strip()
     labels = ", ".join(e.get("label", "") for e in expanded_entries)
-    base = (
-        "Perform only the cross-simulation analysis requested by the user across "
-        f"these completed simulations: {labels}. Compare the requested metrics across "
-        "systems, generate aggregate plots or tables only when they support the stated "
-        "goal, and avoid adding unrelated calculations. Produce a consolidated report "
-        "that explains shared trends, meaningful differences, and limitations."
+    parts = [
+        "Perform cross-simulation analysis across these completed simulations: "
+        f"{labels}.",
+    ]
+    if detect_classification_requested(original):
+        parts.append(
+            "Build an unsupervised classification feature table (raw CSV + z-score CSV) "
+            "from per-simulation outputs, then cluster with hierarchical clustering "
+            "(Ward linkage, default) on the z-score matrix. Plot clusters labeled with "
+            "protein names using the id:name map from the user goal."
+        )
+    if original and re.search(
+        r"overlay|compare|across simulations|cross[-\s]?sim",
+        original,
+        re.IGNORECASE,
+    ):
+        parts.append(
+            "Overlay or compare requested metrics across simulations "
+            "(e.g. ligand pocket distance and protein RMSF when named in the goal)."
+        )
+    parts.append(
+        "Generate a combined HTML report summarizing shared trends, differences, "
+        "and limitations. Do not add analyses outside the user goal."
     )
     if original:
-        return f"{base}\n\nOriginal study goal for reference:\n{original}"
-    return base
+        return f"{' '.join(parts)}\n\nOriginal study goal for reference:\n{original}"
+    return " ".join(parts)
 
 
 class MDPlanner:
@@ -549,24 +638,36 @@ class MDPlanner:
             "- For post-simulation workflows, do not mention preprocessing, system setup, force-field choice, box size, HPC submission, or simulation length because those stages are finished.\n"
             "- Avoid comma-separated key=value prompt strings because downstream agents treat them as metadata stubs; write complete sentences with enough context for analysis and reporting.\n"
             "- Do not copy and paste the same prompt for every entry. Vary the wording naturally and adapt details to protein name, label, case, source, residues, ligands, and requested metrics.\n"
-            f"- Mention only these workflow steps: {agents_desc}.\n\n"
+            f"- Mention only these workflow steps: {agents_desc}.\n"
+            "- Keep each sim_prompt concise (under ~120 words) so all entries and combined fields fit in one JSON response.\n\n"
             "For run_combined_analysis, use the user goal as the source of truth. "
             f"The conservative heuristic before this LLM call is {default_combined}; override it only if the goal text clearly supports a different choice.\n"
             "Return only valid JSON."
         )
 
         sim_prompts_list = None
+        prompt_source = "deterministic_fallback"
         combined_plan = ""
         run_combined_analysis = default_combined
+        decomposition_complete = False
+        parsed = None
         try:
-            response = self.llm.prompt(decomposition_prompt, temperature=0.35, max_tokens=3600)
+            response = self.llm.prompt_raw(decomposition_prompt, temperature=0.35, max_tokens=8192)
             log_llm_interaction("planner.multi_sim_master", decomposition_prompt, response)
-            parsed = self._extract_json_from_response(response)
+            if _is_mock_or_error_llm_response(response):
+                logger.warning(
+                    "PLANNER [multi-sim]: LLM decomposition returned mock/error response; "
+                    "using deterministic prompt decomposition"
+                )
+                parsed = None
+            else:
+                parsed = self._extract_json_from_response(response)
             if parsed and "sim_prompts" in parsed:
                 sim_prompts_list = [
                     _coerce_plan_text(item, default="")
                     for item in parsed["sim_prompts"]
                 ]
+                prompt_source = "llm"
                 run_combined_analysis = _coerce_bool(
                     parsed.get("run_combined_analysis"),
                     default=default_combined,
@@ -581,23 +682,80 @@ class MDPlanner:
                 )
 
                 if len(sim_prompts_list) > 1:
-                    keys = []
-                    for text in sim_prompts_list:
-                        key = (_coerce_plan_text(text) or "").lower()
-                        key = re.sub(r"/[\w./\-]+", "<path>", key)
-                        key = re.sub(r"\b[\w\-]+\.pdb\b", "<pdb>", key)
-                        key = re.sub(r"\b[a-z0-9]{4,12}\b", "<tok>", key)
-                        key = re.sub(r"\b\d+\s*ns\b", "<time>", key)
-                        key = re.sub(r"\s+", " ", key).strip()
-                        keys.append(key)
-                    if len(set(keys)) <= max(1, len(keys) // 3):
+                    # Only reject when prompts are effectively identical after light
+                    # whitespace normalization. Earlier aggressive token replacement
+                    # caused valid label-specific prompts to be incorrectly discarded.
+                    normalized = [
+                        re.sub(r"\s+", " ", (_coerce_plan_text(text) or "").strip().lower())
+                        for text in sim_prompts_list
+                    ]
+                    if len(set(normalized)) == 1:
                         logger.warning(
-                            "PLANNER [multi-sim]: LLM sim_prompts are repetitive; "
+                            "PLANNER [multi-sim]: LLM sim_prompts are identical; "
                             "switching to deterministic per-entry prompts"
                         )
                         sim_prompts_list = None
+                        prompt_source = "deterministic_fallback"
+
+                if (
+                    sim_prompts_list
+                    and len(sim_prompts_list) != len(expanded_entries)
+                    and len(sim_prompts_list) >= 1
+                ):
+                    logger.warning(
+                        "PLANNER [multi-sim]: LLM returned %d/%d sim_prompts; "
+                        "filling missing entries with deterministic prompts",
+                        len(sim_prompts_list),
+                        len(expanded_entries),
+                    )
+                    prompt_source = "llm_partial"
+                    for idx in range(len(sim_prompts_list), len(expanded_entries)):
+                        if post_sim_subtask:
+                            sim_prompts_list.append(
+                                _build_per_sim_analysis_prompt(
+                                    expanded_entries[idx],
+                                    original_goal=original_goal,
+                                    enriched_prompt=enriched_prompt,
+                                    agents_desc=agents_desc,
+                                )
+                            )
+                        else:
+                            entry = expanded_entries[idx]
+                            pdb_name = Path(entry["pdb"]).name
+                            sim_prompts_list.append(
+                                (
+                                    f"Prepare simulation for {entry['protein_name']} using "
+                                    f"source structure {pdb_name}. Use simulation label "
+                                    f"{entry['label']} under {entry['working_dir']}. "
+                                    f"Case: {entry['case_description']}: {entry['case_directive']}. "
+                                    f"Run workflow steps: {agents_desc}."
+                                ).strip()
+                            )
+
+                decomposition_complete = (
+                    prompt_source == "llm"
+                    and len(sim_prompts_list or []) == len(expanded_entries)
+                    and _strip_markdown_json_fence(response).rstrip().endswith("}")
+                )
         except Exception as exc:
             logger.warning(f"PLANNER [multi-sim]: LLM decomposition failed: {exc}")
+
+        # Truncated JSON often omits combined fields; never drop combined work when
+        # the user goal clearly requested it unless a complete JSON says otherwise.
+        if default_combined:
+            if decomposition_complete and parsed and parsed.get("run_combined_analysis") is False:
+                run_combined_analysis = False
+            else:
+                run_combined_analysis = True
+                if not combined_plan:
+                    combined_plan = _build_combined_analysis_plan_fallback(
+                        state, expanded_entries
+                    )
+                    logger.info(
+                        "PLANNER [multi-sim]: using combined analysis fallback plan "
+                        "(decomposition_complete=%s)",
+                        decomposition_complete,
+                    )
 
         if not sim_prompts_list or len(sim_prompts_list) != len(expanded_entries):
             logger.info(
@@ -605,6 +763,7 @@ class MDPlanner:
                 f"(post_sim_subtask={post_sim_subtask})"
             )
             sim_prompts_list = []
+            prompt_source = "deterministic_fallback"
             if post_sim_subtask:
                 for entry in expanded_entries:
                     sim_prompts_list.append(
@@ -649,7 +808,7 @@ class MDPlanner:
         for entry, prompt_text in zip(expanded_entries, sim_prompts_list):
             pdb = entry["pdb"]
             prompt_body = _coerce_plan_text(prompt_text, default="")
-            if post_sim_subtask and len(prompt_body) < 240:
+            if post_sim_subtask and not prompt_body.strip():
                 prompt_body = _build_per_sim_analysis_prompt(
                     entry,
                     original_goal=original_goal,
@@ -685,7 +844,16 @@ class MDPlanner:
             action="Generated Multi-Simulation Master Plan",
             details={
                 "num_simulations": len(sim_prompts),
+                "num_combined_prompts": 1 if run_combined_analysis else 0,
                 "labels": [s["label"] for s in sim_prompts],
+                "prompt_source": prompt_source,
+                "per_sim_prompts": [
+                    {
+                        "label": s.get("label"),
+                        "prompt": _coerce_plan_text(s.get("prompt"), default=""),
+                    }
+                    for s in sim_prompts
+                ],
                 "component_cases": [c.get("description") for c in component_cases],
                 "agents": agents_desc,
                 "run_combined_analysis": run_combined_analysis,
@@ -726,6 +894,8 @@ class MDPlanner:
             "enriched_prompt": enriched_prompt,
             "sim_prompts": sim_prompts,
             "run_combined_analysis": run_combined_analysis,
+            "num_combined_prompts": 1 if run_combined_analysis else 0,
+            "combined_prompt": combined_plan,
             "combined_analysis_plan": combined_plan,
             "num_simulations": len(sim_prompts),
             "labels": [s.get("label") for s in sim_prompts],
@@ -740,6 +910,7 @@ class MDPlanner:
             f"**Pipeline:** {agents_desc}",
             f"**Task scope:** {plan_data.get('task_scope', 'full_pipeline')}",
             f"**Combined analysis requested:** {'yes' if run_combined_analysis else 'no'}",
+            f"**Combined prompts:** {1 if run_combined_analysis else 0}",
             "",
             "## Overall Goal",
             "",
@@ -781,22 +952,53 @@ class MDPlanner:
         )
 
     def _extract_json_from_response(self, response: str) -> Optional[Dict[str, Any]]:
-        """Extract the first JSON object from an LLM response using brace counting."""
-        start = response.find("{")
-        if start == -1:
+        """Extract JSON from an LLM response; salvage truncated multi-sim decomposition."""
+        text = _strip_markdown_json_fence(response)
+        start = text.find("{")
+        if start != -1:
+            depth = 0
+            for idx, char in enumerate(text[start:], start):
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(text[start: idx + 1])
+                        except json.JSONDecodeError:
+                            break
+
+        salvaged_prompts = _salvage_sim_prompts_from_response(response)
+        if not salvaged_prompts:
             return None
-        depth = 0
-        for idx, char in enumerate(response[start:], start):
-            if char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(response[start: idx + 1])
-                    except json.JSONDecodeError:
-                        return None
-        return None
+
+        text_lower = text.lower()
+        run_combined = None
+        if re.search(r'"run_combined_analysis"\s*:\s*true', text_lower):
+            run_combined = True
+        elif re.search(r'"run_combined_analysis"\s*:\s*false', text_lower):
+            run_combined = False
+        combined_plan = ""
+        plan_match = re.search(
+            r'"combined_analysis_plan"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            text,
+            re.DOTALL,
+        )
+        if plan_match:
+            try:
+                combined_plan = json.loads(f'"{plan_match.group(1)}"')
+            except json.JSONDecodeError:
+                combined_plan = plan_match.group(1)
+
+        logger.info(
+            "PLANNER: salvaged %d sim_prompts from truncated LLM JSON",
+            len(salvaged_prompts),
+        )
+        return {
+            "sim_prompts": salvaged_prompts,
+            "run_combined_analysis": run_combined,
+            "combined_analysis_plan": combined_plan,
+        }
     
     def planner_node(self, state: MDState) -> MDState:
         """Main planner node - creates execution plan from structured prompt.
@@ -818,8 +1020,8 @@ class MDPlanner:
         # Use structured prompt if available, otherwise fall back to rephrased/original goal
         structured_prompt = state.get("enriched_prompt") or state.get("rephrased_goal") or state.get("user_goal", "")
         pdb_path = state.get("raw_pdb", "")
-        pdb_analysis = state.get("pdb_analysis", {})
-        component_selection = state.get("component_selection", {})
+        pdb_analysis = _coerce_pdb_analysis(state.get("pdb_analysis"))
+        component_selection = state.get("component_selection") or {}
         
         logger.info(f"PLANNER: Using structured prompt: {structured_prompt[:100]}...")
 
@@ -969,6 +1171,8 @@ class MDPlanner:
         CRITICAL: Respects subtask-specific workflows (analysis-only, setup-only, etc.)
         Uses dynamic tools knowledge and domain knowledge to create comprehensive plans.
         """
+        pdb_analysis = _coerce_pdb_analysis(pdb_analysis)
+        component_selection = component_selection or {}
         logger.info("PLANNER: Creating plan with dynamic tools and knowledge")
         
         # HPC pool prep: preprocess + simsetup only — never analysis/HPC/programmer tools.
@@ -1093,7 +1297,7 @@ class MDPlanner:
             # Call LLM to create plan
             try:
                 logger.info(f"PLANNER: Creating execution plan (iteration {iteration + 1}/{max_iterations + 1})...")
-                response = self.llm.prompt(
+                response = self.llm.prompt_raw(
                     prompt=current_prompt,
                     temperature=0.2,
                     max_tokens=2000
@@ -1104,6 +1308,15 @@ class MDPlanner:
                     prompt=current_prompt,
                     response=response
                 )
+
+                if _is_mock_or_error_llm_response(response):
+                    logger.warning(
+                        "PLANNER: LLM returned mock/error during execution planning; "
+                        "using fallback natural-language plan"
+                    )
+                    return self._create_fallback_plan(
+                        structured_prompt, pdb_path, pdb_analysis, component_selection, state
+                    )
                 
                 # Check if LLM indicates missing tools
                 if tool_creation_enabled and iteration < max_iterations:
@@ -1353,7 +1566,7 @@ Create detailed specifications ONLY for the missing tools/scripts. For each tool
 Generate tool specifications now (ONLY for missing tools):"""
         
         try:
-            response = self.llm.prompt(spec_prompt, temperature=0.1, max_tokens=1500)
+            response = self.llm.prompt_raw(spec_prompt, temperature=0.1, max_tokens=1500)
             
             log_llm_interaction(
                 agent_name="planner.tool_specification",
@@ -1588,6 +1801,8 @@ CRITICAL: If you output JSON, YAML, or any structured format, the plan will be r
         include_new_tools_note: bool = False
     ) -> str:
         """Build planning prompt for execution plan creation."""
+        pdb_analysis = _coerce_pdb_analysis(pdb_analysis)
+        component_selection = component_selection or {}
         
         per_sim_scope_note = self._get_per_sim_scope_note(state)
         user_goal_text = structured_prompt or state.get("user_goal") or ""
@@ -2303,8 +2518,10 @@ When you indicate missing tools, the Programmer Agent will be automatically invo
         """
         logger.info("PLANNER: Creating fallback natural language plan from PDB analysis")
         
+        pdb_analysis = _coerce_pdb_analysis(pdb_analysis)
+        component_selection = component_selection or {}
         subtask_type = state.get("subtask_type")
-        summary = pdb_analysis.get("summary", {})
+        summary = pdb_analysis.get("summary") or {}
         working_dir = state.get("working_directory", ".")
         
         # Build natural language plan prose
@@ -2571,7 +2788,7 @@ When you indicate missing tools, the Programmer Agent will be automatically invo
         return self._create_fallback_plan(
             structured_prompt=user_goal,
             pdb_path=validated_pdb,
-            pdb_analysis=state.get("pdb_analysis", {}),
-            component_selection=state.get("component_selection", {}),
+            pdb_analysis=_coerce_pdb_analysis(state.get("pdb_analysis")),
+            component_selection=state.get("component_selection") or {},
             state=state
         )

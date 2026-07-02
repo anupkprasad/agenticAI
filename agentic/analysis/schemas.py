@@ -157,6 +157,10 @@ class AnalysisAgentInput(BaseModel):
         description="List of analyses to perform"
     )
     user_goal: str = Field(default="", description="User's analysis goals")
+    enriched_goal: Optional[str] = Field(
+        None,
+        description="Per-simulation enriched goal from input validation (primary analysis scope)",
+    )
     additional_instructions: Optional[str] = Field(None, description="Planner's detailed instructions for this agent")
 
 

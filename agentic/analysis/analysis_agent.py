@@ -13,7 +13,7 @@ import json
 import logging
 import shutil
 from datetime import datetime
-from typing import Dict, Any, Optional, List, FrozenSet
+from typing import Dict, Any, Optional, List, FrozenSet, Set
 from pathlib import Path
 
 from ..state import MDState
@@ -24,6 +24,7 @@ from ..utils import (
     log_agent_action, log_file_operation, log_agent_completion, log_error,
     SecureFileManager, sanitize_tool_output_params
 )
+from ..utils.tool_prompt_format import format_tools_for_llm_prompt
 from .schemas import (
     AnalysisPlan, AnalysisStep,
     AnalysisResult as AnalysisExecutionResult,
@@ -34,6 +35,10 @@ from ..planner.planning_guidelines import (
     detect_requested_metrics,
     detect_requested_metrics_union,
     detect_requested_metrics_for_sim,
+    detect_classification_requested,
+    classification_metric_groups_for_goal,
+    get_classification_tool_guide,
+    get_classification_per_sim_tool_guide,
     detect_com_distance_mode,
     collect_goal_texts_for_intent,
     resolve_sims_for_combined_metric,
@@ -57,6 +62,13 @@ _CALC_TOOL_TO_METRIC: Dict[str, str] = {
     "calculate_com_distance": "com",
     "calculate_trajectory_pca": "pca",
     "calculate_free_energy_landscape": "fel",
+    "analyze_fel_landscape_features": "fel",
+    "export_fel_basin_structures": "fel",
+    "calculate_protein_ligand_contacts": "contacts",
+    "calculate_pocket_sasa": "pocket_sasa",
+    "analyze_ligand_residence": "residence",
+    "calculate_pocket_rmsf": "pocket_rmsf",
+    "calculate_ligand_rmsf": "ligand_rmsf",
 }
 
 _PREP_TOOLS = frozenset({"wrap_trajectory", "run_complete_analysis"})
@@ -119,27 +131,71 @@ class MDAnalysisAgent:
         )
 
     def _format_tools_list_for_prompt(self, tool_metadata: Dict[str, Dict[str, Any]]) -> str:
-        """Format tool metadata as a prompt-friendly bullet list."""
-        tools_list = []
-        for tool_info in tool_metadata.values():
-            tool_entry = f"→ {tool_info['name']}: {tool_info['description']}"
-            tools_list.append(tool_entry)
-        return "\n".join(tools_list)
+        """Alias for detailed tool formatting (kept for backward compatibility)."""
+        return self._format_tools_list_detailed(tool_metadata)
 
     def _format_tools_list_detailed(self, tool_metadata: Dict[str, Dict[str, Any]]) -> str:
-        """Format tool metadata with parameter details for standard planning prompts."""
-        tools_list = []
-        for tool_info in tool_metadata.values():
-            tool_entry = f"→ {tool_info['name']}\n"
-            tool_entry += f"  {tool_info['description']}\n"
-            if tool_info.get("args"):
-                tool_entry += "  Parameters:\n"
-                for arg_name, arg_details in tool_info["args"].items():
-                    required = "required" if arg_details["required"] else "optional"
-                    desc = arg_details.get("description", "No description")
-                    tool_entry += f"    • {arg_name} ({required}): {desc}\n"
-            tools_list.append(tool_entry)
-        return "\n".join(tools_list)
+        """Format tool metadata (docstring Args/Returns only — no duplicate Parameters block)."""
+        return format_tools_for_llm_prompt(tool_metadata)
+
+    def _resolve_enriched_goal_for_planning(
+        self,
+        state: Optional[MDState],
+        agent_input: AnalysisAgentInput,
+    ) -> str:
+        """Per-simulation enriched goal from input validation (clearest analysis scope)."""
+        if state and state.get("is_multi_simulation"):
+            idx = state.get("current_sim_index", 0)
+            sim_prompts = state.get("sim_prompts") or []
+            if 0 <= idx < len(sim_prompts):
+                stored = (sim_prompts[idx].get("enriched_prompt") or "").strip()
+                if stored:
+                    return stored
+        for candidate in (
+            agent_input.enriched_goal,
+            (state or {}).get("enriched_prompt"),
+            (state or {}).get("rephrased_goal"),
+        ):
+            text = (candidate or "").strip()
+            if text:
+                return text
+        return ""
+
+    def _format_goal_context_for_planning(
+        self,
+        agent_input: AnalysisAgentInput,
+        state: Optional[MDState] = None,
+    ) -> str:
+        """User + enriched goals for analysis planning prompts."""
+        enriched = self._resolve_enriched_goal_for_planning(state, agent_input)
+        user_goal = (agent_input.user_goal or "").strip()
+        if enriched and enriched != user_goal:
+            return (
+                f"- User Goal: {user_goal or 'Not specified'}\n"
+                f"- Enriched User Goal (PRIMARY scope — plan every analysis listed here): "
+                f"{enriched}"
+            )
+        if enriched:
+            return f"- Enriched User Goal (PRIMARY scope): {enriched}"
+        return f"- User Goal: {user_goal or 'Not specified'}"
+
+    def _format_trajectory_input_block(self, agent_input: AnalysisAgentInput) -> str:
+        """Explicit topology/trajectory basenames the LLM must use in tool_params."""
+        topo_name = (
+            Path(agent_input.topology_file).name
+            if agent_input.topology_file
+            else "md.tpr"
+        )
+        traj_name = (
+            Path(agent_input.trajectory_file).name
+            if agent_input.trajectory_file
+            else "md.xtc"
+        )
+        return (
+            "**Required input filenames (copy exactly into every calculate_*/analyze_* step):**\n"
+            f"- topology_file: \"{topo_name}\"\n"
+            f"- trajectory_file: \"{traj_name}\"\n"
+        )
 
     def _get_per_sim_tool_scope_note(self, state: Optional[MDState] = None) -> str:
         """Tell the analysis LLM to stay within this simulation's scope."""
@@ -679,8 +735,7 @@ class MDAnalysisAgent:
         """LLM plan for HITL chat — task text only; no multisim intent filtering."""
         prompt = self._build_hitl_planning_prompt(task, agent_input, state)
         try:
-            response = self.llm.invoke([prompt])
-            content = response.content or ""
+            content = self.llm.prompt_raw(prompt, temperature=0.2, max_tokens=3000)
 
             log_llm_interaction(
                 "analysis.hitl_planning",
@@ -690,6 +745,7 @@ class MDAnalysisAgent:
             )
 
             plan_dict = self._extract_plan_json(content)
+            plan_dict = self._normalize_plan_steps(plan_dict, agent_input)
             plan_dict = self._normalize_hitl_plan_dict(plan_dict)
             plan_dict = self._sanitize_combined_hitl_plan(plan_dict, state, task)
             return AnalysisPlan(
@@ -722,8 +778,9 @@ class MDAnalysisAgent:
     ) -> str:
         """Planning prompt where the HITL chat task is the only user intent."""
         tool_metadata = self._get_analysis_tool_metadata(state)
-        tools_list_str = self._format_tools_list_for_prompt(tool_metadata)
+        tools_list_str = self._format_tools_list_detailed(tool_metadata)
         pdb_info_str = self._format_pdb_info_for_llm(state)
+        input_files_block = self._format_trajectory_input_block(agent_input)
 
         topo_name = Path(agent_input.topology_file).name if agent_input.topology_file else "md.tpr"
         traj_name = Path(agent_input.trajectory_file).name if agent_input.trajectory_file else "mdWrap.xtc"
@@ -744,6 +801,7 @@ class MDAnalysisAgent:
 - Topology File: {agent_input.topology_file or "Not available"} (use filename "{topo_name}" in tool_params)
 - Trajectory File: {agent_input.trajectory_file or "Not available"} (use filename "{traj_name}" in tool_params)
 - Energy File: {agent_input.energy_file or "Not available"}
+{input_files_block}
 {pdb_info_str}
 
 **Available Tools:**
@@ -906,6 +964,7 @@ Output as JSON:
                 run_combined_dccm_difference,
                 run_combined_rmsf_segment_analysis,
                 run_combined_com_distance_analysis,
+                run_combined_binding_rmsf_overlay,
                 pair_apo_holo_simulations,
                 run_combined_rmsf_apo_holo_analysis,
                 run_combined_dccm_apo_holo_analysis,
@@ -950,12 +1009,21 @@ Output as JSON:
                         r"ligand_pocket_distance",
                     ],
                     "dssp": [r"\bdssp\b", r"secondary[-\s]?structure"],
+                    "pocket_rmsf": [r"pocket\s+rmsf", r"pocket_rmsf"],
+                    "ligand_rmsf": [r"ligand\s+rmsf", r"ligand_rmsf"],
                 }
                 requested = frozenset(
                     metric
                     for metric, patterns in metric_patterns.items()
                     if any(re.search(pattern, combined_plan_text) for pattern in patterns)
                 ) or None
+
+            class_groups = classification_metric_groups_for_goal(
+                state.get("user_goal_original") or "",
+                state.get("combined_analysis_plan") or "",
+                state.get("master_enriched_prompt") or "",
+                state.get("enriched_prompt") or "",
+            )
 
             explicit_metrics_requested = bool(requested)
             broad_dynamics_request = any(
@@ -1194,6 +1262,55 @@ Output as JSON:
             except Exception as _exc:
                 logger.warning(f"COM distance overlay failed: {_exc}")
 
+            # ── Pocket / ligand RMSF combined overlays ───────────────────────
+            overlay_metrics = set(requested or [])
+            if class_groups is not None:
+                overlay_metrics |= set(class_groups)
+            for profile_type in ("pocket_rmsf", "ligand_rmsf"):
+                if profile_type not in overlay_metrics:
+                    continue
+                try:
+                    rmsf_dirs, rmsf_labels = self._sims_for_combined_metric(
+                        state, sim_dirs, labels, profile_type,
+                        label_name_map=_name_map_a or None,
+                    )
+                    if len(rmsf_dirs) < 1:
+                        logger.info(
+                            "Combined %s: no holo simulations with data", profile_type
+                        )
+                        continue
+                    display_labels = [
+                        (_name_map_a or {}).get(lab.lower(), lab)
+                        for lab in rmsf_labels
+                    ]
+                    rmsf_overlay = run_combined_binding_rmsf_overlay.func(
+                        sim_dirs=rmsf_dirs,
+                        labels=display_labels,
+                        working_dir=analysis_dir,
+                        profile_type=profile_type,
+                    )
+                    if rmsf_overlay.get("success"):
+                        out_path = rmsf_overlay.get("output_path")
+                        if out_path and out_path not in plots:
+                            plots.append(out_path)
+                        log_agent_action(
+                            "analysis",
+                            f"Combined {profile_type} overlay generated",
+                            {
+                                "output": out_path,
+                                "n_simulations": rmsf_overlay.get("n_simulations"),
+                                "missing": rmsf_overlay.get("missing", []),
+                            },
+                        )
+                    else:
+                        logger.info(
+                            "Combined %s overlay: %s",
+                            profile_type,
+                            rmsf_overlay.get("message") or rmsf_overlay.get("error"),
+                        )
+                except Exception as _exc:
+                    logger.warning(f"Combined {profile_type} overlay failed: {_exc}")
+
             # ── DSSP: backfill missing per-sim runs, comparison chart, activation-loop heatmaps ─
             dssp_plots: list = []
             try:
@@ -1225,6 +1342,174 @@ Output as JSON:
             except Exception as _exc:
                 logger.warning(f"Combined DSSP analysis failed: {_exc}")
 
+            # ── Classification feature matrix (only when user explicitly requests) ─
+            classification_table = None
+            classification_clustering = None
+            if class_groups is not None:
+                try:
+                    from .tools import (
+                        collect_classification_features_table,
+                        cluster_classification_features,
+                    )
+                    from src.analysis.classification_clustering import (
+                        clustering_method_for_goal,
+                        plot_cluster_feature_trajectories,
+                        plot_cluster_rmsf_profiles,
+                        CLUSTER_TRAJECTORY_METRIC_GROUPS,
+                        CLUSTER_RMSF_PROFILE_GROUPS,
+                    )
+
+                    class_result = collect_classification_features_table.func(
+                        base_directory=working_dir,
+                        working_dir=analysis_dir,
+                        requested_metric_groups=sorted(class_groups),
+                        allowed_labels=[Path(d).name for d in sim_dirs],
+                    )
+                    if class_result.get("success"):
+                        classification_table = class_result.get("output_file")
+                        tables.append(classification_table)
+                        zscore_path = class_result.get("zscore_output_file")
+                        if zscore_path:
+                            tables.append(zscore_path)
+                        log_agent_action(
+                            "analysis",
+                            "Classification feature table built",
+                            {
+                                "output": classification_table,
+                                "metric_groups": sorted(class_groups),
+                                "n_simulations": class_result.get("n_simulations"),
+                            },
+                        )
+
+                        user_goal_text = " ".join(
+                            t
+                            for t in (
+                                state.get("user_goal_original"),
+                                state.get("user_goal"),
+                                state.get("combined_analysis_plan"),
+                                state.get("master_enriched_prompt"),
+                                state.get("enriched_prompt"),
+                            )
+                            if t
+                        ).strip()
+                        cluster_method = clustering_method_for_goal(
+                            user_goal_text,
+                            state.get("combined_analysis_plan") or "",
+                        )
+                        cluster_result = cluster_classification_features.func(
+                            working_dir=analysis_dir,
+                            features_file=(
+                                Path(zscore_path).name
+                                if zscore_path
+                                else "classification_features_zscore.csv"
+                            ),
+                            method=cluster_method,
+                            user_goal=user_goal_text,
+                            label_name_map=_name_map_a or None,
+                        )
+                        if cluster_result.get("success"):
+                            classification_clustering = cluster_result
+                            scatter = cluster_result.get("scatter_plot")
+                            dendro = cluster_result.get("dendrogram_plot")
+                            if scatter:
+                                plots.append(scatter)
+                            if dendro:
+                                plots.append(dendro)
+                            log_agent_action(
+                                "analysis",
+                                "Classification clustering complete",
+                                {
+                                    "method": cluster_result.get("method"),
+                                    "n_clusters": cluster_result.get("n_clusters"),
+                                    "assignments": cluster_result.get("assignments_file"),
+                                },
+                            )
+                            traj_groups = sorted(
+                                g
+                                for g in class_groups
+                                if g in CLUSTER_TRAJECTORY_METRIC_GROUPS
+                            )
+                            if traj_groups:
+                                traj_result = plot_cluster_feature_trajectories.func(
+                                    working_dir=analysis_dir,
+                                    assignments_file=(
+                                        Path(cluster_result["assignments_file"]).name
+                                        if cluster_result.get("assignments_file")
+                                        else "classification_cluster_assignments.csv"
+                                    ),
+                                    metric_groups=traj_groups,
+                                )
+                                if traj_result.get("success"):
+                                    for p in traj_result.get("plots", []):
+                                        if p not in plots:
+                                            plots.append(p)
+                                    log_agent_action(
+                                        "analysis",
+                                        "Cluster trajectory plots generated",
+                                        {
+                                            "metrics": traj_result.get("metrics_plotted"),
+                                            "n_clusters": traj_result.get("n_clusters"),
+                                        },
+                                    )
+                                else:
+                                    logger.warning(
+                                        "Cluster trajectory plots: %s",
+                                        traj_result.get("error"),
+                                    )
+                            rmsf_profile_types = sorted(
+                                g
+                                for g in class_groups
+                                if g in CLUSTER_RMSF_PROFILE_GROUPS
+                            )
+                            if rmsf_profile_types:
+                                rmsf_cluster = plot_cluster_rmsf_profiles.func(
+                                    working_dir=analysis_dir,
+                                    assignments_file=(
+                                        Path(cluster_result["assignments_file"]).name
+                                        if cluster_result.get("assignments_file")
+                                        else "classification_cluster_assignments.csv"
+                                    ),
+                                    profile_types=rmsf_profile_types,
+                                )
+                                if rmsf_cluster.get("success"):
+                                    for p in rmsf_cluster.get("plots", []):
+                                        if p not in plots:
+                                            plots.append(p)
+                                    log_agent_action(
+                                        "analysis",
+                                        "Cluster RMSF profile plots generated",
+                                        {
+                                            "profiles": rmsf_cluster.get("profiles_plotted"),
+                                            "n_clusters": rmsf_cluster.get("n_clusters"),
+                                        },
+                                    )
+                                else:
+                                    logger.warning(
+                                        "Cluster RMSF plots: %s",
+                                        rmsf_cluster.get("error"),
+                                    )
+                        else:
+                            logger.warning(
+                                "Classification clustering: %s",
+                                cluster_result.get("error"),
+                            )
+                    else:
+                        logger.warning(
+                            "Classification table: %s", class_result.get("error")
+                        )
+                        log_agent_action(
+                            "analysis",
+                            "Classification feature table failed",
+                            {"error": class_result.get("error"), "metric_groups": sorted(class_groups)},
+                        )
+                except Exception as _exc:
+                    logger.warning(f"Classification feature table failed: {_exc}")
+                    log_agent_action(
+                        "analysis",
+                        "Classification feature table failed",
+                        {"error": str(_exc), "metric_groups": sorted(class_groups)},
+                    )
+
             # Store results in state for the reporter
             analysis_results = state.get("analysis_results") or {}
             analysis_results["combined"] = {
@@ -1239,6 +1524,9 @@ Output as JSON:
                 "rmsf_segment_plots": segment_plots,
                 "com_distance_plot": com_plot,
                 "dssp_plots": dssp_plots,
+                "classification_features_table": classification_table,
+                "classification_clustering": classification_clustering,
+                "classification_metric_groups": sorted(class_groups) if class_groups else None,
                 "analysis_dir": analysis_dir,
             }
             state["analysis_results"] = analysis_results
@@ -1698,6 +1986,7 @@ Output as JSON:
             energy_file=state.get("energy_file"),
             analyses=defaults.get("metrics", ["rmsd", "rmsf", "gyration"]),
             user_goal=state.get("user_goal", ""),
+            enriched_goal=state.get("enriched_prompt") or state.get("rephrased_goal"),
             additional_instructions=planner_instructions
         )
 
@@ -1849,20 +2138,34 @@ Output as JSON:
         prompt = self._build_analysis_planning_prompt(agent_input, state)
         
         try:
-            response = self.llm.invoke([prompt])
-            content = response.content or ""
-            
+            content = self.llm.prompt_raw(prompt, temperature=0.2, max_tokens=4000)
+
             log_llm_interaction("analysis.planning", prompt, content,
                               is_mock=hasattr(self.llm, '_is_mock_mode') and self.llm._is_mock_mode)
-            
-            # Parse LLM response into structured plan
+
             plan_dict = self._extract_plan_json(content)
+            plan_dict = self._normalize_plan_steps(plan_dict, agent_input)
+
+            llm_step_count = len(plan_dict.get("steps", []))
+            llm_reasoning = plan_dict.get("reasoning", "")
 
             plan_dict = self._filter_plan_steps_by_intent(plan_dict, state, agent_input)
 
             # Post-process: inject mandatory steps the LLM may have omitted
             plan_dict = self._inject_mandatory_steps(plan_dict, agent_input, state)
+            plan_dict = self._ensure_requested_metric_steps(plan_dict, agent_input, state)
             plan_dict = self._filter_plan_steps_by_intent(plan_dict, state, agent_input)
+
+            final_step_count = len(plan_dict.get("steps", []))
+            if final_step_count > llm_step_count:
+                tools = [s.get("tool_name", "") for s in plan_dict.get("steps", [])]
+                plan_dict["reasoning"] = (
+                    f"Expanded LLM draft ({llm_step_count} steps) to {final_step_count} steps "
+                    f"covering all metrics in the enriched user goal. "
+                    f"Tools: {', '.join(tools)}."
+                )
+            elif not plan_dict.get("reasoning"):
+                plan_dict["reasoning"] = llm_reasoning or content[:500]
 
             return AnalysisPlan(
                 reasoning=plan_dict.get("reasoning", content[:500]),
@@ -2043,7 +2346,106 @@ Output as JSON:
         if not label:
             label = Path(state.get("working_directory", "")).name
         sim_dir = state.get("working_directory", "")
-        return is_holo_simulation(sim_dir, label)
+        if is_holo_simulation(sim_dir, label):
+            return True
+
+        goal_text = " ".join(
+            t for t in (
+                state.get("user_goal"),
+                state.get("user_goal_original"),
+                getattr(agent_input, "user_goal", None),
+            )
+            if t
+        ).lower()
+        if any(kw in goal_text for kw in ("holo", "protein–atp", "protein-atp", "atp", "ligand")):
+            return True
+
+        requested = self._intent_metrics(state, agent_input)
+        binding_metrics = frozenset({
+            "com", "contacts", "pocket_sasa", "residence", "pocket_rmsf", "ligand_rmsf",
+        })
+        if requested and requested & binding_metrics:
+            return True
+        return False
+
+    @staticmethod
+    def _analysis_step_to_dict(step: AnalysisStep) -> Dict[str, Any]:
+        return {
+            "name": step.name,
+            "description": step.description,
+            "tool_name": step.tool_name,
+            "tool_params": step.tool_params,
+            "reason": step.reason,
+        }
+
+    def _ensure_requested_metric_steps(
+        self,
+        plan_dict: Dict[str, Any],
+        agent_input: AnalysisAgentInput,
+        state: MDState,
+    ) -> Dict[str, Any]:
+        """Merge fallback steps for requested metrics missing from the LLM plan."""
+        if state.get("hitl_chat_task"):
+            return plan_dict
+
+        requested = self._intent_metrics(state, agent_input)
+        if not requested:
+            return plan_dict
+
+        existing_tools = {s.get("tool_name", "") for s in plan_dict.get("steps", [])}
+        missing_metrics: Set[str] = set()
+        for metric in requested:
+            if not any(
+                _CALC_TOOL_TO_METRIC.get(tool) == metric for tool in existing_tools
+            ):
+                missing_metrics.add(metric)
+
+        if "fel" in missing_metrics:
+            missing_metrics.add("pca")
+
+        if not missing_metrics:
+            return plan_dict
+
+        fallback = self._create_fallback_analysis_plan(agent_input, state)
+        merged = list(plan_dict.get("steps", []))
+        merged_outputs = {
+            str(s.get("tool_params", {}).get("output_file", ""))
+            for s in merged
+        }
+
+        for fb_step in fallback.steps:
+            tool = fb_step.tool_name
+            metric = _CALC_TOOL_TO_METRIC.get(tool)
+            if metric and metric in missing_metrics and tool not in existing_tools:
+                merged.append(self._analysis_step_to_dict(fb_step))
+                existing_tools.add(tool)
+                out = str(fb_step.tool_params.get("output_file", ""))
+                if out:
+                    merged_outputs.add(out)
+                continue
+
+            if tool in {"plot_md_data", "plot_pca_projection", "plot_multipanel"}:
+                out_file = str(fb_step.tool_params.get("output_file", ""))
+                if out_file and out_file in merged_outputs:
+                    continue
+                data_files = fb_step.tool_params.get("data_files") or []
+                for m in missing_metrics:
+                    spec = STANDARD_OUTPUT_FILES.get(m, {})
+                    plot_ok = out_file and out_file == spec.get("plot")
+                    data_ok = any(df == spec.get("data") for df in data_files)
+                    if plot_ok or data_ok:
+                        merged.append(self._analysis_step_to_dict(fb_step))
+                        if out_file:
+                            merged_outputs.add(out_file)
+                        break
+
+        if len(merged) > len(plan_dict.get("steps", [])):
+            logger.info(
+                "_ensure_requested_metric_steps: added steps for missing metrics: %s",
+                sorted(missing_metrics),
+            )
+            plan_dict["steps"] = merged
+        return plan_dict
 
     def _inject_mandatory_steps(self, plan_dict: Dict[str, Any],
                                  agent_input: AnalysisAgentInput,
@@ -2326,13 +2728,20 @@ Output as JSON:
         """Build prompt using planner's detailed natural language instructions"""
         
         tool_metadata = self._get_analysis_tool_metadata(state)
-        tools_list_str = self._format_tools_list_for_prompt(tool_metadata)
+        tools_list_str = self._format_tools_list_detailed(tool_metadata)
         scope_note = self._get_per_sim_tool_scope_note(state)
+        input_files_block = self._format_trajectory_input_block(agent_input)
+        goal_context = self._format_goal_context_for_planning(agent_input, state)
 
         goal_text = " ".join(collect_goal_texts_for_intent(state, agent_input)).lower()
         _pca_fel_block = (
             get_pca_fel_tool_guide()
             if any(k in goal_text for k in ("pca", "principal component", "free energy landscape", "fel", "energy landscape", "essential dynamics"))
+            else ""
+        )
+        _classification_block = (
+            get_classification_per_sim_tool_guide()
+            if detect_classification_requested(*collect_goal_texts_for_intent(state, agent_input))
             else ""
         )
         
@@ -2358,14 +2767,19 @@ Output as JSON:
 - Topology File: {agent_input.topology_file or "Not available"}
 - Trajectory File: {agent_input.trajectory_file or "Not available"}
 - Energy File: {agent_input.energy_file or "Not available"}
-- User Goal: {agent_input.user_goal or "Not specified"}
+{goal_context}
+{input_files_block}
 {registry_str}
 {pdb_info_str}
 
 **INTENT (HIGHEST PRIORITY — overrides planner if they conflict):**
-The User Goal defines which analyses to run. If the User Goal says "RMSF only" (or similar),
-your plan must include ONLY calculate_rmsf + plot_md_data for rmsf.dat/rmsf.png — do NOT add
-RMSD, Rg, SASA, hydrogen bonds, DCCM, wrap_trajectory, or run_complete_analysis.
+The **Enriched User Goal** (when present) is the authoritative per-simulation scope.
+Your JSON plan MUST include a calculate_*/analyze_* step plus plot_md_data (or plot_pca_projection)
+for **every** metric named in the Enriched User Goal — not just the first one.
+Planner instructions below are a reference checklist only: omit any planner step whose metric
+is absent from the Enriched User Goal; add every metric the Enriched User Goal requests even
+if the planner omits it.
+If the Enriched User Goal says "RMSF only" (or similar exclusive language), plan ONLY that metric.
 
 {get_standard_output_filenames_block()}
 
@@ -2383,8 +2797,11 @@ RMSD, Rg, SASA, hydrogen bonds, DCCM, wrap_trajectory, or run_complete_analysis.
 - Every "tool_name" in your plan must match exactly one of the tool names listed above
 - FORBIDDEN tool names: "none", "manual", "skip", "custom", "placeholder", or any made-up tool
 - For input file parameters (topology_file, trajectory_file, energy_file etc.):
-  Use ONLY the file name (e.g. "md.gro"), NOT a full path.
-  The framework resolves correct paths automatically. Do NOT invent directory paths.
+  Use ONLY the exact filenames from **Required input filenames** above.
+  NEVER use trajectory.dcd, md.dcd, or invented paths.
+- For plot_md_data use **data_files** (list), e.g. `"data_files": ["ligand_pocket_distance.csv"]` — not data_file.
+- For plot_pca_projection use **pca_projections_file** (from calculate_trajectory_pca), not pca_file or input_file.
+- For calculate_trajectory_pca use **projections_file** / **variance_file**, not output_file.
 - For output file parameters (output_file, plot_file, csv_file etc.):
   Use ONLY the file name (e.g. "rmsd.dat"). The framework prepends the output directory.
 - If a required capability is missing, either:
@@ -2402,18 +2819,21 @@ RMSD, Rg, SASA, hydrogen bonds, DCCM, wrap_trajectory, or run_complete_analysis.
 - Apply this pattern for RMSD, RMSF, Rg, energy, and any distance calculation.
 {get_com_distance_tool_guide()}
 {_pca_fel_block}
+{_classification_block}
 - **DCCM — only when the User Goal explicitly names DCCM for this simulation:**
   Include calculate_dccm only if DCCM is requested in the User Goal for this run.
   Do NOT add DCCM because the global project mentions it for other proteins.
   Use: selection="protein and name CA", frame_interval=5, output_prefix="dccm".
 
-Your task: Create a detailed, step-by-step execution plan that follows the planner's instructions above
-AND honours the original User Goal. When the User Goal requests ligand/pocket/COM distance analysis,
+Your task: Create a detailed, step-by-step execution plan that implements **every analysis**
+in the Enriched User Goal (or User Goal when no enriched text exists). Follow planner
+instructions only where they match that scope. When ligand/pocket/COM distance is requested,
 include the correct COM tool from the guide above (not both unless both are requested).
-The plan should specify which tools to call and in what order to achieve the planner's objectives.
+The plan should specify which tools to call and in what order.
 ONLY include steps that use valid tools from the list above.
+Your "steps" array must list ALL requested calculations and plots — a partial plan is invalid.
 
-Output as JSON with this structure:
+Output as JSON with this structure (object with "steps", NOT a tool-call array):
 {{
   "reasoning": "How you'll implement the planner's instructions",
   "overview": "High-level summary",
@@ -2422,13 +2842,14 @@ Output as JSON with this structure:
       "name": "step name",
       "description": "what it does",
       "tool_name": "tool to call",
-      "tool_params": {{"param": "value"}},
+      "tool_params": {{"topology_file": "{Path(agent_input.topology_file).name if agent_input.topology_file else 'md.tpr'}", "trajectory_file": "{Path(agent_input.trajectory_file).name if agent_input.trajectory_file else 'md.xtc'}", "output_file": "example.dat"}},
       "reason": "why it's needed per planner's instructions"
     }}
   ],
   "potential_issues": ["issue1"],
   "recommendations": ["rec1"]
 }}
+Return ONLY this JSON object — no markdown fences, no [{{"name":..., "arguments":...}}] array.
 """
 
     def _build_standard_analysis_prompt(self, agent_input: AnalysisAgentInput, state: MDState = None) -> str:
@@ -2438,13 +2859,16 @@ Output as JSON with this structure:
         tool_metadata = self._get_analysis_tool_metadata(state)
         tools_list_str = self._format_tools_list_detailed(tool_metadata)
         scope_note = self._get_per_sim_tool_scope_note(state)
+        input_files_block = self._format_trajectory_input_block(agent_input)
+        goal_context = self._format_goal_context_for_planning(agent_input, state)
         
         # Build analysis context
         analysis_context = "\n".join([
             f"- Trajectory available: {bool(agent_input.trajectory_file)}",
             f"- Topology available: {bool(agent_input.topology_file)}",
             f"- Energy file available: {bool(agent_input.energy_file)}",
-            f"- Requested analyses: {', '.join(agent_input.analyses) if agent_input.analyses else 'None specified'}"
+            f"- Requested analyses: {', '.join(agent_input.analyses) if agent_input.analyses else 'None specified'}",
+            goal_context,
         ])
         
         # Extract PDB structural information if state provided
@@ -2457,6 +2881,9 @@ Output as JSON with this structure:
                 topology_file=agent_input.topology_file or "Not available",
                 energy_file=agent_input.energy_file or "Not available",
                 user_goal=agent_input.user_goal,
+                enriched_goal=self._resolve_enriched_goal_for_planning(state, agent_input)
+                or agent_input.user_goal
+                or "Not specified",
                 hpc_output_dir=agent_input.hpc_output_dir or "Not specified",
                 analysis_context=analysis_context,
                 tools_list=tools_list_str + ("\n\n" + scope_note if scope_note else ""),
@@ -2470,6 +2897,7 @@ Output as JSON with this structure:
 - Trajectory: {agent_input.trajectory_file or "Not available"}
 - Energy File: {agent_input.energy_file or "Not available"}
 - User Goal: {agent_input.user_goal}
+{input_files_block}
 {pdb_info_str}
 
 **Available Tools:**
@@ -2487,21 +2915,136 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
 """
 
     def _extract_plan_json(self, content: str) -> Dict[str, Any]:
-        """Extract and parse JSON plan from LLM response"""
-        # Try to find JSON block in response
-        json_match = re.search(r'\{[\s\S]*\}', content)
-        if json_match:
+        """Extract and parse JSON plan from LLM response."""
+        text = (content or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text).strip()
+
+        def _try_parse(raw: str) -> Optional[Dict[str, Any]]:
             try:
-                return json.loads(json_match.group())
+                parsed = json.loads(raw)
             except json.JSONDecodeError:
-                pass
-        
-        # Fallback: return minimal structure
+                return None
+            if isinstance(parsed, list):
+                return self._coerce_tool_call_array_to_plan(parsed)
+            if isinstance(parsed, dict):
+                if "steps" not in parsed and parsed.get("tool_name"):
+                    return self._coerce_tool_call_array_to_plan([parsed])
+                return parsed
+            return None
+
+        result = _try_parse(text)
+        if result is not None:
+            return result
+
+        for pattern in (r"\[[\s\S]*\]", r"\{[\s\S]*\}"):
+            match = re.search(pattern, text)
+            if match:
+                result = _try_parse(match.group())
+                if result is not None:
+                    return result
+
         return {
             "reasoning": content,
             "overview": "MD trajectory analysis plan",
-            "steps": []
+            "steps": [],
         }
+
+    def _coerce_tool_call_array_to_plan(self, items: List[Any]) -> Dict[str, Any]:
+        """Convert [{name, arguments}] tool-call JSON into a structured plan dict."""
+        steps: List[Dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            tool_name = item.get("tool_name") or item.get("name") or ""
+            params = dict(item.get("tool_params") or item.get("arguments") or {})
+            steps.append(
+                {
+                    "name": item.get("name") or tool_name or "step",
+                    "description": item.get("description", ""),
+                    "tool_name": tool_name,
+                    "tool_params": params,
+                    "reason": item.get("reason", "LLM plan step"),
+                }
+            )
+        return {
+            "reasoning": "Converted from LLM tool-call array response",
+            "overview": "MD trajectory analysis plan",
+            "steps": steps,
+            "potential_issues": ["LLM returned tool-call array instead of plan object"],
+            "recommendations": [],
+        }
+
+    _BAD_TRAJECTORY_NAMES = frozenset(
+        {"trajectory.dcd", "traj.dcd", "md.dcd", "trajectory.xtc", "topology.tpr"}
+    )
+
+    def _normalize_plan_steps(
+        self,
+        plan_dict: Dict[str, Any],
+        agent_input: AnalysisAgentInput,
+    ) -> Dict[str, Any]:
+        """Repair common LLM parameter mistakes before tool execution."""
+        topo = (
+            Path(agent_input.topology_file).name
+            if agent_input.topology_file
+            else "md.tpr"
+        )
+        traj = (
+            Path(agent_input.trajectory_file).name
+            if agent_input.trajectory_file
+            else "md.xtc"
+        )
+        traj_prefixes = ("calculate_", "analyze_", "wrap_trajectory")
+
+        for step in plan_dict.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            tool = step.get("tool_name") or ""
+            params = dict(step.get("tool_params") or {})
+
+            if tool == "plot_md_data":
+                for alias in ("data_file", "input_file", "csv_file"):
+                    if alias in params and "data_files" not in params:
+                        val = params.pop(alias)
+                        params["data_files"] = [val] if isinstance(val, str) else val
+
+            if tool == "plot_pca_projection":
+                for alias in ("pca_file", "input_file", "pca_projections"):
+                    if alias in params and "pca_projections_file" not in params:
+                        val = params.pop(alias)
+                        if val in ("pca.csv", "pca.dat"):
+                            val = "pca_projections.dat"
+                        params["pca_projections_file"] = val
+
+            if tool == "calculate_trajectory_pca":
+                params.pop("output_file", None)
+                params.setdefault("projections_file", "pca_projections.dat")
+                params.setdefault("variance_file", "pca_variance.dat")
+
+            if tool == "calculate_free_energy_landscape":
+                for alias in ("pca_file", "input_file"):
+                    if alias in params and "pca_projections_file" not in params:
+                        val = params.pop(alias)
+                        if val in ("pca.csv", "pca.dat"):
+                            val = "pca_projections.dat"
+                        params["pca_projections_file"] = val
+
+            needs_traj = any(tool.startswith(p) for p in traj_prefixes)
+            if needs_traj:
+                cur_traj = str(params.get("trajectory_file") or "").lower()
+                if (
+                    not params.get("topology_file")
+                    or not params.get("trajectory_file")
+                    or cur_traj in self._BAD_TRAJECTORY_NAMES
+                    or cur_traj.endswith(".dcd")
+                ):
+                    params["topology_file"] = topo
+                    params["trajectory_file"] = traj
+
+            step["tool_params"] = params
+        return plan_dict
 
     def replan_with_guidance(self, human_recommendation: str, state: dict) -> Optional[dict]:
         """Update the structured analysis plan by applying human guidance.
@@ -2527,11 +3070,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         if current_plan:
             # Modification mode: keep existing plan, apply targeted changes
             tool_metadata = self._get_analysis_tool_metadata(state)
-            tools_list = [
-                f"→ {t['name']}: {t['description']}"
-                for t in tool_metadata.values()
-            ]
-            tools_str = "\n".join(tools_list)
+            tools_str = self._format_tools_list_detailed(tool_metadata)
             scope_note = self._get_per_sim_tool_scope_note(state)
             prompt = (
                 f"You are updating an MD trajectory analysis execution plan.\n\n"
@@ -2572,8 +3111,12 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             prompt = self._build_analysis_planning_prompt(agent_input, state)
 
         try:
-            resp = self.llm.prompt(prompt, temperature=0.1)
-            return self._extract_plan_json(resp)
+            resp = self.llm.prompt_raw(prompt, temperature=0.1, max_tokens=4000)
+            plan_dict = self._extract_plan_json(resp)
+            if current_plan:
+                return plan_dict
+            plan_dict = self._normalize_plan_steps(plan_dict, agent_input)
+            return plan_dict
         except Exception:
             return None
 
@@ -2683,19 +3226,14 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     ),
                 ])
 
-            _has_ligand_request = "com" in requested or any(
-                kw in _goal_lower for kw in
-                ["ligand", "atp", "adp", "inhibitor", "pocket", "distance", "com distance", "binding"]
+            _lig_resname = (
+                self._detect_ligand_resname(agent_input, state)
+                if state
+                else "ATP"
             )
-            import re as _re_fb
-            _lig_resname_match = _re_fb.search(
-                r'resname[\s:]+([A-Za-z0-9]{1,6})', _goal_lower
-            ) or _re_fb.search(
-                r'\b(ATP|ADP|LIG|INH|NAD|FAD|GTP|GDP|AMP|MG|ION)\b', agent_input.user_goal or ""
-            )
-            _lig_resname = _lig_resname_match.group(1).upper() if _lig_resname_match else "LIG"
+            _is_holo = state and self._is_holo_simulation(state, agent_input)
 
-            if _has_ligand_request and state and self._is_holo_simulation(state, agent_input):
+            if "com" in requested and _is_holo:
                 steps.extend([
                     AnalysisStep(
                         name="Ligand Pocket Distance",
@@ -2727,6 +3265,221 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                             "ylabel": "COM Distance (Å)",
                         },
                         reason="Visualise ligand displacement from catalytic pocket",
+                    ),
+                ])
+
+            if "contacts" in requested and _is_holo:
+                steps.extend([
+                    AnalysisStep(
+                        name="Protein-Ligand Contacts",
+                        description="Count protein–ligand H-bonds and heavy-atom contacts per frame",
+                        tool_name="calculate_protein_ligand_contacts",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "ligand_selection": f"resname {_lig_resname}",
+                            "output_file": "protein_ligand_contacts.csv",
+                        },
+                        reason="User requested protein–ligand contact analysis",
+                    ),
+                    AnalysisStep(
+                        name="Plot Protein-Ligand Contacts",
+                        description="Plot contact and H-bond counts over time",
+                        tool_name="plot_md_data",
+                        tool_params={
+                            "data_files": ["protein_ligand_contacts.csv"],
+                            "output_file": "protein_ligand_contacts.png",
+                            "xlabel": "Time (ns)",
+                            "ylabel": "Count",
+                        },
+                        reason="Visualise protein–ligand interactions",
+                    ),
+                ])
+
+            if "pocket_sasa" in requested and _is_holo:
+                steps.extend([
+                    AnalysisStep(
+                        name="Pocket SASA",
+                        description="Calculate solvent-accessible surface area of the binding pocket",
+                        tool_name="calculate_pocket_sasa",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "ligand_selection": f"resname {_lig_resname}",
+                            "output_file": "pocket_sasa.csv",
+                        },
+                        reason="User requested pocket SASA",
+                    ),
+                    AnalysisStep(
+                        name="Plot Pocket SASA",
+                        description="Plot pocket SASA over time",
+                        tool_name="plot_md_data",
+                        tool_params={
+                            "data_files": ["pocket_sasa.csv"],
+                            "output_file": "pocket_sasa.png",
+                            "xlabel": "Time (ns)",
+                            "ylabel": "SASA (Å²)",
+                        },
+                        reason="Visualise pocket accessibility",
+                    ),
+                ])
+
+            if "residence" in requested and _is_holo:
+                steps.extend([
+                    AnalysisStep(
+                        name="Ligand Residence",
+                        description="Analyze ligand residence time and unbinding events",
+                        tool_name="analyze_ligand_residence",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "ligand_selection": f"resname {_lig_resname}",
+                            "output_file": "ligand_residence.csv",
+                        },
+                        reason="User requested ligand residence/unbinding analysis",
+                    ),
+                    AnalysisStep(
+                        name="Plot Ligand Residence",
+                        description="Plot bound fraction and residence metrics",
+                        tool_name="plot_md_data",
+                        tool_params={
+                            "data_files": ["ligand_residence.csv"],
+                            "output_file": "ligand_residence.png",
+                            "xlabel": "Time (ns)",
+                            "ylabel": "Bound fraction",
+                        },
+                        reason="Visualise ligand binding stability",
+                    ),
+                ])
+
+            if "pocket_rmsf" in requested and _is_holo:
+                steps.extend([
+                    AnalysisStep(
+                        name="Pocket RMSF",
+                        description="Calculate per-residue RMSF for binding-pocket residues",
+                        tool_name="calculate_pocket_rmsf",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "ligand_selection": f"resname {_lig_resname}",
+                            "output_file": "pocket_rmsf.dat",
+                        },
+                        reason="User requested pocket RMSF",
+                    ),
+                    AnalysisStep(
+                        name="Plot Pocket RMSF",
+                        description="Plot pocket residue flexibility",
+                        tool_name="plot_md_data",
+                        tool_params={
+                            "data_files": ["pocket_rmsf.dat"],
+                            "output_file": "pocket_rmsf.png",
+                            "xlabel": "Residue",
+                            "ylabel": "RMSF (Å)",
+                            "plot_type": "line",
+                        },
+                        reason="Visualise pocket flexibility",
+                    ),
+                ])
+
+            if "ligand_rmsf" in requested and _is_holo:
+                steps.extend([
+                    AnalysisStep(
+                        name="Ligand RMSF",
+                        description="Calculate per-atom RMSF for the ligand",
+                        tool_name="calculate_ligand_rmsf",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "ligand_selection": f"resname {_lig_resname}",
+                            "output_file": "ligand_rmsf.dat",
+                        },
+                        reason="User requested ligand RMSF",
+                    ),
+                    AnalysisStep(
+                        name="Plot Ligand RMSF",
+                        description="Plot ligand atom flexibility",
+                        tool_name="plot_md_data",
+                        tool_params={
+                            "data_files": ["ligand_rmsf.dat"],
+                            "output_file": "ligand_rmsf.png",
+                            "xlabel": "Atom",
+                            "ylabel": "RMSF (Å)",
+                            "plot_type": "bar",
+                        },
+                        reason="Visualise ligand flexibility",
+                    ),
+                ])
+
+            if "pca" in requested:
+                steps.extend([
+                    AnalysisStep(
+                        name="Trajectory PCA",
+                        description="PCA on Cα coordinates to capture collective motions",
+                        tool_name="calculate_trajectory_pca",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "selection": "protein and name CA",
+                            "projections_file": "pca_projections.dat",
+                            "variance_file": "pca_variance.dat",
+                        },
+                        reason="User requested PCA on Cα",
+                    ),
+                    AnalysisStep(
+                        name="Plot PCA Projection",
+                        description="PC1 vs PC2 scatter coloured by time",
+                        tool_name="plot_pca_projection",
+                        tool_params={
+                            "pca_projections_file": "pca_projections.dat",
+                            "output_file": "pca_pc1_pc2.png",
+                        },
+                        reason="Visualise PCA conformational sampling",
+                    ),
+                ])
+
+            if "fel" in requested:
+                steps.extend([
+                    AnalysisStep(
+                        name="Free-Energy Landscape",
+                        description="Build FEL from PCA projections at 310 K",
+                        tool_name="calculate_free_energy_landscape",
+                        tool_params={
+                            "pca_projections_file": "pca_projections.dat",
+                            "temperature_k": 310.0,
+                            "output_plot": "fel_pc1_pc2.png",
+                            "output_grid": "fel_pc1_pc2_grid.csv",
+                        },
+                        reason="User requested free-energy landscape at 310 K",
+                    ),
+                    AnalysisStep(
+                        name="FEL Basin Features",
+                        description="Extract basin depths, barriers, and landscape entropy",
+                        tool_name="analyze_fel_landscape_features",
+                        tool_params={
+                            "fel_grid_file": "fel_pc1_pc2_grid.csv",
+                            "temperature_k": 310.0,
+                            "output_json": "fel_features.json",
+                            "output_csv": "fel_features.csv",
+                            "output_basins_csv": "fel_basins.csv",
+                            "output_plot": "fel_basins.png",
+                        },
+                        reason="User requested FEL basin features",
+                    ),
+                    AnalysisStep(
+                        name="Export FEL Basin Structures",
+                        description=(
+                            "Write representative PDB per FEL basin for "
+                            "visualising transient conformations"
+                        ),
+                        tool_name="export_fel_basin_structures",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "fel_features_file": "fel_features.json",
+                            "pca_projections_file": "pca_projections.dat",
+                            "manifest_file": "fel_basin_structures.csv",
+                        },
+                        reason="User requested FEL basin structures for highlighting",
                     ),
                 ])
 

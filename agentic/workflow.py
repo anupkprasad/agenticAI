@@ -965,28 +965,8 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             )
             is_completed_snapshot = str(saved_status).startswith("completed")
 
-            # Auto-resume interrupted multi-sim runs from base/per-sim state files.
-            if (
-                state.get("is_multi_simulation")
-                and not state.get("combined_only")
-                and not state.get("resume_failed_only")
-            ):
-                from agentic.multi_sim_progress import multisim_workflow_incomplete
-
-                saved_progress = saved_state.get("multi_sim_progress")
-                if multisim_workflow_incomplete(saved_progress):
-                    state["resume_failed_only"] = True
-                    is_completed_snapshot = False
-                    logger.info(
-                        "[multi-sim] Incomplete progress in saved state — "
-                        "auto-resuming (q7rtn6/q96c45 etc. need not use --resume)"
-                    )
-                elif str(saved_status).startswith("in_progress") and saved_state.get("sim_prompts"):
-                    state["resume_failed_only"] = True
-                    is_completed_snapshot = False
-                    logger.info(
-                        "[multi-sim] in_progress snapshot with sim_prompts — auto-resuming"
-                    )
+            # Fresh reruns should rebuild the master plan unless the user explicitly
+            # requests resume mode (``--resume``), which sets resume_failed_only.
 
             # Multi-simulation loop bookkeeping: restore when resuming (explicit or auto).
             multisim_loop_restore = (
@@ -1111,7 +1091,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     sync_state_from_progress,
                 )
 
-                if state.get("multi_sim_progress"):
+                if state.get("multi_sim_progress") and not state.get("combined_only"):
                     sync_state_from_progress(state)
                     from agentic.multi_sim_progress import ensure_per_sim_working_directory
 
@@ -1201,9 +1181,10 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
 
         # --combined-only reruns must not inherit per-sim routing from a saved state.
         if state.get("combined_only"):
-            base_dir = state.get("working_directory")
+            base_dir = state.get("multi_sim_base_dir") or working_dir
             for _k, _default in (
                 ("multi_sim_phase", None),
+                ("multi_sim_progress", None),
                 ("execution_plan", None),
                 ("plan_executed", False),
                 ("current_agent_idx", 0),
@@ -1221,19 +1202,20 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 ("reporter_instructions", None),
                 ("sim_prompts", None),
                 ("completed_sim_states", None),
-                ("run_combined_analysis", None),
                 ("combined_analysis_plan", None),
                 ("input_validated", True),
                 ("subtask_type_initialized", False),
             ):
                 state[_k] = _default
             state["figures"] = []
+            state["run_combined_analysis"] = True
+            state["user_goal"] = user_goal
             if base_dir:
                 state["multi_sim_base_dir"] = base_dir
                 state["working_directory"] = base_dir
             logger.info(
                 "[combined_only] Cleared restored routing state — "
-                "supervisor will run combined analysis + report only"
+                f"supervisor will run combined analysis + report only at {base_dir}"
             )
         
         # Ensure execution_path is always a list we control

@@ -11,6 +11,7 @@ Uses MDAnalysis ``analysis.pca.PCA`` when available (recommended).
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import os
 from pathlib import Path
@@ -70,6 +71,19 @@ PCA_TOOL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "output_plot": "fel_pc1_pc2.png",
         "output_grid": "fel_pc1_pc2_grid.csv",
     },
+    "analyze_fel_landscape_features": {
+        "pc_x": 1,
+        "pc_y": 2,
+        "bins": 50,
+        "temperature_k": 310.0,
+        "smooth_sigma": 2.0,
+        "min_basin_population": 0.05,
+        "min_prominence_kj_mol": 1.5,
+        "fel_grid_file": "fel_pc1_pc2_grid.csv",
+        "output_json": "fel_features.json",
+        "output_csv": "fel_features.csv",
+        "output_basins_csv": "fel_basins.csv",
+    },
 }
 
 
@@ -111,13 +125,25 @@ def resolve_pca_overrides_from_goal(user_goal: str) -> Dict[str, Any]:
 def apply_pca_tool_defaults(
     tool_name: str, kwargs: Dict[str, Any], user_goal: str = ""
 ) -> Dict[str, Any]:
-    """Merge canonical PCA/FEL defaults; user-goal overrides beat LLM plan params."""
+    """
+    Merge canonical PCA/FEL defaults; user-goal overrides beat LLM plan params.
+
+    Args:
+        tool_name: Name of the PCA/FEL tool to normalize.
+        kwargs: Tool kwargs proposed by planner/LLM.
+        user_goal: Original user goal text used for explicit override extraction.
+
+    Returns:
+        Dict of normalized kwargs for the requested tool.
+    """
     defaults = PCA_TOOL_DEFAULTS.get(tool_name)
     if not defaults:
         return kwargs
     merged = dict(kwargs)
     merged.update(defaults)
-    merged.update(resolve_pca_overrides_from_goal(user_goal))
+    overrides = resolve_pca_overrides_from_goal(user_goal)
+    # Goal overrides (e.g. temperature_k from "310 K") apply only to keys this tool uses.
+    merged.update({k: v for k, v in overrides.items() if k in defaults})
     return merged
 
 
@@ -257,6 +283,7 @@ def load_pca_projections(path: str) -> Dict[str, Any]:
         return {"success": False, "error": f"PCA projections file not found: {path}"}
 
     times_ns: List[float] = []
+    frame_indices: List[int] = []
     rows: List[List[float]] = []
     pc_labels: List[str] = []
 
@@ -271,6 +298,7 @@ def load_pca_projections(path: str) -> Dict[str, Any]:
             cols = line.split("\t")
             if len(cols) < 3:
                 continue
+            frame_indices.append(int(float(cols[0])))
             times_ns.append(float(cols[1]))
             rows.append([float(x) for x in cols[2:]])
 
@@ -285,6 +313,7 @@ def load_pca_projections(path: str) -> Dict[str, Any]:
         "success": True,
         "projections": projections,
         "times_ns": np.asarray(times_ns),
+        "frame_indices": np.asarray(frame_indices, dtype=int),
         "pc_labels": pc_labels,
         "path": str(p.resolve()),
     }
@@ -575,6 +604,9 @@ def calculate_free_energy_landscape(
         output_grid: CSV grid export (default ``fel_pc{pc_x}_pc{pc_y}_grid.csv``).
         working_dir: Output directory.
 
+    Returns:
+        Dict with FEL output paths and summary free-energy statistics.
+
     Standard outputs: ``fel_pc1_pc2.png``, ``fel_pc1_pc2_grid.csv``.
     """
     if not HAS_MATPLOTLIB:
@@ -697,6 +729,1048 @@ def calculate_free_energy_landscape(
         }
     except Exception as exc:
         logger.exception("Free-energy landscape failed")
+        return {"success": False, "error": str(exc)}
+    finally:
+        _restore_cwd(original_dir)
+
+
+# ── FEL landscape feature extraction (classification metrics) ─────────────────
+
+
+def load_fel_grid_csv(path: str) -> Dict[str, Any]:
+    """Load long-format FEL grid CSV written by ``calculate_free_energy_landscape``."""
+    p = Path(path)
+    if not p.is_file():
+        return {"success": False, "error": f"FEL grid file not found: {path}"}
+
+    xs: List[float] = []
+    ys: List[float] = []
+    fs: List[float] = []
+    ps: List[float] = []
+
+    with open(p, encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        if not reader.fieldnames:
+            return {"success": False, "error": f"Empty FEL grid CSV: {path}"}
+        for row in reader:
+            try:
+                pc_cols = [c for c in reader.fieldnames if c.startswith("PC")]
+                if len(pc_cols) >= 2:
+                    xs.append(float(row[pc_cols[0]]))
+                    ys.append(float(row[pc_cols[1]]))
+                else:
+                    xs.append(float(row.get("PC1", row.get("x", 0))))
+                    ys.append(float(row.get("PC2", row.get("y", 0))))
+                fs.append(float(row.get("free_energy_kJ_mol", row.get("F", 0))))
+                ps.append(float(row.get("probability", row.get("P", 0))))
+            except (TypeError, ValueError, KeyError):
+                continue
+
+    if not xs:
+        return {"success": False, "error": f"No valid rows in FEL grid CSV: {path}"}
+
+    x_unique = sorted(set(xs))
+    y_unique = sorted(set(ys))
+    nx, ny = len(x_unique), len(y_unique)
+    F = np.full((ny, nx), np.nan, dtype=float)
+    P = np.zeros((ny, nx), dtype=float)
+
+    x_index = {v: i for i, v in enumerate(x_unique)}
+    y_index = {v: i for i, v in enumerate(y_unique)}
+    for x, y, f, prob in zip(xs, ys, fs, ps):
+        j, i = y_index[y], x_index[x]
+        F[j, i] = f
+        P[j, i] = prob
+
+    if np.isnan(F).any():
+        F = np.nan_to_num(F, nan=np.nanmax(F[np.isfinite(F)]))
+
+    return {
+        "success": True,
+        "free_energy": F,
+        "probability": P,
+        "x_centers": np.asarray(x_unique, dtype=float),
+        "y_centers": np.asarray(y_unique, dtype=float),
+        "path": str(p.resolve()),
+    }
+
+
+def _smooth_fel_grid(grid: np.ndarray, sigma: float) -> np.ndarray:
+    from scipy.ndimage import gaussian_filter
+
+    return gaussian_filter(grid, sigma=max(float(sigma), 0.0), mode="nearest")
+
+
+def _find_fel_minima(
+    F: np.ndarray,
+    *,
+    smooth_sigma: float = 1.0,
+    min_prominence: float = 0.5,
+    merge_distance: int = 2,
+) -> Tuple[List[Tuple[int, int]], np.ndarray]:
+    """Return (y, x) coordinates of significant local minima on the FEL grid."""
+    from scipy.ndimage import maximum_filter, minimum_filter
+
+    F_s = _smooth_fel_grid(F, smooth_sigma)
+    f_range = float(np.nanmax(F_s) - np.nanmin(F_s))
+    prominence = max(float(min_prominence), 0.08 * f_range)
+
+    local_min = minimum_filter(F_s, size=3, mode="nearest")
+    is_min = (F_s <= local_min + 1e-9) & np.isfinite(F_s)
+
+    local_max = maximum_filter(F_s, size=7, mode="nearest")
+    is_min &= (local_max - F_s) >= prominence
+
+    coords = sorted(
+        [(int(y), int(x)) for y, x in zip(*np.where(is_min))],
+        key=lambda c: F_s[c],
+    )
+
+    merged: List[Tuple[int, int]] = []
+    taken = set()
+    for y, x in coords:
+        if (y, x) in taken:
+            continue
+        merged.append((y, x))
+        for y2, x2 in coords:
+            if abs(y2 - y) <= merge_distance and abs(x2 - x) <= merge_distance:
+                taken.add((y2, x2))
+
+    return merged, F_s
+
+
+def _assign_fel_basins(F: np.ndarray, minima: List[Tuple[int, int]]) -> np.ndarray:
+    """Assign each grid cell to a basin via steepest descent to the nearest minimum."""
+    h, w = F.shape
+    if not minima:
+        return np.zeros((h, w), dtype=int)
+
+    min_map = {coord: idx + 1 for idx, coord in enumerate(minima)}
+    labels = np.zeros((h, w), dtype=int)
+
+    for j in range(h):
+        for i in range(w):
+            y, x = j, i
+            seen = set()
+            while (y, x) not in min_map:
+                if (y, x) in seen:
+                    break
+                seen.add((y, x))
+                best_y, best_x = y, x
+                best_f = F[y, x]
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        if dy == 0 and dx == 0:
+                            continue
+                        ny, nx = y + dy, x + dx
+                        if 0 <= ny < h and 0 <= nx < w and F[ny, nx] < best_f:
+                            best_f = F[ny, nx]
+                            best_y, best_x = ny, nx
+                if best_y == y and best_x == x:
+                    break
+                y, x = best_y, best_x
+            if (y, x) in min_map:
+                labels[j, i] = min_map[(y, x)]
+            else:
+                # Plateau / ambiguous — nearest minimum by grid distance
+                dists = [abs(y - my) + abs(x - mx) for my, mx in minima]
+                labels[j, i] = int(np.argmin(dists)) + 1
+
+    return labels
+
+
+def _line_cells(y0: int, x0: int, y1: int, x1: int) -> List[Tuple[int, int]]:
+    """Bresenham-like line between two grid points."""
+    cells: List[Tuple[int, int]] = []
+    dy = abs(y1 - y0)
+    dx = abs(x1 - x0)
+    sy = 1 if y0 < y1 else -1
+    sx = 1 if x0 < x1 else -1
+    err = dx - dy
+    y, x = y0, x0
+    while True:
+        cells.append((y, x))
+        if y == y1 and x == x1:
+            break
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            x += sx
+        if e2 < dx:
+            err += dx
+            y += sy
+    return cells
+
+
+def _inter_basin_barrier(
+    F: np.ndarray,
+    min_a: Tuple[int, int],
+    min_b: Tuple[int, int],
+) -> float:
+    """Lowest maximum F along a straight grid path (saddle estimate)."""
+    path = _line_cells(min_a[0], min_a[1], min_b[0], min_b[1])
+    f_path = [F[y, x] for y, x in path if 0 <= y < F.shape[0] and 0 <= x < F.shape[1]]
+    if not f_path:
+        return 0.0
+    saddle = float(max(f_path))
+    base = min(F[min_a], F[min_b])
+    return max(0.0, saddle - base)
+
+
+def analyze_fel_landscape_core(
+    F: np.ndarray,
+    P: np.ndarray,
+    *,
+    smooth_sigma: float = 1.0,
+    min_basin_population: float = 0.01,
+    min_prominence_kj_mol: float = 0.5,
+) -> Dict[str, Any]:
+    """
+    Extract classification features from a 2D FEL grid.
+
+    **Basin detection algorithm (reported as ``n_basins``, max 8):**
+
+    1. **Smooth** the free-energy grid (Gaussian σ = ``smooth_sigma``).
+    2. **Find local minima** on the smoothed surface (3×3 neighbourhood) with
+       minimum **prominence** (≥ ``min_prominence_kj_mol`` or 8% of F range).
+    3. **Assign basins** by steepest descent from each grid cell to the nearest
+       minimum; compute **population** pᵢ = Σ P(cell) per basin.
+    4. **Filter & merge:** drop basins with population < ``min_basin_population``;
+       iteratively merge the smallest basin into the largest until at most
+       **8 basins** remain (or all meet the population threshold).
+
+    Only these final merged basins appear in ``fel_basins.png`` and in
+    ``n_basins`` / ``landscape_entropy`` (S = −Σ pᵢ ln pᵢ).
+
+    Metrics:
+      - basins: per-basin population, depth, area
+      - barriers: inter-basin saddle heights (kJ/mol above lower minimum)
+      - major_basin_population: largest basin occupancy fraction
+    """
+    minima, F_smooth = _find_fel_minima(
+        F,
+        smooth_sigma=smooth_sigma,
+        min_prominence=min_prominence_kj_mol,
+    )
+    if not minima:
+        # Single basin — treat global minimum as one minimum
+        gy, gx = np.unravel_index(int(np.argmin(F_smooth)), F_smooth.shape)
+        minima = [(int(gy), int(gx))]
+
+    labels = _assign_fel_basins(F_smooth, minima)
+    total_p = float(P.sum()) or 1.0
+
+    basins: List[Dict[str, Any]] = []
+    for idx, (my, mx) in enumerate(minima):
+        bid = idx + 1
+        mask = labels == bid
+        pop = float(P[mask].sum() / total_p)
+        if pop < float(min_basin_population):
+            continue
+        f_min = float(F_smooth[my, mx])
+        f_max_in = float(np.max(F_smooth[mask])) if mask.any() else f_min
+        depth = f_max_in - f_min
+        area_fraction = float(mask.sum()) / float(F.size)
+        basins.append({
+            "basin_id": bid,
+            "min_y": my,
+            "min_x": mx,
+            "free_energy_min_kJ_mol": f_min,
+            "population": pop,
+            "basin_depth_kJ_mol": depth,
+            "area_fraction": area_fraction,
+            "n_grid_cells": int(mask.sum()),
+        })
+
+    if not basins:
+        # Keep at least the deepest minimum
+        my, mx = minima[0]
+        mask = labels == 1
+        basins.append({
+            "basin_id": 1,
+            "min_y": my,
+            "min_x": mx,
+            "free_energy_min_kJ_mol": float(F_smooth[my, mx]),
+            "population": float(P[mask].sum() / total_p),
+            "basin_depth_kJ_mol": float(np.max(F_smooth[mask]) - F_smooth[my, mx]),
+            "area_fraction": float(mask.sum()) / float(F.size),
+            "n_grid_cells": int(mask.sum()),
+        })
+
+    # Re-label basin_id sequentially after population filter
+    for new_id, b in enumerate(basins, start=1):
+        b["basin_id"] = new_id
+
+    # Merge tiny basins into the major basin until population threshold is met
+    max_basins = 8
+    while len(basins) > 1:
+        pops = [b["population"] for b in basins]
+        if len(basins) <= max_basins and min(pops) >= float(min_basin_population):
+            break
+        smallest = int(np.argmin(pops))
+        if pops[smallest] >= float(min_basin_population) and len(basins) <= max_basins:
+            break
+        major = int(np.argmax(pops))
+        if smallest == major:
+            break
+        basins[major]["population"] += basins[smallest]["population"]
+        basins[major]["area_fraction"] += basins[smallest]["area_fraction"]
+        basins[major]["n_grid_cells"] += basins[smallest]["n_grid_cells"]
+        basins[major]["basin_depth_kJ_mol"] = max(
+            basins[major]["basin_depth_kJ_mol"],
+            basins[smallest]["basin_depth_kJ_mol"],
+        )
+        basins.pop(smallest)
+        for new_id, b in enumerate(basins, start=1):
+            b["basin_id"] = new_id
+
+    populations = np.asarray([b["population"] for b in basins], dtype=float)
+    populations = populations / max(populations.sum(), 1e-12)
+    landscape_entropy = float(-np.sum(populations * np.log(populations + 1e-12)))
+
+    # Grid-level entropy (conformational spread in PC space)
+    p_flat = P.ravel()
+    p_flat = p_flat[p_flat > 0]
+    grid_entropy = float(-np.sum(p_flat * np.log(p_flat + 1e-12)))
+
+    major_idx = int(np.argmax(populations))
+    major_basin = basins[major_idx]
+
+    barriers: List[Dict[str, Any]] = []
+    kept_minima = [(b["min_y"], b["min_x"]) for b in basins]
+    kept_ids = [b["basin_id"] for b in basins]
+    for i in range(len(kept_minima)):
+        for j in range(i + 1, len(kept_minima)):
+            h_ij = _inter_basin_barrier(F_smooth, kept_minima[i], kept_minima[j])
+            barriers.append({
+                "basin_a": kept_ids[i],
+                "basin_b": kept_ids[j],
+                "barrier_height_kJ_mol": h_ij,
+            })
+
+    max_barrier = max((b["barrier_height_kJ_mol"] for b in barriers), default=0.0)
+    mean_depth = float(np.mean([b["basin_depth_kJ_mol"] for b in basins]))
+
+    return {
+        "success": True,
+        "n_basins": len(basins),
+        "n_minima": len(basins),  # backward-compatible alias
+        "landscape_entropy": landscape_entropy,
+        "grid_entropy": grid_entropy,
+        "major_basin_population": float(major_basin["population"]),
+        "major_basin_id": int(major_basin["basin_id"]),
+        "max_barrier_height_kJ_mol": float(max_barrier),
+        "mean_basin_depth_kJ_mol": mean_depth,
+        "basins": basins,
+        "barriers": barriers,
+    }
+
+
+def _write_fel_feature_tables(
+    features: Dict[str, Any],
+    *,
+    output_json: str,
+    output_csv: str,
+    output_basins_csv: str,
+) -> None:
+    summary = {
+        k: features[k]
+        for k in (
+            "n_minima",
+            "landscape_entropy",
+            "grid_entropy",
+            "major_basin_population",
+            "major_basin_id",
+            "max_barrier_height_kJ_mol",
+            "mean_basin_depth_kJ_mol",
+        )
+        if k in features
+    }
+    summary["basins"] = features.get("basins", [])
+    summary["barriers"] = features.get("barriers", [])
+
+    with open(output_json, "w", encoding="utf-8") as fh:
+        json.dump(summary, fh, indent=2)
+
+    with open(output_csv, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow([
+            "n_minima",
+            "landscape_entropy",
+            "grid_entropy",
+            "major_basin_population",
+            "major_basin_id",
+            "max_barrier_height_kJ_mol",
+            "mean_basin_depth_kJ_mol",
+        ])
+        writer.writerow([
+            summary.get("n_minima"),
+            f"{summary.get('landscape_entropy', 0):.6f}",
+            f"{summary.get('grid_entropy', 0):.6f}",
+            f"{summary.get('major_basin_population', 0):.6f}",
+            summary.get("major_basin_id"),
+            f"{summary.get('max_barrier_height_kJ_mol', 0):.6f}",
+            f"{summary.get('mean_basin_depth_kJ_mol', 0):.6f}",
+        ])
+
+    with open(output_basins_csv, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow([
+            "basin_id",
+            "population",
+            "basin_depth_kJ_mol",
+            "area_fraction",
+            "free_energy_min_kJ_mol",
+            "n_grid_cells",
+        ])
+        for b in features.get("basins", []):
+            writer.writerow([
+                b["basin_id"],
+                f"{b['population']:.6f}",
+                f"{b['basin_depth_kJ_mol']:.6f}",
+                f"{b['area_fraction']:.6f}",
+                f"{b['free_energy_min_kJ_mol']:.6f}",
+                b["n_grid_cells"],
+            ])
+
+
+@tool
+def analyze_fel_landscape_features(
+    fel_grid_file: Optional[str] = None,
+    pca_projections_file: Optional[str] = None,
+    topology_file: Optional[str] = None,
+    trajectory_file: Optional[str] = None,
+    pc_x: int = 1,
+    pc_y: int = 2,
+    bins: int = 50,
+    temperature_k: float = 310.0,
+    smooth_sigma: float = 1.0,
+    min_basin_population: float = 0.01,
+    min_prominence_kj_mol: float = 0.5,
+    output_json: Optional[str] = None,
+    output_csv: Optional[str] = None,
+    output_basins_csv: Optional[str] = None,
+    output_plot: Optional[str] = None,
+    working_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Extract FEL classification features for conformational diversity analysis.
+
+    Computes from a PC1/PC2 free-energy landscape:
+      - **Number of minima** (significant basins)
+      - **Basin depth** (kJ/mol below basin rim)
+      - **Basin area** (grid-cell fraction and population)
+      - **Barrier heights** between basin pairs
+      - **Major basin population** (largest basin occupancy)
+      - **Landscape entropy** S = −Σ p_i ln(p_i) over basin populations
+        (higher S → more conformational diversity)
+
+    Run after ``calculate_free_energy_landscape``. Input priority:
+    1. ``fel_grid_file`` (``fel_pc1_pc2_grid.csv``), or
+    2. ``pca_projections_file``, or
+    3. ``topology_file`` + ``trajectory_file`` (rebuilds FEL).
+
+    Args:
+        fel_grid_file (optional): Existing FEL grid CSV (preferred input).
+        pca_projections_file (optional): PCA projections file to rebuild FEL.
+        topology_file (optional): Topology for inline PCA/FEL rebuild.
+        trajectory_file (optional): Trajectory for inline PCA/FEL rebuild.
+        pc_x (optional): Principal component index for x axis (1-based).
+        pc_y (optional): Principal component index for y axis (1-based).
+        bins (optional): Number of 2D histogram bins per axis.
+        temperature_k (optional): Temperature in Kelvin used for FEL conversion.
+        smooth_sigma (optional): Gaussian smoothing sigma for basin detection.
+        min_basin_population (optional): Minimum basin population fraction.
+        min_prominence_kj_mol (optional): Minimum basin prominence in kJ/mol.
+        output_json (optional): Output JSON file for FEL feature summary.
+        output_csv (optional): Output one-row CSV summary file.
+        output_basins_csv (optional): Output per-basin CSV file.
+        output_plot (optional): Output PNG with basin annotations.
+        working_dir (optional): Output working directory.
+
+    Returns:
+        Dict with FEL feature statistics and output artifact paths.
+
+    Standard outputs: ``fel_features.json``, ``fel_features.csv``, ``fel_basins.csv``.
+    Optional: ``fel_basins.png`` when ``output_plot`` is set.
+    """
+    original_dir = None
+    try:
+        original_dir = _chdir_working(working_dir)
+
+        grid_file = fel_grid_file or "fel_pc1_pc2_grid.csv"
+        if os.path.isfile(grid_file):
+            loaded = load_fel_grid_csv(grid_file)
+        elif pca_projections_file and os.path.exists(pca_projections_file):
+            proj = load_pca_projections(pca_projections_file)
+            if not proj.get("success"):
+                return proj
+            ix, iy = int(pc_x) - 1, int(pc_y) - 1
+            loaded = _compute_free_energy_grid(
+                proj["projections"][:, ix],
+                proj["projections"][:, iy],
+                bins=bins,
+                temperature_k=temperature_k,
+            )
+        elif topology_file and trajectory_file:
+            pca_result = _run_trajectory_pca(
+                topology_file,
+                trajectory_file,
+                n_components=max(10, max(pc_x, pc_y)),
+                frame_interval=1,
+            )
+            if not pca_result.get("success"):
+                return pca_result
+            ix, iy = int(pc_x) - 1, int(pc_y) - 1
+            loaded = _compute_free_energy_grid(
+                pca_result["projections"][:, ix],
+                pca_result["projections"][:, iy],
+                bins=bins,
+                temperature_k=temperature_k,
+            )
+        else:
+            return {
+                "success": False,
+                "error": (
+                    "Provide fel_grid_file, pca_projections_file, or "
+                    "topology_file + trajectory_file"
+                ),
+            }
+
+        if not loaded.get("success"):
+            return loaded
+
+        features = analyze_fel_landscape_core(
+            loaded["free_energy"],
+            loaded["probability"],
+            smooth_sigma=smooth_sigma,
+            min_basin_population=min_basin_population,
+            min_prominence_kj_mol=min_prominence_kj_mol,
+        )
+        if not features.get("success"):
+            return features
+
+        json_out = output_json or "fel_features.json"
+        csv_out = output_csv or "fel_features.csv"
+        basins_out = output_basins_csv or "fel_basins.csv"
+        plot_out = output_plot if output_plot is not None else "fel_basins.png"
+        _write_fel_feature_tables(
+            features,
+            output_json=json_out,
+            output_csv=csv_out,
+            output_basins_csv=basins_out,
+        )
+
+        if plot_out and HAS_MATPLOTLIB:
+            F = loaded["free_energy"]
+            F_smooth = _smooth_fel_grid(F, smooth_sigma)
+            final_minima = [(b["min_y"], b["min_x"]) for b in features["basins"]]
+            labels = _assign_fel_basins(F_smooth, final_minima)
+            fig, ax = plt.subplots(figsize=(8, 6.5))
+            X, Y = np.meshgrid(loaded["x_centers"], loaded["y_centers"])
+            cf = ax.contourf(X, Y, F, levels=20, cmap="viridis_r", alpha=0.9)
+            fig.colorbar(cf, ax=ax, label="Relative free energy (kJ/mol)")
+            # Basin boundaries (white lines between assigned regions)
+            basin_levels = sorted({int(x) for x in labels.flat if x > 0})
+            if basin_levels:
+                ax.contour(
+                    X, Y, labels, levels=basin_levels,
+                    colors="white", linewidths=0.7, alpha=0.85,
+                )
+            # Numbered markers — one per final classified basin only
+            for b in features["basins"]:
+                bx = loaded["x_centers"][b["min_x"]]
+                by = loaded["y_centers"][b["min_y"]]
+                bid = b["basin_id"]
+                ax.plot(bx, by, marker="*", color="red", markersize=14, zorder=5)
+                ax.annotate(
+                    str(bid),
+                    (bx, by),
+                    textcoords="offset points",
+                    xytext=(6, 6),
+                    fontsize=11,
+                    fontweight="bold",
+                    color="white",
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="red", alpha=0.85),
+                    zorder=6,
+                )
+            n_show = features.get("n_basins", features["n_minima"])
+            ax.set_xlabel(f"PC{pc_x} (Å)")
+            ax.set_ylabel(f"PC{pc_y} (Å)")
+            ax.set_title(
+                f"FEL basins (n={n_show}, S={features['landscape_entropy']:.2f})"
+            )
+            fig.tight_layout()
+            fig.savefig(plot_out, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+        if working_dir:
+            try:
+                append_analysis_summary(
+                    working_dir=working_dir,
+                    analysis_type="FELFeatures",
+                    statistics={
+                        "n_minima": features["n_minima"],
+                        "landscape_entropy": features["landscape_entropy"],
+                        "major_basin_population": features["major_basin_population"],
+                        "max_barrier_height_kJ_mol": features["max_barrier_height_kJ_mol"],
+                    },
+                    files={
+                        "features_json": json_out,
+                        "features_csv": csv_out,
+                        "basins_csv": basins_out,
+                    },
+                    metadata={"fel_grid_file": grid_file},
+                )
+            except Exception as exc:
+                logger.warning("Failed to write FEL features summary: %s", exc)
+
+        msg = (
+            f"FEL features: {features['n_minima']} minima, "
+            f"S={features['landscape_entropy']:.3f}, "
+            f"major basin={features['major_basin_population'] * 100:.1f}%"
+        )
+        return {
+            "success": True,
+            "message": msg,
+            **{k: features[k] for k in (
+                "n_minima",
+                "landscape_entropy",
+                "grid_entropy",
+                "major_basin_population",
+                "major_basin_id",
+                "max_barrier_height_kJ_mol",
+                "mean_basin_depth_kJ_mol",
+            )},
+            "basins": features["basins"],
+            "barriers": features["barriers"],
+            "output_json": json_out,
+            "output_csv": csv_out,
+            "output_basins_csv": basins_out,
+            "output_plot": plot_out if (plot_out and HAS_MATPLOTLIB) else None,
+        }
+    except Exception as exc:
+        logger.exception("FEL feature extraction failed")
+        return {"success": False, "error": str(exc)}
+    finally:
+        _restore_cwd(original_dir)
+
+
+@tool
+def collect_fel_features_table(
+    base_directory: str,
+    output_file: str = "fel_classification_features.csv",
+    working_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Collect per-simulation FEL classification features into one comparison table.
+
+    Scans ``{base_directory}/{label}/analysis/fel_features.json`` for each
+    simulation subdirectory and writes a CSV suitable for clustering or
+    supervised classification across many protein–ATP systems.
+
+    Run after all per-simulation ``analyze_fel_landscape_features`` steps complete.
+
+    Args:
+        base_directory: Multi-simulation root (e.g. ``agenticB5R1/``).
+        output_file: Combined CSV path (default ``fel_classification_features.csv``).
+        working_dir: Directory for the output file (default: ``base_directory/analysis/``).
+
+    Standard output: ``{base}/analysis/fel_classification_features.csv``.
+    """
+    original_dir = None
+    try:
+        original_dir = _chdir_working(working_dir)
+        base = Path(base_directory).resolve()
+        if not base.is_dir():
+            return {"success": False, "error": f"Base directory not found: {base}"}
+
+        rows: List[Dict[str, Any]] = []
+        for child in sorted(base.iterdir()):
+            if not child.is_dir() or child.name in ("analysis", "reporter", "supervisor", "planner"):
+                continue
+            feat_path = child / "analysis" / "fel_features.json"
+            if not feat_path.is_file():
+                continue
+            with open(feat_path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            rows.append({
+                "label": child.name,
+                "sim_directory": str(child),
+                "n_minima": data.get("n_minima"),
+                "landscape_entropy": data.get("landscape_entropy"),
+                "grid_entropy": data.get("grid_entropy"),
+                "major_basin_population": data.get("major_basin_population"),
+                "major_basin_id": data.get("major_basin_id"),
+                "max_barrier_height_kJ_mol": data.get("max_barrier_height_kJ_mol"),
+                "mean_basin_depth_kJ_mol": data.get("mean_basin_depth_kJ_mol"),
+            })
+
+        if not rows:
+            return {
+                "success": False,
+                "error": (
+                    f"No fel_features.json found under {base}/*/analysis/. "
+                    "Run analyze_fel_landscape_features per simulation first."
+                ),
+            }
+
+        out_path = Path(output_file)
+        if not out_path.is_absolute():
+            out_dir = Path(working_dir) if working_dir else base / "analysis"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / output_file
+
+        fieldnames = list(rows[0].keys())
+        with open(out_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        return {
+            "success": True,
+            "message": f"Collected FEL features for {len(rows)} simulations → {out_path}",
+            "output_file": str(out_path),
+            "n_simulations": len(rows),
+            "labels": [r["label"] for r in rows],
+        }
+    except Exception as exc:
+        logger.exception("collect_fel_features_table failed")
+        return {"success": False, "error": str(exc)}
+    finally:
+        _restore_cwd(original_dir)
+
+
+def _resolve_topology_trajectory(
+    topology_file: Optional[str],
+    trajectory_file: Optional[str],
+    sim_directory: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve topology and trajectory paths from explicit args or sim hpc/."""
+    topo = topology_file
+    traj = trajectory_file
+    sim_root = Path(sim_directory).resolve() if sim_directory else None
+
+    if topo:
+        topo_path = Path(topo)
+        if not topo_path.is_absolute() and sim_root is not None:
+            for candidate in (sim_root / "hpc" / topo_path.name, sim_root / topo_path.name):
+                if candidate.is_file():
+                    topo = str(candidate.resolve())
+                    break
+    if traj:
+        traj_path = Path(traj)
+        if not traj_path.is_absolute() and sim_root is not None:
+            for candidate in (sim_root / "hpc" / traj_path.name, sim_root / traj_path.name):
+                if candidate.is_file():
+                    traj = str(candidate.resolve())
+                    break
+
+    if topo and traj and os.path.isfile(topo) and os.path.isfile(traj):
+        return topo, traj
+
+    if not sim_root:
+        return topo, traj
+
+    hpc = sim_root / "hpc"
+    if not hpc.is_dir():
+        return topo, traj
+
+    if not topo or not os.path.isfile(topo):
+        for candidate in ("md.tpr", "md.gro", "processed.gro"):
+            p = hpc / candidate
+            if p.is_file():
+                topo = str(p)
+                break
+    if not traj or not os.path.isfile(traj):
+        for candidate in ("mdWrap.xtc", "md.xtc", "md.trr"):
+            p = hpc / candidate
+            if p.is_file():
+                traj = str(p)
+                break
+    return topo, traj
+
+
+def _write_structure_pdb(
+    topology_file: str,
+    trajectory_file: str,
+    frame_index: int,
+    output_path: Path,
+) -> bool:
+    """Extract one aligned frame (protein + ligand) as PDB."""
+    if not HAS_MDA:
+        return False
+
+    try:
+        u = mda.Universe(topology_file, trajectory_file)
+        if u.trajectory.n_frames <= 0:
+            return False
+
+        frame_index = max(0, min(int(frame_index), u.trajectory.n_frames - 1))
+
+        if u.trajectory.n_frames > 1:
+            try:
+                from MDAnalysis.analysis import align as _mda_align
+
+                ref = mda.Universe(topology_file, trajectory_file)
+                ref.trajectory[0]
+                align_sel = (
+                    "backbone" if u.select_atoms("backbone").n_atoms > 0 else "name CA"
+                )
+                if u.select_atoms(align_sel).n_atoms > 0:
+                    _mda_align.AlignTraj(
+                        u, ref, select=align_sel, in_memory=True
+                    ).run()
+            except Exception as exc:
+                logger.debug("Basin PDB alignment skipped: %s", exc)
+
+        u.trajectory[frame_index]
+
+        bulk_ions = "resname NA NA+ CL CL- K K+ SOD CLA"
+        water = "resname HOH WAT SOL TIP3 TIP4 SPC"
+        sel_parts: List[str] = []
+        if len(u.select_atoms("protein")) > 0:
+            sel_parts.append("protein")
+        if len(u.select_atoms("nucleic")) > 0:
+            sel_parts.append("nucleic")
+        other_sel = (
+            f"not protein and not nucleic and not ({water}) and not ({bulk_ions})"
+        )
+        if len(u.select_atoms(other_sel)) > 0:
+            sel_parts.append(f"({other_sel})")
+        selection_str = " or ".join(sel_parts) if sel_parts else f"not ({water})"
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        u.select_atoms(selection_str).write(str(output_path))
+        return output_path.is_file()
+    except Exception as exc:
+        logger.warning("Failed to write basin PDB %s: %s", output_path, exc)
+        return False
+
+
+def _representative_frames_for_basins(
+    pc_x_vals: np.ndarray,
+    pc_y_vals: np.ndarray,
+    basins: List[Dict[str, Any]],
+    x_centers: np.ndarray,
+    y_centers: np.ndarray,
+) -> Dict[int, int]:
+    """Pick one trajectory row per basin — closest in PC space to basin minimum."""
+    reps: Dict[int, int] = {}
+    coords = np.column_stack([pc_x_vals, pc_y_vals])
+    for basin in basins:
+        bid = int(basin["basin_id"])
+        target = np.array([
+            float(x_centers[int(basin["min_x"])]),
+            float(y_centers[int(basin["min_y"])]),
+        ])
+        dists = np.linalg.norm(coords - target, axis=1)
+        reps[bid] = int(np.argmin(dists))
+    return reps
+
+
+@tool
+def export_fel_basin_structures(
+    topology_file: Optional[str] = None,
+    trajectory_file: Optional[str] = None,
+    fel_features_file: str = "fel_features.json",
+    pca_projections_file: str = "pca_projections.dat",
+    pc_x: int = 1,
+    pc_y: int = 2,
+    bins: int = 50,
+    temperature_k: float = 310.0,
+    output_dir: Optional[str] = None,
+    manifest_file: str = "fel_basin_structures.csv",
+    sim_directory: Optional[str] = None,
+    working_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Export representative PDB structures for each FEL basin (up to 8).
+
+    After ``analyze_fel_landscape_features`` identifies basins on the PC1/PC2
+    free-energy landscape, this tool maps each basin minimum back to the
+    nearest trajectory frame in PCA space and writes one PDB per basin directly
+    in ``{working_dir}/basin_XX.pdb`` (no subdirectory).
+
+    Also writes ``fel_basin_structures.csv`` with basin_id, population,
+    PC coordinates, frame index, time (ns), and PDB path — for highlighting
+    transient conformations in a molecular viewer.
+
+    Standard outputs: ``basin_01.pdb``, ``basin_02.pdb``, …, ``fel_basin_structures.csv``.
+    """
+    original_dir = None
+    try:
+        work_base = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
+        if sim_directory is None:
+            sim_directory = str(work_base.parent)
+
+        feat_path = Path(fel_features_file)
+        if not feat_path.is_absolute():
+            feat_path = work_base / fel_features_file
+        feat_path = feat_path.resolve()
+
+        proj_path = Path(pca_projections_file)
+        if not proj_path.is_absolute():
+            proj_path = work_base / pca_projections_file
+        proj_path = proj_path.resolve()
+
+        topo, traj = _resolve_topology_trajectory(
+            topology_file, trajectory_file, sim_directory=sim_directory
+        )
+        if topo:
+            topo_path = Path(topo)
+            if not topo_path.is_absolute():
+                topo = str(topo_path.resolve())
+        if traj:
+            traj_path = Path(traj)
+            if not traj_path.is_absolute():
+                traj = str(traj_path.resolve())
+
+        original_dir = _chdir_working(working_dir)
+
+        if not feat_path.is_file():
+            return {
+                "success": False,
+                "error": f"FEL features file not found: {feat_path}",
+            }
+        if not proj_path.is_file():
+            return {
+                "success": False,
+                "error": f"PCA projections file not found: {proj_path}",
+            }
+        if not topo or not traj:
+            return {
+                "success": False,
+                "error": (
+                    "Topology and trajectory required. Pass topology_file + "
+                    "trajectory_file or sim_directory with hpc/md.tpr and mdWrap.xtc."
+                ),
+            }
+        if not HAS_MDA:
+            return {"success": False, "error": "MDAnalysis is required for PDB export"}
+
+        with open(feat_path, encoding="utf-8") as fh:
+            fel_data = json.load(fh)
+        basins = fel_data.get("basins") or []
+        if not basins:
+            return {"success": False, "error": "No basins found in fel_features.json"}
+
+        loaded = load_pca_projections(str(proj_path))
+        if not loaded.get("success"):
+            return loaded
+
+        ix, iy = int(pc_x) - 1, int(pc_y) - 1
+        projections = loaded["projections"]
+        if ix < 0 or iy < 0 or ix >= projections.shape[1] or iy >= projections.shape[1]:
+            return {
+                "success": False,
+                "error": f"PC indices {pc_x}/{pc_y} out of range",
+            }
+
+        pc_x_vals = projections[:, ix]
+        pc_y_vals = projections[:, iy]
+        grid = _compute_free_energy_grid(
+            pc_x_vals, pc_y_vals, bins=bins, temperature_k=temperature_k
+        )
+        if not grid.get("success"):
+            return grid
+
+        rep_indices = _representative_frames_for_basins(
+            pc_x_vals,
+            pc_y_vals,
+            basins,
+            grid["x_centers"],
+            grid["y_centers"],
+        )
+
+        out_root = work_base
+        if output_dir and output_dir not in (".", ""):
+            out_root = work_base / output_dir
+            out_root.mkdir(parents=True, exist_ok=True)
+        manifest_rows: List[Dict[str, Any]] = []
+        pdb_files: List[str] = []
+
+        frame_indices = loaded.get("frame_indices")
+        times_ns = loaded.get("times_ns")
+
+        for basin in basins:
+            bid = int(basin["basin_id"])
+            traj_idx = rep_indices[bid]
+            pdb_name = f"basin_{bid:02d}.pdb"
+            pdb_path = out_root / pdb_name
+
+            frame_idx = (
+                int(frame_indices[traj_idx])
+                if frame_indices is not None and len(frame_indices) > traj_idx
+                else traj_idx
+            )
+
+            if not _write_structure_pdb(topo, traj, frame_idx, pdb_path):
+                logger.warning("Failed to export PDB for basin %d", bid)
+                continue
+
+            pc1_val = float(pc_x_vals[traj_idx])
+            pc2_val = float(pc_y_vals[traj_idx])
+            time_ns = (
+                float(times_ns[traj_idx])
+                if times_ns is not None and len(times_ns) > traj_idx
+                else None
+            )
+            target_pc1 = float(grid["x_centers"][int(basin["min_x"])])
+            target_pc2 = float(grid["y_centers"][int(basin["min_y"])])
+
+            manifest_rows.append({
+                "basin_id": bid,
+                "population": basin.get("population"),
+                "basin_depth_kJ_mol": basin.get("basin_depth_kJ_mol"),
+                "PC1_basin_min": target_pc1,
+                "PC2_basin_min": target_pc2,
+                "PC1_frame": pc1_val,
+                "PC2_frame": pc2_val,
+                "trajectory_row_index": traj_idx,
+                "frame_index": frame_idx,
+                "time_ns": time_ns,
+                "pdb_file": str(pdb_path.resolve()),
+            })
+            pdb_files.append(str(pdb_path.resolve()))
+
+        if not pdb_files:
+            return {"success": False, "error": "No basin PDB files could be written"}
+
+        manifest_path = Path(manifest_file)
+        with open(manifest_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(manifest_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(manifest_rows)
+
+        if working_dir:
+            try:
+                append_analysis_summary(
+                    working_dir=working_dir,
+                    analysis_type="FELBasinStructures",
+                    statistics={"n_basins": len(pdb_files)},
+                    files={
+                        "manifest_csv": str(manifest_path.resolve()),
+                        "basin_pdbs": pdb_files,
+                    },
+                    metadata={"n_basins_detected": len(basins)},
+                )
+            except Exception as exc:
+                logger.warning("Failed to write basin structure summary: %s", exc)
+
+        return {
+            "success": True,
+            "message": (
+                f"Exported {len(pdb_files)} basin representative structure(s) "
+                f"→ {out_root}/"
+            ),
+            "n_basins": len(pdb_files),
+            "pdb_files": pdb_files,
+            "manifest_file": str(manifest_path.resolve()),
+            "output_dir": str(out_root.resolve()),
+        }
+    except Exception as exc:
+        logger.exception("export_fel_basin_structures failed")
         return {"success": False, "error": str(exc)}
     finally:
         _restore_cwd(original_dir)

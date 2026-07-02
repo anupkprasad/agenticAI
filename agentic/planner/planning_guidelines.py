@@ -22,8 +22,13 @@ STANDARD_OUTPUT_FILES: Dict[str, Dict[str, str]] = {
     "dccm": {"data_prefix": "dccm", "plot": "dccm_heatmap.png"},
     "dssp": {"data_prefix": "dssp", "plot": "dssp.png"},
     "com": {"data": "ligand_pocket_distance.csv", "plot": "ligand_pocket_distance.png"},
+    "contacts": {"data": "protein_ligand_contacts.csv", "plot": "protein_ligand_contacts.png"},
+    "pocket_sasa": {"data": "pocket_sasa.csv", "plot": "pocket_sasa.png"},
+    "residence": {"data": "ligand_residence.csv", "plot": "ligand_residence.png"},
+    "pocket_rmsf": {"data": "pocket_rmsf.dat", "plot": "pocket_rmsf.png"},
+    "ligand_rmsf": {"data": "ligand_rmsf.dat", "plot": "ligand_rmsf.png"},
     "pca": {"data": "pca_projections.dat", "plot": "pca_pc1_pc2.png"},
-    "fel": {"data": "fel_pc1_pc2_grid.csv", "plot": "fel_pc1_pc2.png"},
+    "fel": {"data": "fel_pc1_pc2_grid.csv", "plot": "fel_pc1_pc2.png", "features": "fel_features.json"},
 }
 
 _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
@@ -41,6 +46,36 @@ _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
         r"pocket[-\s]?distance",
         r"atp[-\s]?(?:to[-\s]?)?(?:protein[-\s]?)?(?:pocket[-\s]?)?distance",
     ),
+    "contacts": (
+        r"\bcontacts?\b",
+        r"h[-\s]?bonds?",
+        r"hydrogen[-\s]?bonds?",
+        r"protein[-\s]?ligand[-\s]?contact",
+    ),
+    "pocket_sasa": (
+        r"pocket\s+sasa",
+        r"binding[-\s]?site\s+sasa",
+        r"pocket\s+solvent",
+        r"pocket\s+accessibility",
+    ),
+    "residence": (
+        r"residence\s+time",
+        r"\bresidence\b",
+        r"\bunbinding\b",
+        r"\brebinding\b",
+        r"bound\s+fraction",
+        r"fraction\s+bound",
+    ),
+    "pocket_rmsf": (
+        r"pocket\s+rmsf",
+        r"binding[-\s]?site\s+rmsf",
+        r"pocket\s+flexibility",
+    ),
+    "ligand_rmsf": (
+        r"ligand\s+rmsf",
+        r"atp\s+rmsf",
+        r"ligand\s+flexibility",
+    ),
     "energy": (r"\benergy\b", r"\bedr\b"),
     "pca": (
         r"\bpca\b",
@@ -53,8 +88,21 @@ _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
         r"\bfel\b",
         r"energy landscape",
         r"conformational landscape",
+        r"landscape entropy",
+        r"\bbasin",
+        r"\bminima",
     ),
 }
+
+_CLASSIFICATION_REQUEST_PATTERNS: tuple[str, ...] = (
+    r"\bclassif(y|ication|y\s+proteins?|y\s+systems?)\b",
+    r"\bcluster(ing|ed|s)?\b",
+    r"\bunsupervised\b",
+    r"\bfeature\s+(matrix|table|vector)\b",
+    r"\bgroup\s+(?:the\s+)?(?:proteins?|systems?|simulations?|kinases?)\b",
+    r"\bcompare\s+.*\bfor\s+classification\b",
+    r"\bconformational\s+diversity\s+(?:across|comparison)\b",
+)
 
 _EXCLUSIVE_PATTERNS = (
     r"\b(?:only|just|specifically|exclusively)\b[^.\n]{0,80}\b(rmsd|rmsf|rg|gyration|sasa|dccm|dssp|energy)\b",
@@ -168,13 +216,110 @@ def detect_requested_metrics(goal: str) -> Optional[FrozenSet[str]]:
     return frozenset(found) if found else None
 
 
+def detect_classification_requested(*goal_texts: str) -> bool:
+    """True when the user explicitly asks for classification / clustering / feature matrix."""
+    for text in goal_texts:
+        if not text:
+            continue
+        normalized = (
+            text.lower()
+            .replace("\u2011", "-")
+            .replace("\u2012", "-")
+            .replace("\u2013", "-")
+            .replace("\u2014", "-")
+        )
+        if any(re.search(p, normalized) for p in _CLASSIFICATION_REQUEST_PATTERNS):
+            return True
+    return False
+
+
+def classification_metric_groups_for_goal(*goal_texts: str) -> Optional[FrozenSet[str]]:
+    """
+    Metric groups to featurize when classification is requested.
+
+    Returns None if classification was not requested (skip collector).
+    """
+    if not detect_classification_requested(*goal_texts):
+        return None
+
+    from src.analysis.classification_collector import (
+        CLASSIFICATION_FEATURE_GROUPS,
+        DEFAULT_CLASSIFICATION_METRIC_GROUPS,
+    )
+
+    metrics = detect_requested_metrics_union(*goal_texts)
+    if metrics is None:
+        return frozenset(DEFAULT_CLASSIFICATION_METRIC_GROUPS)
+
+    groups = {m for m in metrics if m in CLASSIFICATION_FEATURE_GROUPS}
+    if "gyration" in metrics:
+        groups.add("rg")
+    # Classification uses pocket-residue flexibility, not whole-protein RMSF.
+    if "rmsf" in groups:
+        groups.discard("rmsf")
+        groups.add("pocket_rmsf")
+    return frozenset(groups) if groups else frozenset(DEFAULT_CLASSIFICATION_METRIC_GROUPS)
+
+
+def get_classification_tool_guide() -> str:
+    """Prompt block when user requests unsupervised classification."""
+    return """**UNSUPERVISED CLASSIFICATION (only when user explicitly requests it):**
+
+Per-simulation: run ONLY analyses the user named. If they say "classify" without
+listing metrics, use the default binding-site + FEL bundle (pocket distance,
+contacts, pocket SASA, residence, pocket/ligand RMSF, FEL features).
+
+| Group | Tools | Notes |
+|-------|-------|-------|
+| com | calculate_ligand_pocket_distance | |
+| contacts | calculate_protein_ligand_contacts | |
+| pocket_sasa | calculate_pocket_sasa | needs .tpr |
+| residence | analyze_ligand_residence | |
+| pocket_rmsf | calculate_pocket_rmsf | |
+| ligand_rmsf | calculate_ligand_rmsf | |
+| fel | PCA + FEL + analyze_fel_landscape_features | |
+| rmsd/rmsf/rg/sasa/energy/dccm | standard per-sim tools | optional extras |
+
+Combined phase ONLY when classification requested:
+`collect_classification_features_table` → classification_features.csv + z-score CSV,
+then `cluster_classification_features` (default: hierarchical Ward linkage; use
+method='kmeans' if user asks for k-means). Plots: PCA scatter + dendrogram with
+protein names from id:name pairs in the goal (e.g. p23458:JAK1).
+
+Do NOT run the collector unless the user asked for classification/clustering."""
+
+
+def get_classification_per_sim_tool_guide() -> str:
+    """Per-simulation classification featurization only (no combined/clustering tools)."""
+    return """**PER-SIMULATION FEATURIZATION (when user requests unsupervised classification):**
+
+Run ONLY the per-trajectory tools needed for the feature groups below. Do NOT call
+collect_classification_features_table or cluster_classification_features here —
+those run automatically at combined phase after all simulations finish.
+
+| Group | Per-sim tools |
+|-------|----------------|
+| com | calculate_ligand_pocket_distance |
+| contacts | calculate_protein_ligand_contacts |
+| pocket_sasa | calculate_pocket_sasa (needs .tpr) |
+| residence | analyze_ligand_residence |
+| pocket_rmsf | calculate_pocket_rmsf |
+| ligand_rmsf | calculate_ligand_rmsf |
+| fel | calculate_trajectory_pca → calculate_free_energy_landscape → analyze_fel_landscape_features |
+
+After each calculate_*/analyze_* step that writes a data file, add plot_md_data using
+the standard output basename from the filenames guide above."""
+
+
 def detect_combined_only_metrics(goal: str) -> FrozenSet[str]:
     """
     Metrics the user scoped to combined/cross-simulation analysis only.
 
     Example: "ligand pocket distance in cross simulations only" → ``com`` is
-    excluded from per-simulation analysis plans (combined phase backfills or
-    overlays from trajectories when possible).
+    excluded from per-simulation analysis plans.
+
+    Does NOT exclude metrics also requested per simulation (e.g. "for each
+    trajectory run: ligand pocket distance" plus "overlay in combined analysis").
     """
     text = (goal or "").lower()
     text = (
@@ -195,14 +340,35 @@ def detect_combined_only_metrics(goal: str) -> FrozenSet[str]:
     if not cross_scope:
         return frozenset()
 
-    # Ligand-pocket / COM distance explicitly for cross-sim comparison only
+    per_sim_requested = bool(
+        re.search(
+            r"for each (?:trajectory|simulation|system)|each trajectory run|per[-\s]simulation",
+            text,
+        )
+    )
+
+    # Ligand-pocket distance explicitly for cross-sim comparison ONLY (not when also per-sim)
     if re.search(
         r"ligand[-\s]?pocket|pocket[-\s]?distance|binding[-\s]?site distance",
         text,
     ):
-        combined_only.add("com")
+        explicit_cross_only = bool(
+            re.search(
+                r"(?:ligand[-\s]?pocket|pocket[-\s]?distance)[^.;\n]{0,100}"
+                r"(?:cross[-\s]?sim(?:ulation)?s?|across simulations|combined analysis)"
+                r"[^.;\n]{0,40}\bonly\b",
+                text,
+            )
+            or re.search(
+                r"(?:cross[-\s]?sim(?:ulation)?s?|combined analysis|across simulations)"
+                r"[^.;\n]{0,100}(?:ligand[-\s]?pocket|pocket[-\s]?distance)"
+                r"[^.;\n]{0,40}\bonly\b",
+                text,
+            )
+        )
+        if explicit_cross_only and not per_sim_requested:
+            combined_only.add("com")
 
-    # "compare RMSF in cross simulations" still requires per-sim RMSF files — not combined-only
     return frozenset(combined_only)
 
 
@@ -251,19 +417,39 @@ def _apply_combined_only_exclusions(
     combined_only = detect_combined_only_metrics(master)
     if not combined_only:
         return metrics
+    # Per-simulation prompt may re-request metrics the master goal also mentions for combined overlay.
+    per_sim = (state.get("user_goal") or "").strip() if state else ""
+    if per_sim:
+        per_sim_metrics = detect_requested_metrics(per_sim)
+        if per_sim_metrics:
+            combined_only = combined_only - per_sim_metrics
+    if not combined_only:
+        return metrics
     trimmed = frozenset(metrics - combined_only)
     return trimmed if trimmed else frozenset()
 
 
 def get_pca_fel_tool_guide() -> str:
     """Prompt block for PCA + free-energy landscape workflow."""
-    return """**PCA & FREE-ENERGY LANDSCAPE (when user asks for dynamics / FEL / essential dynamics):**
+    return """**PCA & FREE-ENERGY LANDSCAPE (when user asks for dynamics / FEL / classification):**
 
 | Step | Tool | Output |
 |------|------|--------|
 | 1 | `calculate_trajectory_pca` | `pca_projections.dat`, `pca_variance.dat` |
 | 2 | `plot_pca_projection` | `pca_pc1_pc2.png` (PC1 vs PC2, coloured by time) |
 | 3 | `calculate_free_energy_landscape` | `fel_pc1_pc2.png`, `fel_pc1_pc2_grid.csv` |
+| 4 | `analyze_fel_landscape_features` | `fel_features.json`, `fel_features.csv`, `fel_basins.csv` |
+
+**FEL classification metrics (step 4):**
+- Number of minima / basins
+- Basin depth, area (population fraction)
+- Inter-basin barrier heights (kJ/mol)
+- Major basin population
+- Landscape entropy S = −Σ p_i ln(p_i) (higher S → more conformational diversity)
+
+**Multi-simulation (35 systems):** if the user explicitly requests classification,
+run `collect_classification_features_table` at combined phase with metric groups
+matching their goal. Otherwise do NOT run it during combined analysis.
 
 Rules:
 - **Always use these defaults** unless the user goal explicitly requests different values:
@@ -272,7 +458,7 @@ Rules:
 - Do NOT pass different `frame_interval` or `n_components` in tool_params unless the user asked.
 - FEL uses F = −kT ln P(PC1, PC2) with `temperature_k` (default 310 K); minimum set to 0 kJ/mol.
 - Prefer ≥ 50 frames for a meaningful landscape; warn the user if the trajectory is very short.
-- Run all three steps when the user requests "free energy landscape" or "conformational landscape"."""
+- Run steps 1–4 when the user requests FEL, classification, or conformational diversity."""
 
 
 def get_intent_preservation_block(user_goal: str = "") -> str:

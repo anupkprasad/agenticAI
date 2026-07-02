@@ -319,8 +319,39 @@ docs/
 | [TUTORIAL.md](TUTORIAL.md) | Step-by-step workflows and troubleshooting |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | LangGraph pipeline and multi-sim design |
 | [docs/PROJECT.md](docs/PROJECT.md) | Extended overview and conventions |
-| [docs/TOOLS.md](docs/TOOLS.md) | Available agent tools |
+| [docs/TOOLS.md](docs/TOOLS.md) | External dependencies and tool index |
+| [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md) | Analysis tool calculations, theory, and standard outputs |
 | [docs/HPC_POOL.md](docs/HPC_POOL.md) | Cross-sim HPC pool, polling, resume |
+
+---
+
+## Example: unsupervised classification (35 protein–ATP systems)
+
+Use when trajectories already exist (~200 ns each) and you want a **feature matrix**
+for clustering — **without** manual labels.
+
+```bash
+python run_agenticAIWork.py \
+  --goal "Simulations are complete for 35 protein–ATP holo systems (~200 ns each) under ./agenticB5R1/<label>/. For each trajectory run: ligand pocket distance, protein–ATP contacts, pocket SASA, ligand residence/unbinding analysis, pocket RMSF, ligand RMSF, PCA on Cα, free-energy landscape at 310 K, and FEL basin features. After all per-simulation analyses, build an unsupervised classification feature table (raw CSV + z-score CSV) across all systems. In combined analysis, overlay ligand pocket distance and protein RMSF across simulations. Generate a combined HTML report. No manual class labels." \
+  --working-dir ./agenticB5R1 \
+  --subtask analysis reporter \
+  --simtype multisim
+```
+
+**Subset of features only** (framework runs and featurizes only what you name):
+
+```bash
+python run_agenticAIWork.py \
+  --goal "Trajectories exist for all systems in ./agenticB5R1/. Per simulation compute RMSF and ligand pocket distance only. Then run unsupervised classification using those two features across all simulations (feature matrix + z-score normalization). Combined analysis: RMSF overlay only." \
+  --working-dir ./agenticB5R1 \
+  --subtask analysis reporter \
+  --simtype multisim
+```
+
+The classification table is created **only** when the goal mentions classification,
+clustering, unsupervised grouping, or a feature matrix — not during ordinary combined analysis.
+
+See [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md) for metrics, normalization, and clustering workflow.
 
 ---
 
@@ -450,10 +481,21 @@ python run_agenticAIWork.py \
 
 
   python run_agenticAIWork.py \
-  --goal "Simulation are already done for these uniprot ids: p23458.pdb, p29597.pdb, q7rtn6.pdb, q96c45.pdb. So please do not preprocess or simsetup or hpc. Directly do the analysis of these data. I want specifically RMSF of protein and COM distance of ATP (ligand) from protein for all the simulations. In combined analysis, please compare the RMSF in cross simulations and ligand pocket distance in cross simulaitons. The given uniprotid:protein name are p23458:JAK1, p29597:TYK2, q7rtn6:STRAA and q96c45:ULK4. Calculate the DCCM for JAK1 and TYK2 to compare the dynamics between these two proteins. Please also calculate radius of gyration for JAK1, TYK2 and ULK4 and compare them in plot. In report preparation, please focus on relevant pseudokinase literature of these simulated proteins." \
+  --goal "Simulation are already done for these uniprot ids: p23458.pdb, p29597.pdb, q7rtn6.pdb, q96c45.pdb. So please do not preprocess or simsetup or hpc. Directly do the analysis of these data. I want specifically RMSF of protein and COM distance of ATP (ligand) from protein for all the simulations. Also Run PCA on protein Cα, plot PC1 vs PC2, and compute the free energy landscape from PC1 and PC2 at 310 K. In combined analysis, please compare the RMSF in cross simulations and ligand pocket distance in cross simulaitons and free enrgy landscape. The given uniprotid:protein name are p23458:JAK1, p29597:TYK2, q7rtn6:STRAA and q96c45:ULK4. Calculate the DCCM for JAK1 and TYK2 to compare the dynamics between these two proteins. Please also calculate radius of gyration for JAK1, TYK2 and ULK4 and compare them in plot. In report preparation, please focus on relevant pseudokinase literature of these simulated proteins." \
   --working-dir ./agenticB5R1 \
   --subtask analysis reporter \
   --simtype multisim
+
+
+python run_agenticAIWork.py \
+  --goal "Simulations are already complete (~200 ns each) for eight protein–ATP holo systems in ./agenticB5R1: o15197, o43187, p21860, p23458, p29597, q7rtn6, q8nb16, q9bxu1. Skip preprocess, simsetup, and HPC — run analysis and reporting only. Per simulation, compute and plot: ligand–pocket COM distance, protein–ATP contacts, pocket SASA, ligand residence/unbinding, pocket RMSF, ligand RMSF, PCA on Cα, free-energy landscape at 310 K, FEL basin features, and export representative PDB structures for each FEL basin (max 8). Combined analysis: build an unsupervised classification feature table (raw CSV, z-score CSV, XLSX), cluster with hierarchical clustering on the z-score matrix (default k), and plot cluster PCA and dendrogram labeled with protein names. After clustering, generate cluster-wise trajectory plots (pocket SASA, COM distance, contacts, residence) and cluster-wise pocket/ligand RMSF; also overlay ligand–pocket distance, pocket RMSF, and ligand RMSF across all simulations. Use id:name map o15197:EPHB6, o43187:IRAK2, p21860:ERBB3, p23458:JAK1, p29597:TYK2, q7rtn6:STRAA, q8nb16:MLKL, q9bxu1:STK31. No manual class labels. Generate a combined HTML report with literature context for each kinase/pseudokinase." \
+  --working-dir ./agenticB5R1 \
+  --subtask analysis reporter \
+  --simtype multisim \
+  --combined-only
+
+
+
 
  q96c45.pdb, q9bxu1.pdb, q9c0k7.pdb, q9y616.pdb
 

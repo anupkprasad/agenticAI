@@ -39,10 +39,28 @@ from src.analysis.dccm_calculator import (
     plot_dccm_comparison,
     plot_dccm_difference,
 )
+from src.analysis.binding_site_analyzer import (
+    calculate_protein_ligand_contacts,
+    calculate_pocket_sasa,
+    analyze_ligand_residence,
+    calculate_pocket_rmsf,
+    calculate_ligand_rmsf,
+)
+from src.analysis.classification_collector import collect_classification_features_table
+from src.analysis.classification_clustering import (
+    cluster_classification_features,
+    plot_cluster_feature_trajectories,
+    plot_cluster_rmsf_profiles,
+    CLUSTER_TRAJECTORY_METRIC_GROUPS,
+    CLUSTER_RMSF_PROFILE_GROUPS,
+)
 from src.analysis.pca_analyzer import (
     calculate_trajectory_pca,
     plot_pca_projection,
     calculate_free_energy_landscape,
+    analyze_fel_landscape_features,
+    export_fel_basin_structures,
+    collect_fel_features_table,
     apply_pca_tool_defaults,
     PCA_TOOL_DEFAULTS,
 )
@@ -63,6 +81,7 @@ from src.analysis.combined_analysis import (
     run_combined_rmsf_apo_holo_analysis,
     run_combined_dccm_apo_holo_analysis,
     run_combined_rmsf_segment_apo_holo_analysis,
+    run_combined_binding_rmsf_overlay,
 )
 
 # Import dynamic tool loader for programmer-generated tools
@@ -93,6 +112,13 @@ __all__ = [
     "calculate_trajectory_pca",
     "plot_pca_projection",
     "calculate_free_energy_landscape",
+    "analyze_fel_landscape_features",
+    "export_fel_basin_structures",
+    "calculate_protein_ligand_contacts",
+    "calculate_pocket_sasa",
+    "analyze_ligand_residence",
+    "calculate_pocket_rmsf",
+    "calculate_ligand_rmsf",
     # Combined (multi-sim) tools
     "collect_metric_files",
     "plot_combined_overlay",
@@ -136,6 +162,12 @@ COMBINED_ANALYSIS_TOOL_NAMES = frozenset({
     "run_combined_rmsf_apo_holo_analysis",
     "run_combined_dccm_apo_holo_analysis",
     "run_combined_rmsf_segment_apo_holo_analysis",
+    "run_combined_binding_rmsf_overlay",
+    "collect_fel_features_table",
+    "collect_classification_features_table",
+    "cluster_classification_features",
+    "plot_cluster_feature_trajectories",
+    "plot_cluster_rmsf_profiles",
 })
 
 _PER_SIM_ANALYSIS_TOOLS = [
@@ -159,6 +191,13 @@ _PER_SIM_ANALYSIS_TOOLS = [
     calculate_trajectory_pca,
     plot_pca_projection,
     calculate_free_energy_landscape,
+    analyze_fel_landscape_features,
+    export_fel_basin_structures,
+    calculate_protein_ligand_contacts,
+    calculate_pocket_sasa,
+    analyze_ligand_residence,
+    calculate_pocket_rmsf,
+    calculate_ligand_rmsf,
 ]
 
 _COMBINED_ANALYSIS_TOOLS = [
@@ -175,6 +214,12 @@ _COMBINED_ANALYSIS_TOOLS = [
     run_combined_rmsf_apo_holo_analysis,
     run_combined_dccm_apo_holo_analysis,
     run_combined_rmsf_segment_apo_holo_analysis,
+    run_combined_binding_rmsf_overlay,
+    collect_fel_features_table,
+    collect_classification_features_table,
+    cluster_classification_features,
+    plot_cluster_feature_trajectories,
+    plot_cluster_rmsf_profiles,
 ]
 
 
@@ -323,6 +368,13 @@ class AnalysisToolExecutor:
             "calculate_trajectory_pca": calculate_trajectory_pca,
             "plot_pca_projection": plot_pca_projection,
             "calculate_free_energy_landscape": calculate_free_energy_landscape,
+            "analyze_fel_landscape_features": analyze_fel_landscape_features,
+            "export_fel_basin_structures": export_fel_basin_structures,
+            "calculate_protein_ligand_contacts": calculate_protein_ligand_contacts,
+            "calculate_pocket_sasa": calculate_pocket_sasa,
+            "analyze_ligand_residence": analyze_ligand_residence,
+            "calculate_pocket_rmsf": calculate_pocket_rmsf,
+            "calculate_ligand_rmsf": calculate_ligand_rmsf,
         }
         if include_combined:
             self.tools.update({
@@ -339,6 +391,12 @@ class AnalysisToolExecutor:
                 "run_combined_rmsf_apo_holo_analysis": run_combined_rmsf_apo_holo_analysis,
                 "run_combined_dccm_apo_holo_analysis": run_combined_dccm_apo_holo_analysis,
                 "run_combined_rmsf_segment_apo_holo_analysis": run_combined_rmsf_segment_apo_holo_analysis,
+                "run_combined_binding_rmsf_overlay": run_combined_binding_rmsf_overlay,
+                "collect_fel_features_table": collect_fel_features_table,
+                "collect_classification_features_table": collect_classification_features_table,
+                "cluster_classification_features": cluster_classification_features,
+                "plot_cluster_feature_trajectories": plot_cluster_feature_trajectories,
+                "plot_cluster_rmsf_profiles": plot_cluster_rmsf_profiles,
             })
         
         # Record built-in tool names BEFORE loading programmer tools
@@ -471,6 +529,22 @@ class AnalysisToolExecutor:
             }
         
         # Normalise common LLM parameter-name mistakes before calling the tool
+        _TOOL_SPECIFIC_ALIASES: Dict[str, Dict[str, str]] = {
+            "plot_pca_projection": {
+                "pca_file": "pca_projections_file",
+                "input_file": "pca_projections_file",
+            },
+            "calculate_free_energy_landscape": {
+                "pca_file": "pca_projections_file",
+                "input_file": "pca_projections_file",
+            },
+            "analyze_fel_landscape_features": {
+                "pca_file": "pca_projections_file",
+            },
+            "calculate_trajectory_pca": {
+                "output_file": "projections_file",
+            },
+        }
         _PARAM_ALIASES = {
             "title": "titles",
             "ylabel": "ylabels",  # multipanel expects plural
@@ -491,6 +565,10 @@ class AnalysisToolExecutor:
         
         if valid_params is not None:
             aliases_applied = {}
+            for alias, canonical in (_TOOL_SPECIFIC_ALIASES.get(tool_name) or {}).items():
+                if alias in kwargs and alias not in valid_params and canonical in valid_params:
+                    kwargs[canonical] = kwargs.pop(alias)
+                    aliases_applied[alias] = canonical
             for alias, canonical in _PARAM_ALIASES.items():
                 if alias in kwargs and alias not in valid_params and canonical in valid_params:
                     val = kwargs.pop(alias)
@@ -521,6 +599,13 @@ class AnalysisToolExecutor:
                     tool_name,
                     changed,
                 )
+            # Defaults may inject params the tool function does not accept (e.g. temperature_k).
+            if valid_params is not None:
+                for k in [k for k in kwargs if k not in valid_params]:
+                    logger.warning(
+                        "Dropping PCA-default parameter '%s' for tool %s", k, tool_name
+                    )
+                    kwargs.pop(k)
         
         try:
             logger.info(f"Executing analysis tool: {tool_name}")

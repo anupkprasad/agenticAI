@@ -458,6 +458,49 @@ to combined analysis when all sims complete.
 
 ---
 
+## 8.1 Unsupervised classification (multi-simulation)
+
+Use when you have many finished trajectories (e.g. 35 protein–ATP systems at ~200 ns)
+and want a **numeric feature matrix** for clustering — without manual labels.
+
+**Important:** The framework builds `classification_features.csv` **only** when your
+`--goal` explicitly requests classification, clustering, unsupervised grouping, or a
+feature matrix. Ordinary combined analysis (overlays, comparison tables) does **not**
+create this file.
+
+**Full feature set example:**
+
+```bash
+python run_agenticAIWork.py \
+  --goal "All trajectories under ./agenticB5R1/<label>/ are complete (~200 ns). Per simulation: ligand pocket distance, protein–ATP contacts, pocket SASA, residence/unbinding, pocket RMSF, ligand RMSF, PCA, FEL, and FEL basin features. Then unsupervised classification across all systems (feature table + z-score CSV). Combined: overlay pocket distance and RMSF." \
+  --working-dir ./agenticB5R1 \
+  --subtask analysis reporter \
+  --simtype multisim
+```
+
+**Subset example** (only RMSF + pocket distance are analyzed and featurized):
+
+```bash
+python run_agenticAIWork.py \
+  --goal "Per simulation compute RMSF and ligand pocket distance only. Unsupervised classification using those features across all systems." \
+  --working-dir ./agenticB5R1 \
+  --subtask analysis reporter \
+  --simtype multisim
+```
+
+**Outputs** (when classification is requested):
+
+| File | Purpose |
+|------|---------|
+| `{base}/analysis/classification_features.csv` | Raw scalars — one row per protein |
+| `{base}/analysis/classification_features_zscore.csv` | Z-scores for k-means / hierarchical clustering |
+| `{base}/analysis/classification_features.json` | Column list and metric groups used |
+
+Use the **z-score** file for clustering (scales differ between contacts, entropy, etc.).
+Details: [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md).
+
+---
+
 ## 9. Reading run outputs
 
 ### Terminal summary

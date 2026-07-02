@@ -122,6 +122,104 @@ tools:
       output_plot: "fel_pc1_pc2.png"
       output_grid: "fel_pc1_pc2_grid.csv"
 
+  analyze_fel_landscape_features:
+    description: "FEL classification metrics — minima, basins, barriers, entropy"
+    defaults:
+      fel_grid_file: "fel_pc1_pc2_grid.csv"
+      output_json: "fel_features.json"
+      output_csv: "fel_features.csv"
+      output_basins_csv: "fel_basins.csv"
+      smooth_sigma: 2.0
+      min_basin_population: 0.05
+      min_prominence_kj_mol: 1.5
+    workflow: "Run after calculate_free_energy_landscape; use collect_fel_features_table across sims"
+
+  export_fel_basin_structures:
+    description: "Representative PDB per FEL basin (up to 8) + fel_basin_structures.csv manifest"
+    defaults:
+      fel_features_file: "fel_features.json"
+      pca_projections_file: "pca_projections.dat"
+      manifest_file: "fel_basin_structures.csv"
+    workflow: "Run after analyze_fel_landscape_features; writes basin_XX.pdb in analysis/"
+
+  collect_fel_features_table:
+    description: "Aggregate fel_features.json from all simulations into one CSV"
+    defaults:
+      output_file: "fel_classification_features.csv"
+    phase: combined_analysis
+
+  calculate_protein_ligand_contacts:
+    description: "Protein-ligand H-bond and heavy-atom contact counts per frame"
+    defaults:
+      ligand_selection: "resname ATP"
+      contact_cutoff: 4.0
+      hbond_distance: 3.0
+      output_file: "protein_ligand_contacts.csv"
+
+  calculate_pocket_sasa:
+    description: "SASA of binding pocket residues (frame-0 pocket definition)"
+    defaults:
+      ligand_selection: "resname ATP"
+      pocket_cutoff: 5.0
+      output_file: "pocket_sasa.csv"
+
+  analyze_ligand_residence:
+    description: "Bound/unbound residence times and unbinding event counts"
+    defaults:
+      ligand_selection: "resname ATP"
+      bound_distance_A: 5.0
+      output_file: "ligand_residence.csv"
+
+  calculate_pocket_rmsf:
+    description: "Per-residue RMSF for pocket Cα atoms only"
+    defaults:
+      ligand_selection: "resname ATP"
+      pocket_cutoff: 5.0
+      output_file: "pocket_rmsf.dat"
+
+  calculate_ligand_rmsf:
+    description: "Per-atom RMSF of ligand heavy atoms (protein-aligned)"
+    defaults:
+      ligand_selection: "resname ATP"
+      output_file: "ligand_rmsf.dat"
+      output_json: "ligand_rmsf.json"
+
+  collect_classification_features_table:
+    description: "One-row-per-sim feature matrix for ML/clustering (+ z-score file)"
+    defaults:
+      output_file: "classification_features.csv"
+      zscore_output_file: "classification_features_zscore.csv"
+    phase: combined_analysis
+
+  cluster_classification_features:
+    description: "Hierarchical (default) or k-means clustering on z-score feature table + labeled plots"
+    defaults:
+      features_file: "classification_features_zscore.csv"
+      method: "hierarchical"
+      linkage_method: "ward"
+      assignments_file: "classification_cluster_assignments.csv"
+      scatter_plot_file: "classification_clusters_pca.png"
+      dendrogram_file: "classification_dendrogram.png"
+    phase: combined_analysis
+
+  plot_cluster_feature_trajectories:
+    description: "Per-cluster trajectory subplots for pocket SASA, COM distance, contacts, residence"
+    defaults:
+      assignments_file: "classification_cluster_assignments.csv"
+    phase: combined_analysis
+
+  plot_cluster_rmsf_profiles:
+    description: "Per-cluster pocket/ligand RMSF profile subplots"
+    defaults:
+      assignments_file: "classification_cluster_assignments.csv"
+    phase: combined_analysis
+
+  run_combined_binding_rmsf_overlay:
+    description: "Overlay pocket or ligand RMSF profiles across holo simulations"
+    defaults:
+      profile_type: "pocket_rmsf"
+    phase: combined_analysis
+
 # LLM-powered analysis planning configuration
 llm:
   planning_prompt_template: |
@@ -132,6 +230,7 @@ llm:
     - Topology File: {topology_file}
     - Energy File: {energy_file}
     - User Goal: {user_goal}
+    - Enriched User Goal (PRIMARY per-simulation scope): {enriched_goal}
     - HPC Output Directory: {hpc_output_dir}
 
     **Analysis Context:**
@@ -141,13 +240,9 @@ llm:
     {tools_list}
 
     **Your Task:**
-    Create a detailed, step-by-step analysis plan to extract meaningful insights from the MD trajectory.
-    Consider:
-    1. **Structural Stability**: RMSD analysis to assess overall structure stability
-    2. **Flexibility Analysis** RMSF to identify rigid and flexible regions
-    3. **Compactness**: Radius of gyration to monitor protein folding/unfolding
-    4. **Thermodynamics**: Energy analysis for equilibration assessment
-    5. **Statistics**: Extract trajectory metadata and sampling information
+    Create a detailed, step-by-step analysis plan covering **every** metric in the Enriched User Goal.
+    Include a calculate_*/analyze_* step plus plot_md_data (or plot_pca_projection) for each metric.
+    Do not stop after the first metric — a partial plan is invalid.
 
     **CRITICAL INSTRUCTIONS:**
     - You MUST ONLY use the tools listed above - do NOT invent non-existent tools

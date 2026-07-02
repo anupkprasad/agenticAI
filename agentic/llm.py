@@ -13,14 +13,13 @@ Example usage:
 """
 from __future__ import annotations
 
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 from dataclasses import dataclass
 import re
 import uuid
 import logging
 import json
 import urllib.parse
-from typing import Any
 import sys
 import os
 
@@ -61,6 +60,8 @@ class LLMClient:
             
         self._client = None
         self._is_mock_mode = False  # Track if we're in mock mode
+        self._last_raw_response = None
+        self._last_thinking = None  # Reasoning tokens from the last call (debug)
         
         logger.info(f"LLMClient initialized: {self.base_url} with model {self.model}")
         
@@ -157,7 +158,19 @@ class LLMClient:
                 out = ollama_client.chat(model=self.model, messages=messages)
                 
         except Exception as e:
-            logger.exception("ollama call failed; trying fallback HTTP")
+            err_text = str(e)
+            if "parsing tool call" in err_text.lower():
+                logger.warning(
+                    "ollama chat mis-parsed model output as a tool call; "
+                    "retrying via /api/generate"
+                )
+                try:
+                    sysp = system if system is not None else self.system_prompt
+                    return self.prompt_raw(prompt, system=sysp, **kwargs)
+                except Exception as gen_exc:
+                    logger.warning("generate retry failed: %s", gen_exc)
+            else:
+                logger.exception("ollama call failed; trying fallback HTTP")
             # Fallback to HTTP call if ollama direct call fails
             if self.base_url:
                 try:
@@ -446,6 +459,35 @@ class LLMClient:
 
         return LLMClient.InvokeResult(content=cleaned, tool_calls=validated_calls, validation_errors=validation_errors)
 
+    def _ollama_options(self, **kwargs: Any) -> Dict[str, Any]:
+        """Build Ollama ``options`` dict honoring per-call and config limits."""
+        num_predict = (
+            kwargs.get("max_tokens")
+            or kwargs.get("num_predict")
+            or self.config.get("max_tokens")
+            or 4096
+        )
+        num_predict = int(num_predict)
+        # Reasoning models (e.g. gpt-oss) spend a large token budget on hidden
+        # reasoning before emitting the answer. Too small a budget yields a
+        # reasoning-only truncated reply with no usable content. Raise the floor
+        # so the model can finish reasoning AND produce the final JSON answer.
+        if self._is_reasoning_model():
+            num_predict = max(num_predict, 8192)
+        options: Dict[str, Any] = {"num_predict": num_predict}
+        num_ctx = kwargs.get("num_ctx") or self.config.get("num_ctx")
+        if num_ctx:
+            options["num_ctx"] = int(num_ctx)
+        temperature = kwargs.get("temperature")
+        if temperature is not None:
+            options["temperature"] = float(temperature)
+        return options
+
+    def _is_reasoning_model(self) -> bool:
+        """Heuristic: does the configured model emit separate reasoning tokens?"""
+        name = (self.model or "").lower()
+        return any(tag in name for tag in ("gpt-oss", "deepseek-r1", "qwq", "-r1", "reason"))
+
     def _http_call(self, prompt: str, system: Optional[str] = None, **kwargs: Any) -> str:
         """Attempt simple HTTP POSTs to a few common endpoints on the base_url.
 
@@ -472,6 +514,56 @@ class LLMClient:
         endpoints = ["/chat", "/api/chat", "/v1/chat/completions", "/"]
         headers = {"Content-Type": "application/json"}
 
+        def _extract_from_obj(obj, pieces, thinking):
+            """Pull assistant content + reasoning from one parsed JSON event/object."""
+            if not isinstance(obj, dict):
+                return
+            msg = obj.get("message") if isinstance(obj.get("message"), dict) else None
+            if msg:
+                if msg.get("content"):
+                    pieces.append(msg["content"])
+                # Reasoning models (e.g. gpt-oss) stream reasoning separately.
+                if msg.get("thinking"):
+                    thinking.append(msg["thinking"])
+                if msg.get("reasoning"):
+                    thinking.append(msg["reasoning"])
+            if obj.get("response"):
+                pieces.append(obj["response"])
+            if obj.get("thinking"):
+                thinking.append(obj["thinking"])
+            for k in ("text", "content", "result"):
+                if not msg and obj.get(k):
+                    pieces.append(obj[k])
+            if "choices" in obj and obj["choices"]:
+                ch = obj["choices"][0]
+                if isinstance(ch, dict):
+                    if ch.get("text"):
+                        pieces.append(ch["text"])
+                    elif isinstance(ch.get("delta"), dict) and ch["delta"].get("content"):
+                        pieces.append(ch["delta"]["content"])
+                    elif isinstance(ch.get("message"), dict) and ch["message"].get("content"):
+                        pieces.append(ch["message"]["content"])
+
+        def _finalize(pieces, thinking):
+            """Prefer real assistant content; never return raw reasoning as the answer."""
+            content = "".join(pieces).strip()
+            reason = "".join(thinking).strip()
+            self._last_thinking = reason
+            if content:
+                return content
+            if reason:
+                # Reasoning-only output means the model never emitted an answer
+                # (usually token-budget truncation during reasoning). Returning
+                # the reasoning would poison JSON parsing downstream, so surface
+                # a clear sentinel and let the caller fall back / retry.
+                logger.warning(
+                    "LLM returned reasoning but no content (%d reasoning chars); "
+                    "likely truncated. Returning empty answer so caller can fall back.",
+                    len(reason),
+                )
+                return ""
+            return ""
+
         def _handle_response(resp):
             # Save raw text where possible for debugging
             try:
@@ -479,75 +571,49 @@ class LLMClient:
             except Exception:
                 self._last_raw_response = str(resp)
 
-            # If content-type indicates NDJSON or chunked token stream, parse iter_lines
-            ctype = resp.headers.get("Content-Type", "")
-            if "ndjson" in ctype or resp.headers.get("Transfer-Encoding", "") == "chunked":
-                # stream token fragments
-                pieces = []
-                thinking = []
-                for raw in resp.iter_lines(decode_unicode=True):
-                    if not raw:
-                        continue
-                    line = raw.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except Exception:
-                        # ignore non-json lines
-                        continue
-                    # try known shapes
-                    if isinstance(obj, dict):
-                        # Some servers stream a wrapper object with a 'message'
-                        # field whose 'content' contains the assistant tokens
-                        # (sometimes split across several events). Prefer
-                        # appending that when available so we reconstruct the
-                        # original assistant content cleanly.
-                        msg = obj.get('message') if isinstance(obj.get('message'), dict) else None
-                        if msg and msg.get('content'):
-                            pieces.append(msg.get('content'))
-                            continue
-                        # common top-level response
-                        if obj.get("response"):
-                            pieces.append(obj.get("response"))
-                        if obj.get("thinking"):
-                            thinking.append(obj.get("thinking"))
-                        # openai/choice style
-                        if "choices" in obj and obj["choices"]:
-                            ch = obj["choices"][0]
-                            if isinstance(ch, dict):
-                                if ch.get("text"):
-                                    pieces.append(ch.get("text"))
-                                elif isinstance(ch.get("delta"), dict) and ch.get("delta").get("content"):
-                                    pieces.append(ch.get("delta").get("content"))
-                if pieces:
-                    return "".join(pieces)
-                if thinking:
-                    return "".join(thinking)
-                return resp.text
+            pieces: List[str] = []
+            thinking: List[str] = []
 
-            # Not NDJSON; try whole-body JSON
+            # 1) Try whole-body JSON first (stream:false responses).
             try:
                 data = resp.json()
             except Exception:
-                return resp.text
+                data = None
 
             if isinstance(data, dict):
-                for k in ("text", "response", "content", "result"):
-                    if k in data and data[k]:
-                        return data[k]
-                if "choices" in data and data["choices"]:
-                    c = data["choices"][0]
-                    if isinstance(c, dict):
-                        return c.get("text") or c.get("message", {}).get("content", json.dumps(data))
+                _extract_from_obj(data, pieces, thinking)
+                if pieces or thinking:
+                    return _finalize(pieces, thinking)
+                # Known non-streaming shapes without message wrapper
                 if "messages" in data and data["messages"]:
-                    parts = []
-                    for m in data["messages"]:
-                        if isinstance(m, dict) and m.get("content"):
-                            parts.append(m["content"])
+                    parts = [
+                        m["content"] for m in data["messages"]
+                        if isinstance(m, dict) and m.get("content")
+                    ]
                     if parts:
                         return "\n".join(parts)
-            return json.dumps(data)
+                return json.dumps(data)
+
+            # 2) NDJSON / chunked token stream — reassemble line by line
+            #    regardless of Content-Type headers (some servers mislabel them).
+            raw_text = self._last_raw_response or ""
+            parsed_any = False
+            for raw in raw_text.splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                parsed_any = True
+                _extract_from_obj(obj, pieces, thinking)
+
+            if parsed_any:
+                return _finalize(pieces, thinking)
+
+            # 3) Not JSON at all — return raw text
+            return raw_text
 
         # 1) Try preferred non-streaming endpoints with explicit stream:false first
         for ep in preferred_endpoints:
@@ -556,7 +622,7 @@ class LLMClient:
                 "model": self.model,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"num_predict": self.config.get("max_tokens", 1024)},
+                "options": self._ollama_options(**kwargs),
             }
             if system:
                 payload["system"] = system
@@ -570,17 +636,19 @@ class LLMClient:
                 continue
             return _handle_response(resp)
 
-        # 2) Fallback to chat-style endpoints which may stream NDJSON
+        # 2) Fallback to chat-style endpoints. Request non-streaming so the
+        #    server returns one complete JSON object instead of NDJSON token
+        #    fragments (which previously leaked raw into logs / JSON parsing).
         for ep in endpoints:
             url = urllib.parse.urljoin(self.base_url.rstrip('/') + '/', ep.lstrip('/'))
             payload = {
                 "model": self.model,
                 "messages": (([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]),
-                "options": {"num_predict": self.config.get("max_tokens", 1024)},
+                "stream": False,
+                "options": self._ollama_options(**kwargs),
             }
             try:
-                # allow streaming iter_lines on the response
-                resp = session.post(url, headers=headers, data=json.dumps(payload), timeout=120, stream=True)
+                resp = session.post(url, headers=headers, data=json.dumps(payload), timeout=180)
             except Exception as e:
                 logger.debug("chat endpoint %s failed: %s", url, e)
                 continue

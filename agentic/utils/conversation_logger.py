@@ -220,7 +220,10 @@ class ConversationLogger:
         # Log full prompt with indentation for easy reading
         prompt_lines = prompt.strip().split('\n')
         for line in prompt_lines:
-            self.logger.info(f"   {line}")
+            if line == "":
+                self.logger.info("")
+            else:
+                self.logger.info(f"   {line}")
         
         self.logger.info("   " + "="*70)
         self.logger.info(f"   💭 Response:")
@@ -263,7 +266,19 @@ class ConversationLogger:
         
         for line in response_lines:
             self.logger.info(f"   {line}")
-        
+
+        stripped = response_str.strip()
+        if stripped.startswith("{") and not stripped.endswith("}"):
+            self.logger.info(
+                "   ⚠ Response appears truncated (JSON does not end with '}'). "
+                "Check Ollama num_predict / max_tokens."
+            )
+        elif stripped.startswith("```") and not stripped.rstrip().endswith("```"):
+            self.logger.info(
+                "   ⚠ Response appears truncated (markdown fence not closed). "
+                "Check Ollama num_predict / max_tokens."
+            )
+
         self.logger.info("   " + "="*70)
         self.logger.info("")
         self._flush()

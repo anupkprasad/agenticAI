@@ -82,6 +82,8 @@ def _parse_label_name_map(text: str) -> Dict[str, str]:
     ):
         key, val = m.group(1).strip(), m.group(2).strip()
         if val[0].isalpha() and len(key) >= 3 and len(val) >= 2:
+            if key.lower() in {"id", "e", "g", "eg"} or val.lower() in {"name", "map"}:
+                continue
             mapping[key.lower()] = val
     return mapping
 

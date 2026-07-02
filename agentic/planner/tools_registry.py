@@ -6,11 +6,14 @@ Extracts tool descriptions, parameters, and metadata from docstrings and decorat
 """
 
 import os
+import re
 import importlib.util
 import inspect
 import logging
 from typing import Dict, List, Any, Optional
 from pathlib import Path
+
+from agentic.utils.tool_prompt_format import format_tool_for_llm_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +163,7 @@ class ToolsRegistry:
             # Extract tools from module
             tools_found = 0
             for name, obj in inspect.getmembers(module):
-                if self._is_tool_function(name, obj):
+                if self._is_tool_function(name, obj, module_name=module.__name__):
                     tool_info = self._extract_tool_info(name, obj, agent_name)
                     self.tools[f"{agent_name}.{name}"] = tool_info
                     
@@ -176,7 +179,7 @@ class ToolsRegistry:
         except Exception as e:
             logger.error(f"Error scanning {file_path}: {e}", exc_info=True)
     
-    def _is_tool_function(self, name: str, obj: Any) -> bool:
+    def _is_tool_function(self, name: str, obj: Any, module_name: Optional[str] = None) -> bool:
         """
         Determine if an object is a tool function (including LangChain @tool decorated).
         
@@ -221,8 +224,15 @@ class ToolsRegistry:
         if hasattr(obj, "__wrapped__"):
             return True
         
-        # Regular function with proper docstring
-        if inspect.isfunction(obj) and obj.__doc__ and len(obj.__doc__.strip()) > 20:
+        # Regular function with proper docstring. To avoid leaking imported helpers
+        # (for example apply_pca_tool_defaults), only allow functions defined in
+        # the scanned module.
+        if (
+            inspect.isfunction(obj)
+            and obj.__doc__
+            and len(obj.__doc__.strip()) > 20
+            and (module_name is None or getattr(obj, "__module__", None) == module_name)
+        ):
             return True
         
         return False
@@ -421,6 +431,42 @@ class ToolsRegistry:
         truncated = text[: max_chars - 40].rsplit("\n", 1)[0]
         return truncated + f"\n  … ({len(tools)} tools total; list truncated)"
 
+    @staticmethod
+    def _annotate_args_required_optional(
+        description: str,
+        parameters: Dict[str, Dict[str, Any]],
+    ) -> str:
+        """Inline required/optional flags into Args lines when possible."""
+        if not description or not parameters or "Args:" not in description:
+            return description
+
+        lines = description.split("\n")
+        in_args = False
+        out: List[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("Args:"):
+                in_args = True
+                out.append(line)
+                continue
+            if in_args and (stripped.startswith("Returns:") or stripped.startswith("Raises:")):
+                in_args = False
+                out.append(line)
+                continue
+
+            if in_args:
+                match = re.match(r"^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$", line)
+                if match:
+                    indent, arg_name, rest = match.groups()
+                    if arg_name in parameters:
+                        req = "required" if parameters[arg_name].get("required") else "optional"
+                        out.append(f"{indent}{arg_name} ({req}): {rest}")
+                        continue
+
+            out.append(line)
+
+        return "\n".join(out)
+
     def get_combined_only_tools_context(self, max_chars: int = 5000) -> str:
         """Tools that run once at project base across multiple simulations."""
         try:
@@ -578,15 +624,13 @@ class ToolsRegistry:
                 formatted.append("")  # Blank line
             
             for tool in tools:
-                formatted.append(f"\n→ {tool['name']}")
-                formatted.append(f"  {tool['description']}")
-                
-                if tool['parameters']:
-                    formatted.append("  Parameters:")
-                    for param_name, param_info in tool['parameters'].items():
-                        req_str = "required" if param_info['required'] else "optional"
-                        desc = param_info.get('description', 'No description')
-                        formatted.append(f"    • {param_name} ({req_str}): {desc}")
+                formatted.append(
+                    format_tool_for_llm_prompt(
+                        tool["name"],
+                        tool.get("description", ""),
+                        tool.get("parameters") or {},
+                    )
+                )
         
         return "\n".join(formatted)
 
