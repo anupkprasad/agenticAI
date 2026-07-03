@@ -1,14 +1,32 @@
+# Python / environment
 __pycache__/
 .venv/
+.pytest_cache/
 .env
 *.pyc
+.conda/
+
+# IDE / editor
+.cursor/
+.vscode/
+
+# Simulation data & artifacts
 *.pdb
 *.xtc
 *.top
 *.tpr
 *.gro
-*.log
 *.cache
+
+# Logs & backups
+*.log
+*_old.py
+*_bckp/
+
+# Slurm scripts
+*.slurm
+
+# Local run / work directories
 results/
 jobs/
 working_dir_backup/
@@ -16,30 +34,25 @@ work_di/
 work_dir_hl/
 work_dir_hl2/
 multi_run/
+tmp/
+ment/
+garbage/
+
+# Project-specific local data (not source)
 pseudokin/
 pseudokin_june3bckp/
 pseudokin1/
 pseudokin2/
-README copy.md/
 pseudo/
 pseudo_for_paper/
+pseudo1/
 dclk_PSMA/
 horse_MLKL/
-pseudo1/
 agenticB5R1/
 agenticB5R1_t1/
-*_bckp/
 backup/
 tests/
-tmp/
-ment/
+examples/
 
-# Log files
-*.log
-
-# Backup files
-*_old.py
-
-
-# Slurm scripts
-*.slurm
+# Misc
+README copy.md/
