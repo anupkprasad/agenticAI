@@ -25,25 +25,58 @@ logger = logging.getLogger(__name__)
 SUMMARY_FILENAME = "analysis_summary.jsonl"
 
 
+def _json_default(obj: Any) -> Any:
+    """Fallback serializer for numpy/scalar types json.dumps can't handle natively."""
+    # numpy scalars expose .item(); arrays expose .tolist()
+    item = getattr(obj, "item", None)
+    if callable(item):
+        try:
+            return obj.item()
+        except Exception:
+            pass
+    tolist = getattr(obj, "tolist", None)
+    if callable(tolist):
+        try:
+            return obj.tolist()
+        except Exception:
+            pass
+    return str(obj)
+
+
+def _dumps(obj: Any, **kwargs: Any) -> str:
+    """json.dumps with numpy-aware default so int64/float64/ndarray never crash."""
+    kwargs.setdefault("default", _json_default)
+    return json.dumps(obj, **kwargs)
+
+
 def _round_floats(obj: Any, decimals: int = 3) -> Any:
     """
-    Recursively round all float values in nested dictionaries/lists.
+    Recursively round floats and coerce numpy scalars to native Python types.
     
     Args:
         obj: Object to process (dict, list, float, or other)
         decimals: Number of decimal places to round to
         
     Returns:
-        Object with floats rounded
+        Object with floats rounded and numpy scalars converted
     """
     if isinstance(obj, dict):
         return {key: _round_floats(value, decimals) for key, value in obj.items()}
     elif isinstance(obj, list):
         return [_round_floats(item, decimals) for item in obj]
+    elif isinstance(obj, tuple):
+        return [_round_floats(item, decimals) for item in obj]
     elif isinstance(obj, float):
         return round(obj, decimals)
-    else:
+    elif isinstance(obj, (bool, int, str)) or obj is None:
         return obj
+    else:
+        # numpy scalar (int64/float64) or ndarray → native Python
+        native = _json_default(obj)
+        # Re-round if the coerced value is a float / list of floats
+        if isinstance(native, (float, list, dict)):
+            return _round_floats(native, decimals)
+        return native
 
 
 def initialize_summary_file(working_dir: str) -> str:
@@ -80,7 +113,7 @@ def initialize_summary_file(working_dir: str) -> str:
         
         with open(summary_path, 'w') as f:
             # Write header with indentation for readability
-            f.write(json.dumps(header, indent=2) + "\n")
+            f.write(_dumps(header, indent=2) + "\n")
         
         logger.info(f"Initialized analysis summary file: {summary_path}")
     
@@ -114,8 +147,13 @@ def append_analysis_summary(
     statistics = _round_floats(statistics or {}, decimals=3)
     metadata = _round_floats(metadata or {}, decimals=3)
     
-    # Ensure Path objects in files dict are converted to strings for JSON serialization
-    safe_files = {k: str(v) for k, v in (files or {}).items()}
+    # Ensure Path objects and lists in files dict are JSON-serializable
+    safe_files: Dict[str, Any] = {}
+    for k, v in (files or {}).items():
+        if isinstance(v, (list, tuple)):
+            safe_files[k] = [str(item) for item in v]
+        else:
+            safe_files[k] = str(v)
     
     # Format timestamp in readable format: "2026-03-03, Time 23:56:00"
     now = datetime.utcnow()
@@ -136,7 +174,7 @@ def append_analysis_summary(
             # Write separator for readability
             f.write("---\n")
             # Write pretty-printed JSON with indentation for readability
-            f.write(json.dumps(entry, indent=2) + "\n")
+            f.write(_dumps(entry, indent=2) + "\n")
         
         logger.info(f"Appended {analysis_type} summary to {summary_path}")
     except Exception as e:
@@ -245,10 +283,10 @@ def update_analysis_summary_with_files(
         with open(summary_path, 'w') as f:
             for entry in entries:
                 if entry.get("summary_file_version"):  # Header entry
-                    f.write(json.dumps(entry, indent=2) + "\n")
+                    f.write(_dumps(entry, indent=2) + "\n")
                 else:
                     f.write("---\n")
-                    f.write(json.dumps(entry, indent=2) + "\n")
+                    f.write(_dumps(entry, indent=2) + "\n")
         
         logger.info(f"Successfully updated summary file: {summary_path}")
         
@@ -377,7 +415,7 @@ def generate_summary_report(working_dir: str) -> str:
             report.append("  Metadata:")
             for key, value in entry["metadata"].items():
                 if isinstance(value, (list, dict)):
-                    report.append(f"    • {key}: {json.dumps(value)[:60]}...")
+                    report.append(f"    • {key}: {_dumps(value)[:60]}...")
                 else:
                     report.append(f"    • {key}: {value}")
         

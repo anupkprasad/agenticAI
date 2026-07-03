@@ -735,7 +735,7 @@ class MDAnalysisAgent:
         """LLM plan for HITL chat — task text only; no multisim intent filtering."""
         prompt = self._build_hitl_planning_prompt(task, agent_input, state)
         try:
-            content = self.llm.prompt_raw(prompt, temperature=0.2, max_tokens=3000)
+            content = self.llm.prompt_raw(prompt, temperature=0.2, max_tokens=16384, format="json")
 
             log_llm_interaction(
                 "analysis.hitl_planning",
@@ -2129,6 +2129,55 @@ Output as JSON:
                 "stage": "analysis"
             }
 
+    def _llm_plan_json_with_retry(
+        self,
+        prompt: str,
+        log_label: str,
+        *,
+        temperature: float = 0.2,
+        max_tokens: int = 16384,
+    ) -> Dict[str, Any]:
+        """Call the LLM for a JSON plan; retry once when the response has no steps.
+
+        Reasoning models occasionally return empty content (reasoning-only) or a
+        JSON object without a ``steps`` array. A single strict retry recovers most
+        of these before the caller falls back to the deterministic template.
+        """
+        content = self.llm.prompt_raw(
+            prompt, temperature=temperature, max_tokens=max_tokens, format="json"
+        )
+        log_llm_interaction(
+            log_label, prompt, content,
+            is_mock=hasattr(self.llm, "_is_mock_mode") and self.llm._is_mock_mode,
+        )
+        plan_dict = self._extract_plan_json(content)
+
+        if not (content or "").strip() or not plan_dict.get("steps"):
+            logger.warning(
+                "%s: empty/invalid JSON plan (content=%d chars, steps=%d); retrying once",
+                log_label, len((content or "").strip()),
+                len(plan_dict.get("steps", []) or []),
+            )
+            retry_prompt = (
+                prompt
+                + "\n\nIMPORTANT: Your previous reply was empty or missing the "
+                "\"steps\" array. Reply with ONLY a single valid JSON object of the "
+                "form {\"reasoning\":..., \"overview\":..., \"steps\":[{...}], "
+                "\"potential_issues\":[], \"recommendations\":[]}. Every requested "
+                "metric must appear as a step. No prose, no markdown fences."
+            )
+            content = self.llm.prompt_raw(
+                retry_prompt, temperature=0.0, max_tokens=max(max_tokens, 24576), format="json"
+            )
+            log_llm_interaction(
+                f"{log_label}.retry", retry_prompt, content,
+                is_mock=hasattr(self.llm, "_is_mock_mode") and self.llm._is_mock_mode,
+            )
+            plan_dict = self._extract_plan_json(content)
+
+        plan_dict["_raw_content"] = content
+        return plan_dict
+
     def _create_analysis_plan_llm(self, agent_input: AnalysisAgentInput, state: MDState) -> AnalysisPlan:
         """
         Use LLM to analyze available data and create intelligent analysis plan.
@@ -2138,12 +2187,10 @@ Output as JSON:
         prompt = self._build_analysis_planning_prompt(agent_input, state)
         
         try:
-            content = self.llm.prompt_raw(prompt, temperature=0.2, max_tokens=4000)
-
-            log_llm_interaction("analysis.planning", prompt, content,
-                              is_mock=hasattr(self.llm, '_is_mock_mode') and self.llm._is_mock_mode)
-
-            plan_dict = self._extract_plan_json(content)
+            plan_dict = self._llm_plan_json_with_retry(
+                prompt, "analysis.planning", temperature=0.2, max_tokens=16384
+            )
+            content = plan_dict.pop("_raw_content", "")
             plan_dict = self._normalize_plan_steps(plan_dict, agent_input)
 
             llm_step_count = len(plan_dict.get("steps", []))
@@ -3111,7 +3158,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             prompt = self._build_analysis_planning_prompt(agent_input, state)
 
         try:
-            resp = self.llm.prompt_raw(prompt, temperature=0.1, max_tokens=4000)
+            resp = self.llm.prompt_raw(prompt, temperature=0.1, max_tokens=16384, format="json")
             plan_dict = self._extract_plan_json(resp)
             if current_plan:
                 return plan_dict

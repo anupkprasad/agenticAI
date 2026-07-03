@@ -1464,28 +1464,64 @@ No need to specify image paths in tool_params - they're extracted from the analy
             logger.warning("Failed to generate combined final impression: %s", exc)
             return fallback
 
+    def _resolve_protein_display_name(self, state: MDState) -> tuple:
+        """Return (protein_name, sim_label) for report title and metadata."""
+        import re
+        user_goal = state.get("enriched_prompt") or state.get("user_goal") or ""
+        workdir = state.get("working_directory", "")
+        sim_label = Path(workdir).name if workdir else ""
+
+        # id:name map in goal (p23458:JAK1, o15197:EPHB6)
+        if sim_label:
+            m = re.search(
+                rf"\b{re.escape(sim_label)}\s*:\s*([A-Za-z0-9_-]+)",
+                user_goal,
+                re.IGNORECASE,
+            )
+            if m:
+                return m.group(1), sim_label
+
+        protein_name = None
+        sys_info = state.get("system_info")
+        if isinstance(sys_info, dict):
+            protein_name = (
+                sys_info.get("protein_name")
+                or sys_info.get("system_name")
+                or sys_info.get("uniprot_id")
+            )
+
+        # "JAK1 holo system", "EPHB6 holo"
+        if not protein_name:
+            m = re.search(
+                r"\b([A-Z][A-Za-z0-9]{1,15})\b[^.\n]{0,40}\b(?:holo|kinase|pseudokinase|system)\b",
+                user_goal,
+            )
+            if m:
+                candidate = m.group(1)
+                if candidate.upper() not in {"MD", "PDB", "HPC", "ATP", "COM", "FEL", "PCA"}:
+                    protein_name = candidate
+
+        if not protein_name and sim_label:
+            protein_name = sim_label
+
+        return protein_name or "Protein", sim_label
+
     def _extract_pdb_for_viewer(self, state: MDState, analysis_data: Dict[str, Any] = None) -> Optional[Dict[str, str]]:
-        """Extract trajectory frames at analysis-driven time points for the 3D viewer.
+        """Extract significant structures for the 3D viewer.
 
-        Reads RMSD / COM-distance data to pick up to 5 scientifically
-        important timepoints (max RMSD, closest ligand approach, etc.)
-        and returns a dict mapping descriptive labels → PDB text.
-
-        Falls back to a single first frame if smart selection fails.
+        Combines FEL basin representative PDBs with trajectory frames at
+        analysis-driven time points (COM extrema, contact extrema, unbinding,
+        RMSD peaks).  Falls back to first frame only when nothing else works.
         """
         try:
             from src.reporter.structure_extractor import (
-                identify_important_timepoints,
-                extract_multi_frame_pdb,
+                collect_significant_structures,
                 extract_first_frame_pdb,
                 read_pdb_data,
             )
 
             working_dir = state.get("working_directory", "working_dir")
 
-            # Resolve the HPC directory from state if available so that
-            # extract_multi_frame_pdb looks in the right place for the
-            # trajectory (md.xtc) regardless of session-specific nesting.
             from pathlib import Path as _Path
             hpc_raw = state.get("hpc_output_directory") or state.get("hpc_dir")
             if hpc_raw and _Path(hpc_raw).is_dir():
@@ -1496,50 +1532,27 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 hpc_parent = working_dir
                 hpc_subdir_name = "hpc"
 
-            # --- Smart timepoint selection from analysis data ---
             if analysis_data:
-                important = identify_important_timepoints(
-                    analysis_data, working_dir, max_points=5
+                frames = collect_significant_structures(
+                    analysis_data,
+                    working_dir,
+                    hpc_parent,
+                    hpc_subdir=hpc_subdir_name,
+                    max_total=8,
                 )
-                if important:
-                    time_points = [t for t, _lbl in important]
-                    labels_map = {t: lbl for t, lbl in important}
-                    logger.info(
-                        "Reporter: extracting PDB frames at %d analysis-driven timepoints: %s",
-                        len(important),
-                        ", ".join(f"{t} ns ({lbl})" for t, lbl in important),
-                    )
+                if frames:
                     log_agent_action(
                         "reporter",
-                        f"Identified {len(important)} important timepoints from analysis data",
-                        {"timepoints": [f"{t} ns ({lbl})" for t, lbl in important]},
+                        f"Collected {len(frames)} structures for 3D viewer",
+                        {"labels": list(frames.keys())},
                     )
-                    frames = extract_multi_frame_pdb(
-                        hpc_parent,
-                        hpc_subdir=hpc_subdir_name,
-                        time_points_ns=time_points,
-                        labels=labels_map,
-                    )
-                    if frames:
-                        logger.info(
-                            "Reporter: extracted %d PDB frames for 3D viewer (%s)",
-                            len(frames),
-                            ", ".join(frames.keys()),
-                        )
-                        log_agent_action(
-                            "reporter",
-                            f"Extracted {len(frames)} multi-timepoint PDB frames for 3D viewer",
-                            {"labels": list(frames.keys())},
-                        )
-                        return frames
-                    logger.warning("Smart PDB extraction returned empty; falling back")
+                    return frames
 
-            # --- Fallback: first frame only ---
             pdb_path = extract_first_frame_pdb(hpc_parent, hpc_subdir=hpc_subdir_name)
             if pdb_path:
                 pdb_text = read_pdb_data(pdb_path)
                 if pdb_text:
-                    logger.info("Extracted single first-frame PDB for 3D viewer (%d chars)", len(pdb_text))
+                    logger.info("Extracted single first-frame PDB for 3D viewer (fallback)")
                     log_agent_action("reporter", "Extracted first-frame PDB for 3D viewer (fallback)", {})
                     return {"0 ns — Start": pdb_text}
 
@@ -1933,6 +1946,11 @@ No need to specify image paths in tool_params - they're extracted from the analy
                     params["literature_review"] = literature_review
                     # Pass system info from state
                     params["system_info"] = state.get("system_info")
+                    protein_name, sim_label = self._resolve_protein_display_name(state)
+                    params["protein_name"] = protein_name
+                    params["sim_label"] = sim_label
+                    # Analysis outputs live in parent/analysis — used to resolve plot paths
+                    params["analysis_dir"] = str(Path(self.file_manager.agent_dir).parent / "analysis")
                     # Generate final impression using LLM
                     logger.info("  [exec] Generating LLM final impression...")
                     params["final_impression"] = self._generate_final_impression(

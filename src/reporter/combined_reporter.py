@@ -28,16 +28,29 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _encode_image(path: str) -> Optional[str]:
+def _encode_image(path: str, search_dirs: Optional[List[Path]] = None) -> Optional[str]:
     """Return a base64-encoded data-URI for PNG/JPEG, or None on failure."""
     try:
-        data = Path(path).read_bytes()
-        ext = Path(path).suffix.lstrip(".").lower()
+        from src.reporter.html_generator import _resolve_asset_path
+
+        resolved = _resolve_asset_path(path, search_dirs)
+        p = resolved if resolved and resolved.is_file() else Path(path)
+        if not p.is_file():
+            logger.warning(f"Could not encode image (not found): {path}")
+            return None
+        data = p.read_bytes()
+        ext = p.suffix.lstrip(".").lower()
         mime = "image/png" if ext == "png" else "image/jpeg"
         return f"data:{mime};base64,{base64.b64encode(data).decode()}"
     except Exception as exc:
         logger.warning(f"Could not encode image {path}: {exc}")
         return None
+
+
+def _population_from_viewer_label(label: str) -> float:
+    """Parse population percentage from labels like ``FEL Basin 2 (26%, 95.5 ns)``."""
+    m = re.search(r"\((\d+(?:\.\d+)?)%", label)
+    return float(m.group(1)) if m else 0.0
 
 
 def _read_jsonl(path: str) -> List[Dict[str, Any]]:
@@ -248,42 +261,105 @@ def _collect_per_sim_resources(
 def _select_representative_pdbs(
     sim_dirs: List[str], labels: List[str], max_pdbs: int = 0
 ) -> Dict[str, str]:
-    """Pick one representative PDB per simulation, labelled with sim type + timepoint.
+    """Pick scientifically significant PDB structures for the combined 3D viewer.
 
-    Label format: ``"1A (0 ns)"`` — simulation label + actual time from filename.
-    By default (``max_pdbs <= 0``) every simulation is represented; pass a
-    positive *max_pdbs* to cap the total number of structures.
+    For each simulation (priority order):
+      1. Highest-population FEL basin representative PDB (from analysis export)
+      2. Analysis-driven trajectory frames (COM/contact/residence extrema)
+      3. Legacy fallback: earliest frame in ``reporter/*.pdb``
+
+    Labels use the display name (e.g. ``JAK1 — FEL Basin 2 (26%, 95.5 ns)``).
     """
-    if max_pdbs is None or max_pdbs <= 0:
-        max_pdbs = len(sim_dirs)
-    pdb_frames: Dict[str, str] = {}
+    return _select_significant_pdbs_for_combined(
+        sim_dirs, labels, label_name_map=None, max_per_sim=2, max_total=max_pdbs or 16
+    )
+
+
+def _select_significant_pdbs_for_combined(
+    sim_dirs: List[str],
+    labels: List[str],
+    label_name_map: Optional[Dict[str, str]] = None,
+    max_per_sim: int = 2,
+    max_total: int = 16,
+) -> Dict[str, str]:
+    """Collect significant structures across all simulations for the 3D viewer."""
+    from src.reporter.structure_extractor import (
+        collect_significant_structures,
+        load_fel_basin_structures,
+    )
+
+    cap = max_total if max_total and max_total > 0 else max(len(sim_dirs) * max_per_sim, 8)
+
+    frames: Dict[str, str] = {}
+
     for sim_dir, label in zip(sim_dirs, labels):
-        if len(pdb_frames) >= max_pdbs:
+        if len(frames) >= cap:
             break
-        reporter_dir = Path(sim_dir) / "reporter"
-        if not reporter_dir.exists():
-            continue
-        pdb_files = sorted(reporter_dir.glob("*.pdb"))
-        if not pdb_files:
-            continue
+        display = resolve_display_label(label, label_name_map)
+        analysis_dir = Path(sim_dir) / "analysis"
+        jsonl = analysis_dir / "analysis_summary.jsonl"
+        records = _read_jsonl(str(jsonl)) if jsonl.exists() else []
+        analysis_data = {"entries": records}
 
-        # Prefer earliest timepoint: *_0ns.pdb, frame0, then first alphabetically
-        chosen = pdb_files[0]
-        for pf in pdb_files:
-            name = pf.name.lower()
-            if "_0ns" in name or "frame0" in name or name.endswith("_0.pdb"):
-                chosen = pf
-                break
+        added_this_sim = 0
 
-        try:
-            pdb_text = chosen.read_text(encoding="utf-8", errors="replace")
-            timepoint = _parse_timepoint(chosen.name)
-            viewer_label = f"{label} ({timepoint})"
-            pdb_frames[viewer_label] = pdb_text
-        except Exception as exc:
-            logger.warning(f"Could not read PDB {chosen}: {exc}")
+        # Priority 1: FEL basin PDBs — major basin first, then next by population
+        basin_frames = load_fel_basin_structures(analysis_data, sim_dir)
+        if basin_frames:
+            ranked = sorted(
+                basin_frames.items(),
+                key=lambda kv: _population_from_viewer_label(kv[0]),
+                reverse=True,
+            )
+            for b_label, pdb_text in ranked[:max_per_sim]:
+                if len(frames) >= cap:
+                    break
+                viewer_key = f"{display} — {b_label}"
+                frames[viewer_key] = pdb_text
+                added_this_sim += 1
 
-    return pdb_frames
+        # Priority 2: trajectory frames from analysis time series
+        if added_this_sim < max_per_sim:
+            sig = collect_significant_structures(
+                analysis_data,
+                sim_dir,
+                sim_dir,
+                "hpc",
+                max_total=max(max_per_sim - added_this_sim, 1),
+            )
+            for t_label, pdb_text in sig.items():
+                if len(frames) >= cap or added_this_sim >= max_per_sim:
+                    break
+                viewer_key = f"{display} — {t_label}"
+                if viewer_key not in frames:
+                    frames[viewer_key] = pdb_text
+                    added_this_sim += 1
+
+        # Priority 3: legacy reporter/*.pdb (earliest frame)
+        if added_this_sim == 0:
+            reporter_dir = Path(sim_dir) / "reporter"
+            if reporter_dir.exists():
+                pdb_files = sorted(reporter_dir.glob("*.pdb"))
+                if pdb_files:
+                    chosen = pdb_files[0]
+                    for pf in pdb_files:
+                        name = pf.name.lower()
+                        if "_0ns" in name or "frame0" in name or name.endswith("_0.pdb"):
+                            chosen = pf
+                            break
+                    try:
+                        pdb_text = chosen.read_text(encoding="utf-8", errors="replace")
+                        timepoint = _parse_timepoint(chosen.name)
+                        frames[f"{display} ({timepoint})"] = pdb_text
+                    except Exception as exc:
+                        logger.warning(f"Could not read PDB {chosen}: {exc}")
+
+    logger.info(
+        "Combined 3D viewer: collected %d structure(s): %s",
+        len(frames),
+        ", ".join(list(frames.keys())[:6]) + ("..." if len(frames) > 6 else ""),
+    )
+    return frames
 
 
 def _parse_refs_from_html(html_path: Optional[str]) -> List[Dict[str, Any]]:
@@ -2020,6 +2096,78 @@ def _collect_activation_loop_dssp_heatmaps(
     return sorted(entries, key=_sort_key)
 
 
+def _build_per_sim_highlights_section(
+    sims_summary: List[Dict[str, Any]],
+    sim_dirs: List[str],
+) -> str:
+    """Embed key per-simulation figures generically from analysis summaries.
+
+    Picks the latest record per analysis type and embeds any plot images found
+    in ``files`` or ``metadata`` (FEL landscape, FEL basins, PCA, binding metrics).
+    """
+    from src.reporter.html_generator import _collect_image_paths, _encode_image_base64
+
+    priority_types = (
+        "FreeEnergyLandscape",
+        "FELFeatures",
+        "FELBasinStructures",
+        "PCA",
+        "Ligand_Pocket_COM_Distance",
+        "ProteinLigandContacts",
+        "LigandResidence",
+        "PocketSASA",
+        "Pocket_RMSF",
+        "Ligand_RMSF",
+    )
+
+    cards: List[str] = []
+    for sim, sim_dir in zip(sims_summary, sim_dirs):
+        label = sim["label"]
+        analysis_dir = Path(sim["analysis_dir"])
+        search_dirs = [analysis_dir, Path(sim_dir), Path(sim_dir) / "analysis"]
+
+        latest_by_type: Dict[str, Dict[str, Any]] = {}
+        for rec in sim.get("records") or []:
+            atype = rec.get("analysis_type") or ""
+            if atype:
+                latest_by_type[atype] = rec
+
+        for atype in priority_types:
+            rec = latest_by_type.get(atype)
+            if not rec:
+                continue
+            images = _collect_image_paths(
+                rec.get("files") or {},
+                rec.get("metadata") or {},
+                search_dirs,
+            )
+            for img_key, img_path in images.items():
+                uri = _encode_image_base64(img_path, search_dirs)
+                if not uri:
+                    continue
+                caption = f"{label} — {atype.replace('_', ' ')}"
+                fname = Path(img_path).name
+                cards.append(
+                    f'<div class="plot-card">'
+                    f'<p><strong>{_html_mod.escape(caption)}</strong></p>'
+                    f'<img src="{uri}" alt="{_html_mod.escape(caption)}" loading="lazy">'
+                    f'<p class="plot-caption">{_html_mod.escape(fname)}</p>'
+                    f'</div>\n'
+                )
+
+    if not cards:
+        return ""
+
+    return (
+        "<h2>&#128200; Per-Simulation Key Results</h2>\n"
+        "<p>Representative figures from each kinase/pseudokinase trajectory "
+        "(free-energy landscapes, binding metrics, and related analyses).</p>\n"
+        '<div class="plot-grid">\n'
+        + "".join(cards)
+        + "</div>\n"
+    )
+
+
 def _collect_per_sim_dssp_figures(
     sim_dirs: List[str],
     labels: List[str],
@@ -2342,12 +2490,17 @@ def generate_combined_html_report(
     # Summary, so a supplementary figure dump would only duplicate them.
     extra_plots_section = ""
 
-    # 3D viewer: show at least one representative PDB per simulation (no 5-cap so
-    # every system in a batch — e.g. all 8 apo/holo runs — is represented).
-    pdb_frames = _select_representative_pdbs(
-        sim_dirs, labels, max_pdbs=max(len(sim_dirs), 5)
+    # 3D viewer: significant structures per simulation (FEL basins preferred)
+    pdb_frames = _select_significant_pdbs_for_combined(
+        sim_dirs,
+        labels,
+        label_name_map=label_name_map,
+        max_per_sim=2,
+        max_total=max(len(sim_dirs) * 2, 16),
     )
     viewer_html = _build_3d_viewer_html(pdb_frames) if pdb_frames else ""
+
+    per_sim_highlights_html = _build_per_sim_highlights_section(sims_summary, sim_dirs)
 
     # Literature: prefer freshly searched refs; fall back to per-sim HTML aggregation
     if literature_refs:
@@ -2414,7 +2567,18 @@ def generate_combined_html_report(
     )
 
     # ---- Assemble HTML ------------------------------------------------------
-    report_headline = "Multi-Simulation Report"
+    if label_name_map:
+        unique_names = sorted(set(label_name_map.values()))
+        if len(unique_names) == 1:
+            report_headline = f"{unique_names[0]} — Multi-Simulation Comparison"
+        elif len(unique_names) <= 4:
+            report_headline = f"{' / '.join(unique_names)} — Kinase Comparison"
+        else:
+            report_headline = f"{len(unique_names)} Kinases — Multi-Simulation Comparison"
+    elif protein_name:
+        report_headline = f"{protein_name} — Multi-Simulation Comparison"
+    else:
+        report_headline = title or "Multi-Simulation Report"
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2449,6 +2613,10 @@ def generate_combined_html_report(
 {"<div class='section-divider'></div>" if viewer_html else ""}
 
 {comparative_html}
+
+{per_sim_highlights_html}
+
+{"<div class='section-divider'></div>" if per_sim_highlights_html else ""}
 
 {extra_plots_section}
 

@@ -26,8 +26,11 @@ from .planning_guidelines import (
     detect_classification_requested,
     detect_requested_metrics,
     get_intent_preservation_block,
+    get_planner_metric_tool_reference,
     get_standard_output_filenames_block,
     get_master_plan_tools_note,
+    metric_covered_by_registry,
+    partition_metrics_by_registry,
 )
 
 logger = logging.getLogger(__name__)
@@ -652,7 +655,9 @@ class MDPlanner:
         decomposition_complete = False
         parsed = None
         try:
-            response = self.llm.prompt_raw(decomposition_prompt, temperature=0.35, max_tokens=8192)
+            response = self.llm.prompt_raw(
+                decomposition_prompt, temperature=0.35, max_tokens=8192, format="json"
+            )
             log_llm_interaction("planner.multi_sim_master", decomposition_prompt, response)
             if _is_mock_or_error_llm_response(response):
                 logger.warning(
@@ -1323,12 +1328,70 @@ class MDPlanner:
                     missing_tools_detected, tool_needs = self._detect_missing_tools_in_response(response)
                     
                     if missing_tools_detected:
+                        existing_names = self._get_existing_tool_names(state)
+                        claimed_metrics = detect_requested_metrics(tool_needs) or frozenset()
+                        covered, genuinely_missing = partition_metrics_by_registry(
+                            claimed_metrics, existing_names
+                        )
+
+                        if claimed_metrics and not genuinely_missing:
+                            from ..utils import log_agent_action
+                            logger.info(
+                                "PLANNER: LLM claimed missing tools for %s but registry "
+                                "already covers them (%s); skipping programmer",
+                                sorted(claimed_metrics),
+                                sorted(covered),
+                            )
+                            log_agent_action(
+                                agent_name="planner",
+                                action="Skipped Programmer (tools already in registry)",
+                                details={
+                                    "claimed_metrics": sorted(claimed_metrics),
+                                    "covered_by": sorted(covered),
+                                },
+                            )
+                            metric_ref = get_planner_metric_tool_reference(claimed_metrics)
+                            current_prompt = (
+                                current_prompt
+                                + "\n\nIMPORTANT: The following metrics ARE already covered "
+                                "by built-in tools in the registry. Do NOT declare them "
+                                "missing or request programmer tool creation:\n"
+                                + metric_ref
+                                + "\n\nOutput the execution plan ONLY — no missing-tool "
+                                "declarations for the metrics above."
+                            )
+                            continue
+
                         logger.info(f"PLANNER: LLM indicates missing tools: {tool_needs}")
+                        if genuinely_missing:
+                            logger.info(
+                                "PLANNER: Genuinely missing metrics (registry): %s",
+                                sorted(genuinely_missing),
+                            )
                         logger.info("PLANNER: Invoking programmer to create needed tools...")
                         
                         # Generate tool specifications via LLM
                         tool_specs = self._generate_tool_specifications(tool_needs, state)
                         
+                        if not tool_specs:
+                            from ..utils import log_agent_action
+                            logger.info(
+                                "PLANNER: Tool specification returned empty — no new tools "
+                                "needed; retrying plan with registry confirmation"
+                            )
+                            log_agent_action(
+                                agent_name="planner",
+                                action="Skipped Programmer (empty tool specs)",
+                                details={"tool_needs_excerpt": (tool_needs or "")[:300]},
+                            )
+                            current_prompt = (
+                                current_prompt
+                                + "\n\nIMPORTANT: Tool specification confirmed all required "
+                                "capabilities already exist in the tools list above. "
+                                "Do NOT declare missing tools. Output the execution plan only."
+                            )
+                            continue
+
                         # Invoke programmer directly (not through supervisor)
                         programmer_result = self._invoke_programmer_for_tools(tool_specs, state)
                         
@@ -1566,7 +1629,7 @@ Create detailed specifications ONLY for the missing tools/scripts. For each tool
 Generate tool specifications now (ONLY for missing tools):"""
         
         try:
-            response = self.llm.prompt_raw(spec_prompt, temperature=0.1, max_tokens=1500)
+            response = self.llm.prompt_raw(spec_prompt, temperature=0.1, max_tokens=1500, format="json")
             
             log_llm_interaction(
                 agent_name="planner.tool_specification",
@@ -2260,7 +2323,8 @@ These new tools are included in the tools list above. Please create your executi
 using both the original tools and the newly created tools.
 """
         else:
-            return """
+            metric_ref = get_planner_metric_tool_reference()
+            return f"""
 **CRITICAL: TOOL AVAILABILITY CHECK**
 
 BEFORE creating your execution plan, you MUST:
@@ -2269,30 +2333,37 @@ BEFORE creating your execution plan, you MUST:
 
 2. **Check available tools** - Carefully examine the tools list above to see if they can accomplish the task
 
-3. **Identify missing capabilities** - If the required functionality is NOT available in existing tools, you MUST explicitly state this
+3. **Use the metric → tool map below** - Common analyses map to existing tools; only request
+   programmer creation when NO tool in the list covers the capability.
 
-**HOW TO REQUEST MISSING TOOLS:**
+{metric_ref}
 
-If you identify that a tool is missing, you MUST include a clear statement in your response using one of these EXACT phrases:
+4. **Identify genuinely missing capabilities** - Only if the required functionality is NOT
+   available in existing tools AND not in the map above, state this explicitly.
+
+**HOW TO REQUEST MISSING TOOLS (only when genuinely absent from the tools list):**
+
+If you identify that a tool is truly missing, include a clear statement using one of these phrases:
 - "Missing tool for [specific functionality]"
 - "Need to create custom tool for [specific purpose]"  
 - "No existing tool available for [task]"
-- "Tool not available for [functionality]"
-- "Require custom tool for [specific analysis]"
-- "Programmer should create [tool description]"
 
-**EXAMPLE:**
-If the user requests DSSP (secondary structure) analysis but you don't see a DSSP tool in the available tools list, you MUST state:
-"Missing tool for DSSP secondary structure analysis. Need to create custom tool for calculating time-dependent helix, sheet, turn, and coil fractions from trajectory data."
+**EXAMPLE (genuine gap):**
+"Missing tool for Ramachandran phi/psi dihedral analysis. Need to create custom tool for
+ calculating backbone dihedral distributions from trajectory data."
+
+**DO NOT declare missing** for metrics covered in the map above (e.g. FEL uses
+`calculate_free_energy_landscape`, pocket SASA uses `calculate_pocket_sasa`,
+residence uses `analyze_ligand_residence`).
 
 **WHAT HAPPENS NEXT:**
-When you indicate missing tools, the Programmer Agent will be automatically invoked to create them before your execution plan is finalized. The tools will then be available for the field agents to use.
+When you indicate genuinely missing tools, the Programmer Agent creates them before
+the execution plan is finalized.
 
 **IMPORTANT:**
-- DO check the tools list carefully - don't request tools that already exist
+- DO match metric names to the tool map and tools list before claiming anything is missing
 - DO be specific about what functionality is missing
-- DO indicate missing tools explicitly even if you think they "should" exist
-- DO request tool creation for ANY specialized analysis not covered by existing tools
+- DO NOT request tools that already exist under a different name
 """
     
     def _parse_llm_plan_response(self, response: str, state: MDState) -> Optional[Dict[str, Any]]:

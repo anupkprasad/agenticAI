@@ -468,16 +468,18 @@ class LLMClient:
             or 4096
         )
         num_predict = int(num_predict)
-        # Reasoning models (e.g. gpt-oss) spend a large token budget on hidden
-        # reasoning before emitting the answer. Too small a budget yields a
-        # reasoning-only truncated reply with no usable content. Raise the floor
-        # so the model can finish reasoning AND produce the final JSON answer.
+        # Reasoning models spend a large token budget on hidden reasoning before
+        # emitting the answer. Complex JSON plans (many tools + 17+ steps) need
+        # a high floor so reasoning finishes AND the full steps array is emitted.
         if self._is_reasoning_model():
-            num_predict = max(num_predict, 8192)
+            num_predict = max(num_predict, 16384)
         options: Dict[str, Any] = {"num_predict": num_predict}
         num_ctx = kwargs.get("num_ctx") or self.config.get("num_ctx")
         if num_ctx:
             options["num_ctx"] = int(num_ctx)
+        elif self._is_reasoning_model():
+            # Large planning prompts (~900 lines of tool docs) need a wide context.
+            options["num_ctx"] = max(int(self.config.get("num_ctx") or 0), 32768)
         temperature = kwargs.get("temperature")
         if temperature is not None:
             options["temperature"] = float(temperature)
@@ -487,6 +489,36 @@ class LLMClient:
         """Heuristic: does the configured model emit separate reasoning tokens?"""
         name = (self.model or "").lower()
         return any(tag in name for tag in ("gpt-oss", "deepseek-r1", "qwq", "-r1", "reason"))
+
+    def _apply_reasoning_directive(self, system: Optional[str]) -> Optional[str]:
+        """Prepend a low-reasoning directive for reasoning models.
+
+        gpt-oss and similar harmony-format models honour a ``Reasoning: low``
+        system directive that sharply shortens hidden reasoning. Without it a
+        complex prompt can spend the entire token budget on reasoning and emit
+        no answer (empty content). Keeps the budget for the actual response.
+        """
+        if not self._is_reasoning_model():
+            return system
+        if system and "reasoning:" in system.lower():
+            return system
+        directive = "Reasoning: low"
+        return f"{directive}\n\n{system}" if system else directive
+
+    @staticmethod
+    def _resolve_format(**kwargs: Any) -> Optional[str]:
+        """Return Ollama ``format`` value ('json') when JSON output is requested."""
+        fmt = kwargs.get("format")
+        if fmt:
+            return fmt
+        rf = kwargs.get("response_format")
+        if isinstance(rf, dict) and rf.get("type") == "json_object":
+            return "json"
+        if rf in ("json", "json_object"):
+            return "json"
+        if kwargs.get("json") is True:
+            return "json"
+        return None
 
     def _http_call(self, prompt: str, system: Optional[str] = None, **kwargs: Any) -> str:
         """Attempt simple HTTP POSTs to a few common endpoints on the base_url.
@@ -513,6 +545,16 @@ class LLMClient:
         preferred_endpoints = ["/api/generate", "/generate"]
         endpoints = ["/chat", "/api/chat", "/v1/chat/completions", "/"]
         headers = {"Content-Type": "application/json"}
+        response_format = self._resolve_format(**kwargs)
+        # Reasoning models: cap reasoning so the token budget reaches the answer.
+        system = self._apply_reasoning_directive(system)
+
+        # /api/chat + format:"json" is reliable for reasoning models; /api/generate
+        # can return empty envelopes. Try chat first when JSON output is required.
+        if response_format == "json" and self._is_reasoning_model():
+            endpoint_order = endpoints + preferred_endpoints
+        else:
+            endpoint_order = preferred_endpoints + endpoints
 
         def _extract_from_obj(obj, pieces, thinking):
             """Pull assistant content + reasoning from one parsed JSON event/object."""
@@ -545,7 +587,7 @@ class LLMClient:
                         pieces.append(ch["message"]["content"])
 
         def _finalize(pieces, thinking):
-            """Prefer real assistant content; never return raw reasoning as the answer."""
+            """Prefer real assistant content; fall back to reasoning only for free-form text."""
             content = "".join(pieces).strip()
             reason = "".join(thinking).strip()
             self._last_thinking = reason
@@ -553,15 +595,24 @@ class LLMClient:
                 return content
             if reason:
                 # Reasoning-only output means the model never emitted an answer
-                # (usually token-budget truncation during reasoning). Returning
-                # the reasoning would poison JSON parsing downstream, so surface
-                # a clear sentinel and let the caller fall back / retry.
+                # (usually token-budget truncation during reasoning).
+                if response_format == "json":
+                    # Reasoning text would poison JSON parsing — return empty so
+                    # the caller retries / falls back to a deterministic plan.
+                    logger.warning(
+                        "LLM returned reasoning but no content for a JSON request "
+                        "(%d reasoning chars); returning empty for caller fallback.",
+                        len(reason),
+                    )
+                    return ""
+                # Free-form/natural-language request: reasoning is better than an
+                # empty plan, so return it as a last resort.
                 logger.warning(
                     "LLM returned reasoning but no content (%d reasoning chars); "
-                    "likely truncated. Returning empty answer so caller can fall back.",
+                    "using reasoning text as the free-form answer.",
                     len(reason),
                 )
-                return ""
+                return reason
             return ""
 
         def _handle_response(resp):
@@ -592,6 +643,15 @@ class LLMClient:
                     ]
                     if parts:
                         return "\n".join(parts)
+                # Recognized generation envelope but empty content (e.g. gpt-oss
+                # returns response="" ). Return an empty answer via _finalize so
+                # the caller can retry / fall back — never leak the raw envelope.
+                envelope_keys = {
+                    "response", "message", "done", "done_reason",
+                    "choices", "model", "eval_count",
+                }
+                if envelope_keys & set(data.keys()):
+                    return _finalize(pieces, thinking)
                 return json.dumps(data)
 
             # 2) NDJSON / chunked token stream — reassemble line by line
@@ -615,46 +675,69 @@ class LLMClient:
             # 3) Not JSON at all — return raw text
             return raw_text
 
-        # 1) Try preferred non-streaming endpoints with explicit stream:false first
-        for ep in preferred_endpoints:
+        def _post_and_parse(ep: str, payload: dict, *, timeout: int = 180) -> tuple[str, bool]:
+            """Return (content, reachable). reachable=True when HTTP succeeded."""
             url = urllib.parse.urljoin(self.base_url.rstrip('/') + '/', ep.lstrip('/'))
-            payload = {
-                "model": self.model,
-                "prompt": prompt,
-                "stream": False,
-                "options": self._ollama_options(**kwargs),
-            }
-            if system:
-                payload["system"] = system
             try:
-                resp = session.post(url, headers=headers, json=payload, timeout=120)
+                resp = session.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=timeout,
+                )
             except Exception as e:
-                logger.debug("preferred endpoint %s failed: %s", url, e)
-                continue
+                logger.debug("endpoint %s failed: %s", url, e)
+                return "", False
             if not resp.ok:
-                logger.debug("preferred endpoint %s returned HTTP %s", url, resp.status_code)
-                continue
-            return _handle_response(resp)
+                logger.debug("endpoint %s returned HTTP %s", url, resp.status_code)
+                return "", False
+            return _handle_response(resp), True
 
-        # 2) Fallback to chat-style endpoints. Request non-streaming so the
-        #    server returns one complete JSON object instead of NDJSON token
-        #    fragments (which previously leaked raw into logs / JSON parsing).
-        for ep in endpoints:
-            url = urllib.parse.urljoin(self.base_url.rstrip('/') + '/', ep.lstrip('/'))
-            payload = {
-                "model": self.model,
-                "messages": (([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]),
-                "stream": False,
-                "options": self._ollama_options(**kwargs),
-            }
-            try:
-                resp = session.post(url, headers=headers, data=json.dumps(payload), timeout=180)
-            except Exception as e:
-                logger.debug("chat endpoint %s failed: %s", url, e)
-                continue
-            if not resp.ok:
-                logger.debug("chat endpoint %s returned HTTP %s", url, resp.status_code)
-                continue
-            return _handle_response(resp)
+        last_empty = ""
+        any_reachable = False
+        for ep in endpoint_order:
+            is_chat = ep in endpoints
+            if is_chat:
+                payload = {
+                    "model": self.model,
+                    "messages": (
+                        ([{"role": "system", "content": system}] if system else [])
+                        + [{"role": "user", "content": prompt}]
+                    ),
+                    "stream": False,
+                    "options": self._ollama_options(**kwargs),
+                }
+                if response_format:
+                    payload["format"] = response_format
+            else:
+                payload = {
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": self._ollama_options(**kwargs),
+                }
+                # /api/generate + format:"json" returns empty for some reasoning models.
+                if response_format and not self._is_reasoning_model():
+                    payload["format"] = response_format
+                if system:
+                    payload["system"] = system
 
+            result, reachable = _post_and_parse(ep, payload)
+            if reachable:
+                any_reachable = True
+            if result:
+                return result
+            last_empty = ep
+            logger.debug(
+                "endpoint %s returned empty content%s; trying next endpoint",
+                ep,
+                " (JSON request)" if response_format == "json" else "",
+            )
+
+        if any_reachable:
+            logger.warning(
+                "All reachable LLM endpoints returned empty content (last tried: %s)",
+                last_empty or endpoint_order[-1],
+            )
+            return ""
         raise RuntimeError("No reachable LLM endpoints found at base_url")

@@ -31,6 +31,79 @@ STANDARD_OUTPUT_FILES: Dict[str, Dict[str, str]] = {
     "fel": {"data": "fel_pc1_pc2_grid.csv", "plot": "fel_pc1_pc2.png", "features": "fel_features.json"},
 }
 
+# Canonical built-in analysis tools that satisfy each metric group.
+# Used by the planner to avoid false "missing tool" → programmer invocations.
+METRIC_TO_CANONICAL_TOOLS: Dict[str, tuple[str, ...]] = {
+    "com": ("calculate_ligand_pocket_distance", "calculate_com_distance"),
+    "contacts": ("calculate_protein_ligand_contacts",),
+    "pocket_sasa": ("calculate_pocket_sasa",),
+    "residence": ("analyze_ligand_residence",),
+    "pocket_rmsf": ("calculate_pocket_rmsf",),
+    "ligand_rmsf": ("calculate_ligand_rmsf",),
+    "pca": ("calculate_trajectory_pca", "plot_pca_projection"),
+    "fel": (
+        "calculate_free_energy_landscape",
+        "analyze_fel_landscape_features",
+        "export_fel_basin_structures",
+    ),
+    "rmsd": ("calculate_rmsd",),
+    "rmsf": ("calculate_rmsf",),
+    "rg": ("calculate_radius_of_gyration",),
+    "sasa": ("calculate_sasa",),
+    "energy": ("analyze_energy",),
+    "dccm": ("calculate_dccm",),
+    "dssp": ("analyze_secondary_structure",),
+}
+
+
+def metric_covered_by_registry(metric: str, existing_tool_names: Set[str]) -> bool:
+    """Return True when any canonical tool for *metric* is already registered."""
+    canonical = METRIC_TO_CANONICAL_TOOLS.get(metric, ())
+    if not canonical:
+        return False
+    lower = {n.lower() for n in existing_tool_names}
+    return any(tool.lower() in lower for tool in canonical)
+
+
+def partition_metrics_by_registry(
+    metrics: FrozenSet[str],
+    existing_tool_names: Set[str],
+) -> tuple[FrozenSet[str], FrozenSet[str]]:
+    """Split metrics into (covered, missing) relative to the tool registry."""
+    covered: Set[str] = set()
+    missing: Set[str] = set()
+    for metric in metrics:
+        if metric_covered_by_registry(metric, existing_tool_names):
+            covered.add(metric)
+        elif metric in METRIC_TO_CANONICAL_TOOLS:
+            missing.add(metric)
+    return frozenset(covered), frozenset(missing)
+
+
+def get_planner_metric_tool_reference(
+    metrics: Optional[FrozenSet[str]] = None,
+) -> str:
+    """Compact metric → tool map for planner prompts (reduces false missing-tool claims)."""
+    lines = [
+        "**METRIC → BUILT-IN TOOL MAP (check this before declaring a tool missing):**",
+        "",
+        "| Metric | Tool(s) in registry |",
+        "|--------|---------------------|",
+    ]
+    show = sorted(metrics) if metrics else sorted(METRIC_TO_CANONICAL_TOOLS.keys())
+    for metric in show:
+        tools = METRIC_TO_CANONICAL_TOOLS.get(metric)
+        if not tools:
+            continue
+        lines.append(f"| {metric} | `{', '.join(tools)}` |")
+    lines.append("")
+    lines.append(
+        "If a metric maps to a tool above, that tool IS available — do NOT request "
+        "programmer creation for it."
+    )
+    return "\n".join(lines)
+
+
 _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
     "rmsd": (r"\brmsd\b", r"root mean square deviation"),
     "rmsf": (r"\brmsf\b", r"root mean square fluctuation"),

@@ -22,6 +22,9 @@ def generate_html_report(
     pdb_data: Optional[Any] = None,
     enriched_prompt: Optional[str] = None,
     literature_review: Optional[str] = None,
+    protein_name: Optional[str] = None,
+    sim_label: Optional[str] = None,
+    analysis_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generate HTML report from analysis data and literature.
@@ -73,6 +76,9 @@ def generate_html_report(
             pdb_data=pdb_frames,
             enriched_prompt=enriched_prompt,
             literature_review=literature_review,
+            protein_name=protein_name,
+            sim_label=sim_label,
+            analysis_dir=analysis_dir,
         )
         
         # Write to file
@@ -152,6 +158,9 @@ def build_html_content(
     pdb_data: Optional[Union[str, Dict[str, str]]] = None,
     enriched_prompt: Optional[str] = None,
     literature_review: Optional[str] = None,
+    protein_name: Optional[str] = None,
+    sim_label: Optional[str] = None,
+    analysis_dir: Optional[str] = None,
 ) -> str:
     """Build HTML content for report (not a @tool, internal helper)"""
 
@@ -162,9 +171,35 @@ def build_html_content(
     elif isinstance(pdb_data, dict):
         pdb_frames = pdb_data
     
-    # Extract data
-    entries = analysis_data.get("entries", [])
+    # Extract data — keep latest entry per analysis_type (re-runs append duplicates)
+    raw_entries = analysis_data.get("entries", [])
+    seen_types: Dict[str, Dict[str, Any]] = {}
+    for entry in raw_entries:
+        atype = entry.get("analysis_type", "Unknown")
+        seen_types[atype] = entry
+    entries = list(seen_types.values())
     analysis_types = analysis_data.get("analysis_types", {})
+    
+    # Resolve asset search directories for plots and data files
+    search_dirs: List[Path] = []
+    if analysis_dir:
+        search_dirs.append(Path(analysis_dir))
+    for entry in entries:
+        for fval in (entry.get("files") or {}).values():
+            if isinstance(fval, str) and Path(fval).is_file():
+                search_dirs.append(Path(fval).parent)
+    if analysis_dir:
+        parent = Path(analysis_dir).parent
+        search_dirs.extend([parent / "analysis", parent])
+    # dedupe while preserving order
+    seen_dir: set = set()
+    unique_dirs: List[Path] = []
+    for d in search_dirs:
+        key = str(d.resolve()) if d.exists() else str(d)
+        if key not in seen_dir:
+            seen_dir.add(key)
+            unique_dirs.append(d)
+    search_dirs = unique_dirs
     
     # Normalize analysis_types to handle both dict and list formats
     if isinstance(analysis_types, list):
@@ -558,8 +593,18 @@ def build_html_content(
 """)
     
     # Title and metadata
-    html_parts.append("<h1>🧬 Molecular Dynamics Report</h1>")
+    title_parts = []
+    if protein_name:
+        title_parts.append(protein_name)
+    if sim_label and sim_label.lower() != (protein_name or "").lower():
+        title_parts.append(f"({sim_label})")
+    report_title = " — ".join(title_parts) if title_parts else "Molecular Dynamics"
+    html_parts.append(f"<h1>🧬 {report_title} MD Report</h1>")
     html_parts.append(f'<div class="metadata">')
+    if protein_name:
+        html_parts.append(f'<p><strong>🧫 Protein:</strong> {protein_name}</p>')
+    if sim_label:
+        html_parts.append(f'<p><strong>🏷️ Simulation:</strong> {sim_label}</p>')
     html_parts.append(f'<p><strong>📊 Report Type:</strong> {report_type.title()}</p>')
     html_parts.append(f'<p><strong>📅 Generated:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>')
     html_parts.append(f'<p><strong>🔬 Total Analyses:</strong> {len(entries)}</p>')
@@ -695,12 +740,11 @@ def build_html_content(
         html_parts.append(f'<h3>{atype}</h3>')
         html_parts.append(f'<p class="timestamp">⏱️ Performed: {timestamp}</p>')
         
-        # Find and display images
-        image_files = _find_image_files(files)
+        # Find and display images (generic — any plot/png in files or metadata)
+        image_files = _collect_image_paths(files, metadata, search_dirs)
         if image_files:
             for img_type, img_path in image_files.items():
-                # Try to encode image as base64
-                img_data = _encode_image_base64(img_path)
+                img_data = _encode_image_base64(img_path, search_dirs)
                 if img_data:
                     html_parts.append(f'''
                         <div class="image-container">
@@ -1318,66 +1362,101 @@ def _build_3d_viewer_section(pdb_frames: Dict[str, str]) -> str:
 </script>
 '''
 
-def _find_image_files(files: Dict[str, Any]) -> Dict[str, str]:
-    """Extract image files from files dictionary"""
-    image_extensions = {'.png', '.jpg', '.jpeg', '.svg', '.gif'}
-    image_files = {}
-    
-    for file_type, file_path in files.items():
-        if isinstance(file_path, str):
-            path_obj = Path(file_path)
-            if path_obj.suffix.lower() in image_extensions:
-                image_files[file_type] = file_path
-    
+def _resolve_asset_path(path: str, search_dirs: Optional[List[Path]] = None) -> Optional[Path]:
+    """Resolve a relative or absolute asset path against known analysis directories."""
+    if not path or not isinstance(path, str):
+        return None
+    path = path.strip()
+    if path.startswith("[") and path.endswith("]"):
+        return None
+    p = Path(path)
+    if p.is_file():
+        return p
+    for d in search_dirs or []:
+        for candidate in (d / p.name, d / path, d / Path(path).name):
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def _collect_image_paths(
+    files: Dict[str, Any],
+    metadata: Dict[str, Any],
+    search_dirs: Optional[List[Path]] = None,
+) -> Dict[str, str]:
+    """Collect all image paths from an analysis entry (files + metadata)."""
+    image_extensions = {".png", ".jpg", ".jpeg", ".svg", ".gif"}
+    image_files: Dict[str, str] = {}
+
+    def _maybe_add(key: str, val: Any) -> None:
+        if not isinstance(val, str):
+            return
+        if Path(val).suffix.lower() not in image_extensions and not _is_image_file(key, val):
+            return
+        resolved = _resolve_asset_path(val, search_dirs)
+        if resolved:
+            image_files[key] = str(resolved)
+
+    for src_name, src in (("files", files), ("metadata", metadata)):
+        for key, val in (src or {}).items():
+            if isinstance(val, list):
+                for i, item in enumerate(val):
+                    _maybe_add(f"{key}_{i}", item)
+            else:
+                _maybe_add(key, val)
     return image_files
 
 
+def _find_image_files(files: Dict[str, Any]) -> Dict[str, str]:
+    """Extract image files from files dictionary (legacy helper)."""
+    return _collect_image_paths(files, {}, None)
+
+
 def _is_image_file(file_type: str, file_path: Any) -> bool:
-    """Check if a file is an image"""
+    """Check if a file is an image."""
     if not isinstance(file_path, str):
         return False
-    
-    image_extensions = {'.png', '.jpg', '.jpeg', '.svg', '.gif'}
-    image_keywords = {'plot', 'heatmap', 'figure', 'image', 'timeseries', '3d'}
-    
+
+    image_extensions = {".png", ".jpg", ".jpeg", ".svg", ".gif"}
+    image_keywords = {"plot", "heatmap", "figure", "image", "timeseries", "3d"}
+
     path_obj = Path(file_path)
-    
-    # Check extension
+
     if path_obj.suffix.lower() in image_extensions:
         return True
-    
-    # Check type name
+
     if any(keyword in file_type.lower() for keyword in image_keywords):
         return True
-    
+
     return False
 
 
-def _encode_image_base64(image_path: str) -> Optional[str]:
-    """Encode image file to base64 data URI"""
+def _encode_image_base64(
+    image_path: str,
+    search_dirs: Optional[List[Path]] = None,
+) -> Optional[str]:
+    """Encode image file to base64 data URI."""
     try:
-        path = Path(image_path)
-        if not path.exists():
+        path = _resolve_asset_path(image_path, search_dirs) or Path(image_path)
+        if not path.is_file():
             logger.warning(f"Image file not found: {image_path}")
             return None
-        
-        # Determine MIME type
+
         ext = path.suffix.lower()
         mime_types = {
-            '.png': 'image/png',
-            '.jpg': 'image/jpeg',
-            '.jpeg': 'image/jpeg',
-            '.gif': 'image/gif',
-            '.svg': 'image/svg+xml'
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".svg": "image/svg+xml",
         }
-        mime_type = mime_types.get(ext, 'image/png')
-        
-        # Read and encode
-        with open(path, 'rb') as f:
-            image_data = base64.b64encode(f.read()).decode('utf-8')
-        
+        mime_type = mime_types.get(ext, "image/png")
+
+        with open(path, "rb") as f:
+            image_data = base64.b64encode(f.read()).decode("utf-8")
+
         return f"data:{mime_type};base64,{image_data}"
-        
+
     except Exception as e:
         logger.error(f"Error encoding image {image_path}: {e}")
         return None

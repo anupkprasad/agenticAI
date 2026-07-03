@@ -149,8 +149,15 @@ def read_pdb_data(pdb_path: str) -> Optional[str]:
         return None
 
 
-def _read_timeseries(filepath: str) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-    """Read a 2-column time-series file (RMSD .dat or COM .csv).
+def _read_timeseries(
+    filepath: str,
+    y_col_name: Optional[str] = None,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Read a 2-column time series from CSV or whitespace-delimited data.
+
+    For CSV files uses the header row to locate time and value columns.
+    *y_col_name* is a substring matched against header names (e.g. ``"distance"``,
+    ``"contact"``).
 
     Returns (time_ns, values) numpy arrays, or None on failure.
     """
@@ -160,25 +167,58 @@ def _read_timeseries(filepath: str) -> Optional[Tuple[np.ndarray, np.ndarray]]:
 
     try:
         if p.suffix == ".csv":
-            # CSV: frame,time,distance
-            times, vals = [], []
-            with open(p, "r") as f:
+            with open(p, "r", encoding="utf-8") as f:
                 reader = csv.reader(f)
                 header = next(reader, None)
                 if header is None:
                     return None
+                lower = [h.strip().lower() for h in header]
+                t_idx = next(
+                    (i for i, h in enumerate(lower) if h in ("time_ns", "time (ns)", "time")),
+                    1 if len(header) >= 3 else 0,
+                )
+                y_idx = None
+                if y_col_name:
+                    for i, h in enumerate(lower):
+                        if y_col_name in h:
+                            y_idx = i
+                            break
+                if y_idx is None:
+                    y_idx = next(
+                        (
+                            i
+                            for i, h in enumerate(lower)
+                            if any(
+                                k in h
+                                for k in (
+                                    "distance",
+                                    "contact",
+                                    "rmsd",
+                                    "value",
+                                    "sasa",
+                                    "rmsf",
+                                )
+                            )
+                        ),
+                        2 if len(header) >= 3 else 1,
+                    )
+                times, vals = [], []
                 for row in reader:
-                    if len(row) >= 3:
-                        try:
-                            t_ps = float(row[1])
-                            v = float(row[2])
-                            times.append(t_ps / 1000.0)  # ps → ns
-                            vals.append(v)
-                        except ValueError:
-                            continue
+                    if len(row) <= max(t_idx, y_idx):
+                        continue
+                    try:
+                        t_val = float(row[t_idx])
+                        v_val = float(row[y_idx])
+                    except ValueError:
+                        continue
+                    times.append(t_val)
+                    vals.append(v_val)
             if not times:
                 return None
-            return np.array(times), np.array(vals)
+            t_arr = np.array(times)
+            if "time_ns" not in lower[t_idx] and t_arr.max() > 500:
+                t_arr = t_arr / 1000.0
+            return t_arr, np.array(vals)
         else:
             # Whitespace-delimited: Time(ns)  Value
             data = np.loadtxt(str(p), comments="#")
@@ -188,6 +228,148 @@ def _read_timeseries(filepath: str) -> Optional[Tuple[np.ndarray, np.ndarray]]:
     except Exception as exc:
         logger.debug("Could not read timeseries %s: %s", filepath, exc)
         return None
+
+
+def _resolve_analysis_path(fpath: str, working_dir: str) -> str:
+    """Resolve a file path relative to *working_dir* or its analysis/ subfolder."""
+    p = Path(fpath)
+    if p.is_absolute() and p.is_file():
+        return str(p)
+    base = Path(working_dir)
+    for base_dir in (base, base / "analysis"):
+        candidate = base_dir / p.name
+        if candidate.is_file():
+            return str(candidate)
+        candidate = base_dir / p
+        if candidate.is_file():
+            return str(candidate)
+    return fpath
+
+
+def load_fel_basin_structures(
+    analysis_data: Dict,
+    working_dir: str,
+) -> Dict[str, str]:
+    """Load FEL basin representative PDBs from the analysis summary.
+
+    Prefers the manifest CSV (rich labels with population and time) and falls
+    back to the ``basin_pdbs`` file list.
+    """
+    import ast
+
+    frames: Dict[str, str] = {}
+    entries = analysis_data.get("entries", []) if isinstance(analysis_data, dict) else []
+
+    for entry in entries:
+        if (entry.get("analysis_type") or "") != "FELBasinStructures":
+            continue
+        files = entry.get("files", {}) or {}
+
+        manifest = files.get("manifest_csv")
+        if manifest:
+            mpath = _resolve_analysis_path(str(manifest), working_dir)
+            if Path(mpath).is_file():
+                try:
+                    with open(mpath, newline="", encoding="utf-8") as fh:
+                        for row in csv.DictReader(fh):
+                            pdb = row.get("pdb_file") or row.get("pdb")
+                            if not pdb:
+                                continue
+                            pdb = _resolve_analysis_path(str(pdb), working_dir)
+                            txt = read_pdb_data(pdb)
+                            if not txt:
+                                continue
+                            bid = row.get("basin_id", "?")
+                            try:
+                                pop = float(row.get("population", 0)) * 100
+                                pop_str = f"{pop:.0f}%"
+                            except (TypeError, ValueError):
+                                pop_str = "?"
+                            t_ns = row.get("time_ns", "")
+                            label = f"FEL Basin {bid} ({pop_str}, {t_ns} ns)"
+                            frames[label] = txt
+                except Exception as exc:
+                    logger.warning("Could not read FEL basin manifest %s: %s", mpath, exc)
+                if frames:
+                    return frames
+
+        basin_pdbs = files.get("basin_pdbs")
+        pdb_list: List[str] = []
+        if isinstance(basin_pdbs, list):
+            pdb_list = [str(x) for x in basin_pdbs]
+        elif isinstance(basin_pdbs, str):
+            try:
+                parsed = ast.literal_eval(basin_pdbs)
+                if isinstance(parsed, list):
+                    pdb_list = [str(x) for x in parsed]
+                elif basin_pdbs.endswith(".pdb"):
+                    pdb_list = [basin_pdbs]
+            except (ValueError, SyntaxError):
+                if basin_pdbs.endswith(".pdb"):
+                    pdb_list = [basin_pdbs]
+
+        for i, pdb in enumerate(pdb_list, 1):
+            ppath = _resolve_analysis_path(pdb, working_dir)
+            txt = read_pdb_data(ppath)
+            if txt:
+                frames[f"FEL Basin {i}"] = txt
+
+    return frames
+
+
+def collect_significant_structures(
+    analysis_data: Dict,
+    working_dir: str,
+    hpc_parent: str,
+    hpc_subdir: str = "hpc",
+    max_total: int = 8,
+) -> Dict[str, str]:
+    """Collect all scientifically important structures for the 3D viewer.
+
+    Priority:
+      1. FEL basin representative PDBs (pre-exported by analysis)
+      2. Trajectory frames at analysis-driven time points (COM extrema,
+         contact extrema, RMSD peaks, unbinding events, start/end)
+    """
+    frames: Dict[str, str] = {}
+
+    # --- FEL basins (highest priority) ------------------------------------
+    basin_frames = load_fel_basin_structures(analysis_data, working_dir)
+    for label, pdb_text in basin_frames.items():
+        if len(frames) >= max_total:
+            break
+        frames[label] = pdb_text
+
+    if len(frames) >= max_total:
+        logger.info("Collected %d FEL basin structures for 3D viewer", len(frames))
+        return frames
+
+    # --- Trajectory-derived frames ----------------------------------------
+    if analysis_data:
+        important = identify_important_timepoints(
+            analysis_data, working_dir, max_points=max(5, max_total - len(frames))
+        )
+        if important:
+            time_points = [t for t, _ in important]
+            labels_map = {t: lbl for t, lbl in important}
+            traj_frames = extract_multi_frame_pdb(
+                hpc_parent,
+                hpc_subdir=hpc_subdir,
+                time_points_ns=time_points,
+                labels=labels_map,
+            )
+            for label, pdb_text in traj_frames.items():
+                if len(frames) >= max_total:
+                    break
+                if label not in frames:
+                    frames[label] = pdb_text
+
+    logger.info(
+        "Collected %d significant structure(s) for 3D viewer: %s",
+        len(frames),
+        ", ".join(frames.keys()) if frames else "none",
+    )
+    return frames
 
 
 def identify_important_timepoints(
@@ -234,7 +416,7 @@ def identify_important_timepoints(
         atype = (entry.get("analysis_type") or "").upper()
         files = entry.get("files", {})
 
-        if "RMSD" in atype and atype != "RMSF" and not rmsd_found:
+        if "RMSD" in atype and "RMSF" not in atype and not rmsd_found:
             dat_path = files.get("data") or files.get("output_file")
             if dat_path:
                 ts = _read_timeseries(_resolve(dat_path))
@@ -254,6 +436,77 @@ def identify_important_timepoints(
                         # Final frame
                         candidates[round(float(t[-1]), 1)] = "End"
                         rmsd_found = True
+
+        # Ligand–pocket COM distance (per-simulation holo metric)
+        if ("COM" in atype and "DISTANCE" in atype) or "LIGAND_POCKET" in atype:
+            dat_path = (
+                files.get("data")
+                or files.get("csv")
+                or files.get("output")
+                or files.get("output_file")
+            )
+            if dat_path:
+                ts = _read_timeseries(_resolve(dat_path), y_col_name="distance")
+                if ts is not None:
+                    t, v = ts
+                    if len(t) > 0:
+                        if total_time_ns is None:
+                            total_time_ns = t[-1]
+                        idx_max = int(np.argmax(v))
+                        candidates[round(float(t[idx_max]), 1)] = (
+                            f"Max pocket COM dist ({v[idx_max]:.1f} Å)"
+                        )
+                        idx_min = int(np.argmin(v))
+                        candidates[round(float(t[idx_min]), 1)] = (
+                            f"Min pocket COM dist ({v[idx_min]:.1f} Å)"
+                        )
+
+        # Protein–ligand contacts — pick frames with strongest/weakest contact counts
+        if "CONTACT" in atype:
+            dat_path = files.get("csv") or files.get("data") or files.get("output_file")
+            if dat_path:
+                ts = _read_timeseries(_resolve(dat_path), y_col_name="contact")
+                if ts is not None:
+                    t, v = ts
+                    if len(t) > 0:
+                        if total_time_ns is None:
+                            total_time_ns = t[-1]
+                        idx_max = int(np.argmax(v))
+                        candidates[round(float(t[idx_max]), 1)] = (
+                            f"Max contacts ({int(v[idx_max])})"
+                        )
+                        idx_min = int(np.argmin(v))
+                        candidates[round(float(t[idx_min]), 1)] = (
+                            f"Min contacts ({int(v[idx_min])})"
+                        )
+
+        # Ligand residence — first unbinding event (bound → unbound)
+        if "RESIDENCE" in atype:
+            dat_path = files.get("csv") or files.get("data") or files.get("output_file")
+            resolved = _resolve(dat_path) if dat_path else None
+            if resolved and Path(resolved).is_file():
+                try:
+                    with open(resolved, newline="", encoding="utf-8") as fh:
+                        reader = csv.DictReader(fh)
+                        prev_bound = None
+                        for row in reader:
+                            t_ns = float(row.get("time_ns", row.get("Time", 0)))
+                            bound_raw = row.get("bound", row.get("is_bound", "1"))
+                            bound = str(bound_raw).strip() in ("1", "True", "true")
+                            if prev_bound is True and not bound:
+                                candidates[round(t_ns, 1)] = "Ligand unbinding"
+                                break
+                            prev_bound = bound
+                        if total_time_ns is None:
+                            # last row time
+                            with open(resolved, newline="", encoding="utf-8") as fh2:
+                                rows = list(csv.DictReader(fh2))
+                                if rows:
+                                    total_time_ns = float(
+                                        rows[-1].get("time_ns", rows[-1].get("Time", 0))
+                                    )
+                except Exception as exc:
+                    logger.debug("Could not parse residence CSV %s: %s", resolved, exc)
 
         if ("INTER" in atype and "COM" in atype) or ("INTER" in atype and "DISTANCE" in atype):
             # Only match inter-molecular COM distance, not single-group COM coordinates

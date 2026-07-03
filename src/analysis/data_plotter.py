@@ -298,6 +298,85 @@ def _plot_rmsf_profile_on_axes(
         ax.set_xlim(-0.5, len(x_pos) - 0.5)
 
 
+def _detect_plot_columns(
+    column_names: List[str],
+    data_columns: List[List[float]],
+    x_col: Optional[int] = None,
+    y_col: Optional[int] = None,
+) -> Tuple[int, List[int]]:
+    """Pick x and one-or-more y column indices for trajectory CSVs / .dat files.
+
+    Handles the common MD layout ``frame, time_ns, metric(s)`` and named columns
+    such as ``distance_angstrom``, ``n_contacts``, and ``n_hbonds``.
+    """
+    if x_col is not None:
+        xi = int(x_col)
+        if y_col is not None:
+            return xi, [int(y_col)]
+        fallback = 1 if xi == 0 and len(data_columns) > 1 else 0
+        return xi, [fallback]
+
+    lower = [n.strip().lower() for n in column_names]
+
+    xi: Optional[int] = None
+    for i, name in enumerate(lower):
+        if name in ("time_ns", "time (ns)", "t_ns") or (
+            "time" in name and "frame" not in name
+        ):
+            xi = i
+            break
+    if xi is None and len(data_columns) >= 3 and lower:
+        if lower[0] in ("frame", "frames", "frame_index", "index"):
+            xi = 1
+    if xi is None:
+        xi = 0
+
+    skip_y = {"frame", "frames", "frame_index", "index", "time_ns", "time", "t_ns"}
+
+    # Contacts CSV: plot H-bonds and contact counts on the same axes.
+    if y_col is None and "n_contacts" in lower:
+        y_indices: List[int] = []
+        if "n_hbonds" in lower:
+            y_indices.append(lower.index("n_hbonds"))
+        y_indices.append(lower.index("n_contacts"))
+        return xi, y_indices
+
+    if y_col is not None:
+        return xi, [int(y_col)]
+
+    y_priority = (
+        "distance_angstrom",
+        "distance_a",
+        "distance",
+        "sasa_nm2",
+        "sasa",
+        "bound",
+        "fraction_bound",
+        "residence",
+        "rmsd",
+        "rmsf",
+        "rg",
+        "gyration",
+        "energy",
+        "value",
+        "n_contacts",
+        "contacts",
+        "n_hbonds",
+        "hbonds",
+    )
+    for pat in y_priority:
+        for i, name in enumerate(lower):
+            if i == xi or name in skip_y:
+                continue
+            if pat in name or name == pat:
+                return xi, [i]
+
+    candidates = [i for i in range(len(data_columns)) if i != xi]
+    if candidates:
+        return xi, [candidates[-1]]
+    return xi, [1 if len(data_columns) > 1 else 0]
+
+
 def parse_data_file(file_path: str) -> Tuple[List[List[float]], List[str]]:
     """
     Parse data file (.xvg, .dat, .csv) and extract columns.
@@ -315,6 +394,7 @@ def parse_data_file(file_path: str) -> Tuple[List[List[float]], List[str]]:
     
     # Detect delimiter from file extension
     is_csv = file_path.lower().endswith('.csv')
+    csv_header_read = False
     
     with open(file_path, 'r') as f:
         for line in f:
@@ -364,6 +444,11 @@ def parse_data_file(file_path: str) -> Tuple[List[List[float]], List[str]]:
                         data_columns[i].append(val)
                         
             except ValueError:
+                # CSV files: first non-comment line is often the column header.
+                if is_csv and not data_columns and not csv_header_read:
+                    column_names = [p.strip() for p in parts]
+                    csv_header_read = True
+                    continue
                 mixed_row_parts.append(parts)
                 continue
 
@@ -521,60 +606,72 @@ def plot_data(
             # Parse data
             data_columns, column_names = parse_data_file(abs_file)
             
-            # Resolve column indices (default: 0 for x, 1 for y).
-            # Auto-skip a leading integer "frame" index column so that CSVs
-            # with the format  frame,time_ns,value  are plotted as
-            # time vs value rather than frame vs time.
-            if x_col is None and y_col is None and len(data_columns) >= 3:
-                first_name = column_names[0].strip().lower() if column_names else ""
-                if first_name in ("frame", "frames", "frame_index", "index"):
-                    xi, yi = 1, 2
-                else:
-                    xi, yi = 0, 1
-            elif x_col is None and y_col is None and len(data_columns) >= 2:
-                lower_names = [c.lower() for c in column_names]
-                yi = next(
-                    (i for i, name in enumerate(lower_names) if "rmsf" in name),
-                    1,
-                )
-                xi = 0
-            else:
-                xi = x_col if x_col is not None else 0
-                yi = y_col if y_col is not None else 1
+            xi, y_indices = _detect_plot_columns(
+                column_names, data_columns, x_col=x_col, y_col=y_col
+            )
             
-            if len(data_columns) <= max(xi, yi):
-                logger.warning(f"Insufficient data columns in {rel_file} (need columns {xi},{yi}, have {len(data_columns)}), skipping")
+            if len(data_columns) <= xi:
+                logger.warning(
+                    f"Insufficient data columns in {rel_file} (need x column {xi}, "
+                    f"have {len(data_columns)}), skipping"
+                )
                 continue
             
             x_data = data_columns[xi]
-            y_data = data_columns[yi]
-            if not x_data or not y_data:
+            if not x_data:
                 logger.warning(f"No plottable numeric data in {rel_file}, skipping")
                 continue
             
-            # Determine label
+            # Determine label base for this file
             if labels is not None and idx < len(labels):
-                label = labels[idx]
+                file_label = labels[idx]
             else:
-                label = Path(rel_file).stem
+                file_label = Path(rel_file).stem
             
-            # Determine color
-            color = colors[idx] if idx < len(colors) else None
-            
-            # Plot based on type
-            if plot_type == "line":
-                ax.plot(x_data, y_data, label=label, color=color, linewidth=2)
-            elif plot_type == "scatter":
-                ax.scatter(x_data, y_data, label=label, color=color, alpha=0.6)
-            elif plot_type == "bar":
-                ax.bar(x_data, y_data, label=label, color=color, alpha=0.7)
+            plotted_any = False
+            for series_i, y_idx in enumerate(y_indices):
+                if len(data_columns) <= y_idx:
+                    logger.warning(
+                        f"Insufficient data columns in {rel_file} (need y column {y_idx}, "
+                        f"have {len(data_columns)}), skipping y series"
+                    )
+                    continue
+                y_data = data_columns[y_idx]
+                if not y_data:
+                    continue
+
+                if len(y_indices) > 1 and y_idx < len(column_names):
+                    label = f"{file_label} ({column_names[y_idx]})"
+                else:
+                    label = file_label
+
+                if len(y_indices) > 1:
+                    series_color = f"C{series_i}"
+                else:
+                    series_color = colors[idx] if idx < len(colors) else None
+
+                if plot_type == "line":
+                    ax.plot(x_data, y_data, label=label, color=series_color, linewidth=2)
+                elif plot_type == "scatter":
+                    ax.scatter(x_data, y_data, label=label, color=series_color, alpha=0.6)
+                elif plot_type == "bar":
+                    ax.bar(x_data, y_data, label=label, color=series_color, alpha=0.7)
+                plotted_any = True
+
+                if idx == 0 and not ylabel and y_idx < len(column_names):
+                    ylabel = column_names[y_idx]
+                    if len(y_indices) > 1:
+                        ylabel = "Count"
+
+            if not plotted_any:
+                continue
             n_plotted += 1
             
             # Auto-detect axis labels from first file
             if idx == 0 and not xlabel and xi < len(column_names):
                 xlabel = column_names[xi]
-            if idx == 0 and not ylabel and yi < len(column_names):
-                ylabel = column_names[yi]
+            if idx == 0 and not ylabel and len(y_indices) == 1 and y_indices[0] < len(column_names):
+                ylabel = column_names[y_indices[0]]
 
         if n_plotted == 0:
             plt.close(fig)

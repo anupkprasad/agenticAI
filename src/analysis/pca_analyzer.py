@@ -1319,6 +1319,7 @@ def analyze_fel_landscape_features(
                         "features_json": json_out,
                         "features_csv": csv_out,
                         "basins_csv": basins_out,
+                        **({"plot": plot_out} if plot_out and HAS_MATPLOTLIB else {}),
                     },
                     metadata={"fel_grid_file": grid_file},
                 )
