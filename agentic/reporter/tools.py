@@ -104,7 +104,8 @@ class ReporterToolExecutor:
             "search_biorxiv": search_biorxiv,
             "search_uniprot": search_uniprot,
             "generate_literature_queries": generate_literature_queries,
-            "generate_html_report": generate_html_report
+            "generate_html_report": generate_html_report,
+            "generate_combined_html_report": generate_combined_html_report,
         }
         
         if tool_name not in tools_map:
@@ -119,7 +120,7 @@ class ReporterToolExecutor:
             # (e.g. generate_html_report).  Input tools like read_analysis_summary
             # need to read from the parent working directory and must keep whatever
             # working_dir the caller has already set in tool_params.
-            _OUTPUT_TOOLS = {"generate_html_report"}
+            _OUTPUT_TOOLS = {"generate_html_report", "generate_combined_html_report"}
             if tool_name in _OUTPUT_TOOLS:
                 tool_params["working_dir"] = self.working_dir
             

@@ -34,6 +34,8 @@ _COMBINED_ANALYSIS_PLOT_GLOBS = (
     "com_distance*.png",
     "dssp_comparison.png",
     "dssp_activation_loop_*.png",
+    "classification_*.png",
+    "*_by_cluster.png",
 )
 
 
@@ -369,7 +371,8 @@ class ReporterAgent:
         _user_goal_text = state.get("user_goal", "")
         _enriched_text = state.get("master_enriched_prompt") or state.get("enriched_prompt", "")
         _combined_text = f"{_user_goal_text} {_enriched_text}"
-        _label_name_map = _parse_label_name_map(_combined_text)
+        raw_labels = [Path(d).name for d in sim_dirs]
+        _label_name_map = _parse_label_name_map(_combined_text, sim_labels=raw_labels)
         if _label_name_map:
             labels = apply_label_name_map(labels, _label_name_map)
 
@@ -389,38 +392,34 @@ class ReporterAgent:
                 _analysis_dir,
             )
 
-        # ── Figure curation ──────────────────────────────────────────────
-        _goal_lower = (_user_goal_text + " " + _enriched_text).lower()
-        _has_dccm_comparison = any(
-            "comparison" in Path(p).name.lower()
-            for p in combined_info.get("dccm_plots", [])
-        ) or any("dccm" in Path(p).name.lower() and "comparison" in Path(p).name.lower() for p in overlay_plots)
-
-        # 1. Remove energy overlay by default; include only if user mentions it.
-        _want_energy = any(kw in _goal_lower for kw in
-                           ("energy", "potential", "temperature", "enthalpy", "kinetic"))
-        overlay_plots = [
-            p for p in overlay_plots
-            if _want_energy or "energy" not in Path(p).name.lower()
-        ]
-
-        # 2. Add per-sim ligand COM distance plots only when the user requested them.
-        _want_com = any(kw in _goal_lower for kw in
-                         ("com", "center of mass", "center-of-mass", "ligand", "pocket",
-                          "binding site", "active site"))
-        if _want_com:
-            _LIGAND_PLOT_NAMES = ("ligand_pocket_distance.png", "com_distance.png")
-            for s_dir in sim_dirs:
-                for _name in _LIGAND_PLOT_NAMES:
-                    _p = Path(s_dir) / "analysis" / _name
-                    if _p.exists() and str(_p) not in overlay_plots:
-                        overlay_plots.append(str(_p))
-
-        # 3. DSSP comparison / activation-loop heatmaps — only when user requested DSSP.
-        from agentic.planner.planning_guidelines import detect_requested_metrics
+        # ── Goal-aware figure curation ───────────────────────────────────
+        from src.reporter.figure_selector import (
+            ReportFigurePolicy,
+            curate_overlay_plots,
+            dedupe_redundant_overlay_plots,
+            resolve_relevant_metrics,
+            resolve_report_narrative,
+        )
 
         _goal_full = (_user_goal_text + " " + _enriched_text).strip()
+        _report_policy = ReportFigurePolicy.from_config(
+            self.config,
+            report_type=state.get("report_type", "comprehensive"),
+            include_visualizations=state.get("include_visualizations", True),
+        )
+        _n_sims = len(sim_dirs) if sim_dirs else len(state.get("sim_prompts") or [])
+        _narrative = resolve_report_narrative(
+            _goal_full,
+            enriched_prompt=_enriched_text,
+            n_simulations=_n_sims,
+            policy=_report_policy,
+        )
+
+        # DSSP: generate combined charts only when requested
+        from agentic.planner.planning_guidelines import detect_requested_metrics
+
         _requested_metrics = detect_requested_metrics(_goal_full)
+        _goal_lower = _goal_full.lower()
         _want_dssp = (
             _requested_metrics is None and "dssp" in _goal_lower
         ) or (
@@ -453,35 +452,12 @@ class ReporterAgent:
                 "(detected metrics: %s)", _requested_metrics
             )
 
-        # 4. Add any per-sim figure type that the user explicitly requested.
-        _USER_PLOT_KEYWORDS: Dict[str, tuple] = {
-            "dccm":   ("dccm_heatmap.png",),
-            "sasa":   ("sasa.png",),
-            "hbond":  ("hbond.png",),
-            "dssp":   ("dssp_heatmap.png",),
-            "rmsd":   ("rmsd.png",),
-            "rmsf":   ("rmsf.png",),
-            "rg":     ("rg.png",),
-        }
-        for keyword, filenames in _USER_PLOT_KEYWORDS.items():
-            if keyword == "dccm" and _has_dccm_comparison:
-                continue  # combined 3-panel figure already covers apo/holo/Δ
-            if keyword in _goal_lower:
-                for s_dir in sim_dirs:
-                    for _fname in filenames:
-                        _p = Path(s_dir) / "analysis" / _fname
-                        if _p.exists() and str(_p) not in overlay_plots:
-                            overlay_plots.append(str(_p))
-
-        # 5. Add combined DCCM comparison + difference plots produced by
-        #    _run_combined_analysis (stored in analysis_results["combined"]["dccm_plots"]).
+        # Add combined analysis artifacts from state
         for _dccm_plot in combined_info.get("dccm_plots", []):
             _p = Path(_dccm_plot)
             if _p.exists() and str(_p) not in overlay_plots:
                 overlay_plots.append(str(_p))
         overlay_plots = _dedupe_dccm_combined_plots(overlay_plots)
-
-        # 6. RMSF segment bar plots and COM distance combined overlay
         for _seg_plot in combined_info.get("rmsf_segment_plots", []):
             _p = Path(_seg_plot)
             if _p.exists() and str(_p) not in overlay_plots:
@@ -491,6 +467,22 @@ class ReporterAgent:
             _p = Path(_com_plot)
             if _p.exists() and str(_p) not in overlay_plots:
                 overlay_plots.append(str(_p))
+
+        _relevant = _narrative.relevant_metrics
+        overlay_plots = dedupe_redundant_overlay_plots(overlay_plots, _narrative)
+        overlay_plots = curate_overlay_plots(
+            overlay_plots,
+            user_goal=_goal_full,
+            enriched_prompt=_enriched_text,
+            policy=_report_policy,
+            narrative=_narrative,
+        )
+        logger.info(
+            "Combined report: %d curated overlay plot(s) for theme=%s metrics=%s",
+            len(overlay_plots),
+            _narrative.primary_theme,
+            sorted(_relevant),
+        )
 
         log_agent_start(
             "reporter",
@@ -504,23 +496,16 @@ class ReporterAgent:
         )
 
         # Resolve protein/system name for literature + report title
-        protein_name: Optional[str] = None
-        sys_info = state.get("system_info") or {}
-        if isinstance(sys_info, dict):
-            protein_name = (
-                sys_info.get("protein_name")
-                or sys_info.get("system_name")
-            )
-        _mapped_names = [
-            v for v in (_label_name_map or {}).values()
-            if v and len(v) >= 2
-        ]
-        if _mapped_names:
-            protein_name = ", ".join(dict.fromkeys(_mapped_names))
+        from src.reporter.protein_identity import resolve_protein_identity
+        from src.reporter.report_curator import build_combined_report_plan, display_names_for_sims
+
+        identity = resolve_protein_identity(state)
+        protein_name: Optional[str] = identity.get("gene_name") or identity.get("display_name")
+        if _label_name_map:
+            protein_name = ", ".join(display_names_for_sims(raw_labels, _label_name_map))
         elif not protein_name and labels:
             protein_name = labels[0]
 
-        report_title = "Multi-Simulation Report"
 
         try:
             # Prefer master_enriched_prompt (supervisor's unified rephrased goal)
@@ -557,19 +542,44 @@ class ReporterAgent:
                 labels=labels,
             )
 
+            report_plan = build_combined_report_plan(
+                overlay_plots,
+                sim_dirs,
+                raw_labels,
+                user_goal=_combined_user_goal,
+                enriched_prompt=_report_enriched,
+                base_analysis_dir=_analysis_dir,
+                label_name_map=_label_name_map,
+                llm_client=self.llm,
+                literature_snippet=(literature_review or "")[:2000],
+            )
+            overlay_plots = report_plan.included_overlay_plots
+            if report_plan.excluded_plots:
+                logger.info(
+                    "Combined report curator excluded %d plot(s): %s",
+                    len(report_plan.excluded_plots),
+                    list(report_plan.excluded_plots.keys())[:5],
+                )
+
             result = generate_combined_html_report.func(
                 sim_dirs=sim_dirs,
                 labels=labels,
                 overlay_plots=overlay_plots,
                 working_dir=reporter_dir,
                 output_file="combined_report.html",
-                title=report_title,
+                title=report_plan.headline,
                 enriched_prompt=_report_enriched,
                 user_goal=_combined_user_goal,
                 protein_name=protein_name,
                 literature_refs=literature_refs,
                 literature_review=literature_review,
                 final_impression=final_impression,
+                report_focus=(
+                    " ".join(state.get("report_focus"))
+                    if isinstance(state.get("report_focus"), list)
+                    else (state.get("report_focus") or "")
+                ),
+                report_plan=report_plan,
             )
 
             if result.get("success"):
@@ -837,6 +847,10 @@ No need to specify image paths in tool_params - they're extracted from the analy
 - Do NOT include "working_dir" in tool_params - it will be automatically set to the reporter's output directory
 - All files will be created in the reporter's dedicated directory (working_dir/reporter/)
 
+**CRITICAL — per-simulation reports:**
+- Use ONLY `generate_html_report` for a single-simulation report (this workflow).
+- Do NOT use `generate_combined_html_report` — that tool is reserved for multi-simulation combined reports with sim_dirs/labels.
+
 **Output Format (JSON):**
 {{
   "reasoning": "Why this approach",
@@ -958,91 +972,20 @@ No need to specify image paths in tool_params - they're extracted from the analy
 
             user_goal = state.get("enriched_prompt") or state.get("user_goal", "MD simulation analysis")
 
-            # ── Protein name extraction (best-effort, multiple sources) ──
-            protein_name = None
-            sys_info = state.get("system_info")
-            if isinstance(sys_info, dict):
-                protein_name = (
-                    sys_info.get("system_name")
-                    or sys_info.get("protein_name")
-                    or sys_info.get("uniprot_id")
-                )
-            # Try explicit uniprot_id / sim_label state fields
-            if not protein_name or len(protein_name) < 3:
-                protein_name = (
-                    state.get("uniprot_id")
-                    or state.get("sim_label")
-                    or protein_name
-                )
-            # Try PDB file stem if system_info didn't give a clean name
-            if not protein_name or len(protein_name) < 3:
-                for pdb_key in ("raw_pdb", "cleaned_pdb", "pdb_path"):
-                    pdb_val = state.get(pdb_key)
-                    if pdb_val and isinstance(pdb_val, str):
-                        import os as _os_lit
-                        stem = _os_lit.path.splitext(_os_lit.path.basename(pdb_val))[0]
-                        # Ignore generic stems that don't identify the protein
-                        _GENERIC_STEMS = {
-                            "protein", "structure", "input", "system", "md",
-                            "protein_md", "cleaned", "prepared", "model",
-                        }
-                        if len(stem) >= 4 and stem.lower() not in _GENERIC_STEMS:
-                            protein_name = stem
-                            break
-            # Try working_directory path: last non-generic component often
-            # is the UniProt accession (e.g., "p17612" from "pseudokin/p17612").
-            if not protein_name or len(protein_name) < 4:
-                import re as _re_wd
-                workdir = state.get("working_directory", "")
-                if workdir:
-                    _SKIP_DIRS = {
-                        "analysis", "reporter", "hpc", "preprocess", "simsetup",
-                        "supervisor", "planner", "programmer", "working_dir",
-                        "work_dir", "tmp", "output", "results",
-                    }
-                    from pathlib import Path as _Path_lit
-                    for part in reversed(_Path_lit(workdir).parts):
-                        if len(part) >= 4 and part.lower() not in _SKIP_DIRS:
-                            protein_name = part
-                            break
-            # If protein_name looks like a UniProt accession (e.g., p17612, Q13418),
-            # attempt a UniProt lookup to resolve it to the actual gene/protein name.
-            import re as _re_lit
-            if protein_name and _re_lit.match(r'^[A-Za-z][0-9]{4,}[0-9A-Za-z]*$', protein_name):
-                try:
-                    uni_resolve = search_uniprot.invoke({
-                        "query": protein_name,
-                        "max_results": 1,
-                    })
-                    if isinstance(uni_resolve, dict) and uni_resolve.get("success"):
-                        entries = uni_resolve.get("entries", [])
-                        if entries:
-                            entry = entries[0]
-                            gene = (
-                                entry.get("gene_name")
-                                or entry.get("protein_name")
-                                or entry.get("entry_name", "")
-                            )
-                            # Keep the resolved gene name only if it looks meaningful
-                            if gene and len(gene) >= 3 and gene.lower() != protein_name.lower():
-                                logger.info(
-                                    "Literature search: resolved accession %s → %s",
-                                    protein_name, gene
-                                )
-                                protein_name = gene
-                except Exception as _uni_err:
-                    logger.debug("UniProt accession lookup failed (non-fatal): %s", _uni_err)
-            # Scan the user goal for the first capitalised word as final fallback
-            if not protein_name and user_goal:
-                import re as _re
-                match = _re.search(r'\b([A-Z]{2,}[0-9]*[A-Z]*|[A-Z][a-z]*[0-9]+)\b', user_goal)
-                if match:
-                    _candidate = match.group(1)
-                    # Avoid generic acronyms that are not protein names
-                    _GENERIC_WORDS = {"MD", "PDB", "HPC", "RNA", "DNA", "ATP", "COM", "II"}
-                    if _candidate.upper() not in _GENERIC_WORDS:
-                        protein_name = _candidate
-            logger.info("Literature search: using protein_name=%r", protein_name)
+            from src.reporter.protein_identity import resolve_protein_identity
+            identity = resolve_protein_identity(state, user_goal=user_goal)
+            protein_name = identity.get("gene_name") or identity.get("display_name")
+            gene_name = identity.get("gene_name") or protein_name
+            protein_family = identity.get("protein_family") or ""
+            related_terms = identity.get("related_terms") or []
+            logger.info(
+                "Literature search: protein=%r gene=%r family=%r source=%s uniprot=%s",
+                protein_name,
+                gene_name,
+                protein_family,
+                identity.get("source"),
+                identity.get("uniprot_id"),
+            )
 
             # ── Collect analysis stats to drive result-specific queries ──
             analysis_stats = extract_analysis_stats_from_entries(analysis_data)
@@ -1066,6 +1009,8 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 protein_name=protein_name,
                 analysis_types=analysis_types,
                 analysis_stats=analysis_stats,
+                protein_family=protein_family,
+                related_terms=related_terms,
             )
             if research_context.get("protein_names") and (
                 not protein_name or protein_name in research_context["protein_ids"]
@@ -1103,6 +1048,8 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 literature_refs.append(ref)
                 return True
 
+            from src.reporter.literature_search import search_europe_pmc
+
             # ── 1. PubMed (protein-priority queries) ──────────────
             for qkey, query_text in queries.items():
                 if len(literature_refs) >= MAX_REFS:
@@ -1123,15 +1070,24 @@ No need to specify image paths in tool_params - they're extracted from the analy
                         if len(literature_refs) >= MAX_REFS:
                             break
 
-            # Per-protein queries for multi-system studies (e.g. ERBB3, VRK3, MLKL, TITIN).
-            for pname in research_context.get("protein_names", [])[:6]:
+            # Protein-specific PubMed themes (gene name first; related family second).
+            _search_names = list(dict.fromkeys(
+                [n for n in ([gene_name] + research_context.get("protein_names", [])) if n]
+            ))[:4]
+            for pname in _search_names:
                 if len(literature_refs) >= MAX_REFS:
                     break
-                for theme in (
-                    f"{pname} pseudokinase molecular dynamics",
-                    f"{pname} activation loop dynamics",
-                    f"{pname} ATP binding apo holo",
-                ):
+                themes = [
+                    f"{pname} protein structure function review",
+                    f"{pname} molecular dynamics simulation",
+                ]
+                if protein_family:
+                    themes.append(f"{pname} {protein_family} dynamics activation")
+                elif "pseudokinase" in (user_goal or "").lower():
+                    themes.append(f"{pname} pseudokinase activation loop")
+                if any(t in (user_goal or "").lower() for t in ("atp", "holo", "apo", "ligand")):
+                    themes.append(f"{pname} ATP binding apo holo")
+                for theme in themes:
                     if len(literature_refs) >= MAX_REFS:
                         break
                     remaining = MAX_REFS - len(literature_refs)
@@ -1148,6 +1104,29 @@ No need to specify image paths in tool_params - they're extracted from the analy
                             if len(literature_refs) >= MAX_REFS:
                                 break
             logger.info("After PubMed: %d refs", len(literature_refs))
+
+            # ── 1b. Europe PMC open-access (protein-focused) ───────
+            if gene_name and len(literature_refs) < MAX_REFS:
+                for epmc_q in (
+                    f"{gene_name} protein molecular dynamics",
+                    f"{gene_name} structure function",
+                ):
+                    if len(literature_refs) >= MAX_REFS:
+                        break
+                    remaining = MAX_REFS - len(literature_refs)
+                    epmc_result = search_europe_pmc(
+                        epmc_q,
+                        max_results=min(4, remaining),
+                        max_age_years=12,
+                        open_access_only=True,
+                    )
+                    if epmc_result.get("success"):
+                        for ref in epmc_result.get("results", []):
+                            if not _add_ref(ref):
+                                continue
+                            if len(literature_refs) >= MAX_REFS:
+                                break
+                logger.info("After Europe PMC: %d refs", len(literature_refs))
 
             # ── 2. bioRxiv preprints (top protein query) ──────────
             if resolved_name and len(literature_refs) < MAX_REFS:
@@ -1256,6 +1235,11 @@ No need to specify image paths in tool_params - they're extracted from the analy
             extract_research_context,
             score_literature_ref_relevance,
         )
+        from src.reporter.figure_selector import (
+            select_analysis_entries,
+            summarize_findings_for_literature,
+            ReportFigurePolicy,
+        )
 
         user_goal = (
             state.get("user_goal_original")
@@ -1263,17 +1247,44 @@ No need to specify image paths in tool_params - they're extracted from the analy
             or state.get("enriched_prompt")
             or state.get("user_goal", "")
         )
+        report_focus_raw = state.get("report_focus") or ""
+        report_focus = (
+            " ".join(report_focus_raw)
+            if isinstance(report_focus_raw, list)
+            else str(report_focus_raw)
+        )
+        policy = ReportFigurePolicy.from_config(
+            getattr(self, "config", None),
+            report_type=state.get("report_type", "comprehensive"),
+        )
+        selected_entries = select_analysis_entries(
+            analysis_data.get("entries") or [],
+            user_goal=user_goal,
+            report_focus=report_focus,
+            enriched_prompt=state.get("enriched_prompt") or "",
+            policy=policy,
+        )
+        focused_findings = summarize_findings_for_literature(
+            analysis_data, selected_entries=selected_entries
+        )
         analysis_stats = extract_analysis_stats_from_entries(analysis_data)
-        analysis_types = list((analysis_data.get("analysis_types") or {}).keys())
-        if isinstance(analysis_data.get("analysis_types"), list):
-            analysis_types = analysis_data["analysis_types"]
+        analysis_types = list({e.get("analysis_type") for e in selected_entries if e.get("analysis_type")})
+        if not analysis_types:
+            analysis_types = list((analysis_data.get("analysis_types") or {}).keys())
+            if isinstance(analysis_data.get("analysis_types"), list):
+                analysis_types = analysis_data["analysis_types"]
 
         sys_info = state.get("system_info") if isinstance(state.get("system_info"), dict) else {}
+        from src.reporter.protein_identity import resolve_protein_identity
+        identity = resolve_protein_identity(state, user_goal=user_goal)
+        resolved_protein = identity.get("gene_name") or identity.get("display_name")
         context = extract_research_context(
             user_goal=user_goal,
-            protein_name=sys_info.get("protein_name") if sys_info else None,
+            protein_name=resolved_protein or sys_info.get("protein_name"),
             analysis_types=analysis_types,
             analysis_stats=analysis_stats,
+            protein_family=identity.get("protein_family"),
+            related_terms=identity.get("related_terms"),
         )
         analysis_text = build_analysis_summary_text(analysis_data, analysis_stats)
 
@@ -1288,11 +1299,18 @@ No need to specify image paths in tool_params - they're extracted from the analy
             )
         lit_text = "\n".join(lit_parts)
 
-        protein_focus = ", ".join(context.get("protein_names") or []) or "the simulated protein(s)"
+        protein_focus = identity.get("gene_name") or ", ".join(context.get("protein_names") or []) or "the simulated protein"
+        family_note = ""
+        if identity.get("protein_family"):
+            family_note = (
+                f"\n**Protein family / class:** {identity['protein_family']} "
+                f"(related-protein papers are acceptable only when they directly inform "
+                f"{protein_focus} mechanism or dynamics)"
+            )
         objective = context.get("user_goal") or user_goal or "MD simulation analysis"
         ligand_focus = ", ".join(context.get("ligand_terms") or []) or "ligand binding"
         region_focus = ", ".join(context.get("region_terms") or []) or "active site / activation loop"
-        findings_focus = "; ".join(context.get("finding_phrases") or []) or "see analysis summary"
+        findings_focus = focused_findings or "; ".join(context.get("finding_phrases") or []) or "see analysis summary"
 
         if not self.llm.available:
             return (
@@ -1316,11 +1334,12 @@ No need to specify image paths in tool_params - they're extracted from the analy
 **User's Research Question / Objective:**
 {objective}
 
-**Protein(s) / System Focus:** {protein_focus}
+**Protein(s) / System Focus:** {protein_focus}{family_note}
 **Ligand / state focus:** {ligand_focus} (apo vs holo where applicable)
 **Structural region focus:** {region_focus}
-**Key simulation findings to contextualise:** {findings_focus}
 {combined_note}
+**Key simulation findings to contextualise (report-selected analyses):**
+{findings_focus}
 
 **Simulation Analysis Results (quantitative summary):**
 {analysis_text}
@@ -1329,10 +1348,11 @@ No need to specify image paths in tool_params - they're extracted from the analy
 {lit_text}
 
 **Instructions:**
-- Read the abstracts and ONLY discuss papers that are genuinely relevant to the proteins, MD dynamics, apo/holo ATP effects, activation-loop behaviour, or analysis outputs above
-- Skip or downplay papers that do not mention the target protein(s), pseudokinase/kinase dynamics, ligand binding, or conformational flexibility
-- Write 2–4 paragraphs of scientific prose connecting published work to THIS simulation study
-- Explicitly relate simulation findings (RMSD, RMSF, Rg, DCCM, ATP–pocket distance, DSSP) to literature for the same or related proteins
+- Prioritise papers whose primary subject is {protein_focus}; use related-family papers (e.g. other pseudokinases) only when they illuminate the same mechanism observed in this simulation
+- Read the abstracts and ONLY discuss papers genuinely relevant to the user's objective, the simulated system(s), and the analysis outputs above
+- Skip or downplay papers unrelated to the target protein(s), ligand/binding context (if applicable), or the performed analysis types ({', '.join(analysis_types[:8]) or 'MD dynamics'})
+- Write 3–4 paragraphs of substantive scientific prose connecting published work to THIS simulation study — dig out mechanistic insights, not generic summaries
+- Explicitly relate simulation findings to literature for the same or related systems — cite metrics that appear in the results above
 - Cite sources using bracket notation [1], [2], etc. matching the reference numbers above
 - Do NOT simply list paper titles — synthesise and compare with the simulation outcomes
 - If a paper's abstract is missing or clearly irrelevant, do not cite it
@@ -1373,11 +1393,18 @@ No need to specify image paths in tool_params - they're extracted from the analy
             extract_research_context,
         )
 
+        from src.reporter.figure_selector import resolve_report_narrative
+
         user_goal = (
             state.get("user_goal_original")
             or state.get("master_enriched_prompt")
             or state.get("enriched_prompt")
             or state.get("user_goal", "")
+        )
+        narrative = resolve_report_narrative(
+            user_goal,
+            enriched_prompt=state.get("enriched_prompt") or "",
+            n_simulations=len(sim_dirs or labels or []),
         )
         analysis_stats = extract_analysis_stats_from_entries(analysis_data)
         analysis_types = list((analysis_data.get("analysis_types") or {}).keys())
@@ -1391,6 +1418,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
             analysis_types=analysis_types,
             analysis_stats=analysis_stats,
         )
+        context["report_theme"] = narrative.primary_theme
         analysis_text = build_analysis_summary_text(analysis_data, analysis_stats)
         protein_focus = ", ".join(context.get("protein_names") or []) or "the simulated systems"
 
@@ -1424,6 +1452,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
 **User's Research Question / Objective:**
 {user_goal}
 
+**Report narrative theme:** {context.get('report_theme', 'general dynamics comparison')}
 **Protein(s) studied:** {protein_focus}
 **Ligand / comparison focus:** {", ".join(context.get("ligand_terms") or ["ATP", "apo", "holo"])}
 **Activation-loop / region focus:** {", ".join(context.get("region_terms") or ["residues 150-200"])}
@@ -1438,10 +1467,10 @@ No need to specify image paths in tool_params - they're extracted from the analy
 {lit_text}
 
 **Instructions:**
-- Write 3–5 paragraphs synthesising cross-simulation dynamics (apo vs holo, multiple pseudokinases/proteins)
-- Integrate quantitative trends (RMSD, RMSF, Rg, DCCM, ATP–pocket distance, DSSP activation loop) with published knowledge
-- Cite relevant literature using bracket notation [1], [2], etc. wherever you compare with prior experimental or MD studies
-- Emphasise protein-specific and shared mechanisms: activation-loop conformations, ATP effects, allosteric coupling
+- Write 3–5 paragraphs that tell one coherent story aligned with the user's objective
+- If the goal emphasises unsupervised classification or clustering, lead with how simulations group by dynamic regime (FEL/phylogenetic tree), what distinguishes each cluster (COM distance, contacts, pocket RMSF, ligand flexibility), and biological interpretation — do not repeat generic RMSD/Rg lists unless they support the classification story
+- If the goal emphasises apo vs holo or binding, integrate ligand–pocket coupling, contacts, and flexibility trends with literature
+- Cite relevant literature using bracket notation [1], [2], etc.
 - End with concise implications and suggested follow-up experiments or simulations
 - Do NOT include section headers — output only the impression paragraphs"""
 
@@ -1466,45 +1495,13 @@ No need to specify image paths in tool_params - they're extracted from the analy
 
     def _resolve_protein_display_name(self, state: MDState) -> tuple:
         """Return (protein_name, sim_label) for report title and metadata."""
-        import re
-        user_goal = state.get("enriched_prompt") or state.get("user_goal") or ""
+        from src.reporter.protein_identity import resolve_protein_identity
+
         workdir = state.get("working_directory", "")
-        sim_label = Path(workdir).name if workdir else ""
-
-        # id:name map in goal (p23458:JAK1, o15197:EPHB6)
-        if sim_label:
-            m = re.search(
-                rf"\b{re.escape(sim_label)}\s*:\s*([A-Za-z0-9_-]+)",
-                user_goal,
-                re.IGNORECASE,
-            )
-            if m:
-                return m.group(1), sim_label
-
-        protein_name = None
-        sys_info = state.get("system_info")
-        if isinstance(sys_info, dict):
-            protein_name = (
-                sys_info.get("protein_name")
-                or sys_info.get("system_name")
-                or sys_info.get("uniprot_id")
-            )
-
-        # "JAK1 holo system", "EPHB6 holo"
-        if not protein_name:
-            m = re.search(
-                r"\b([A-Z][A-Za-z0-9]{1,15})\b[^.\n]{0,40}\b(?:holo|kinase|pseudokinase|system)\b",
-                user_goal,
-            )
-            if m:
-                candidate = m.group(1)
-                if candidate.upper() not in {"MD", "PDB", "HPC", "ATP", "COM", "FEL", "PCA"}:
-                    protein_name = candidate
-
-        if not protein_name and sim_label:
-            protein_name = sim_label
-
-        return protein_name or "Protein", sim_label
+        sim_label = Path(workdir).name if workdir else state.get("sim_label", "")
+        identity = resolve_protein_identity(state, sim_label=sim_label)
+        display = identity.get("display_name") or identity.get("gene_name") or "Protein"
+        return display, sim_label
 
     def _extract_pdb_for_viewer(self, state: MDState, analysis_data: Dict[str, Any] = None) -> Optional[Dict[str, str]]:
         """Extract significant structures for the 3D viewer.
@@ -1595,16 +1592,52 @@ No need to specify image paths in tool_params - they're extracted from the analy
                     lines.append(f"**{atype}**: Analysis completed")
             return "\n\n".join(lines)
         
-        analysis_summary_parts = []
-        for entry in entries:
-            atype = entry.get("analysis_type", "Unknown")
-            stats = entry.get("statistics", {})
-            if isinstance(stats, dict) and stats:
-                stat_lines = ", ".join(f"{k}: {v}" for k, v in stats.items() if isinstance(v, (int, float)))
-                analysis_summary_parts.append(f"- {atype}: {stat_lines}")
-            else:
-                analysis_summary_parts.append(f"- {atype}: (no statistics)")
-        analysis_text = "\n".join(analysis_summary_parts)
+        from src.reporter.literature_search import (
+            build_analysis_summary_text,
+            extract_analysis_stats_from_entries,
+            extract_research_context,
+            score_literature_ref_relevance,
+        )
+        from src.reporter.figure_selector import (
+            select_analysis_entries,
+            summarize_findings_for_literature,
+            ReportFigurePolicy,
+        )
+        from src.reporter.protein_identity import resolve_protein_identity
+
+        user_goal = (
+            state.get("user_goal_original")
+            or state.get("master_enriched_prompt")
+            or state.get("enriched_prompt")
+            or state.get("user_goal", "MD simulation analysis")
+        )
+        identity = resolve_protein_identity(state, user_goal=user_goal)
+        protein_label = identity.get("gene_name") or identity.get("display_name") or "the protein"
+
+        policy = ReportFigurePolicy.from_config(
+            getattr(self, "config", None),
+            report_type=state.get("report_type", "comprehensive"),
+        )
+        selected_entries = select_analysis_entries(
+            analysis_data.get("entries") or [],
+            user_goal=user_goal,
+            report_focus="",
+            enriched_prompt=state.get("enriched_prompt") or "",
+            policy=policy,
+        )
+        focused_findings = summarize_findings_for_literature(
+            analysis_data, selected_entries=selected_entries
+        )
+        analysis_stats = extract_analysis_stats_from_entries(analysis_data)
+        context = extract_research_context(
+            user_goal=user_goal,
+            protein_name=protein_label,
+            analysis_types=list({e.get("analysis_type") for e in selected_entries if e.get("analysis_type")}),
+            analysis_stats=analysis_stats,
+            protein_family=identity.get("protein_family"),
+            related_terms=identity.get("related_terms"),
+        )
+        analysis_text = build_analysis_summary_text(analysis_data, analysis_stats)
         
         # Build literature summary for LLM
         lit_text = "No literature references available."
@@ -1612,29 +1645,44 @@ No need to specify image paths in tool_params - they're extracted from the analy
             lit_parts = []
             for i, ref in enumerate(literature_refs[:10], 1):
                 title = ref.get("title", "Unknown")
-                abstract = ref.get("abstract", "")
-                abstract_snippet = abstract[:300] if abstract else "No abstract"
-                lit_parts.append(f"[{i}] {title}\n    {abstract_snippet}")
+                abstract = ref.get("abstract") or ""
+                score, note = score_literature_ref_relevance(ref, context)
+                abstract_snippet = abstract[:400] if abstract else "No abstract"
+                lit_parts.append(
+                    f"[{i}] {title} (relevance {score}; {note})\n    {abstract_snippet}"
+                )
             lit_text = "\n".join(lit_parts)
         
-        user_goal = state.get("enriched_prompt") or state.get("user_goal", "MD simulation analysis")
+        user_goal_display = (
+            state.get("user_goal_original")
+            or state.get("enriched_prompt")
+            or state.get("user_goal", "MD simulation analysis")
+        )
+        findings_block = focused_findings or "; ".join(context.get("finding_phrases") or [])
         
         prompt = f"""You are a computational biophysics expert. Based on the analysis results and literature below, write a concise Final Impression section for a scientific MD simulation report.
 
-**User Goal:** {user_goal}
+**User Goal:** {user_goal_display}
 
-**Analysis Results:**
+**Protein studied:** {protein_label} ({identity.get('uniprot_id') or 'accession unknown'})
+**Protein class:** {identity.get('protein_family') or 'see literature'}
+
+**Key findings (goal-selected analyses):**
+{findings_block or analysis_text}
+
+**Analysis Results (quantitative):**
 {analysis_text}
 
 **Literature References:**
 {lit_text}
 
 **Instructions:**
-- Correlate the analysis results with findings from the literature
-- Highlight key observations: Is the protein stable? Are there notable flexible regions?
-- Put the results in context of what is known from published work
-- Provide actionable insights or conclusions relevant to the user's question
-- Keep it concise: 2-4 paragraphs, no bullet points
+- Write specifically about {protein_label} — not generic kinase/pseudokinase commentary unless directly supported by the data
+- Correlate the analysis results with findings from the literature on {protein_label} or closely related systems
+- Highlight the most important observations: stability, flexible regions, ligand effects, FEL basins, activation-loop behaviour — whichever appear in the results
+- Draw a clear conclusion that answers the user's research question
+- Provide actionable insights or suggested follow-up experiments
+- Keep it concise: 3–4 paragraphs, no bullet points
 - Write in scientific prose, suitable for a report
 - Cite relevant literature using bracket notation like [1], [2], [3] corresponding to the reference numbers above
 - Do NOT include section headers or titles — just the text content"""
@@ -1926,21 +1974,31 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 
                 # Special handling for steps that need previous results
                 params = step.tool_params.copy()
+                effective_tool = step.tool_name
                 
                 # Override working_dir based on tool type:
                 # - Output tools (generate_html_report): Use reporter's agent directory
                 # - Input tools (read_analysis_summary): Use base working directory to find analysis files
-                if step.tool_name == "generate_html_report":
+                effective_tool = step.tool_name
+                if step.tool_name == "generate_combined_html_report":
+                    logger.warning(
+                        "Plan requested generate_combined_html_report for per-sim run; "
+                        "redirecting to generate_html_report"
+                    )
+                    effective_tool = "generate_html_report"
+
+                if effective_tool == "generate_html_report":
                     # Output tool - use reporter directory  
                     params["working_dir"] = self.file_manager.agent_dir
-                    logger.debug(f"Set working_dir to {self.file_manager.agent_dir} for output tool {step.tool_name}")
+                    logger.debug(f"Set working_dir to {self.file_manager.agent_dir} for output tool {effective_tool}")
                 elif step.tool_name == "read_analysis_summary":
                     # Input tool - use base directory to find analysis files
                     base_dir = Path(self.file_manager.agent_dir).parent
                     params["working_dir"] = str(base_dir)
                     logger.debug(f"Set working_dir to {base_dir} for input tool {step.tool_name}")
                 
-                if step.tool_name == "generate_html_report":
+                if effective_tool == "generate_html_report":
+                    from src.reporter.figure_selector import ReportFigurePolicy
                     params["analysis_data"] = analysis_data
                     params["literature_refs"] = literature_refs
                     params["literature_review"] = literature_review
@@ -1951,6 +2009,23 @@ No need to specify image paths in tool_params - they're extracted from the analy
                     params["sim_label"] = sim_label
                     # Analysis outputs live in parent/analysis — used to resolve plot paths
                     params["analysis_dir"] = str(Path(self.file_manager.agent_dir).parent / "analysis")
+                    _fig_policy = ReportFigurePolicy.from_config(
+                        self.config,
+                        report_type=agent_input.report_type.value if hasattr(agent_input.report_type, "value") else str(agent_input.report_type),
+                        include_visualizations=agent_input.include_visualizations,
+                    )
+                    params["user_goal"] = (
+                        state.get("user_goal_original")
+                        or state.get("user_goal")
+                        or agent_input.user_goal
+                    )
+                    params["report_focus"] = " ".join(
+                        getattr(plan, "report_focus", None) or state.get("report_focus") or []
+                    ) if isinstance(getattr(plan, "report_focus", None) or state.get("report_focus"), list) else (
+                        getattr(plan, "report_focus", None) or state.get("report_focus") or ""
+                    )
+                    params["max_figures_per_section"] = _fig_policy.max_figures_per_section
+                    params["include_visualizations"] = agent_input.include_visualizations
                     # Generate final impression using LLM
                     logger.info("  [exec] Generating LLM final impression...")
                     params["final_impression"] = self._generate_final_impression(
@@ -1969,7 +2044,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
                     params["enriched_prompt"] = state.get("enriched_prompt") or state.get("user_goal")
                 
                 # Execute tool
-                result = self.tool_executor.execute_tool(step.tool_name, params)
+                result = self.tool_executor.execute_tool(effective_tool, params)
                 
                 # Store results for next steps; only update if the new result has
                 # entries — don't discard a good pre-loaded analysis_data with an
@@ -1986,7 +2061,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 
                 step_results.append({
                     "step_name": step.name,
-                    "tool": step.tool_name,
+                    "tool": effective_tool if effective_tool != step.tool_name else step.tool_name,
                     "success": result.get("success", True),
                     "result": result
                 })
@@ -2023,6 +2098,52 @@ No need to specify image paths in tool_params - they're extracted from the analy
             literature_review = self._generate_literature_review(
                 analysis_data, literature_refs, state
             )
+
+        # Fallback: ensure HTML report exists even if the LLM plan chose the wrong tool
+        report_file_from_steps = None
+        for sr in step_results:
+            if sr.get("tool") == "generate_html_report" and sr.get("success"):
+                report_file_from_steps = sr.get("result", {}).get("report_file")
+
+        if not report_file_from_steps and analysis_data.get("entries"):
+            logger.warning("No HTML report produced by plan — running fallback generate_html_report")
+            from src.reporter.figure_selector import ReportFigurePolicy
+            protein_name, sim_label = self._resolve_protein_display_name(state)
+            _fig_policy = ReportFigurePolicy.from_config(
+                self.config,
+                report_type=agent_input.report_type.value if hasattr(agent_input.report_type, "value") else str(agent_input.report_type),
+                include_visualizations=agent_input.include_visualizations,
+            )
+            fallback_params = {
+                "working_dir": self.file_manager.agent_dir,
+                "analysis_data": analysis_data,
+                "literature_refs": literature_refs,
+                "literature_review": literature_review,
+                "system_info": state.get("system_info"),
+                "protein_name": protein_name,
+                "sim_label": sim_label,
+                "analysis_dir": str(Path(self.file_manager.agent_dir).parent / "analysis"),
+                "user_goal": state.get("user_goal_original") or state.get("user_goal") or agent_input.user_goal,
+                "report_focus": " ".join(plan.report_focus) if isinstance(plan.report_focus, list) else (plan.report_focus or ""),
+                "max_figures_per_section": _fig_policy.max_figures_per_section,
+                "include_visualizations": agent_input.include_visualizations,
+                "final_impression": self._generate_final_impression(analysis_data, literature_refs, state),
+                "pdb_data": self._extract_pdb_for_viewer(state, analysis_data),
+                "enriched_prompt": state.get("enriched_prompt") or state.get("user_goal"),
+                "output_file": "analysis_report.html",
+                "report_type": agent_input.report_type.value if hasattr(agent_input.report_type, "value") else str(agent_input.report_type),
+            }
+            fallback_result = self.tool_executor.execute_tool("generate_html_report", fallback_params)
+            step_results.append({
+                "step_name": "Fallback HTML Report",
+                "tool": "generate_html_report",
+                "success": fallback_result.get("success", False),
+                "result": fallback_result,
+            })
+            if fallback_result.get("success"):
+                completed += 1
+            else:
+                issues.append(f"Fallback HTML report: {fallback_result.get('error', 'unknown error')}")
         
         # Build report
         report_lines = ["=" * 80, "REPORTER EXECUTION REPORT", "=" * 80, ""]

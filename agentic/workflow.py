@@ -1087,11 +1087,14 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
 
             if state.get("is_multi_simulation"):
                 from agentic.multi_sim_progress import (
+                    reconcile_multisim_progress_from_disk,
                     rebuild_progress_from_disk,
                     sync_state_from_progress,
                 )
 
-                if state.get("multi_sim_progress") and not state.get("combined_only"):
+                if state.get("resume_failed_only") and not state.get("combined_only"):
+                    reconcile_multisim_progress_from_disk(state, working_dir)
+                elif state.get("multi_sim_progress") and not state.get("combined_only"):
                     sync_state_from_progress(state)
                     from agentic.multi_sim_progress import ensure_per_sim_working_directory
 
@@ -1101,13 +1104,16 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
 
             if state.get("is_multi_simulation") and (is_completed_snapshot or not same_subtask_signature):
                 if state.get("resume_failed_only"):
-                    # Resume: keep sim_prompts + progress; re-enter per-sim loop.
+                    # Resume: keep sim_prompts + progress; supervisor routes from
+                    # reconciled multi_sim_progress (combined reporter only when done).
                     state["multi_sim_phase"] = None
                     state["execution_plan"] = None
                     state["plan_executed"] = False
+                    if state.get("multi_sim_progress", {}).get("phase") == "combined_reporter":
+                        state["current_agent_idx"] = 1
                     logger.info(
                         "[resume] Multi-sim state preserved — supervisor will continue "
-                        "from multi_sim_progress"
+                        "from reconciled multi_sim_progress"
                     )
                 else:
                     state["multi_sim_phase"] = None

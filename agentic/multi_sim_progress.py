@@ -403,6 +403,116 @@ def reconcile_progress_from_disk(state: Dict[str, Any], progress: Dict[str, Any]
             _reconcile_sim_agents_from_disk(rec, agents)
 
 
+def _combined_analysis_done_on_disk(base: Path) -> bool:
+    """True when base-level combined analysis artifacts exist."""
+    analysis_dir = base / "analysis"
+    if not analysis_dir.is_dir():
+        return False
+    markers = (
+        analysis_dir / "classification_features.csv",
+        analysis_dir / "classification_clusters.json",
+        analysis_dir / "com_distance_overlay.png",
+        analysis_dir / "ligand_rmsf_overlay.png",
+        analysis_dir / "pocket_rmsf_overlay.png",
+    )
+    if any(path.is_file() for path in markers):
+        return True
+    return any(analysis_dir.glob("*_overlay.png"))
+
+
+def _combined_reporter_done_on_disk(base: Path) -> bool:
+    """True when the base-level combined HTML report exists."""
+    reporter_dir = base / "reporter"
+    return (reporter_dir / "combined_report.html").is_file()
+
+
+def reconcile_multisim_progress_from_disk(
+    state: Dict[str, Any],
+    base_dir: Optional[str] = None,
+) -> None:
+    """
+    Refresh multi_sim_progress from on-disk artifacts before resume routing.
+
+    Ensures ``--resume`` skips per-simulation work (and combined analysis) that
+    already finished, even when the saved checkpoint still shows ``pending``.
+    """
+    if not state.get("is_multi_simulation"):
+        return
+    if not state.get("sim_prompts") and not state.get("multi_sim_progress"):
+        return
+
+    base = Path(
+        base_dir
+        or state.get("multi_sim_base_dir")
+        or state.get("working_directory")
+        or "."
+    ).resolve()
+
+    if not state.get("multi_sim_progress"):
+        init_multi_sim_progress(state)
+
+    progress = state.get("multi_sim_progress") or {}
+    agents = progress.get("required_agents") or _required_agents(state)
+    for label in progress.get("sim_order") or []:
+        rec = _sim_record(progress, label)
+        if not rec:
+            continue
+        wd = rec.get("working_dir") or str(base / label)
+        rec["working_dir"] = wd
+        _reconcile_sim_agents_from_disk(rec, agents)
+
+    wants_combined = bool(
+        state.get("run_combined_analysis")
+        or progress.get("combined")
+        or _combined_analysis_done_on_disk(base)
+        or _combined_reporter_done_on_disk(base)
+    )
+    if wants_combined:
+        combined = progress.setdefault(
+            "combined",
+            {"analysis": "pending", "reporter": "pending"},
+        )
+        if _combined_analysis_done_on_disk(base):
+            combined["analysis"] = "done"
+        if _combined_reporter_done_on_disk(base):
+            combined["reporter"] = "done"
+        state["run_combined_analysis"] = True
+
+    if all_per_sim_agents_done(state):
+        combined = progress.get("combined") or {}
+        if combined:
+            if combined.get("analysis") != "done":
+                progress["phase"] = "combined_analysis"
+                progress["active_sim_label"] = None
+                progress["active_agent"] = "analysis"
+            elif combined.get("reporter") != "done":
+                progress["phase"] = "combined_reporter"
+                progress["active_sim_label"] = None
+                progress["active_agent"] = "reporter"
+            else:
+                progress["phase"] = "complete"
+                progress["active_sim_label"] = None
+                progress["active_agent"] = None
+        else:
+            progress["phase"] = "complete"
+            progress["active_sim_label"] = None
+            progress["active_agent"] = None
+    else:
+        progress["phase"] = "executing_sims"
+        active = _next_incomplete_sim(progress)
+        if active:
+            progress["active_sim_label"] = active
+            progress["active_agent"] = _next_pending_agent(progress, active)
+
+    state["multi_sim_progress"] = progress
+    sync_state_from_progress(state)
+    logger.info(
+        "[resume] Reconciled multi_sim_progress from disk at %s\n%s",
+        base,
+        progress_summary(state),
+    )
+
+
 def _workflow_pause_sim(progress: Dict[str, Any], state: Dict[str, Any]) -> Optional[str]:
     """
     Simulation where the workflow paused for HITL (authoritative for continue).
@@ -762,39 +872,7 @@ def progress_summary(state: Dict[str, Any]) -> str:
 
 def rebuild_progress_from_disk(state: Dict[str, Any], base_dir: str) -> None:
     """Infer progress from per-sim supervisor state + artifacts (resume helper)."""
-    if not state.get("is_multi_simulation"):
-        return
-    init_multi_sim_progress(state)
-    progress = state["multi_sim_progress"]
-    agents = progress.get("required_agents") or []
-    base = Path(base_dir)
-    for label in progress.get("sim_order") or []:
-        rec = _sim_record(progress, label)
-        if not rec:
-            continue
-        sim_dir = Path(rec.get("working_dir") or base / label)
-        for agent in agents:
-            sub = {"preprocessing": "preprocess", "simsetup": "simsetup", "hpc": "hpc",
-                   "analysis": "analysis", "reporter": "reporter"}.get(agent, agent)
-            marker = sim_dir / sub
-            if agent == "analysis" and (marker / "analysis_summary.jsonl").is_file():
-                rec["agents"][agent] = "done"
-            elif agent == "reporter" and list((marker).glob("*.html")):
-                rec["agents"][agent] = "done"
-            elif marker.is_dir() and any(marker.iterdir()):
-                if rec["agents"].get(agent) != "done":
-                    rec["agents"][agent] = "in_progress"
-        if all(rec["agents"].get(a) == "done" for a in agents):
-            rec["status"] = "done"
-        elif any(rec["agents"].get(a) == "done" for a in agents):
-            rec["status"] = "in_progress"
-
-    active = _next_incomplete_sim(progress)
-    if active:
-        progress["active_sim_label"] = active
-        progress["active_agent"] = _next_pending_agent(progress, active)
-    state["multi_sim_progress"] = progress
-    sync_state_from_progress(state)
+    reconcile_multisim_progress_from_disk(state, base_dir)
 
 
 def multisim_workflow_incomplete(progress: Optional[Dict[str, Any]]) -> bool:

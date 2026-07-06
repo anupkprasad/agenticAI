@@ -214,6 +214,116 @@ def _save_dccm_csv(
 
 # ── Public @tool functions ───────────────────────────────────────────────────
 
+def compute_dccm_from_universe(
+    u,
+    *,
+    topology_file: str,
+    trajectory_file: str,
+    selection: str = "protein and name CA",
+    output_prefix: Optional[str] = None,
+    frame_interval: int = 1,
+    save_matrix_csv: bool = True,
+    create_heatmap: bool = True,
+    vmin: float = -1.0,
+    vmax: float = 1.0,
+    working_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Compute DCCM from a pre-loaded (typically aligned) Universe."""
+    if not HAS_MDA or not HAS_NUMPY:
+        return {"success": False, "error": "MDAnalysis and NumPy are required for DCCM"}
+
+    prefix = output_prefix or "dccm"
+    atoms = u.select_atoms(selection)
+    if len(atoms) == 0:
+        return {"success": False, "error": f"Selection '{selection}' matched 0 atoms"}
+
+    n_total = len(u.trajectory)
+    frame_indices = list(range(0, n_total, frame_interval))
+    n_frames = len(frame_indices)
+    n_atoms = len(atoms)
+    positions = np.zeros((n_frames, n_atoms, 3), dtype=np.float64)
+
+    for out_idx, ts_idx in enumerate(frame_indices):
+        u.trajectory[ts_idx]
+        positions[out_idx] = atoms.positions.copy()
+
+    dccm = _compute_dccm_matrix(positions)
+    residue_ids = [int(r.resid) for r in atoms.residues]
+
+    strong_pairs = []
+    for i in range(n_atoms):
+        for j in range(i + 1, n_atoms):
+            v = float(dccm[i, j])
+            if abs(v) > 0.7:
+                strong_pairs.append({
+                    "residue_i": residue_ids[i],
+                    "residue_j": residue_ids[j],
+                    "correlation": round(v, 3),
+                })
+    strong_pairs.sort(key=lambda x: abs(x["correlation"]), reverse=True)
+    strong_pairs = strong_pairs[:50]
+    mean_abs_corr = float(np.abs(dccm[np.triu_indices(n_atoms, k=1)]).mean())
+
+    output_files: Dict[str, str] = {}
+    csv_path = None
+    if save_matrix_csv:
+        csv_name = f"{prefix}.csv"
+        csv_path = str(Path(working_dir) / csv_name) if working_dir else csv_name
+        _save_dccm_csv(dccm, residue_ids, csv_path)
+        output_files["csv"] = csv_path
+
+    heatmap_path = None
+    if create_heatmap and HAS_MATPLOTLIB:
+        heatmap_name = f"{prefix}_heatmap.png"
+        heatmap_path = str(Path(working_dir) / heatmap_name) if working_dir else heatmap_name
+        _plot_dccm_heatmap(
+            dccm, residue_ids, heatmap_path,
+            title=f"DCCM — {prefix}",
+            vmin=vmin, vmax=vmax,
+        )
+        output_files["heatmap"] = heatmap_path
+
+    if working_dir:
+        append_analysis_summary(
+            working_dir=working_dir,
+            analysis_type="DCCM",
+            statistics={
+                "n_atoms": n_atoms,
+                "n_residues": len(residue_ids),
+                "n_frames_used": n_frames,
+                "mean_abs_correlation": round(mean_abs_corr, 3),
+                "n_strongly_correlated_pairs": len(strong_pairs),
+            },
+            files={
+                "topology_file": topology_file,
+                "trajectory_file": trajectory_file,
+                "csv_file": csv_path or "not_saved",
+                "heatmap_file": heatmap_path or "not_generated",
+            },
+            metadata={
+                "selection": selection,
+                "frame_interval": frame_interval,
+                "top_correlated_pairs": strong_pairs[:5],
+                "aligned_pass": True,
+            },
+        )
+
+    return {
+        "success": True,
+        "n_atoms": n_atoms,
+        "n_residues": len(residue_ids),
+        "n_frames_used": n_frames,
+        "residue_ids": residue_ids,
+        "mean_abs_correlation": round(mean_abs_corr, 3),
+        "strongly_correlated_pairs": strong_pairs,
+        "output_files": output_files,
+        "message": (
+            f"DCCM computed for {n_atoms} Cα atoms over {n_frames} frames. "
+            f"Mean |C_ij| = {mean_abs_corr:.3f}."
+        ),
+    }
+
+
 @tool
 def calculate_dccm(
     topology_file: str,
@@ -287,109 +397,20 @@ def calculate_dccm(
     prefix = output_prefix or "dccm"
 
     try:
-        # ── Load universe ────────────────────────────────────────────────────
         u = mda.Universe(topology_file, trajectory_file)
-        atoms = u.select_atoms(selection)
-        if len(atoms) == 0:
-            return {"success": False,
-                    "error": f"Selection '{selection}' matched 0 atoms"}
-
-        n_total = len(u.trajectory)
-        frame_indices = list(range(0, n_total, frame_interval))
-        n_frames = len(frame_indices)
-
-        # ── Collect positions ────────────────────────────────────────────────
-        n_atoms = len(atoms)
-        positions = np.zeros((n_frames, n_atoms, 3), dtype=np.float64)
-
-        for out_idx, ts_idx in enumerate(frame_indices):
-            u.trajectory[ts_idx]
-            positions[out_idx] = atoms.positions.copy()
-
-        # ── Compute DCCM ─────────────────────────────────────────────────────
-        dccm = _compute_dccm_matrix(positions)
-
-        # ── Residue IDs ──────────────────────────────────────────────────────
-        residue_ids = [int(r.resid) for r in atoms.residues]
-
-        # ── Strongly correlated / anti-correlated pairs (|C|>0.7, off-diag) ─
-        strong_pairs = []
-        for i in range(n_atoms):
-            for j in range(i + 1, n_atoms):
-                v = float(dccm[i, j])
-                if abs(v) > 0.7:
-                    strong_pairs.append({
-                        "residue_i": residue_ids[i],
-                        "residue_j": residue_ids[j],
-                        "correlation": round(v, 3),
-                    })
-        # Sort by |correlation| descending, cap at 50 for readability
-        strong_pairs.sort(key=lambda x: abs(x["correlation"]), reverse=True)
-        strong_pairs = strong_pairs[:50]
-
-        mean_abs_corr = float(np.abs(dccm[np.triu_indices(n_atoms, k=1)]).mean())
-
-        # ── Write CSV ────────────────────────────────────────────────────────
-        output_files: Dict[str, str] = {}
-        csv_path = None
-        if save_matrix_csv:
-            csv_name = f"{prefix}.csv"
-            csv_path = str(Path(working_dir) / csv_name) if working_dir else csv_name
-            _save_dccm_csv(dccm, residue_ids, csv_path)
-            output_files["csv"] = csv_path
-
-        # ── Heatmap ──────────────────────────────────────────────────────────
-        heatmap_path = None
-        if create_heatmap and HAS_MATPLOTLIB:
-            heatmap_name = f"{prefix}_heatmap.png"
-            heatmap_path = str(Path(working_dir) / heatmap_name) if working_dir else heatmap_name
-            _plot_dccm_heatmap(
-                dccm, residue_ids, heatmap_path,
-                title=f"DCCM — {prefix}",
-                vmin=vmin, vmax=vmax,
-            )
-            output_files["heatmap"] = heatmap_path
-
-        # ── Summary logger ───────────────────────────────────────────────────
-        if working_dir:
-            append_analysis_summary(
-                working_dir=working_dir,
-                analysis_type="DCCM",
-                statistics={
-                    "n_atoms": n_atoms,
-                    "n_residues": len(residue_ids),
-                    "n_frames_used": n_frames,
-                    "mean_abs_correlation": round(mean_abs_corr, 3),
-                    "n_strongly_correlated_pairs": len(strong_pairs),
-                },
-                files={
-                    "topology_file": topology_file,
-                    "trajectory_file": trajectory_file,
-                    "csv_file": csv_path or "not_saved",
-                    "heatmap_file": heatmap_path or "not_generated",
-                },
-                metadata={
-                    "selection": selection,
-                    "frame_interval": frame_interval,
-                    "top_correlated_pairs": strong_pairs[:5],
-                },
-            )
-
-        return {
-            "success": True,
-            "n_atoms": n_atoms,
-            "n_residues": len(residue_ids),
-            "n_frames_used": n_frames,
-            "residue_ids": residue_ids,
-            "mean_abs_correlation": round(mean_abs_corr, 3),
-            "strongly_correlated_pairs": strong_pairs,
-            "output_files": output_files,
-            "message": (
-                f"DCCM computed for {n_atoms} Cα atoms over {n_frames} frames. "
-                f"Mean |C_ij| = {mean_abs_corr:.3f}. "
-                f"{len(strong_pairs)} strongly correlated pairs (|C|>0.7)."
-            ),
-        }
+        return compute_dccm_from_universe(
+            u,
+            topology_file=topology_file,
+            trajectory_file=trajectory_file,
+            selection=selection,
+            output_prefix=prefix,
+            frame_interval=frame_interval,
+            save_matrix_csv=save_matrix_csv,
+            create_heatmap=create_heatmap,
+            vmin=vmin,
+            vmax=vmax,
+            working_dir=working_dir,
+        )
 
     except Exception as e:
         import traceback

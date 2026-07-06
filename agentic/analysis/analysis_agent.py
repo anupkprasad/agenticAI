@@ -141,7 +141,7 @@ class MDAnalysisAgent:
     def _resolve_enriched_goal_for_planning(
         self,
         state: Optional[MDState],
-        agent_input: AnalysisAgentInput,
+        agent_input: Optional[AnalysisAgentInput] = None,
     ) -> str:
         """Per-simulation enriched goal from input validation (clearest analysis scope)."""
         if state and state.get("is_multi_simulation"):
@@ -151,11 +151,12 @@ class MDAnalysisAgent:
                 stored = (sim_prompts[idx].get("enriched_prompt") or "").strip()
                 if stored:
                     return stored
-        for candidate in (
-            agent_input.enriched_goal,
+        candidates = (
+            getattr(agent_input, "enriched_goal", None) if agent_input else None,
             (state or {}).get("enriched_prompt"),
             (state or {}).get("rephrased_goal"),
-        ):
+        )
+        for candidate in candidates:
             text = (candidate or "").strip()
             if text:
                 return text
@@ -1411,10 +1412,13 @@ Output as JSON:
                             classification_clustering = cluster_result
                             scatter = cluster_result.get("scatter_plot")
                             dendro = cluster_result.get("dendrogram_plot")
+                            phylo = cluster_result.get("phylo_tree_plot")
                             if scatter:
                                 plots.append(scatter)
                             if dendro:
                                 plots.append(dendro)
+                            if phylo:
+                                plots.append(phylo)
                             log_agent_action(
                                 "analysis",
                                 "Classification clustering complete",
@@ -2241,7 +2245,15 @@ Output as JSON:
         agent_input: Optional[AnalysisAgentInput] = None,
     ) -> Optional[FrozenSet[str]]:
         """Requested metrics for the current simulation (per-sim goal takes precedence)."""
-        return detect_requested_metrics_for_sim(state, agent_input)
+        base = detect_requested_metrics_for_sim(state, agent_input)
+        enriched = self._resolve_enriched_goal_for_planning(state, agent_input)
+        if not enriched:
+            return base
+        extra = detect_requested_metrics(enriched)
+        if base is None and extra is None:
+            return None
+        merged = set(base or ()) | set(extra or ())
+        return frozenset(merged) if merged else None
 
     def _sims_for_combined_metric(
         self,
@@ -2441,7 +2453,18 @@ Output as JSON:
 
         existing_tools = {s.get("tool_name", "") for s in plan_dict.get("steps", [])}
         missing_metrics: Set[str] = set()
+        binding_rmsf = (requested or frozenset()) & {"pocket_rmsf", "ligand_rmsf"}
         for metric in requested:
+            if metric == "rmsf" and binding_rmsf:
+                covered = all(
+                    any(
+                        _CALC_TOOL_TO_METRIC.get(tool) == binding_metric
+                        for tool in existing_tools
+                    )
+                    for binding_metric in binding_rmsf
+                )
+                if covered:
+                    continue
             if not any(
                 _CALC_TOOL_TO_METRIC.get(tool) == metric for tool in existing_tools
             ):
@@ -3387,15 +3410,15 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     ),
                     AnalysisStep(
                         name="Plot Ligand Residence",
-                        description="Plot bound fraction and residence metrics",
+                        description="Plot minimum protein–ligand contact distance over time",
                         tool_name="plot_md_data",
                         tool_params={
                             "data_files": ["ligand_residence.csv"],
                             "output_file": "ligand_residence.png",
                             "xlabel": "Time (ns)",
-                            "ylabel": "Bound fraction",
+                            "ylabel": "Min contact distance (Å)",
                         },
-                        reason="Visualise ligand binding stability",
+                        reason="Visualise ligand binding proximity",
                     ),
                 ])
 
@@ -3622,6 +3645,61 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             recommendations=["Verify all files exist before execution"],
         )
 
+    def _run_trajectory_batch_precache(
+        self,
+        plan: AnalysisPlan,
+        state: MDState,
+    ) -> Dict[int, Dict[str, Any]]:
+        """Pre-compute trajectory metrics in minimal RAW/ALIGNED passes."""
+        try:
+            from src.analysis.trajectory_batch import (
+                run_plan_trajectory_batches,
+                summarize_batch_plan,
+            )
+        except ImportError:
+            return {}
+
+        input_map = self._resolve_input_files(state)
+        topology = input_map.get("topology")
+        trajectory = input_map.get("trajectory")
+        if not topology or not trajectory:
+            logger.info("Trajectory batching skipped: topology/trajectory not resolved")
+            return {}
+
+        prepared: Dict[int, Dict[str, Any]] = {}
+        output_param_names = [
+            "output_file", "output_prefix", "plot_file", "figure_path",
+            "csv_file", "dat_file", "save_path", "output_csv", "output_fig",
+        ]
+        input_param_to_type = {
+            "topology_file": "topology",
+            "topology": "topology",
+            "structure": "topology",
+            "trajectory_file": "trajectory",
+            "trajectory": "trajectory",
+            "traj": "trajectory",
+        }
+
+        for idx, step in enumerate(plan.steps):
+            params = sanitize_tool_output_params(dict(step.tool_params or {}))
+            for pname in output_param_names:
+                if pname in params and params[pname]:
+                    params[pname] = os.path.basename(str(params[pname]))
+            for pname, ftype in input_param_to_type.items():
+                if pname in params and input_map.get(ftype):
+                    params[pname] = input_map[ftype]
+            params["working_dir"] = str(self.file_manager.agent_dir)
+            prepared[idx] = params
+
+        logger.info(summarize_batch_plan(plan.steps))
+        return run_plan_trajectory_batches(
+            plan.steps,
+            topology_file=topology,
+            trajectory_file=trajectory,
+            working_dir=str(self.file_manager.agent_dir),
+            prepared_params=prepared,
+        )
+
     def _execute_analysis_plan(self, agent_input: AnalysisAgentInput, 
                                plan: AnalysisPlan,
                                state: MDState) -> AnalysisExecutionResult:
@@ -3649,6 +3727,14 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             if len(plan.steps) > max_steps:
                 warnings.append(f"Plan has {len(plan.steps)} steps, limiting to {max_steps}")
                 plan.steps = plan.steps[:max_steps]
+
+            batch_results: Dict[int, Dict[str, Any]] = {}
+            if agent_config.get("use_trajectory_batching", True):
+                batch_results = self._run_trajectory_batch_precache(plan, state)
+                if batch_results:
+                    execution_log.append(
+                        f"\n=== Trajectory batch pre-computed {len(batch_results)} metric(s) ==="
+                    )
             
             for i, step in enumerate(plan.steps):
                 # Validate tool name - skip invalid placeholder names
@@ -3775,21 +3861,28 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 
                 execution_log.append(f"Parameters: {json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in tool_params.items()}, indent=2)}")
                 
-                # Execute tool with retry logic
-                retry_count = 0
-                result = None
-                
-                while retry_count <= max_retries:
-                    result = self.tool_executor.execute(step.tool_name, **tool_params)
+                # Use batched trajectory result when available
+                if i in batch_results and batch_results[i].get("success"):
+                    result = batch_results[i]
+                    execution_log.append(
+                        f"✓ Success (trajectory batch): {result.get('message', 'Step completed')}"
+                    )
+                else:
+                    # Execute tool with retry logic (or retry after batch failure)
+                    retry_count = 0
+                    result = None
                     
-                    if result.get("success"):
-                        break
-                    
-                    retry_count += 1
-                    if retry_count <= max_retries:
-                        execution_log.append(f"⚠ Retry {retry_count}/{max_retries}: {result.get('error')}")
-                    else:
-                        execution_log.append(f"✗ Max retries ({max_retries}) exceeded")
+                    while retry_count <= max_retries:
+                        result = self.tool_executor.execute(step.tool_name, **tool_params)
+                        
+                        if result.get("success"):
+                            break
+                        
+                        retry_count += 1
+                        if retry_count <= max_retries:
+                            execution_log.append(f"⚠ Retry {retry_count}/{max_retries}: {result.get('error')}")
+                        else:
+                            execution_log.append(f"✗ Max retries ({max_retries}) exceeded")
                 
                 # Process results
                 if result and result.get("success"):

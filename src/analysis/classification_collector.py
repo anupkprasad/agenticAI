@@ -761,7 +761,8 @@ def collect_classification_features_table(
                 "Load classification_features_zscore.csv (or ZScore_Features sheet in XLSX)",
                 "Drop columns with many NaNs",
                 "cluster_classification_features (hierarchical default, or method='kmeans')",
-                "Inspect classification_clusters_pca.png and classification_dendrogram.png",
+                "Inspect classification_clusters_pca.png, classification_dendrogram.png, "
+                "and classification_phylo_tree.png",
             ],
         }
         manifest_path = out_dir / manifest_file

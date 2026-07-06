@@ -298,6 +298,23 @@ def _plot_rmsf_profile_on_axes(
         ax.set_xlim(-0.5, len(x_pos) - 0.5)
 
 
+_SERIES_LABELS: Dict[str, str] = {
+    "n_hbonds": "H-bonds",
+    "n_contacts": "Heavy-atom contact pairs",
+    "min_contact_distance_a": "Min contact distance (Å)",
+    "bound": "Bound (1=bound, 0=unbound)",
+}
+
+
+def _series_label(column_names: List[str], y_idx: int, file_label: str) -> str:
+    if y_idx < len(column_names):
+        col_key = column_names[y_idx].strip().lower()
+        if col_key in _SERIES_LABELS:
+            return _SERIES_LABELS[col_key]
+        return f"{file_label} ({column_names[y_idx]})"
+    return file_label
+
+
 def _detect_plot_columns(
     column_names: List[str],
     data_columns: List[List[float]],
@@ -341,6 +358,10 @@ def _detect_plot_columns(
         y_indices.append(lower.index("n_contacts"))
         return xi, y_indices
 
+    # Residence CSV: min heavy-atom distance is more informative than a flat bound mask.
+    if y_col is None and "min_contact_distance_a" in lower:
+        return xi, [lower.index("min_contact_distance_a")]
+
     if y_col is not None:
         return xi, [int(y_col)]
 
@@ -350,7 +371,6 @@ def _detect_plot_columns(
         "distance",
         "sasa_nm2",
         "sasa",
-        "bound",
         "fraction_bound",
         "residence",
         "rmsd",
@@ -363,12 +383,13 @@ def _detect_plot_columns(
         "contacts",
         "n_hbonds",
         "hbonds",
+        "bound",
     )
     for pat in y_priority:
         for i, name in enumerate(lower):
             if i == xi or name in skip_y:
                 continue
-            if pat in name or name == pat:
+            if name == pat or (len(pat) > 4 and pat in name):
                 return xi, [i]
 
     candidates = [i for i in range(len(data_columns)) if i != xi]
@@ -578,6 +599,7 @@ def plot_data(
         
         # Plot each data file (use absolute paths)
         n_plotted = 0
+        multi_series = False
         for idx, (abs_file, rel_file) in enumerate(zip(abs_data_files, data_files)):
             profile = _parse_rmsf_profile_dat(abs_file)
             if profile:
@@ -609,6 +631,8 @@ def plot_data(
             xi, y_indices = _detect_plot_columns(
                 column_names, data_columns, x_col=x_col, y_col=y_col
             )
+            if len(y_indices) > 1:
+                multi_series = True
             
             if len(data_columns) <= xi:
                 logger.warning(
@@ -641,7 +665,7 @@ def plot_data(
                     continue
 
                 if len(y_indices) > 1 and y_idx < len(column_names):
-                    label = f"{file_label} ({column_names[y_idx]})"
+                    label = _series_label(column_names, y_idx, file_label)
                 else:
                     label = file_label
 
@@ -659,7 +683,8 @@ def plot_data(
                 plotted_any = True
 
                 if idx == 0 and not ylabel and y_idx < len(column_names):
-                    ylabel = column_names[y_idx]
+                    col_key = column_names[y_idx].strip().lower()
+                    ylabel = _SERIES_LABELS.get(col_key, column_names[y_idx])
                     if len(y_indices) > 1:
                         ylabel = "Count"
 
@@ -696,9 +721,11 @@ def plot_data(
         if titles is not None and len(titles) > 0:
             ax.set_title(titles[0], fontsize=14, fontweight='bold')
         
-        # Add legend if multiple datasets
-        if len(data_files) > 1:
-            ax.legend(frameon=True, shadow=True, fontsize=10)
+        # Add legend when multiple series or multiple files are plotted
+        if len(data_files) > 1 or multi_series:
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                ax.legend(frameon=True, shadow=True, fontsize=10)
         
         # Grid
         ax.grid(True, alpha=0.3, linestyle='--')

@@ -25,6 +25,7 @@ from ..utils.plan_persistence import save_plan_artifacts
 from ..utils.conversation_logger import set_log_file
 from ..llm import LLMClient
 from ..planner import MDPlanner
+from src.supervisor.component_parser import detect_component_cases
 from .tools import (
     parse_component_selection,
     validate_feasibility,
@@ -666,8 +667,10 @@ class MDSupervisor:
             from agentic.multi_sim_progress import (
                 multisim_workflow_incomplete,
                 prepare_multisim_resume_state,
+                reconcile_multisim_progress_from_disk,
             )
 
+            reconcile_multisim_progress_from_disk(state)
             if multisim_workflow_incomplete(state.get("multi_sim_progress")):
                 logger.info("SUPERVISOR [multi-sim]: Resuming from saved multi_sim_progress")
                 resumed = prepare_multisim_resume_state(state)
@@ -703,16 +706,27 @@ class MDSupervisor:
                 from agentic.multi_sim_progress import (
                     multisim_workflow_incomplete,
                     prepare_multisim_resume_state,
+                    reconcile_multisim_progress_from_disk,
                 )
 
+                reconcile_multisim_progress_from_disk(state)
                 if multisim_workflow_incomplete(state.get("multi_sim_progress")):
-                    prepare_multisim_resume_state(state)
+                    resumed = prepare_multisim_resume_state(state)
+                    if resumed == "__combined__":
+                        return self._setup_combined_analysis(state)
+                    if resumed == "__combined_reporter__":
+                        return state
                 else:
                     state = self._setup_resume_mode(state)
             else:
                 state["current_sim_index"] = 0
                 state["completed_sim_states"] = []
-            init_multi_sim_progress(state)
+            if not (
+                state.get("resume_failed_only")
+                and (state.get("multi_sim_progress") or {}).get("phase")
+                in ("combined_analysis", "combined_reporter", "complete")
+            ):
+                init_multi_sim_progress(state)
             return self._start_next_sim(state)
 
         # Post-HPC analysis loop after cross-sim pool completes
@@ -2006,64 +2020,19 @@ class MDSupervisor:
     # Multi-simulation master planning (moved from planner — no tools context)
     # ──────────────────────────────────────────────────────────────────────
 
-    def _detect_component_cases(self, prompt: str) -> List[Dict[str, str]]:
+    def _detect_component_cases(
+        self,
+        prompt: str,
+        *,
+        original_goal: str = "",
+        pdb_count: int = 0,
+    ) -> List[Dict[str, str]]:
         """Infer component-specific simulation cases from user goal text."""
-        p = (prompt or "").lower()
-        # Normalize common unicode variants from LLM responses.
-        p = (
-            p.replace("\u2011", "-")
-            .replace("\u2012", "-")
-            .replace("\u2013", "-")
-            .replace("\u2014", "-")
-            .replace("\u2212", "-")
+        return detect_component_cases(
+            original_goal or prompt,
+            prompt,
+            pdb_count=pdb_count,
         )
-
-        has_protein_only = bool(re.search(r"\bprotein[\s\-]*(only|alone)\b", p))
-        has_atp = "atp" in p
-        has_holo = "holo" in p
-        has_mg = bool(re.search(r"\bmg(?:2\+?|\u00b2\+?)?\b", p))
-        has_case_language = bool(
-            re.search(
-                r"two\s+different\s+cases?|two\s+systems\s+per\s+file|"
-                r"case\s*[:\-]|\bcase\s*1\b|\bcase\s*2\b|"
-                r"\(\s*1\s*\)|\(\s*2\s*\)|\b1\.\b|\b2\.\b",
-                p,
-            )
-        )
-
-        # Common request pattern: same PDB run in multiple component conditions.
-        if has_case_language and has_protein_only and (has_atp or has_holo):
-            full_suffix = "ATP_MG" if has_mg else "ATP"
-            full_desc = "protein + ATP + MG" if has_mg else "protein + ATP"
-            full_directive = (
-                "Keep protein with ATP ligand and Mg ions from the source PDB."
-                if has_mg else
-                "Keep protein with ATP ligand from the source PDB."
-            )
-            return [
-                {
-                    "case_id": "protein_only",
-                    "suffix": "",
-                    "description": "protein only",
-                    "directive": "Use protein-only system. Remove ATP, ligands, and non-essential ions.",
-                },
-                {
-                    "case_id": "protein_with_ligand",
-                    "suffix": full_suffix,
-                    "description": full_desc,
-                    "directive": full_directive,
-                },
-            ]
-
-        # Default behavior: one simulation per PDB using full detected system.
-        return [
-            {
-                "case_id": "default",
-                "suffix": "",
-                "description": "default system from input PDB",
-                "directive": "Use the full biologically relevant system present in the input PDB.",
-            }
-        ]
 
     def _create_multi_sim_master_plan(self, state: MDState) -> MDState:
         """Deprecated compatibility wrapper; planner owns multi-sim master plans."""
@@ -2109,7 +2078,11 @@ class MDSupervisor:
             logger.info(f"SUPERVISOR [multi-sim]: Protein name map: {_protein_name_map}")
 
         # Expand each PDB into one or more component-specific simulation cases.
-        component_cases = self._detect_component_cases(enriched_prompt)
+        component_cases = self._detect_component_cases(
+            enriched_prompt,
+            original_goal=original_goal,
+            pdb_count=len(pdb_list),
+        )
         expanded_entries: List[Dict[str, Any]] = []
         for pdb in pdb_list:
             uid = _Path(pdb).stem

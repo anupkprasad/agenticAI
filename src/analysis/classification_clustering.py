@@ -84,6 +84,7 @@ def _load_feature_matrix(
 
     Returns (labels, display_names, sim_dirs, X, feature_columns).
     Rows with fewer than ``min_features_present`` non-NaN features are dropped.
+    Rows are sorted by label for reproducible clustering order.
     """
     with open(csv_path, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
@@ -130,12 +131,54 @@ def _load_feature_matrix(
             f"No usable rows in {csv_path} (need ≥{min_features_present} features per sim)"
         )
 
+    order = sorted(range(len(labels)), key=lambda i: labels[i].lower())
+    labels = [labels[i] for i in order]
+    display_names = [display_names[i] for i in order]
+    sim_dirs = [sim_dirs[i] for i in order]
+    rows = [rows[i] for i in order]
+
     return labels, display_names, sim_dirs, np.array(rows, dtype=float), feature_cols
 
 
-def _impute_column_means(X: np.ndarray) -> np.ndarray:
+def _filter_usable_feature_columns(
+    X: np.ndarray,
+    feature_cols: Sequence[str],
+    max_missing_fraction: float = 0.25,
+) -> Tuple[np.ndarray, List[str], List[str]]:
+    """
+    Drop feature columns that are mostly missing or have <2 observed values.
+
+    Returns (filtered_X, kept_columns, dropped_columns).
+    """
+    keep_indices: List[int] = []
+    dropped: List[str] = []
+    n_rows = X.shape[0]
+    for j, col in enumerate(feature_cols):
+        col_vals = X[:, j]
+        n_missing = int(np.isnan(col_vals).sum())
+        n_present = n_rows - n_missing
+        if n_present < 2:
+            dropped.append(col)
+            continue
+        if n_missing / n_rows > max_missing_fraction:
+            dropped.append(col)
+            continue
+        keep_indices.append(j)
+
+    if not keep_indices:
+        raise ValueError(
+            "No usable feature columns remain after missing-data filtering "
+            f"(max_missing_fraction={max_missing_fraction})"
+        )
+
+    kept = [feature_cols[j] for j in keep_indices]
+    return X[:, keep_indices], kept, dropped
+
+
+def _impute_column_means(X: np.ndarray) -> Tuple[np.ndarray, Dict[str, int]]:
     """Replace NaN with column mean; all-NaN columns become zeros."""
     out = X.copy()
+    imputed_cells = 0
     for j in range(out.shape[1]):
         col = out[:, j]
         mask = np.isnan(col)
@@ -144,10 +187,12 @@ def _impute_column_means(X: np.ndarray) -> np.ndarray:
         mean = np.nanmean(col)
         if np.isnan(mean):
             out[:, j] = 0.0
+            imputed_cells += int(mask.sum())
         else:
             col[mask] = mean
             out[:, j] = col
-    return out
+            imputed_cells += int(mask.sum())
+    return out, {"imputed_cells": imputed_cells, "total_cells": out.size}
 
 
 def _pca_2d(X: np.ndarray) -> Tuple[np.ndarray, float, float]:
@@ -274,6 +319,161 @@ def _plot_dendrogram(
     plt.close(fig)
 
 
+def _cluster_color_map(cluster_ids: Sequence[int]):
+    """Return sorted cluster ids and a color for each."""
+    clusters = sorted(set(cluster_ids))
+    cmap = plt.cm.get_cmap("tab10", max(len(clusters), 1))
+    colors = {cid: cmap(i) for i, cid in enumerate(clusters)}
+    return clusters, colors
+
+
+def _tree_leaf_count(node) -> int:
+    if node.is_leaf():
+        return 1
+    return _tree_leaf_count(node.get_left()) + _tree_leaf_count(node.get_right())
+
+
+def _assign_circular_angles(node, start: float, span: float, angles: Dict[int, float]) -> None:
+    """Assign polar angles proportional to subtree leaf counts."""
+    if node.is_leaf():
+        angles[node.id] = start + span / 2.0
+        return
+    left = node.get_left()
+    right = node.get_right()
+    left_count = _tree_leaf_count(left)
+    right_count = _tree_leaf_count(right)
+    total = left_count + right_count
+    left_span = span * left_count / total if total else span / 2.0
+    _assign_circular_angles(left, start, left_span, angles)
+    _assign_circular_angles(right, start + left_span, span - left_span, angles)
+    angles[node.id] = start + span / 2.0
+
+
+def _assign_radial_depths(node, radius: float, radii: Dict[int, float]) -> None:
+    """Assign radial depth from the tree root (center) using branch lengths."""
+    radii[node.id] = radius
+    if node.is_leaf():
+        return
+    _assign_radial_depths(node.get_left(), radius + node.get_left().dist, radii)
+    _assign_radial_depths(node.get_right(), radius + node.get_right().dist, radii)
+
+
+def _polar_to_xy(theta: float, radius: float) -> Tuple[float, float]:
+    return radius * np.cos(theta), radius * np.sin(theta)
+
+
+def _plot_unrooted_phylo_tree(
+    linkage_matrix: np.ndarray,
+    display_names: Sequence[str],
+    cluster_ids: Sequence[int],
+    output_path: Path,
+    title: str,
+) -> None:
+    """
+    Circular unrooted phylogram from a scipy linkage matrix.
+
+    Leaf tips and terminal branches are colored by cluster assignment.
+    """
+    if not HAS_MPL:
+        return
+
+    n_samples = len(display_names)
+    if n_samples < 2:
+        return
+
+    root = hierarchy.to_tree(linkage_matrix, rd=False)
+    angles: Dict[int, float] = {}
+    radii: Dict[int, float] = {}
+    _assign_circular_angles(root, 0.0, 2.0 * np.pi, angles)
+    _assign_radial_depths(root, 0.0, radii)
+    max_radius = max(radii.values()) or 1.0
+    label_radius = max_radius * 1.1
+
+    clusters, cluster_colors = _cluster_color_map(cluster_ids)
+    leaf_cluster = {idx: int(cluster_ids[idx]) for idx in range(n_samples)}
+
+    fig_size = max(8.0, min(14.0, 6.0 + n_samples * 0.35))
+    fig, ax = plt.subplots(figsize=(fig_size, fig_size))
+    ax.set_aspect("equal")
+
+    def _draw_edges(node) -> None:
+        if node.is_leaf():
+            return
+        parent_angle = angles[node.id]
+        parent_radius = radii[node.id]
+        parent_x, parent_y = _polar_to_xy(parent_angle, parent_radius)
+        for child in (node.get_left(), node.get_right()):
+            child_angle = angles[child.id]
+            child_radius = radii[child.id]
+            child_x, child_y = _polar_to_xy(child_angle, child_radius)
+            junction_x, junction_y = _polar_to_xy(child_angle, parent_radius)
+            if child.is_leaf():
+                color = cluster_colors[leaf_cluster[child.id]]
+                lw = 2.0
+            else:
+                color = "#666666"
+                lw = 1.3
+            ax.plot(
+                [child_x, junction_x, parent_x],
+                [child_y, junction_y, parent_y],
+                color=color,
+                linewidth=lw,
+                solid_capstyle="round",
+                zorder=1,
+            )
+            _draw_edges(child)
+
+    _draw_edges(root)
+
+    for idx, name in enumerate(display_names):
+        cid = leaf_cluster[idx]
+        color = cluster_colors[cid]
+        theta = angles[idx]
+        tip_x, tip_y = _polar_to_xy(theta, radii[idx])
+        ax.scatter(
+            [tip_x],
+            [tip_y],
+            s=140,
+            c=[color],
+            edgecolors="black",
+            linewidths=0.7,
+            zorder=3,
+        )
+        label_x, label_y = _polar_to_xy(theta, label_radius)
+        ha = "left" if np.cos(theta) >= 0 else "right"
+        ax.text(
+            label_x,
+            label_y,
+            name,
+            ha=ha,
+            va="center",
+            fontsize=9,
+            fontweight="bold",
+            color=color,
+            zorder=4,
+        )
+
+    for cid in clusters:
+        ax.scatter(
+            [],
+            [],
+            c=[cluster_colors[cid]],
+            s=80,
+            edgecolors="black",
+            linewidths=0.6,
+            label=f"Cluster {cid}",
+        )
+    ax.legend(loc="upper right", fontsize=9, framealpha=0.9)
+    ax.set_title(title)
+    margin = max_radius * 0.28
+    ax.set_xlim(-max_radius - margin, max_radius + margin)
+    ax.set_ylim(-max_radius - margin, max_radius + margin)
+    ax.axis("off")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 @tool
 def cluster_classification_features(
     working_dir: str = "",
@@ -284,9 +484,11 @@ def cluster_classification_features(
     user_goal: str = "",
     label_name_map: Optional[Dict[str, str]] = None,
     min_features_present: int = 1,
+    max_column_missing_fraction: float = 0.25,
     assignments_file: str = "classification_cluster_assignments.csv",
     scatter_plot_file: str = "classification_clusters_pca.png",
     dendrogram_file: str = "classification_dendrogram.png",
+    phylo_tree_file: str = "classification_phylo_tree.png",
     summary_file: str = "classification_clusters.json",
 ) -> Dict[str, Any]:
     """
@@ -294,7 +496,8 @@ def cluster_classification_features(
 
     Default method is hierarchical agglomerative clustering (Ward linkage).
     Use method='kmeans' for k-means. Writes cluster assignments and a PCA scatter
-    plot with protein/simulation name labels; hierarchical runs also get a dendrogram.
+    plot with protein/simulation name labels; hierarchical runs also get a dendrogram
+    and an unrooted circular phylogenetic tree colored by cluster.
 
     Args:
         working_dir: Directory containing the features CSV (usually base/analysis).
@@ -305,9 +508,12 @@ def cluster_classification_features(
         user_goal: Optional goal text to parse id:name labels (e.g. p23458:JAK1).
         label_name_map: Optional explicit {uniprot_id: protein_name} map (preferred).
         min_features_present: Skip sims with fewer non-NaN feature values.
+        max_column_missing_fraction: Drop feature columns missing in more than
+            this fraction of simulations (default 0.25) before clustering.
         assignments_file: Output CSV with label, display_name, cluster_id.
         scatter_plot_file: PCA scatter colored by cluster with name annotations.
         dendrogram_file: Dendrogram PNG (hierarchical only).
+        phylo_tree_file: Unrooted circular phylogram PNG colored by cluster (hierarchical only).
         summary_file: JSON summary of clustering parameters and results.
     """
     original_dir = os.getcwd()
@@ -333,14 +539,26 @@ def cluster_classification_features(
         labels, _, sim_dirs, X_raw, feature_cols = _load_feature_matrix(
             feat_path, min_features_present=min_features_present
         )
+        X_filtered, feature_cols, dropped_cols = _filter_usable_feature_columns(
+            X_raw,
+            feature_cols,
+            max_missing_fraction=max_column_missing_fraction,
+        )
+        if dropped_cols:
+            logger.warning(
+                "Dropped %d feature column(s) with excessive missing data: %s",
+                len(dropped_cols),
+                ", ".join(dropped_cols),
+            )
+
         display_names = _apply_display_names(
             labels, user_goal=user_goal, label_name_map=label_name_map
         )
-        n_samples = X_raw.shape[0]
+        n_samples = X_filtered.shape[0]
         k = n_clusters or _parse_n_clusters_from_text(user_goal) or _default_n_clusters(n_samples)
         k = max(1, min(k, n_samples))
 
-        X = _impute_column_means(X_raw)
+        X, impute_stats = _impute_column_means(X_filtered)
         coords, pc1_var, pc2_var = _pca_2d(X)
 
         linkage_matrix = None
@@ -386,6 +604,7 @@ def cluster_classification_features(
             scatter_path = None
 
         dendro_path = None
+        phylo_path = None
         if method_key == "hierarchical" and linkage_matrix is not None and HAS_MPL:
             dendro_path = out_dir / dendrogram_file
             _plot_dendrogram(
@@ -394,16 +613,33 @@ def cluster_classification_features(
                 dendro_path,
                 title=f"Hierarchical clustering dendrogram (k={k})",
             )
+            phylo_path = out_dir / phylo_tree_file
+            _plot_unrooted_phylo_tree(
+                linkage_matrix,
+                display_names,
+                cluster_ids,
+                phylo_path,
+                title=f"Unrooted phylogenetic tree (k={k}) — z-score features",
+            )
 
         summary = {
             "method": method_key,
             "n_clusters": k,
             "n_simulations": n_samples,
             "feature_columns": feature_cols,
+            "dropped_feature_columns": dropped_cols,
+            "imputation": impute_stats,
+            "row_order": labels,
+            "reproducibility_note": (
+                "Hierarchical Ward clustering is deterministic for a fixed z-score "
+                "matrix. Re-runs differ when the feature table changes (metric "
+                "groups, missing per-sim outputs, or re-computed analysis values)."
+            ),
             "features_file": str(feat_path),
             "assignments_file": str(assign_path),
             "scatter_plot": str(scatter_path) if scatter_path else None,
             "dendrogram_plot": str(dendro_path) if dendro_path else None,
+            "phylo_tree_plot": str(phylo_path) if phylo_path else None,
             "linkage_method": linkage_method if method_key == "hierarchical" else None,
             "labels": labels,
             "display_names": display_names,
@@ -429,9 +665,13 @@ def cluster_classification_features(
             "assignments_file": str(assign_path),
             "scatter_plot": str(scatter_path) if scatter_path else None,
             "dendrogram_plot": str(dendro_path) if dendro_path else None,
+            "phylo_tree_plot": str(phylo_path) if phylo_path else None,
             "summary_file": str(summary_path),
             "cluster_assignments": summary["cluster_assignments"],
             "display_names": display_names,
+            "feature_columns": feature_cols,
+            "dropped_feature_columns": dropped_cols,
+            "imputation": impute_stats,
         }
     except Exception as exc:
         logger.exception("cluster_classification_features failed")

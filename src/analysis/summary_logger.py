@@ -181,6 +181,41 @@ def append_analysis_summary(
         logger.error(f"Failed to write to summary file: {e}")
 
 
+def append_trajectory_batch_summary(
+    working_dir: str,
+    session_stats: Dict[str, Any],
+    *,
+    aligned_metrics: Optional[List[str]] = None,
+    raw_streaming_metrics: Optional[List[str]] = None,
+    raw_batch_metrics: Optional[List[str]] = None,
+    step_indices: Optional[List[int]] = None,
+    topology_file: Optional[str] = None,
+    trajectory_file: Optional[str] = None,
+) -> None:
+    """Log trajectory batch orchestration stats to analysis_summary.jsonl."""
+    append_analysis_summary(
+        working_dir=working_dir,
+        analysis_type="TrajectoryBatch",
+        statistics={
+            "universe_loads": session_stats.get("universe_loads", 0),
+            "align_runs": session_stats.get("align_runs", 0),
+            "n_passes": len(session_stats.get("passes", []) or []),
+            "n_metrics_batched": len(step_indices or []),
+        },
+        files={
+            "topology": topology_file or "",
+            "trajectory": trajectory_file or "",
+        },
+        metadata={
+            "session_stats": session_stats,
+            "aligned_metrics": aligned_metrics or [],
+            "raw_streaming_metrics": raw_streaming_metrics or [],
+            "raw_batch_metrics": raw_batch_metrics or [],
+            "batched_step_indices": step_indices or [],
+        },
+    )
+
+
 def read_summary_file(working_dir: str) -> list:
     """
     Read and parse the analysis summary file.

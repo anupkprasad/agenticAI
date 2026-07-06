@@ -25,6 +25,10 @@ def generate_html_report(
     protein_name: Optional[str] = None,
     sim_label: Optional[str] = None,
     analysis_dir: Optional[str] = None,
+    user_goal: Optional[str] = None,
+    report_focus: Optional[str] = None,
+    max_figures_per_section: Optional[int] = None,
+    include_visualizations: bool = True,
 ) -> Dict[str, Any]:
     """
     Generate HTML report from analysis data and literature.
@@ -79,6 +83,10 @@ def generate_html_report(
             protein_name=protein_name,
             sim_label=sim_label,
             analysis_dir=analysis_dir,
+            user_goal=user_goal,
+            report_focus=report_focus,
+            max_figures_per_section=max_figures_per_section,
+            include_visualizations=include_visualizations,
         )
         
         # Write to file
@@ -161,8 +169,23 @@ def build_html_content(
     protein_name: Optional[str] = None,
     sim_label: Optional[str] = None,
     analysis_dir: Optional[str] = None,
+    user_goal: Optional[str] = None,
+    report_focus: Optional[str] = None,
+    max_figures_per_section: Optional[int] = None,
+    include_visualizations: bool = True,
 ) -> str:
     """Build HTML content for report (not a @tool, internal helper)"""
+
+    from src.reporter.figure_selector import (
+        ReportFigurePolicy,
+        select_analysis_entries,
+        select_images_from_entry,
+    )
+
+    policy = ReportFigurePolicy(
+        max_figures_per_section=max_figures_per_section or 5,
+        include_visualizations=include_visualizations,
+    )
 
     # Normalise pdb_data to dict
     pdb_frames: Dict[str, str] = {}
@@ -177,7 +200,15 @@ def build_html_content(
     for entry in raw_entries:
         atype = entry.get("analysis_type", "Unknown")
         seen_types[atype] = entry
-    entries = list(seen_types.values())
+    entries = select_analysis_entries(
+        list(seen_types.values()),
+        user_goal=user_goal or "",
+        report_focus=report_focus or "",
+        enriched_prompt=enriched_prompt or "",
+        policy=policy,
+    )
+    if not entries:
+        entries = list(seen_types.values())[: policy.max_total_per_sim_figures]
     analysis_types = analysis_data.get("analysis_types", {})
     
     # Resolve asset search directories for plots and data files
@@ -607,7 +638,8 @@ def build_html_content(
         html_parts.append(f'<p><strong>🏷️ Simulation:</strong> {sim_label}</p>')
     html_parts.append(f'<p><strong>📊 Report Type:</strong> {report_type.title()}</p>')
     html_parts.append(f'<p><strong>📅 Generated:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>')
-    html_parts.append(f'<p><strong>🔬 Total Analyses:</strong> {len(entries)}</p>')
+    html_parts.append(f'<p><strong>🔬 Analyses in Report:</strong> {len(entries)} '
+                      f'(of {len(seen_types)} available)</p>')
     html_parts.append(f'<p><strong>📈 Analysis Types:</strong> {", ".join(analysis_types.keys())}</p>')
     html_parts.append('</div>')
     
@@ -740,8 +772,16 @@ def build_html_content(
         html_parts.append(f'<h3>{atype}</h3>')
         html_parts.append(f'<p class="timestamp">⏱️ Performed: {timestamp}</p>')
         
-        # Find and display images (generic — any plot/png in files or metadata)
+        # Find and display images (goal-aware subset)
         image_files = _collect_image_paths(files, metadata, search_dirs)
+        image_files = select_images_from_entry(
+            image_files,
+            user_goal=user_goal or "",
+            report_focus=report_focus or "",
+            enriched_prompt=enriched_prompt or "",
+            analysis_type=atype,
+            policy=policy,
+        )
         if image_files:
             for img_type, img_path in image_files.items():
                 img_data = _encode_image_base64(img_path, search_dirs)
@@ -1379,6 +1419,18 @@ def _resolve_asset_path(path: str, search_dirs: Optional[List[Path]] = None) -> 
     return None
 
 
+def _dedupe_fel_plot_images(image_files: Dict[str, str]) -> Dict[str, str]:
+    """Prefer annotated ``fel_basins.png`` over the plain ``fel_pc1_pc2.png`` FEL."""
+    has_basins = any(Path(v).name == "fel_basins.png" for v in image_files.values())
+    if not has_basins:
+        return image_files
+    return {
+        key: path
+        for key, path in image_files.items()
+        if Path(path).name != "fel_pc1_pc2.png"
+    }
+
+
 def _collect_image_paths(
     files: Dict[str, Any],
     metadata: Dict[str, Any],
@@ -1404,7 +1456,7 @@ def _collect_image_paths(
                     _maybe_add(f"{key}_{i}", item)
             else:
                 _maybe_add(key, val)
-    return image_files
+    return _dedupe_fel_plot_images(image_files)
 
 
 def _find_image_files(files: Dict[str, Any]) -> Dict[str, str]:

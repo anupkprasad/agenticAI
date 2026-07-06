@@ -300,7 +300,7 @@ Run at `{base}/analysis/` after all per-simulation runs complete.
 | `run_combined_rmsf_segment_analysis` | Bar chart for residue window |
 | `collect_fel_features_table` | One CSV of FEL features for all sims → clustering / ML |
 | `collect_classification_features_table` | **Full feature matrix** — binding + FEL scalars; raw + z-score CSV + XLSX |
-| `cluster_classification_features` | Hierarchical (default) or k-means on z-score matrix + labeled PCA/dendrogram plots |
+| `cluster_classification_features` | Hierarchical (default) or k-means on z-score matrix + labeled PCA/dendrogram/phylo-tree plots |
 | `plot_cluster_feature_trajectories` | After clustering: one PNG per time-series metric, **one subplot per cluster** |
 | `plot_cluster_rmsf_profiles` | After clustering: pocket/ligand RMSF profiles, **one subplot per cluster** |
 
@@ -459,6 +459,7 @@ After the feature table is built, run **`cluster_classification_features`** on t
 | `classification_cluster_assignments.csv` | label, display_name, cluster_id, method |
 | `classification_clusters_pca.png` | 2D PCA scatter, colored by cluster, **protein name annotations** |
 | `classification_dendrogram.png` | Hierarchical dendrogram with protein names (hierarchical only) |
+| `classification_phylo_tree.png` | Unrooted circular phylogenetic tree colored by cluster (hierarchical only) |
 | `classification_clusters.json` | Parameters + assignment summary |
 
 **What does k mean on the dendrogram?**
@@ -531,7 +532,7 @@ cluster_classification_features.func(
 **Unsupervised (no labels yet):**
 
 - Load z-score matrix → sims with missing features are skipped automatically
-- `cluster_classification_features` (hierarchical default) → inspect cluster assignments and PCA/dendrogram plots
+- `cluster_classification_features` (hierarchical default) → inspect cluster assignments and PCA/dendrogram/phylo-tree plots
 - Compare clusters to binding/residence/FEL metrics in the raw CSV
 
 **Supervised (when you have labels):**
