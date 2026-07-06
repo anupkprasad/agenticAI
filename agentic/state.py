@@ -64,6 +64,9 @@ class MDState(TypedDict):
     resume_failed_only: Optional[bool]   # True → skip already-succeeded sims on re-run
     retry_labels: Optional[List[str]]    # Labels to force-retry even if previously succeeded
     _resume_succeeded_labels: Optional[List[str]]  # Internal: labels confirmed succeeded on disk
+    multisim_resume_applied: Optional[bool]  # True after --resume initial bind (LangGraph-persisted)
+    workflow_loop_streak: Optional[int]  # Detect supervisor/input_validation routing loops
+    workflow_loop_key: Optional[str]  # Last routing key for loop detection
     combined_only: Optional[bool]        # True → skip per-sim loop; run base-level combined analysis + report only
 
     # Preprocessing stage

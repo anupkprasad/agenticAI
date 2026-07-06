@@ -444,6 +444,24 @@ class HumanCheckpoints:
 
         # ── Non-interactive: auto-approve and continue to supervisor ──
         if not hitl_should_interact(state) and not feedback:
+            if (
+                state.get("is_multi_simulation")
+                and state.get("sim_prompts")
+                and state.get("multi_sim_phase") == "executing_sims"
+            ):
+                from agentic.multi_sim_progress import (
+                    _sim_all_agents_done,
+                    reconcile_multisim_progress_from_disk,
+                    workflow_sim_label_for_hitl,
+                )
+
+                reconcile_multisim_progress_from_disk(state)
+                progress = state.get("multi_sim_progress") or {}
+                label = workflow_sim_label_for_hitl(state) or progress.get(
+                    "active_sim_label"
+                )
+                if label and _sim_all_agents_done(progress, label):
+                    state["plan_executed"] = True
             state["next_node"] = "supervisor"
             return state
 

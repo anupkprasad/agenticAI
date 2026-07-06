@@ -487,6 +487,27 @@ python run_agenticAIWork.py \
   --simtype multisim
 
 
+
+
+
+
+python run_agenticAIWork.py \
+  --goal "Simulations are already complete (~200 ns each) for thirty-eight protein–ATP holo systems in ./pseudoKin: o15197, o43187, o60674, p00533, p17612, p21860, p23458, p24941, p25092, p28482, p29597, p51841, p52333, q05823, q13308, q13418, q58a45, q5jzy3, q6vab6, q7rtn6, q7z7a4, q8iv63, q8ivt5, q8nb16, q8ncb2, q8ne28, q8tea7, q8wz42, q92519, q96c45, q96qs6, q96s38, q9bxu1, q9c0k7, q9nsy0, q9uhy1, q9y243, q9y616. Skip preprocess, simsetup, and HPC — run analysis and reporting only. Per simulation, compute and plot: ligand–pocket COM distance, protein–ATP contacts, pocket SASA, ligand residence/unbinding, pocket RMSF, ligand RMSF, PCA on Cα, free-energy landscape at 310 K, FEL basin features, and export representative PDB structures for each FEL basin (max 8). Combined analysis: build an unsupervised classification feature table (raw CSV, z-score CSV, XLSX), cluster with hierarchical clustering on the z-score matrix (default k), and plot cluster PCA and dendrogram labeled with protein names. After clustering, generate cluster-wise trajectory plots (pocket SASA, COM distance, contacts, residence) and cluster-wise pocket/ligand RMSF; also overlay ligand–pocket distance, pocket RMSF, and ligand RMSF across all simulations. Use id:name map o15197:EPHB6, o43187:IRAK2, o60674:JAK2, p00533:EGFR, p17612:KAPCA, p21860:ERBB3, p23458:JAK1, p24941:CDK2, p25092:GUC2C, p28482:MK01, p29597:TYK2, p51841:GUC2F, p52333:JAK3, q05823:RN5A, q13308:PTK7, q13418:ILK, q58a45:PAN3, q5jzy3:EPHAA, q6vab6:KSR2, q7rtn6:STRAA, q7z7a4:PXK, q8iv63:VRK3, q8ivt5:KSR1, q8nb16:MLKL, q8ncb2:CAMKV, q8ne28:STKL1, q8tea7:TBCK, q8wz42:TITIN, q92519:TRIB2, q96c45:ULK4, q96qs6:PSKH2, q96s38:KS6C1, q9bxu1:STK31, q9c0k7:STRAB, q9nsy0:NRBP2, q9uhy1:NRBP, q9y243:AKT3, q9y616:IRAK3. No manual class labels. Generate a combined HTML report with literature context for each kinase/pseudokinase." \
+  --working-dir ./pseudoKin \
+  --subtask analysis reporter \
+  --simtype multisim
+
+
+
+
+
+
+
+
+
+
+
+
 python run_agenticAIWork.py \
   --goal "Simulations are already complete (~200 ns each) for eight protein–ATP holo systems in ./agenticB5R1: o15197, o43187, p21860, p23458, p29597, q7rtn6, q8nb16, q9bxu1. Skip preprocess, simsetup, and HPC — run analysis and reporting only. Per simulation, compute and plot: ligand–pocket COM distance, protein–ATP contacts, pocket SASA, ligand residence/unbinding, pocket RMSF, ligand RMSF, PCA on Cα, free-energy landscape at 310 K, FEL basin features, and export representative PDB structures for each FEL basin (max 8). Combined analysis: build an unsupervised classification feature table (raw CSV, z-score CSV, XLSX), cluster with hierarchical clustering on the z-score matrix (default k), and plot cluster PCA and dendrogram labeled with protein names. After clustering, generate cluster-wise trajectory plots (pocket SASA, COM distance, contacts, residence) and cluster-wise pocket/ligand RMSF; also overlay ligand–pocket distance, pocket RMSF, and ligand RMSF across all simulations. Use id:name map o15197:EPHB6, o43187:IRAK2, p21860:ERBB3, p23458:JAK1, p29597:TYK2, q7rtn6:STRAA, q8nb16:MLKL, q9bxu1:STK31. No manual class labels. Generate a combined HTML report with literature context for each kinase/pseudokinase." \
   --working-dir ./agenticB5R1 \

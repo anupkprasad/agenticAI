@@ -246,6 +246,71 @@ def _resolve_analysis_path(fpath: str, working_dir: str) -> str:
     return fpath
 
 
+def _load_fel_basin_populations(analysis_dir: Path) -> Dict[str, float]:
+    """Read basin_id → population from fel_basins.csv when present."""
+    pop_by_id: Dict[str, float] = {}
+    for csv_path in (analysis_dir / "fel_basins.csv", analysis_dir / "analysis" / "fel_basins.csv"):
+        if not csv_path.is_file():
+            continue
+        try:
+            with open(csv_path, newline="", encoding="utf-8") as fh:
+                for row in csv.DictReader(fh):
+                    bid = str(row.get("basin_id", "")).strip()
+                    if not bid:
+                        continue
+                    try:
+                        pop_by_id[bid] = float(row.get("population", 0))
+                    except (TypeError, ValueError):
+                        continue
+        except Exception as exc:
+            logger.warning("Could not read FEL basin CSV %s: %s", csv_path, exc)
+        if pop_by_id:
+            break
+    return pop_by_id
+
+
+def discover_fel_basin_structures_from_disk(working_dir: str) -> Dict[str, str]:
+    """Fallback when FELBasinStructures was not written to analysis_summary.jsonl."""
+    frames: Dict[str, str] = {}
+    base = Path(working_dir)
+    analysis_dir = base / "analysis"
+    if not analysis_dir.is_dir():
+        return frames
+
+    pop_by_id = _load_fel_basin_populations(analysis_dir)
+    basin_pdbs: List[Path] = []
+    for sub in (analysis_dir / "analysis", analysis_dir):
+        if sub.is_dir():
+            basin_pdbs.extend(sorted(sub.glob("basin_*.pdb")))
+    if not basin_pdbs:
+        return frames
+
+    seen: set = set()
+    for pdb_path in basin_pdbs:
+        key = str(pdb_path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        txt = read_pdb_data(str(pdb_path))
+        if not txt:
+            continue
+        stem = pdb_path.stem
+        bid = stem.replace("basin_", "") if stem.startswith("basin_") else stem
+        try:
+            pop = pop_by_id.get(bid, pop_by_id.get(str(int(bid)), 0.0)) * 100
+            pop_str = f"{pop:.0f}%" if pop else "?"
+        except (TypeError, ValueError):
+            pop_str = "?"
+        frames[f"FEL Basin {bid} ({pop_str})"] = txt
+
+    if frames:
+        logger.info(
+            "Discovered %d FEL basin PDB(s) on disk for 3D viewer (analysis_summary fallback)",
+            len(frames),
+        )
+    return frames
+
+
 def load_fel_basin_structures(
     analysis_data: Dict,
     working_dir: str,
@@ -253,7 +318,7 @@ def load_fel_basin_structures(
     """Load FEL basin representative PDBs from the analysis summary.
 
     Prefers the manifest CSV (rich labels with population and time) and falls
-    back to the ``basin_pdbs`` file list.
+    back to the ``basin_pdbs`` file list, then on-disk ``basin_*.pdb`` files.
     """
     import ast
 
@@ -314,7 +379,9 @@ def load_fel_basin_structures(
             if txt:
                 frames[f"FEL Basin {i}"] = txt
 
-    return frames
+    if frames:
+        return frames
+    return discover_fel_basin_structures_from_disk(working_dir)
 
 
 def collect_significant_structures(

@@ -125,6 +125,15 @@ def validate_and_enrich_inputs(
     # Mark unified validation complete
     state["input_validated"] = True
     state["next_node"] = "supervisor"
+
+    if state.get("is_multi_simulation"):
+        from agentic.multi_sim_progress import mark_sim_pipeline_stage, workflow_sim_label_for_hitl
+
+        sim_label = workflow_sim_label_for_hitl(state) or (
+            (state.get("multi_sim_progress") or {}).get("active_sim_label")
+        )
+        if sim_label:
+            mark_sim_pipeline_stage(state, sim_label, input_validated=True)
     
     logger.info("=" * 60)
     logger.info(f"INPUT_VALIDATION: Validation complete for {subtask_type}")
@@ -663,9 +672,19 @@ def _validate_multi_agent_inputs(
     _TRAJ_REQUIRING = {"analysis"}
     _REPORT_REQUIRING = {"reporter"}
 
-    # Validate based on FIRST agent only
-    first_agent = agent_list[0]
-    logger.info(f"INPUT_VALIDATION: Validating for first agent: {first_agent}")
+    def _active_validation_agent() -> str:
+        progress = state.get("multi_sim_progress") or {}
+        active = progress.get("active_agent")
+        if active and active in agent_list:
+            return active
+        idx = int(state.get("current_agent_idx") or 0)
+        if 0 <= idx < len(agent_list):
+            return agent_list[idx]
+        return agent_list[0]
+
+    # Validate based on the active agent (resume may start at reporter).
+    first_agent = _active_validation_agent()
+    logger.info(f"INPUT_VALIDATION: Validating for active agent: {first_agent}")
 
     if first_agent in _PDB_REQUIRING:
         state = _analyze_pdb_if_available(state, user_goal, working_directory, analyze_pdb_tool, logger)
