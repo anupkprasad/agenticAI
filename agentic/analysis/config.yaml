@@ -23,6 +23,7 @@ agent:
   max_tool_retries: 2  # Max retries per tool on failure
   max_total_steps: 25  # Max total analysis steps (raised to accommodate plot steps)
   fail_fast: false  # Continue on failures to complete other analyses
+  use_trajectory_batching: true  # Share trajectory loads across metrics (RAW/ALIGNED passes)
 
 # Analysis workflow defaults
 workflow:
@@ -66,6 +67,7 @@ tools:
     defaults:
       selection: "protein"
       output_format: "dat"
+      align_before_rg: false
     interpretations:
       compact: "Rg stable with low std"
       expanding: "Rg increasing trend"
@@ -200,6 +202,7 @@ tools:
       assignments_file: "classification_cluster_assignments.csv"
       scatter_plot_file: "classification_clusters_pca.png"
       dendrogram_file: "classification_dendrogram.png"
+      phylo_tree_file: "classification_phylo_tree.png"
     phase: combined_analysis
 
   plot_cluster_feature_trajectories:
@@ -218,6 +221,22 @@ tools:
     description: "Overlay pocket or ligand RMSF profiles across holo simulations"
     defaults:
       profile_type: "pocket_rmsf"
+    phase: combined_analysis
+
+  build_sequence_phylo_tree:
+    description: "Sequence-based phylogenetic tree from sequences extracted from each simulation's PDB (pairwise % identity, UPGMA)"
+    defaults:
+      plot_file: "sequence_phylo_tree.png"
+      newick_file: "sequence_phylo_tree.nwk"
+      distance_matrix_file: "sequence_phylo_distance_matrix.csv"
+    phase: combined_analysis
+
+  build_structure_phylo_tree:
+    description: "Structure-based phylogenetic tree from CA coordinates of each simulation's PDB (sequence-aligned CA-RMSD, UPGMA)"
+    defaults:
+      plot_file: "structure_phylo_tree.png"
+      newick_file: "structure_phylo_tree.nwk"
+      distance_matrix_file: "structure_phylo_distance_matrix.csv"
     phase: combined_analysis
 
 # LLM-powered analysis planning configuration

@@ -143,11 +143,15 @@ _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
         r"pocket\s+rmsf",
         r"binding[-\s]?site\s+rmsf",
         r"pocket\s+flexibility",
+        r"pocket\b[^.\n]{0,40}\brmsf\b",
+        r"rmsf\b[^.\n]{0,40}\bpocket\b",
     ),
     "ligand_rmsf": (
         r"ligand\s+rmsf",
         r"atp\s+rmsf",
         r"ligand\s+flexibility",
+        r"ligand\b[^.\n]{0,40}\brmsf\b",
+        r"rmsf\b[^.\n]{0,40}\bligand\b",
     ),
     "energy": (r"\benergy\b", r"\bedr\b"),
     "pca": (
@@ -242,6 +246,59 @@ def detect_requested_metrics_union(*goal_texts: str) -> Optional[FrozenSet[str]]
     return None if saw_broad else None
 
 
+def _normalize_metric_false_positives(text: str, found: Set[str]) -> None:
+    """
+    Drop whole-protein metrics when a binding-site metric already covers the phrase.
+
+    Examples:
+    - "pocket SASA" must not also enable whole-protein ``sasa``.
+    - "free-energy landscape" must not also enable potential ``energy``.
+    """
+    lower = (text or "").lower()
+    if "sasa" in found and (
+        "pocket_sasa" in found
+        or re.search(r"pocket\s+sasa|binding[-\s]?site\s+sasa", lower)
+    ):
+        found.discard("sasa")
+    if "energy" in found and re.search(r"free[-\s]?energy", lower):
+        if not re.search(
+            r"potential\s+energy|analyze_energy|\bedr\b|energy\.dat|"
+            r"mean\s+potential|energy\s+analysis",
+            lower,
+        ):
+            found.discard("energy")
+
+
+def _normalize_binding_rmsf_metrics(text: str, found: Set[str]) -> None:
+    """
+    Map phrasing like "pocket and ligand RMSF" to specific binding metrics.
+
+    When binding-site RMSF is requested, drop generic whole-protein ``rmsf``
+    unless the user explicitly asks for global/per-residue protein RMSF.
+    """
+    lower = (text or "").lower()
+    if not re.search(r"\brmsf\b", lower) and "rmsf" not in found:
+        return
+
+    if re.search(r"\bpocket\b", lower):
+        found.add("pocket_rmsf")
+    if re.search(r"\bligand\b", lower) or re.search(r"\batp\b", lower):
+        found.add("ligand_rmsf")
+
+    binding_rmsf = found & {"pocket_rmsf", "ligand_rmsf"}
+    if not binding_rmsf or "rmsf" not in found:
+        return
+
+    whole_protein_rmsf = re.search(
+        r"(?:whole[-\s]?protein|global|backbone|cα|ca)\s+rmsf|"
+        r"rmsf\s+(?:for\s+)?(?:the\s+)?(?:whole\s+)?protein|"
+        r"per[-\s]?residue\s+rmsf(?!\s+(?:for|of)\s+(?:pocket|ligand|atp))",
+        lower,
+    )
+    if not whole_protein_rmsf:
+        found.discard("rmsf")
+
+
 def detect_requested_metrics(goal: str) -> Optional[FrozenSet[str]]:
     """
     Return the set of metrics explicitly requested in *goal*.
@@ -264,6 +321,8 @@ def detect_requested_metrics(goal: str) -> Optional[FrozenSet[str]]:
         for metric, patterns in _METRIC_PATTERNS.items()
         if any(re.search(pattern, text) for pattern in patterns)
     }
+    _normalize_binding_rmsf_metrics(text, found)
+    _normalize_metric_false_positives(text, found)
     # Normalise rg/gyration
     if "rg" in found or "gyration" in found:
         found.discard("gyration")
@@ -287,6 +346,68 @@ def detect_requested_metrics(goal: str) -> Optional[FrozenSet[str]]:
         return None
 
     return frozenset(found) if found else None
+
+
+_PHYLO_GENERIC_PATTERNS: tuple[str, ...] = (
+    r"\bphylogen(?:etic|y|omic)\b",
+    r"\bphylo\s*tree\b",
+    r"\bevolutionary\s+tree\b",
+    r"\bdendrogram\s+of\s+(?:sequences?|structures?)\b",
+)
+_PHYLO_SEQUENCE_PATTERNS: tuple[str, ...] = (
+    r"\bsequence[-\s]*(?:based\s+)?(?:phylogen\w*|tree)\b",
+    r"\bsequence\s+alignment\s+tree\b",
+    r"\bmsa\b",
+)
+_PHYLO_STRUCTURE_PATTERNS: tuple[str, ...] = (
+    r"\bstructur(?:e|al)[-\s]*(?:based\s+)?(?:phylogen\w*|tree)\b",
+    r"\bstructur(?:e|al)\s+(?:similarity|comparison)\s+tree\b",
+)
+
+
+def _normalize_goal_text(*goal_texts: str) -> str:
+    parts = []
+    for text in goal_texts:
+        if not text:
+            continue
+        parts.append(
+            text.lower()
+            .replace("\u2011", "-")
+            .replace("\u2012", "-")
+            .replace("\u2013", "-")
+            .replace("\u2014", "-")
+        )
+    return " ".join(parts)
+
+
+def detect_phylo_tree_requested(*goal_texts: str) -> Dict[str, bool]:
+    """
+    Detect whether the user asked for sequence- and/or structure-based
+    phylogenetic trees at the combined-analysis level.
+
+    Returns a dict ``{"sequence": bool, "structure": bool}``. A bare
+    "phylogenetic tree" request (no sequence/structure qualifier) defaults to a
+    sequence tree, which is the conventional meaning.
+    """
+    text = _normalize_goal_text(*goal_texts)
+    if not text:
+        return {"sequence": False, "structure": False}
+
+    has_generic = any(re.search(p, text) for p in _PHYLO_GENERIC_PATTERNS)
+    seq = any(re.search(p, text) for p in _PHYLO_SEQUENCE_PATTERNS)
+    struct = any(re.search(p, text) for p in _PHYLO_STRUCTURE_PATTERNS)
+
+    if has_generic:
+        # Qualifiers mentioned anywhere alongside a phylo request.
+        mentions_sequence = bool(re.search(r"\bsequences?\b", text))
+        mentions_structure = bool(re.search(r"\b(?:structures?|pdb|3d)\b", text))
+        seq = seq or mentions_sequence
+        struct = struct or mentions_structure
+        # Bare "phylogenetic tree" with no qualifier → sequence tree by default.
+        if not seq and not struct:
+            seq = True
+
+    return {"sequence": bool(seq), "structure": bool(struct)}
 
 
 def detect_classification_requested(*goal_texts: str) -> bool:
@@ -331,7 +452,13 @@ def classification_metric_groups_for_goal(*goal_texts: str) -> Optional[FrozenSe
     if "rmsf" in groups:
         groups.discard("rmsf")
         groups.add("pocket_rmsf")
-    return frozenset(groups) if groups else frozenset(DEFAULT_CLASSIFICATION_METRIC_GROUPS)
+
+    # Anchor on the stable ATP/pocket bundle; only add explicit extras (rmsd, rg, …).
+    base = set(DEFAULT_CLASSIFICATION_METRIC_GROUPS)
+    extras = groups - base
+    if extras:
+        return frozenset(base | extras)
+    return frozenset(base)
 
 
 def get_classification_tool_guide() -> str:
@@ -356,8 +483,8 @@ contacts, pocket SASA, residence, pocket/ligand RMSF, FEL features).
 Combined phase ONLY when classification requested:
 `collect_classification_features_table` → classification_features.csv + z-score CSV,
 then `cluster_classification_features` (default: hierarchical Ward linkage; use
-method='kmeans' if user asks for k-means). Plots: PCA scatter + dendrogram with
-protein names from id:name pairs in the goal (e.g. p23458:JAK1).
+method='kmeans' if user asks for k-means). Plots: PCA scatter, dendrogram, and
+unrooted phylogenetic tree (cluster-colored) with protein names from id:name pairs in the goal (e.g. p23458:JAK1).
 
 Do NOT run the collector unless the user asked for classification/clustering."""
 

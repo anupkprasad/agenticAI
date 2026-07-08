@@ -33,6 +33,8 @@ def extract_research_context(
     protein_name: Optional[str] = None,
     analysis_types: Optional[List[str]] = None,
     analysis_stats: Optional[Dict[str, Any]] = None,
+    protein_family: Optional[str] = None,
+    related_terms: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Extract structured research context from the user goal and analysis outputs."""
     goal = (user_goal or "").strip()
@@ -46,6 +48,9 @@ def extract_research_context(
         "hypothesis_terms": [],
         "analysis_types": list(analysis_types or []),
         "finding_phrases": [],
+        "protein_family": (protein_family or "").strip(),
+        "related_terms": list(related_terms or []),
+        "primary_gene": "",
     }
 
     if protein_name:
@@ -53,6 +58,9 @@ def extract_research_context(
             part = part.strip()
             if len(part) >= 2:
                 context["protein_names"].append(part)
+
+    if context["protein_names"]:
+        context["primary_gene"] = context["protein_names"][0]
 
     for match in _PROTEIN_MAP_RE.finditer(goal):
         pid, pname = match.group(1).strip(), match.group(2).strip()
@@ -160,6 +168,27 @@ def build_analysis_summary_text(
     return "\n".join(lines) if lines else "No quantitative analysis statistics available."
 
 
+def _confusable_gene_penalty(haystack: str, primary_genes: List[str]) -> int:
+    """Penalise papers about a closely related but different gene (e.g. IRAK4 vs IRAK2)."""
+    for gene in primary_genes:
+        if not gene or len(gene) < 3:
+            continue
+        g = gene.upper()
+        prefix = re.sub(r"\d+$", "", g)
+        if len(prefix) < 3:
+            continue
+        siblings = [
+            m.group(1).upper()
+            for m in re.finditer(rf"\b({re.escape(prefix)}\d{{1,3}})\b", haystack, re.IGNORECASE)
+        ]
+        if not siblings:
+            continue
+        if g in siblings:
+            return 0
+        return -18
+    return 0
+
+
 def score_literature_ref_relevance(
     ref: Dict[str, Any],
     context: Dict[str, Any],
@@ -167,26 +196,50 @@ def score_literature_ref_relevance(
     """Score one reference against research context; return (score, short note)."""
     protein_names = context.get("protein_names") or []
     protein_ids = context.get("protein_ids") or []
+    primary_gene = context.get("primary_gene") or (protein_names[0] if protein_names else "")
+    protein_family = (context.get("protein_family") or "").lower()
     hypothesis_terms = context.get("hypothesis_terms") or []
     ligand_terms = context.get("ligand_terms") or []
     region_terms = context.get("region_terms") or []
     finding_phrases = context.get("finding_phrases") or []
     analysis_types = [str(a).lower() for a in (context.get("analysis_types") or [])]
 
+    title = ref.get("title", "") or ""
+    abstract = ref.get("abstract") or ""
     haystack = " ".join(filter(None, [
-        ref.get("title", ""),
-        ref.get("abstract", "") or "",
+        title,
+        abstract,
         ref.get("journal", ""),
         " ".join(ref.get("authors") or []),
     ])).lower()
+    title_lower = title.lower()
 
     score = 0
     matched: List[str] = []
 
+    if primary_gene and primary_gene.lower() in title_lower:
+        score += 15
+        matched.append(primary_gene)
+    elif primary_gene and primary_gene.lower() in haystack:
+        score += 8
+        matched.append(primary_gene)
+
     for name in protein_names + protein_ids:
-        if name and name.lower() in haystack:
+        if not name:
+            continue
+        nl = name.lower()
+        if nl in title_lower:
+            score += 12
+            matched.append(name)
+        elif nl in haystack:
             score += 10
             matched.append(name)
+
+    if primary_gene:
+        score += _confusable_gene_penalty(haystack, [primary_gene])
+
+    if protein_family and protein_family in haystack:
+        score += 5
 
     for term in hypothesis_terms + ligand_terms:
         if term.lower() in haystack:
@@ -210,11 +263,12 @@ def score_literature_ref_relevance(
                 score += 2
                 break
 
-    abstract = ref.get("abstract") or ""
     if abstract:
         score += 2
         # Abstract-level checks carry more weight than title-only matches.
         abstract_lower = abstract.lower()
+        if primary_gene and primary_gene.lower() in abstract_lower:
+            score += 10
         for name in protein_names + protein_ids:
             if name and name.lower() in abstract_lower:
                 score += 6
@@ -520,6 +574,76 @@ def search_biorxiv(
         return {"success": False, "error": str(e), "results": []}
 
 
+def search_europe_pmc(
+    query: str,
+    max_results: int = 8,
+    max_age_years: Optional[int] = 12,
+    open_access_only: bool = True,
+) -> Dict[str, Any]:
+    """
+    Search Europe PMC for peer-reviewed literature (includes many open-access journals).
+
+    Complements PubMed with PMC full-text metadata and broader OA coverage.
+    """
+    try:
+        search_q = query
+        if max_age_years:
+            from datetime import datetime
+            min_year = datetime.now().year - max_age_years
+            search_q += f" FIRST_PDATE:[{min_year} TO *]"
+        if open_access_only:
+            search_q += " OPEN_ACCESS:Y"
+        # Exclude preprints (handled by search_biorxiv)
+        search_q += " NOT SRC:PPR"
+
+        params = urlencode({
+            "query": search_q,
+            "format": "json",
+            "resultType": "core",
+            "pageSize": min(max_results, 25),
+        })
+        url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?{params}"
+        logger.info("Searching Europe PMC: %s", search_q[:120])
+
+        req = Request(url, headers={"Accept": "application/json"})
+        with urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode())
+
+        articles = []
+        for item in data.get("resultList", {}).get("result", []):
+            doi = item.get("doi")
+            pmid = item.get("pmid")
+            articles.append({
+                "title": item.get("title", "Unknown"),
+                "authors": [a.strip() for a in (item.get("authorString") or "").split(",")][:10],
+                "journal": item.get("journalTitle") or item.get("bookOrReportDetails", {}).get("publisher", ""),
+                "year": int(item["pubYear"]) if item.get("pubYear") else None,
+                "pmid": str(pmid) if pmid else None,
+                "doi": doi,
+                "abstract": item.get("abstractText"),
+                "url": (
+                    f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                    if pmid
+                    else (f"https://doi.org/{doi}" if doi else None)
+                ),
+                "source": "EuropePMC",
+            })
+
+        return {
+            "success": True,
+            "query": query,
+            "total_found": data.get("hitCount", 0),
+            "returned": len(articles),
+            "results": articles,
+        }
+    except (URLError, OSError) as e:
+        logger.warning("Europe PMC search network error: %s", e)
+        return {"success": False, "error": str(e), "results": []}
+    except Exception as e:
+        logger.error("Europe PMC search error: %s", e, exc_info=True)
+        return {"success": False, "error": str(e), "results": []}
+
+
 # ---------------------------------------------------------------------------
 # UniProt protein entry search
 # ---------------------------------------------------------------------------
@@ -722,6 +846,12 @@ def generate_literature_queries(
         if func_context:
             fc = " ".join(func_context[:2])
             queries["protein_context"] = f"{_name} {fc} molecular dynamics"
+
+    family = (context.get("protein_family") or "").strip()
+    if _name and family:
+        queries["protein_family_review"] = f"{_name} {family} structure function review"
+        if family == "pseudokinase":
+            queries["related_pseudokinase"] = f"{_name} pseudokinase activation loop dynamics"
 
     # Ligand / ATP effect queries from user goal
     if context["ligand_terms"] and _name:

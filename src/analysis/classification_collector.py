@@ -315,7 +315,9 @@ def _load_json(path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _csv_mean_std(path: Path, value_col: str) -> Tuple[Optional[float], Optional[float]]:
+def _csv_mean_std(
+    path: Path, value_col: str, clean_pbc: bool = False
+) -> Tuple[Optional[float], Optional[float]]:
     if not path.is_file():
         return None, None
     vals: List[float] = []
@@ -329,6 +331,21 @@ def _csv_mean_std(path: Path, value_col: str) -> Tuple[Optional[float], Optional
     if not vals:
         return None, None
     arr = np.asarray(vals, dtype=float)
+    if clean_pbc:
+        # Strip transient PBC imaging spikes so the mean/std reflect the real
+        # binding-site behaviour rather than periodic-image jumps.
+        try:
+            from src.analysis.pbc_utils import clean_pbc_distance_series
+
+            cleaned, _, n_removed = clean_pbc_distance_series(arr)
+            if n_removed:
+                logger.info(
+                    "%s: removed %d PBC spike(s) before feature stats",
+                    path.name, n_removed,
+                )
+                arr = cleaned
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("PBC clean skipped for %s: %s", path.name, exc)
     return float(np.mean(arr)), float(np.std(arr))
 
 
@@ -419,7 +436,7 @@ def collect_features_for_sim(sim_dir: Path) -> Dict[str, Any]:
     lp_csv = _find_ligand_pocket_csv(adir)
     if lp_csv:
         for col in ("distance_A", "distance_angstrom", "distance"):
-            m, s = _csv_mean_std(lp_csv, col)
+            m, s = _csv_mean_std(lp_csv, col, clean_pbc=True)
             if m is not None:
                 row["ligand_pocket_distance_mean_A"] = m
                 row["ligand_pocket_distance_std_A"] = s
@@ -761,7 +778,8 @@ def collect_classification_features_table(
                 "Load classification_features_zscore.csv (or ZScore_Features sheet in XLSX)",
                 "Drop columns with many NaNs",
                 "cluster_classification_features (hierarchical default, or method='kmeans')",
-                "Inspect classification_clusters_pca.png and classification_dendrogram.png",
+                "Inspect classification_clusters_pca.png, classification_dendrogram.png, "
+                "and classification_phylo_tree.png",
             ],
         }
         manifest_path = out_dir / manifest_file

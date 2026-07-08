@@ -1615,20 +1615,24 @@ def _build_pdb_list_from_uniprot_goal(goal: str, working_dir: str) -> List[Dict[
 def _prefetch_uniprot_structures(
     entries: List[Dict[str, Any]],
     goal: str,
-) -> List[str]:
+) -> Tuple[List[str], List[str]]:
     """
-    Pre-download shared structures to the base working directory.
+    Ensure shared structures exist in the base working directory.
 
-    Returns list of successfully downloaded PDB paths.
+    Existing (user-provided) files are reused as-is; only missing structures
+    are fetched from the database.
+
+    Returns ``(reused, downloaded)`` lists of PDB paths.
     """
     from src.preprocess.structure_acquisition import acquire_structure_from_request
     from src.preprocess.structure_downloader import download_structure
 
+    reused: List[str] = []
     downloaded: List[str] = []
     for entry in entries:
         pdb_path = entry["pdb_path"]
         if Path(pdb_path).exists():
-            downloaded.append(pdb_path)
+            reused.append(pdb_path)
             continue
 
         out_dir = str(Path(pdb_path).parent)
@@ -1652,7 +1656,7 @@ def _prefetch_uniprot_structures(
         if result.get("success"):
             downloaded.append(pdb_path)
 
-    return downloaded
+    return reused, downloaded
 
 
 def _build_structure_request_config(entry: Dict[str, Any], goal: str) -> Dict[str, Any]:
@@ -1817,11 +1821,26 @@ def main(argv=None):
     parser.add_argument("--working-dir", default=".",
                        help="Base working directory (agents use subdirs: working_dir/preprocess/, working_dir/hpc/, etc.)")
     parser.add_argument("--max-concurrent", type=int, default=4,
-                       help="Maximum concurrent simulations in multi-sim mode (default: 4)")
-    parser.add_argument("--allowed-hpc-jobs", type=int, default=5,
+                       help="Maximum concurrent simulations in multi-sim mode (legacy)")
+    parser.add_argument("--allowed-hpc-jobs", type=int, default=None,
                        help=(
-                           "Max concurrent SLURM jobs in cross-sim HPC pool mode "
-                           "(default: 5). Used when preprocess+HPC+analysis run together."
+                           "Max concurrent SLURM jobs in cross-sim HPC pool mode. "
+                           "Default: auto from CPU/memory when --parallel-workers is auto."
+                       ))
+    parser.add_argument("--parallel-workers", default="auto",
+                       help=(
+                           "Max parallel local workers for multi-sim prep and "
+                           "analysis/reporter: 'auto' (default) or integer (1=sequential)"
+                       ))
+    parser.add_argument("--parallel-mem-gb", type=float, default=None,
+                       help="Estimated GiB RAM per parallel worker (default: phase-specific)")
+    parser.add_argument("--parallel-cpus", type=float, default=None,
+                       help="Estimated CPU cores per parallel worker (default: phase-specific)")
+    parser.add_argument("--llm-concurrency", default="auto",
+                       help=(
+                           "Max concurrent LLM requests for parallel prep/analysis workers. "
+                           "'auto' (default) matches OLLAMA_NUM_PARALLEL (4). "
+                           "Caps local workers so fewer sims queue on the shared Ollama server."
                        ))
     parser.add_argument("--hpc-check-interval", default="2h",
                        help=(
@@ -1935,9 +1954,14 @@ def main(argv=None):
         "resume_failed_only": getattr(args, "resume", False),
         "retry_labels": list(getattr(args, "retry_labels", None) or []),
         "combined_only": getattr(args, "combined_only", False),
-        "allowed_hpc_jobs": getattr(args, "allowed_hpc_jobs", 5),
+        "allowed_hpc_jobs": getattr(args, "allowed_hpc_jobs", None),
+        "_allowed_hpc_jobs_explicit": getattr(args, "allowed_hpc_jobs", None) is not None,
         "max_concurrent": getattr(args, "max_concurrent", 4),
         "hpc_check_interval": getattr(args, "hpc_check_interval", "2h"),
+        "parallel_workers": getattr(args, "parallel_workers", "auto"),
+        "parallel_mem_gb_per_job": getattr(args, "parallel_mem_gb", None),
+        "parallel_cpus_per_job": getattr(args, "parallel_cpus", None),
+        "llm_concurrency": getattr(args, "llm_concurrency", "auto"),
     }
     
     # Pass subtask type directly in config
@@ -2033,10 +2057,21 @@ def main(argv=None):
             if structure_request_entries:
                 pdb_list = [e["pdb_path"] for e in structure_request_entries]
                 uids = ", ".join(e["uniprot_id"] for e in structure_request_entries)
-                print(
-                    f"\n  No local PDB provided — will download structure(s) for UniProt: {uids}",
-                    flush=True,
+                _n_existing = sum(
+                    1 for e in structure_request_entries if Path(e["pdb_path"]).exists()
                 )
+                if _n_existing == len(structure_request_entries):
+                    print(
+                        f"\n  Using {_n_existing} existing local structure(s) for UniProt: {uids}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"\n  Resolving structure(s) for UniProt: {uids} "
+                        f"({_n_existing} present locally, "
+                        f"{len(structure_request_entries) - _n_existing} to fetch)",
+                        flush=True,
+                    )
                 if len(structure_request_entries) == 1 and simtype == 'multisim':
                     print(
                         "  Note: --simtype multisim with one UniProt ID will expand into "
@@ -2082,15 +2117,33 @@ def main(argv=None):
             )
             return 1
 
-        # Pre-download UniProt structures once at base working_dir (shared by cases)
+        # Ensure UniProt structures exist at base working_dir (shared by cases).
+        # User-provided files are reused; only missing ones are fetched.
         if structure_request_entries:
-            print("  Downloading structure(s) from database...", flush=True)
-            fetched = _prefetch_uniprot_structures(structure_request_entries, goal)
-            if fetched:
-                print(f"  Downloaded {len(fetched)} structure file(s)", flush=True)
-            else:
+            n_missing = sum(
+                1 for e in structure_request_entries if not Path(e["pdb_path"]).exists()
+            )
+            if n_missing:
                 print(
-                    "  Warning: structure download deferred to preprocessing agent",
+                    f"  Fetching {n_missing} missing structure(s) from database...",
+                    flush=True,
+                )
+            reused, downloaded = _prefetch_uniprot_structures(
+                structure_request_entries, goal
+            )
+            if reused:
+                print(
+                    f"  Reusing {len(reused)} existing local structure file(s)",
+                    flush=True,
+                )
+            if downloaded:
+                print(
+                    f"  Downloaded {len(downloaded)} structure file(s)",
+                    flush=True,
+                )
+            if not reused and not downloaded:
+                print(
+                    "  Warning: structure acquisition deferred to preprocessing agent",
                     flush=True,
                 )
             config["structure_requests"] = {

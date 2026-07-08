@@ -1289,8 +1289,37 @@ def run_combined_com_distance_analysis(
             "missing": missing,
         }
 
+    # De-spike each per-sim COM distance series (PBC imaging artifacts) into a
+    # scratch dir so the overlay is clean without mutating per-sim outputs.
+    plot_files = found_files
+    try:
+        from src.analysis.pbc_utils import clean_distance_csv
+
+        clean_dir = Path(working_dir) / "_com_clean"
+        clean_dir.mkdir(parents=True, exist_ok=True)
+        cleaned_files: List[str] = []
+        total_removed = 0
+        for src, label in zip(found_files, found_labels):
+            dst = clean_dir / f"{label}_com_clean.csv"
+            ok, n_removed = clean_distance_csv(str(src), str(dst))
+            cleaned_files.append(str(dst) if ok else str(src))
+            total_removed += n_removed
+        plot_files = cleaned_files
+        if total_removed:
+            logger.info(
+                "run_combined_com_distance_analysis: removed %d PBC spike(s) "
+                "across %d simulation(s) before overlay",
+                total_removed, len(found_files),
+            )
+    except Exception as exc:
+        logger.warning(
+            "run_combined_com_distance_analysis: PBC cleaning skipped (%s); "
+            "plotting raw series", exc,
+        )
+        plot_files = found_files
+
     result = plot_combined_overlay.func(
-        data_files=found_files,
+        data_files=plot_files,
         labels=found_labels,
         output_file=output_file,
         working_dir=working_dir,

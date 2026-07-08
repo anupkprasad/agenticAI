@@ -64,6 +64,9 @@ class MDState(TypedDict):
     resume_failed_only: Optional[bool]   # True → skip already-succeeded sims on re-run
     retry_labels: Optional[List[str]]    # Labels to force-retry even if previously succeeded
     _resume_succeeded_labels: Optional[List[str]]  # Internal: labels confirmed succeeded on disk
+    multisim_resume_applied: Optional[bool]  # True after --resume initial bind (LangGraph-persisted)
+    workflow_loop_streak: Optional[int]  # Detect supervisor/input_validation routing loops
+    workflow_loop_key: Optional[str]  # Last routing key for loop detection
     combined_only: Optional[bool]        # True → skip per-sim loop; run base-level combined analysis + report only
 
     # Preprocessing stage
@@ -184,6 +187,15 @@ class MDState(TypedDict):
     hpc_check_interval: Optional[str]
     post_hpc_analysis_only: Optional[bool]
     hpc_pool_phase_complete: Optional[bool]
+
+    # Cross-sim parallel worker pool (local prep / analysis+reporter)
+    parallel_pool: Optional[Dict[str, Any]]
+    parallel_workers: Optional[Any]              # "auto" or int (1 = sequential)
+    parallel_mem_gb_per_job: Optional[float]
+    parallel_cpus_per_job: Optional[float]
+    parallel_workers_resolved: Optional[int]
+    llm_concurrency: Optional[Any]                 # "auto" or int (Ollama parallel slots)
+    _allowed_hpc_jobs_explicit: Optional[bool]
 
     # Human-in-the-loop session (persisted in state.jsonl across checkpoints)
     hitl_active_agent: Optional[str]               # Field agent selected in HITL chat

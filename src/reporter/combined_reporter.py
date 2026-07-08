@@ -17,7 +17,7 @@ import re
 import base64
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Set, Sequence
 
 from langchain.tools import tool
 
@@ -77,16 +77,20 @@ def _read_jsonl(path: str) -> List[Dict[str, Any]]:
     return [r for r in records if r.get("analysis_type")]
 
 
-def _parse_label_name_map(text: str) -> Dict[str, str]:
-    """Extract a {uniprot_id: protein_name} mapping from free text.
+def _parse_label_name_map(text: str, sim_labels: Optional[Sequence[str]] = None) -> Dict[str, str]:
+    """Extract a {uniprot_id: protein_name} mapping from free text."""
+    from src.reporter.report_curator import parse_label_name_map_strict
 
-    Handles patterns like:
-      "p17612: KAPCA, p24941: CDK2"
-      "p21860: ERBB3"
+    _UNIPROT_ID_RE = re.compile(r"^[a-z][0-9][a-z0-9]{3,9}[0-9a-z]*$", re.IGNORECASE)
+    _GENE_NAME_RE = re.compile(r"^[A-Z][A-Za-z0-9\-]{1,20}$")
 
-    Keys are lowercased UniProt-style IDs; values are protein names as given.
-    """
+    strict = parse_label_name_map_strict(text, sim_labels)
+    if strict:
+        return strict
+
+    # Legacy fallback: same regex as before, but filter to sim labels + gene names.
     mapping: Dict[str, str] = {}
+    sim_set = {s.lower() for s in (sim_labels or []) if s}
     if not text:
         return mapping
     for m in re.finditer(
@@ -94,10 +98,16 @@ def _parse_label_name_map(text: str) -> Dict[str, str]:
         text
     ):
         key, val = m.group(1).strip(), m.group(2).strip()
-        if val[0].isalpha() and len(key) >= 3 and len(val) >= 2:
-            if key.lower() in {"id", "e", "g", "eg"} or val.lower() in {"name", "map"}:
-                continue
-            mapping[key.lower()] = val
+        key_l, val_st = key.lower(), val.strip()
+        if key_l in {"id", "e", "g", "eg"} or val_st.lower() in {"name", "map"}:
+            continue
+        if not _UNIPROT_ID_RE.match(key_l):
+            continue
+        if not _GENE_NAME_RE.match(val_st):
+            continue
+        if sim_set and key_l not in sim_set:
+            continue
+        mapping[key_l] = val_st
     return mapping
 
 
@@ -281,14 +291,33 @@ def _select_significant_pdbs_for_combined(
     label_name_map: Optional[Dict[str, str]] = None,
     max_per_sim: int = 2,
     max_total: int = 16,
+    user_goal: Optional[str] = None,
+    enriched_prompt: Optional[str] = None,
+    highlight_plan: Optional[Any] = None,
 ) -> Dict[str, str]:
-    """Collect significant structures across all simulations for the 3D viewer."""
+    """Collect significant structures across all simulations for the 3D viewer.
+
+    When a ``highlight_plan`` (``StructureHighlightPlan``) is provided, the
+    number of metastates embedded per simulation follows the plan — story-
+    relevant proteins get multiple conformational states while the rest are
+    limited or skipped — instead of one structure for every simulation.
+    """
+    from src.reporter.figure_selector import resolve_report_narrative
+
+    narrative = resolve_report_narrative(
+        user_goal or "",
+        enriched_prompt=enriched_prompt or "",
+        n_simulations=len(sim_dirs),
+    )
+    if narrative.classification_primary:
+        max_per_sim = min(max_per_sim, narrative.max_fel_per_sim)
+    cap = narrative.max_pdb_structures if narrative.max_pdb_structures else max_total
+    cap = cap if cap and cap > 0 else max(len(sim_dirs) * max_per_sim, 8)
+
     from src.reporter.structure_extractor import (
         collect_significant_structures,
         load_fel_basin_structures,
     )
-
-    cap = max_total if max_total and max_total > 0 else max(len(sim_dirs) * max_per_sim, 8)
 
     frames: Dict[str, str] = {}
 
@@ -296,6 +325,14 @@ def _select_significant_pdbs_for_combined(
         if len(frames) >= cap:
             break
         display = resolve_display_label(label, label_name_map)
+
+        # Per-sim metastate budget from the highlight plan (0 → skip this sim).
+        sim_max = max_per_sim
+        if highlight_plan is not None:
+            sim_max = highlight_plan.structures_for(display)
+            if sim_max <= 0:
+                continue
+
         analysis_dir = Path(sim_dir) / "analysis"
         jsonl = analysis_dir / "analysis_summary.jsonl"
         records = _read_jsonl(str(jsonl)) if jsonl.exists() else []
@@ -311,7 +348,7 @@ def _select_significant_pdbs_for_combined(
                 key=lambda kv: _population_from_viewer_label(kv[0]),
                 reverse=True,
             )
-            for b_label, pdb_text in ranked[:max_per_sim]:
+            for b_label, pdb_text in ranked[:sim_max]:
                 if len(frames) >= cap:
                     break
                 viewer_key = f"{display} — {b_label}"
@@ -319,16 +356,16 @@ def _select_significant_pdbs_for_combined(
                 added_this_sim += 1
 
         # Priority 2: trajectory frames from analysis time series
-        if added_this_sim < max_per_sim:
+        if added_this_sim < sim_max:
             sig = collect_significant_structures(
                 analysis_data,
                 sim_dir,
                 sim_dir,
                 "hpc",
-                max_total=max(max_per_sim - added_this_sim, 1),
+                max_total=max(sim_max - added_this_sim, 1),
             )
             for t_label, pdb_text in sig.items():
-                if len(frames) >= cap or added_this_sim >= max_per_sim:
+                if len(frames) >= cap or added_this_sim >= sim_max:
                     break
                 viewer_key = f"{display} — {t_label}"
                 if viewer_key not in frames:
@@ -2099,69 +2136,87 @@ def _collect_activation_loop_dssp_heatmaps(
 def _build_per_sim_highlights_section(
     sims_summary: List[Dict[str, Any]],
     sim_dirs: List[str],
+    user_goal: Optional[str] = None,
+    report_focus: Optional[str] = None,
+    enriched_prompt: Optional[str] = None,
+    exclude_paths: Optional[Set[str]] = None,
+    max_highlights: Optional[int] = None,
+    allowed_labels: Optional[Set[str]] = None,
+    structure_highlight: Optional[Any] = None,
 ) -> str:
-    """Embed key per-simulation figures generically from analysis summaries.
+    """Embed goal-selected per-simulation figures (capped for large cohorts).
 
-    Picks the latest record per analysis type and embeds any plot images found
-    in ``files`` or ``metadata`` (FEL landscape, FEL basins, PCA, binding metrics).
+    When ``allowed_labels`` is given, only those (story-relevant) simulations
+    contribute per-sim highlight figures, matching the 3D-viewer subset.
     """
+    from src.reporter.figure_selector import (
+        ReportFigurePolicy,
+        resolve_report_narrative,
+        select_per_sim_highlight_figures,
+    )
     from src.reporter.html_generator import _collect_image_paths, _encode_image_base64
 
-    priority_types = (
-        "FreeEnergyLandscape",
-        "FELFeatures",
-        "FELBasinStructures",
-        "PCA",
-        "Ligand_Pocket_COM_Distance",
-        "ProteinLigandContacts",
-        "LigandResidence",
-        "PocketSASA",
-        "Pocket_RMSF",
-        "Ligand_RMSF",
+    # Restrict to the featured simulations when the plan asks for it.
+    if allowed_labels:
+        filtered = [(s, d) for s, d in zip(sims_summary, sim_dirs)
+                    if s.get("label") in allowed_labels]
+        if filtered:
+            sims_summary = [s for s, _ in filtered]
+            sim_dirs = [d for _, d in filtered]
+
+    narrative = resolve_report_narrative(
+        user_goal or "",
+        report_focus or "",
+        enriched_prompt or "",
+        n_simulations=len(sims_summary),
+    )
+    policy = ReportFigurePolicy(max_combined_highlight_figures=max_highlights or 24)
+    figures = select_per_sim_highlight_figures(
+        sims_summary,
+        sim_dirs,
+        _collect_image_paths,
+        user_goal=user_goal or "",
+        report_focus=report_focus or "",
+        enriched_prompt=enriched_prompt or "",
+        exclude_paths=exclude_paths,
+        policy=policy,
+        narrative=narrative,
     )
 
+    rationale_map = {}
+    if structure_highlight is not None:
+        rationale_map = getattr(structure_highlight, "rationale", {}) or {}
+
     cards: List[str] = []
-    for sim, sim_dir in zip(sims_summary, sim_dirs):
-        label = sim["label"]
-        analysis_dir = Path(sim["analysis_dir"])
-        search_dirs = [analysis_dir, Path(sim_dir), Path(sim_dir) / "analysis"]
-
-        latest_by_type: Dict[str, Dict[str, Any]] = {}
-        for rec in sim.get("records") or []:
-            atype = rec.get("analysis_type") or ""
-            if atype:
-                latest_by_type[atype] = rec
-
-        for atype in priority_types:
-            rec = latest_by_type.get(atype)
-            if not rec:
-                continue
-            images = _collect_image_paths(
-                rec.get("files") or {},
-                rec.get("metadata") or {},
-                search_dirs,
-            )
-            for img_key, img_path in images.items():
-                uri = _encode_image_base64(img_path, search_dirs)
-                if not uri:
-                    continue
-                caption = f"{label} — {atype.replace('_', ' ')}"
-                fname = Path(img_path).name
-                cards.append(
-                    f'<div class="plot-card">'
-                    f'<p><strong>{_html_mod.escape(caption)}</strong></p>'
-                    f'<img src="{uri}" alt="{_html_mod.escape(caption)}" loading="lazy">'
-                    f'<p class="plot-caption">{_html_mod.escape(fname)}</p>'
-                    f'</div>\n'
-                )
+    for fig in figures:
+        search_dirs = [
+            Path(fig["path"]).parent,
+        ]
+        uri = _encode_image_base64(fig["path"], search_dirs)
+        if not uri:
+            continue
+        caption = fig["caption"]
+        _story = rationale_map.get(fig.get("label", ""))
+        if _story:
+            caption = f"{caption} — {_story}"
+        fname = Path(fig["path"]).name
+        cards.append(
+            f'<div class="plot-card">'
+            f'<p><strong>{_html_mod.escape(caption)}</strong></p>'
+            f'<img src="{uri}" alt="{_html_mod.escape(caption)}" loading="lazy">'
+            f'<p class="plot-caption">{_html_mod.escape(fname)}</p>'
+            f'</div>\n'
+        )
 
     if not cards:
         return ""
 
+    n_sims = len(sims_summary)
     return (
         "<h2>&#128200; Per-Simulation Key Results</h2>\n"
-        "<p>Representative figures from each kinase/pseudokinase trajectory "
-        "(free-energy landscapes, binding metrics, and related analyses).</p>\n"
+        f"<p>Selected figures most relevant to the study objective "
+        f"({len(cards)} plot(s) from {n_sims} simulation(s); "
+        f"see comparative panels above for cross-simulation overlays).</p>\n"
         '<div class="plot-grid">\n'
         + "".join(cards)
         + "</div>\n"
@@ -2179,6 +2234,192 @@ def _collect_per_sim_dssp_figures(
     ]
 
 
+def _build_phylo_trees_section(
+    overlay_plots: List[str],
+    base_analysis_dir: Optional[str] = None,
+) -> str:
+    """
+    Dedicated section for on-request sequence/structure phylogenetic trees.
+
+    These are distinct from the FEL-feature ``classification_phylo_tree`` shown
+    in the classification section: they are derived from sequences extracted
+    from the input PDBs and from CA structural superposition, respectively.
+    """
+    specs = (
+        (
+            "sequence_phylo_tree.png",
+            "Sequence-based phylogenetic tree",
+            "Unrooted tree from pairwise sequence identity of residues extracted "
+            "from every input PDB (UPGMA of 1 − % identity).",
+        ),
+        (
+            "structure_phylo_tree.png",
+            "Structure-based phylogenetic tree",
+            "Unrooted tree from CA-RMSD after sequence-guided structural "
+            "superposition of every pair of input PDBs (UPGMA).",
+        ),
+    )
+
+    def _locate(name: str) -> Optional[str]:
+        for p in overlay_plots or []:
+            if Path(p).name == name and Path(p).is_file():
+                return str(p)
+        if base_analysis_dir:
+            cand = Path(base_analysis_dir) / name
+            if cand.is_file():
+                return str(cand)
+        return None
+
+    cards: List[str] = []
+    for fname, title, caption in specs:
+        path = _locate(fname)
+        if not path:
+            continue
+        uri = _encode_image(path)
+        if uri is None:
+            continue
+        cards.append(
+            f'<div class="plot-card">'
+            f'<img src="{uri}" alt="{_html_mod.escape(title)}" loading="lazy">'
+            f'<p><b>{_html_mod.escape(title)}</b><br>{_html_mod.escape(caption)}</p>'
+            f'</div>\n'
+        )
+
+    if not cards:
+        return ""
+
+    return (
+        "<h2>&#127793; Phylogenetic Trees</h2>\n"
+        "<p>Cross-simulation relationships inferred directly from the provided "
+        "structures. Newick trees and pairwise distance matrices are written "
+        "alongside these figures in the analysis directory.</p>\n"
+        '<div class="plot-grid">\n' + "".join(cards) + "</div>\n"
+    )
+
+
+def _build_classification_dynamics_section(
+    overlay_plots: List[str],
+    user_goal: Optional[str] = None,
+    report_focus: Optional[str] = None,
+    enriched_prompt: Optional[str] = None,
+    report_plan: Optional[Any] = None,
+    base_analysis_dir: Optional[str] = None,
+) -> str:
+    """
+    Dedicated section for unsupervised classification / cluster-based dynamics.
+
+    Highlights the FEL-derived phylogenetic tree, cluster assignments, and
+    per-cluster trajectory overlays that distinguish dynamic regimes.
+    """
+    from src.reporter.figure_selector import (
+        partition_combined_overlay_plots,
+        resolve_report_narrative,
+    )
+
+    plan = report_plan
+    if plan and getattr(plan, "classification_section", None):
+        cs = plan.classification_section
+        if not cs.include or not cs.plot_paths:
+            return ""
+        parts = partition_combined_overlay_plots(cs.plot_paths)
+        intro = cs.summary or ""
+        subsection_summaries = getattr(plan, "subsection_summaries", None) or {}
+    else:
+        narrative = resolve_report_narrative(
+            user_goal or "",
+            report_focus or "",
+            enriched_prompt or "",
+        )
+        if not narrative.classification_primary and not any(
+            "classification_" in Path(p).name.lower() or "by_cluster" in Path(p).name.lower()
+            for p in overlay_plots
+        ):
+            return ""
+        parts = partition_combined_overlay_plots(overlay_plots)
+        intro = (
+            "Unsupervised grouping of simulations from conformational and binding-site "
+            "dynamics features. The phylogenetic tree and cluster overlays summarise "
+            "which systems share similar dynamic regimes and how ATP–pocket coupling "
+            "differs between clusters."
+        )
+        subsection_summaries = {}
+    summary = parts.get("classification_summary") or []
+    trajectories = parts.get("cluster_trajectories") or []
+    rmsf = parts.get("cluster_rmsf") or []
+
+    if not (summary or trajectories or rmsf):
+        return ""
+
+    def _img_card(path: str, caption: str) -> str:
+        uri = _encode_image(path)
+        if not uri:
+            return ""
+        return (
+            f'<div class="plot-card">'
+            f'<p><strong>{_html_mod.escape(caption)}</strong></p>'
+            f'<img src="{uri}" alt="{_html_mod.escape(caption)}" loading="lazy">'
+            f'<p class="plot-caption">{_html_mod.escape(Path(path).name)}</p>'
+            f'</div>\n'
+        )
+
+    def _caption_for(path: str) -> str:
+        name = Path(path).stem.replace("_", " ").title()
+        if "phylo" in path.lower():
+            return "Unrooted phylogenetic tree from FEL-based dynamic features"
+        if "pca" in name.lower() and "cluster" in name.lower():
+            return "PCA projection coloured by unsupervised cluster assignment"
+        if "dendrogram" in name.lower():
+            return "Hierarchical clustering dendrogram (protein labels)"
+        if "com_distance" in path.lower():
+            return "ATP–catalytic pocket COM distance by cluster"
+        if "contacts" in path.lower():
+            return "Protein–ATP contacts by cluster"
+        if "pocket_sasa" in path.lower():
+            return "Binding-pocket SASA by cluster"
+        if "residence" in path.lower():
+            return "Ligand residence / unbinding events by cluster"
+        if "pocket_rmsf" in path.lower():
+            return "Pocket RMSF profiles by cluster"
+        if "ligand_rmsf" in path.lower():
+            return "Ligand RMSF profiles by cluster"
+        return name
+
+    html_parts: List[str] = [
+        "<h2>&#128202; Dynamic Classification &amp; Cluster Analysis</h2>\n",
+        f"<p>{_html_mod.escape(intro)}</p>\n",
+    ]
+
+    def _subsection(title: str, section_id: str, paths: List[str]) -> str:
+        if not paths:
+            return ""
+        summary_text = subsection_summaries.get(section_id, "")
+        header = f"<h3>{_html_mod.escape(title)}</h3>\n"
+        if summary_text:
+            header += f"<p>{_html_mod.escape(summary_text)}</p>\n"
+        cards = [_img_card(p, _caption_for(p)) for p in paths]
+        cards = [c for c in cards if c]
+        if not cards:
+            return ""
+        return header + '<div class="plot-grid">\n' + "".join(cards) + "</div>\n"
+
+    html_parts.append(_subsection("Cluster assignment summary", "classification_summary", summary))
+    html_parts.append(_subsection(
+        "Cluster-resolved binding-site trajectories",
+        "cluster_trajectories",
+        trajectories,
+    ))
+    html_parts.append(_subsection(
+        "Cluster-resolved flexibility (RMSF)",
+        "cluster_rmsf",
+        rmsf,
+    ))
+
+    body = "".join(html_parts)
+    if body.count("<img ") == 0:
+        return ""
+    return body
+
+
 def _build_comparative_dynamics_section(
     overlay_plots: List[str],
     sims_summary: List[Dict[str, Any]],
@@ -2186,17 +2427,22 @@ def _build_comparative_dynamics_section(
     labels: List[str],
     user_goal: Optional[str] = None,
     cache_dir: Optional[str] = None,
+    report_focus: Optional[str] = None,
+    enriched_prompt: Optional[str] = None,
 ) -> str:
     """Build the Comparative Dynamics Summary multi-panel HTML section.
 
-    Panel A — RMSD overlay (structural stability over time)
-    Panel B — RMSF overlay (per-residue backbone flexibility)
-    Panel C — Rg comparison (structural compactness over time)
-    Panel D — ATP/ligand pocket distance (active-site geometry)
-    Panel E — DCCM Apo | Holo | ΔDCCM triptychs (one per protein, stacked)
-    Panel F — Summary bar chart generated from per-sim statistics
-    Panel G — Secondary structure (DSSP) comparison + activation-loop heatmaps
+    Only panels relevant to the user goal (with data) are included.
+    Cluster-level binding metrics supersede redundant global COM overlays.
     """
+    from src.reporter.figure_selector import panel_is_relevant, resolve_report_narrative
+
+    narrative = resolve_report_narrative(
+        user_goal or "",
+        report_focus or "",
+        enriched_prompt or "",
+        n_simulations=len(labels),
+    )
 
     def _panel(
         panel_id: str,
@@ -2299,9 +2545,14 @@ def _build_comparative_dynamics_section(
         _img(rg_path, "Rg overlay") if rg_path else _missing("No Rg overlay found"),
     )
 
-    # ── Panel D: ATP–catalytic pocket COM distance (combined overlay only) ─
+    # ── Panel D: ATP–catalytic pocket COM distance ───────────────────────
     com_overlay = _find_overlay_by_type(overlay_plots, "com_distance")
-    if com_overlay:
+    com_by_cluster = _find_overlay_by_type(overlay_plots, "com_distance_by_cluster")
+    pocket_plots: List[Tuple[str, str]] = []
+    skip_com_panel = narrative.prefer_cluster_views and bool(com_by_cluster)
+    if skip_com_panel:
+        pocket_body = ""
+    elif com_overlay:
         pocket_body = (
             '<p style="font-size:12px;color:#6b7280;margin:0 0 6px 0;">'
             'Combined overlay — apo vs holo (holo systems with bound ATP)</p>'
@@ -2315,15 +2566,17 @@ def _build_comparative_dynamics_section(
             pocket_body = _img_stack([p for _, p in pocket_plots], "Pocket distance")
         else:
             pocket_body = _missing("No ATP–pocket COM distance data found")
+    has_com_data = bool(not skip_com_panel and (com_overlay or pocket_plots))
 
     panel_d = _panel(
         "D", "ATP–Catalytic Pocket COM Distance",
-        "Center-of-mass distance between ATP and the catalytic pocket (apo vs holo)",
+        "Center-of-mass distance between ATP and the catalytic pocket",
         pocket_body,
     )
 
     # ── Panel E: Apo | Holo | ΔDCCM triptychs only (stacked, full width) ──
     dccm_panel_plots = _find_dccm_apo_holo_panel_plots(overlay_plots)
+    dccm_ov = _find_overlay_by_type(overlay_plots, "dccm")
     if dccm_panel_plots:
         dccm_body = (
             '<p style="font-size:12px;color:#6b7280;margin:0 0 10px;">'
@@ -2331,8 +2584,8 @@ def _build_comparative_dynamics_section(
             + _img_stack(dccm_panel_plots, "DCCM apo holo delta")
         )
     else:
-        dccm_ov = _find_overlay_by_type(overlay_plots, "dccm")
         dccm_body = _img(dccm_ov, "DCCM heatmap") if dccm_ov else _missing("No DCCM apo/holo panels found")
+    has_dccm_data = bool(dccm_panel_plots or dccm_ov)
 
     panel_e = _panel(
         "E", "DCCM Apo | Holo | \u0394DCCM",
@@ -2394,18 +2647,51 @@ def _build_comparative_dynamics_section(
     # ── Ranking table ─────────────────────────────────────────────────────
     ranking_table = _build_ranking_summary_table(sims_summary)
 
+    def _include_panel(panel_id: str, panel_html: str, has_data: bool) -> bool:
+        return panel_is_relevant(
+            panel_id,
+            user_goal=user_goal or "",
+            report_focus=report_focus or "",
+            enriched_prompt=enriched_prompt or "",
+            has_data=has_data,
+            narrative=narrative,
+        )
+
+    panels: List[str] = []
+    if _include_panel("A", panel_a, bool(rmsd_path)):
+        panels.append(panel_a)
+    if _include_panel("B", panel_b, bool(rmsf_apo_holo_plots or rmsf_path or rmsf_segment_plots)):
+        panels.append(panel_b)
+    if _include_panel("C", panel_c, bool(rg_path)):
+        panels.append(panel_c)
+    if _include_panel("D", panel_d, has_com_data):
+        panels.append(panel_d)
+    if _include_panel("E", panel_e, has_dccm_data):
+        panels.append(panel_e)
+    if _include_panel("F", panel_f, bool(bar_svg)):
+        panels.append(panel_f)
+    if _include_panel("G", panel_g, bool(dssp_comparison or dssp_heatmaps)):
+        panels.append(panel_g)
+
+    if not panels:
+        return (
+            '<h2>&#128202; Comparative Dynamics Summary</h2>\n'
+            '<p>No comparative overlay panels matched the study objective. '
+            'See per-simulation highlights and statistics below.</p>\n'
+            + ranking_table
+        )
+
     return (
         '<h2>&#128202; Comparative Dynamics Summary</h2>\n'
-        '<p>Multi-panel comparison of structural dynamics across all simulations. '
-        'Each panel spans the full report width for side-by-side visual comparison.</p>\n'
-        '<div class="dyn-panel-grid">\n'
-        + panel_a + "\n"
-        + panel_b + "\n"
-        + panel_c + "\n"
-        + panel_d + "\n"
-        + panel_e + "\n"
-        + panel_f + "\n"
-        + panel_g + "\n"
+        + (
+            '<p>Supplementary cross-simulation panels; cluster-resolved dynamics '
+            'are summarised in the classification section above.</p>\n'
+            if narrative.classification_primary
+            else f'<p>Cross-simulation comparison panels selected for this study objective '
+            f'({len(panels)} panel(s)).</p>\n'
+        )
+        + '<div class="dyn-panel-grid">\n'
+        + "\n".join(panels)
         + '</div>\n'
         + ranking_table
     )
@@ -2429,6 +2715,8 @@ def generate_combined_html_report(
     literature_refs: Optional[List[Dict[str, Any]]] = None,
     literature_review: Optional[str] = None,
     final_impression: Optional[str] = None,
+    report_focus: Optional[str] = None,
+    report_plan: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Generate a rich comparison HTML report spanning multiple MD simulations.
@@ -2461,15 +2749,36 @@ def generate_combined_html_report(
     output_path = str(Path(working_dir) / output_file)
 
     # ---- Build label → protein name map from user_goal + protein_name ------
-    # Merge: explicit protein_name overrides nothing; user_goal text has the
-    # full "uniprotId: ProteinName" table the user typed.
+    raw_labels = [Path(d).name for d in sim_dirs]
     _combined_text = " ".join(filter(None, [user_goal, enriched_prompt, protein_name]))
-    label_name_map = _parse_label_name_map(_combined_text)
-    # Also fold in any "(label) ProteinName" style from enriched_prompt if we
-    # didn't already find the label there.
+    label_name_map = _parse_label_name_map(_combined_text, sim_labels=raw_labels)
     if label_name_map:
         logger.info("Label → protein name map: %s", label_name_map)
         labels = apply_label_name_map(labels, label_name_map)
+
+    from src.reporter.report_curator import build_report_headline
+
+    if report_plan is None:
+        from src.reporter.report_curator import build_combined_report_plan
+        base_for_plan = str(Path(working_dir).parent / "analysis")
+        report_plan = build_combined_report_plan(
+            overlay_plots,
+            sim_dirs,
+            raw_labels,
+            user_goal=user_goal or "",
+            enriched_prompt=enriched_prompt or "",
+            base_analysis_dir=base_for_plan,
+            label_name_map=label_name_map,
+        )
+
+    if report_plan and getattr(report_plan, "included_overlay_plots", None):
+        overlay_plots = list(report_plan.included_overlay_plots)
+
+    report_headline = (
+        report_plan.headline
+        if report_plan and getattr(report_plan, "headline", None)
+        else build_report_headline(raw_labels, label_name_map, user_goal=user_goal or "")
+    )
 
     # ---- Collect data -------------------------------------------------------
     sims_summary = _collect_sim_summaries(sim_dirs, labels, label_name_map)
@@ -2477,12 +2786,41 @@ def generate_combined_html_report(
 
     stats_html = _build_stats_section(sims_summary)
 
-    # Comparative Dynamics Summary — multi-panel figure (Panels A–G)
     base_analysis_dir = str(Path(working_dir).parent / "analysis")
+
+    from src.reporter.figure_selector import (
+        collect_paths_for_combined_sections,
+        resolve_report_narrative,
+    )
+
+    narrative = resolve_report_narrative(
+        user_goal or "",
+        report_focus or "",
+        enriched_prompt or "",
+        n_simulations=len(sim_dirs),
+    )
+
+    classification_html = _build_classification_dynamics_section(
+        overlay_plots,
+        user_goal=user_goal,
+        report_focus=report_focus,
+        enriched_prompt=enriched_prompt,
+        report_plan=report_plan,
+        base_analysis_dir=base_analysis_dir,
+    )
+
+    phylo_trees_html = _build_phylo_trees_section(
+        overlay_plots,
+        base_analysis_dir=base_analysis_dir,
+    )
+
+    # Comparative Dynamics Summary — multi-panel figure (Panels A–G)
     comparative_html = _build_comparative_dynamics_section(
         overlay_plots, sims_summary, sim_dirs, labels,
         user_goal=user_goal,
         cache_dir=base_analysis_dir if Path(base_analysis_dir).is_dir() else str(Path(working_dir) / ".dssp_cache"),
+        report_focus=report_focus,
+        enriched_prompt=enriched_prompt,
     )
 
     # The "Additional Comparison Figures" section is intentionally omitted:
@@ -2490,17 +2828,40 @@ def generate_combined_html_report(
     # Summary, so a supplementary figure dump would only duplicate them.
     extra_plots_section = ""
 
-    # 3D viewer: significant structures per simulation (FEL basins preferred)
+    # 3D viewer: significant structures per simulation (FEL basins preferred).
+    # A StructureHighlightPlan (goal/data/LLM-driven) decides which proteins get
+    # multiple metastates and which are skipped, so the viewer tells a story
+    # instead of dumping one structure per simulation.
+    structure_highlight = getattr(report_plan, "structure_highlight", None)
     pdb_frames = _select_significant_pdbs_for_combined(
         sim_dirs,
         labels,
         label_name_map=label_name_map,
         max_per_sim=2,
         max_total=max(len(sim_dirs) * 2, 16),
+        user_goal=user_goal,
+        enriched_prompt=enriched_prompt,
+        highlight_plan=structure_highlight,
     )
     viewer_html = _build_3d_viewer_html(pdb_frames) if pdb_frames else ""
 
-    per_sim_highlights_html = _build_per_sim_highlights_section(sims_summary, sim_dirs)
+    # Paths already shown in classification / comparative sections — exclude from per-sim highlights
+    comparative_paths = collect_paths_for_combined_sections(overlay_plots, narrative)
+
+    _highlight_labels = None
+    if structure_highlight is not None and getattr(structure_highlight, "restrict_highlights", False):
+        _highlight_labels = set(structure_highlight.highlight_labels)
+
+    per_sim_highlights_html = _build_per_sim_highlights_section(
+        sims_summary,
+        sim_dirs,
+        user_goal=user_goal,
+        report_focus=report_focus,
+        enriched_prompt=enriched_prompt,
+        exclude_paths=comparative_paths,
+        allowed_labels=_highlight_labels,
+        structure_highlight=structure_highlight,
+    )
 
     # Literature: prefer freshly searched refs; fall back to per-sim HTML aggregation
     if literature_refs:
@@ -2534,6 +2895,7 @@ def generate_combined_html_report(
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     sims_list_html = ", ".join(f"<b>{_html_mod.escape(s['label'])}</b>" for s in sims_summary)
 
+    # report_headline set above from report_plan / build_report_headline
     # ---- Simulations overview table (enhanced) ------------------------------
     sim_overview_rows = ""
     for s in sims_summary:
@@ -2567,18 +2929,6 @@ def generate_combined_html_report(
     )
 
     # ---- Assemble HTML ------------------------------------------------------
-    if label_name_map:
-        unique_names = sorted(set(label_name_map.values()))
-        if len(unique_names) == 1:
-            report_headline = f"{unique_names[0]} — Multi-Simulation Comparison"
-        elif len(unique_names) <= 4:
-            report_headline = f"{' / '.join(unique_names)} — Kinase Comparison"
-        else:
-            report_headline = f"{len(unique_names)} Kinases — Multi-Simulation Comparison"
-    elif protein_name:
-        report_headline = f"{protein_name} — Multi-Simulation Comparison"
-    else:
-        report_headline = title or "Multi-Simulation Report"
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2611,6 +2961,14 @@ def generate_combined_html_report(
 {viewer_html}
 
 {"<div class='section-divider'></div>" if viewer_html else ""}
+
+{classification_html}
+
+{"<div class='section-divider'></div>" if classification_html else ""}
+
+{phylo_trees_html}
+
+{"<div class='section-divider'></div>" if phylo_trees_html else ""}
 
 {comparative_html}
 

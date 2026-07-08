@@ -28,6 +28,88 @@ except ImportError:
     HAS_NUMPY = False
 
 
+def compute_rmsd_from_universe(
+    u,
+    *,
+    topology_file: str,
+    trajectory_file: str,
+    selection: str = "protein and name CA",
+    reference_frame: int = 0,
+    output_file: Optional[str] = None,
+    working_dir: Optional[str] = None,
+    align_before_rmsd: bool = True,
+    pre_aligned: bool = False,
+) -> Dict[str, Any]:
+    """Compute RMSD using a pre-loaded Universe (optionally pre-aligned)."""
+    if not HAS_MDA or not HAS_NUMPY:
+        return {"success": False, "error": "MDAnalysis and numpy are required for RMSD"}
+
+    if pre_aligned:
+        align_before_rmsd = False
+
+    R = rms.RMSD(
+        u,
+        select=selection,
+        ref_frame=reference_frame,
+        groupselections=[selection] if not align_before_rmsd else None,
+    )
+    R.run()
+
+    rmsd_data = R.results.rmsd
+    times = rmsd_data[:, 1]
+    rmsd_values = rmsd_data[:, 2]
+
+    mean_rmsd = float(np.mean(rmsd_values))
+    std_rmsd = float(np.std(rmsd_values))
+    min_rmsd = float(np.min(rmsd_values))
+    max_rmsd = float(np.max(rmsd_values))
+
+    output_filename = output_file or "rmsd.dat"
+    with open(output_filename, "w") as f:
+        f.write("# Time(ns)\tRMSD(Angstrom)\n")
+        for t, r in zip(times, rmsd_values):
+            f.write(f"{t/1000.0:.4f}\t{r:.4f}\n")
+
+    if working_dir:
+        try:
+            append_analysis_summary(
+                working_dir=working_dir,
+                analysis_type="RMSD",
+                statistics={
+                    "n_frames": len(rmsd_values),
+                    "mean_rmsd_angstrom": mean_rmsd,
+                    "std_rmsd_angstrom": std_rmsd,
+                    "min_rmsd_angstrom": min_rmsd,
+                    "max_rmsd_angstrom": max_rmsd,
+                },
+                files={
+                    "topology": topology_file,
+                    "trajectory": trajectory_file,
+                    "data": output_filename,
+                },
+                metadata={
+                    "selection": selection,
+                    "reference_frame": reference_frame,
+                    "alignment_performed": align_before_rmsd,
+                    "pre_aligned_universe": pre_aligned,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write to summary file: {e}")
+
+    return {
+        "success": True,
+        "mean_rmsd": mean_rmsd,
+        "std_rmsd": std_rmsd,
+        "min_rmsd": min_rmsd,
+        "max_rmsd": max_rmsd,
+        "n_frames": len(rmsd_values),
+        "selection": selection,
+        "output_file": output_filename,
+        "message": f"RMSD calculation complete: mean={mean_rmsd:.2f} Å, std={std_rmsd:.2f} Å",
+    }
+
+
 @tool
 def calculate_rmsd(
     topology_file: str,
@@ -88,86 +170,19 @@ def calculate_rmsd(
         # Use MDAnalysis if available
         if HAS_MDA and HAS_NUMPY:
             logger.info(f"Calculating RMSD using MDAnalysis for {trajectory_file}")
-            
-            # Load universe
-            u = mda.Universe(topology_file, trajectory_file)
-            
-            # Create RMSD analysis object
-            # Note: MDAnalysis RMSD automatically aligns unless you disable it
-            R = rms.RMSD(
-                u,
-                select=selection,
-                ref_frame=reference_frame,
-                groupselections=[selection] if not align_before_rmsd else None
+            result = compute_rmsd_from_universe(
+                mda.Universe(topology_file, trajectory_file),
+                topology_file=topology_file,
+                trajectory_file=trajectory_file,
+                selection=selection,
+                reference_frame=reference_frame,
+                output_file=output_file,
+                working_dir=working_dir,
+                align_before_rmsd=align_before_rmsd,
             )
-            
-            # Run analysis
-            R.run()
-            
-            # Extract results
-            rmsd_data = R.results.rmsd  # Shape: (n_frames, 3) - [frame, time, RMSD]
-            times = rmsd_data[:, 1]  # Time in ps
-            rmsd_values = rmsd_data[:, 2]  # RMSD in Angstroms
-            
-            # Calculate statistics
-            mean_rmsd = float(np.mean(rmsd_values))
-            std_rmsd = float(np.std(rmsd_values))
-            min_rmsd = float(np.min(rmsd_values))
-            max_rmsd = float(np.max(rmsd_values))
-            
-            # Save data if requested (use filename only, already in working_dir)
-            if output_file:
-                output_filename = output_file
-            else:
-                output_filename = "rmsd.dat"
-            
-            with open(output_filename, 'w') as f:
-                f.write("# Time(ns)\tRMSD(Angstrom)\n")
-                for t, r in zip(times, rmsd_values):
-                    f.write(f"{t/1000.0:.4f}\t{r:.4f}\n")  # Convert ps to ns
-            
-            logger.info(f"RMSD data saved to {output_filename}")
-            
-            # Write to analysis summary file
             if working_dir:
-                try:
-                    append_analysis_summary(
-                        working_dir=working_dir,
-                        analysis_type="RMSD",
-                        statistics={
-                            "n_frames": len(rmsd_values),
-                            "mean_rmsd_angstrom": mean_rmsd,
-                            "std_rmsd_angstrom": std_rmsd,
-                            "min_rmsd_angstrom": min_rmsd,
-                            "max_rmsd_angstrom": max_rmsd
-                        },
-                        files={
-                            "topology": topology_file,
-                            "trajectory": trajectory_file,
-                            "data": output_filename if output_file else None
-                        },
-                        metadata={
-                            "selection": selection,
-                            "reference_frame": reference_frame,
-                            "alignment_performed": align_before_rmsd
-                        }
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to write to summary file: {e}")
-                
                 os.chdir(original_dir)
-            
-            return {
-                "success": True,
-                "mean_rmsd": mean_rmsd,
-                "std_rmsd": std_rmsd,
-                "min_rmsd": min_rmsd,
-                "max_rmsd": max_rmsd,
-                "n_frames": len(rmsd_values),
-                "selection": selection,
-                "output_file": output_file,
-                "message": f"RMSD calculation complete: mean={mean_rmsd:.2f} Å, std={std_rmsd:.2f} Å"
-            }
+            return result
         
         # Fallback: Use GROMACS gmx rms
         else:

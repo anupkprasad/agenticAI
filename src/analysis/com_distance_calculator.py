@@ -16,6 +16,7 @@ from typing import Dict, Any, Optional
 from pathlib import Path
 from langchain.tools import tool
 from .summary_logger import append_analysis_summary
+from .pbc_utils import minimum_image_distance, clean_pbc_distance_series
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,279 @@ try:
     HAS_NUMPY = True
 except ImportError:
     HAS_NUMPY = False
+
+
+def finalize_com_distance_result(
+    frames: list,
+    times: list,
+    distances: list,
+    *,
+    selection1: str,
+    selection2: str,
+    label1: str,
+    label2: str,
+    output_file: Optional[str],
+    topology_file: str,
+    trajectory_file: str,
+    working_dir: Optional[str],
+    frame_interval: int = 1,
+) -> Dict[str, Any]:
+    if not distances:
+        return {"success": False, "error": "No COM distance values collected"}
+
+    distances_arr = np.array(distances)
+    mean_dist = float(np.mean(distances_arr))
+    std_dist = float(np.std(distances_arr))
+    min_dist = float(np.min(distances_arr))
+    max_dist = float(np.max(distances_arr))
+
+    if not output_file:
+        safe1 = label1.replace(" ", "_")
+        safe2 = label2.replace(" ", "_")
+        output_file = f"com_distance_{safe1}_vs_{safe2}.csv"
+
+    with open(output_file, "w") as f:
+        f.write("frame,time_ns,distance_angstrom\n")
+        for fr, t, d in zip(frames, times, distances):
+            f.write(f"{fr},{t/1000.0:.4f},{d:.4f}\n")
+
+    analysis_type = f"INTER_COM_Distance_{label1}_vs_{label2}"
+    if working_dir:
+        try:
+            append_analysis_summary(
+                working_dir=working_dir,
+                analysis_type=analysis_type,
+                statistics={
+                    "n_frames": len(distances),
+                    "mean_distance_angstrom": mean_dist,
+                    "std_distance_angstrom": std_dist,
+                    "min_distance_angstrom": min_dist,
+                    "max_distance_angstrom": max_dist,
+                },
+                files={"topology": topology_file, "trajectory": trajectory_file, "data": output_file},
+                metadata={
+                    "selection1": selection1,
+                    "selection2": selection2,
+                    "label1": label1,
+                    "label2": label2,
+                    "frame_interval": frame_interval,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write to summary file: {e}")
+
+    return {
+        "success": True,
+        "mean_distance": mean_dist,
+        "std_distance": std_dist,
+        "min_distance": min_dist,
+        "max_distance": max_dist,
+        "n_frames": len(distances),
+        "selection1": selection1,
+        "selection2": selection2,
+        "label1": label1,
+        "label2": label2,
+        "output_file": output_file,
+        "message": (
+            f"COM distance ({label1} vs {label2}): "
+            f"mean={mean_dist:.2f} Å, std={std_dist:.2f} Å"
+        ),
+    }
+
+
+def compute_com_distance_from_universe(
+    u,
+    *,
+    topology_file: str,
+    trajectory_file: str,
+    selection1: str,
+    selection2: str,
+    label1: str = "group1",
+    label2: str = "group2",
+    output_file: Optional[str] = None,
+    working_dir: Optional[str] = None,
+    frame_interval: int = 1,
+) -> Dict[str, Any]:
+    if not HAS_MDA or not HAS_NUMPY:
+        return {"success": False, "error": "MDAnalysis and numpy are required for COM distance"}
+
+    group1 = u.select_atoms(selection1)
+    group2 = u.select_atoms(selection2)
+    if len(group1) == 0:
+        return {"success": False, "error": f"Selection 1 matched 0 atoms: '{selection1}'"}
+    if len(group2) == 0:
+        return {"success": False, "error": f"Selection 2 matched 0 atoms: '{selection2}'"}
+
+    frames, times, distances = [], [], []
+    for ts in u.trajectory[::frame_interval]:
+        try:
+            group1.wrap(compound="residues")
+            group2.wrap(compound="residues")
+        except Exception:
+            pass
+        dist = minimum_image_distance(
+            group1.center_of_mass(), group2.center_of_mass(), getattr(ts, "dimensions", None)
+        )
+        frames.append(int(ts.frame))
+        times.append(float(ts.time))
+        distances.append(dist)
+
+    # Remove residual transient PBC spikes so stats/plots are not corrupted.
+    cleaned, _, n_removed = clean_pbc_distance_series(distances)
+    if n_removed:
+        logger.info("COM distance (%s vs %s): removed %d PBC spike(s)", label1, label2, n_removed)
+        distances = [float(v) for v in cleaned]
+
+    return finalize_com_distance_result(
+        frames, times, distances,
+        selection1=selection1,
+        selection2=selection2,
+        label1=label1,
+        label2=label2,
+        output_file=output_file,
+        topology_file=topology_file,
+        trajectory_file=trajectory_file,
+        working_dir=working_dir,
+        frame_interval=frame_interval,
+    )
+
+
+def finalize_ligand_pocket_distance_result(
+    frames: list,
+    times: list,
+    distances: list,
+    *,
+    ligand_selection: str,
+    protein_selection: str,
+    cutoff: float,
+    pocket_resids: list,
+    n_pocket_atoms: int,
+    output_file: Optional[str],
+    topology_file: str,
+    trajectory_file: str,
+    working_dir: Optional[str],
+) -> Dict[str, Any]:
+    if not distances:
+        return {"success": False, "error": "No ligand pocket distance values collected"}
+
+    distances_arr = np.array(distances)
+    mean_dist = float(np.mean(distances_arr))
+    std_dist = float(np.std(distances_arr))
+    min_dist = float(np.min(distances_arr))
+    max_dist = float(np.max(distances_arr))
+
+    if not output_file:
+        lig_tag = ligand_selection.replace(" ", "_")
+        output_file = f"ligand_pocket_distance_{lig_tag}_cutoff{int(cutoff)}A.csv"
+
+    with open(output_file, "w") as fh:
+        fh.write("frame,time_ns,distance_angstrom\n")
+        for fr, t, d in zip(frames, times, distances):
+            fh.write(f"{fr},{t/1000.0:.4f},{d:.4f}\n")
+
+    if working_dir:
+        try:
+            append_analysis_summary(
+                working_dir=working_dir,
+                analysis_type="Ligand_Pocket_COM_Distance",
+                statistics={
+                    "n_frames": len(distances),
+                    "cutoff_angstrom": cutoff,
+                    "n_pocket_atoms": n_pocket_atoms,
+                    "mean_distance_angstrom": mean_dist,
+                    "std_distance_angstrom": std_dist,
+                    "min_distance_angstrom": min_dist,
+                    "max_distance_angstrom": max_dist,
+                },
+                files={"topology": topology_file, "trajectory": trajectory_file, "data": output_file},
+                metadata={
+                    "ligand_selection": ligand_selection,
+                    "protein_selection": protein_selection,
+                    "pocket_residues": pocket_resids,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write analysis summary: {e}")
+
+    return {
+        "success": True,
+        "n_pocket_atoms": n_pocket_atoms,
+        "n_pocket_residues": len(pocket_resids),
+        "mean_distance": mean_dist,
+        "std_distance": std_dist,
+        "min_distance": min_dist,
+        "max_distance": max_dist,
+        "n_frames": len(distances),
+        "output_file": output_file,
+        "message": f"Ligand-pocket COM distance: mean={mean_dist:.2f} Å",
+    }
+
+
+def compute_ligand_pocket_distance_from_universe(
+    u,
+    *,
+    topology_file: str,
+    trajectory_file: str,
+    ligand_selection: str = "resname LIG",
+    protein_selection: str = "protein",
+    cutoff: float = 5.0,
+    output_file: Optional[str] = None,
+    working_dir: Optional[str] = None,
+    frame_interval: int = 1,
+) -> Dict[str, Any]:
+    """Ligand pocket distance from a pre-loaded Universe (single traverse)."""
+    if not HAS_MDA or not HAS_NUMPY:
+        return {"success": False, "error": "MDAnalysis and numpy are required"}
+
+    u.trajectory[0]
+    ligand = u.select_atoms(ligand_selection)
+    if len(ligand) == 0:
+        return {"success": False, "error": f"Ligand selection matched 0 atoms: '{ligand_selection}'"}
+
+    pocket_sel_str = f"({protein_selection}) and around {cutoff} ({ligand_selection})"
+    pocket_atoms = u.select_atoms(pocket_sel_str)
+    if len(pocket_atoms) == 0:
+        return {
+            "success": False,
+            "error": f"No protein atoms within {cutoff} Å of ligand at frame 0",
+        }
+
+    pocket_frozen = u.atoms[pocket_atoms.indices]
+    pocket_resids = sorted(set(pocket_frozen.resids))
+
+    frames, times, distances = [], [], []
+    for ts in u.trajectory[::frame_interval]:
+        try:
+            pocket_frozen.wrap(compound="residues")
+            ligand.wrap(compound="residues")
+        except Exception:
+            pass
+        dist = minimum_image_distance(
+            pocket_frozen.center_of_mass(), ligand.center_of_mass(), getattr(ts, "dimensions", None)
+        )
+        frames.append(int(ts.frame))
+        times.append(float(ts.time))
+        distances.append(dist)
+
+    cleaned, _, n_removed = clean_pbc_distance_series(distances)
+    if n_removed:
+        logger.info("Ligand-pocket distance: removed %d PBC spike(s)", n_removed)
+        distances = [float(v) for v in cleaned]
+
+    return finalize_ligand_pocket_distance_result(
+        frames,
+        times,
+        distances,
+        ligand_selection=ligand_selection,
+        protein_selection=protein_selection,
+        cutoff=cutoff,
+        pocket_resids=pocket_resids,
+        n_pocket_atoms=len(pocket_frozen),
+        output_file=output_file,
+        topology_file=topology_file,
+        trajectory_file=trajectory_file,
+        working_dir=working_dir,
+    )
 
 
 @tool
@@ -98,108 +372,22 @@ def calculate_com_distance(
             f"Calculating COM distance: '{selection1}' ({label1}) vs '{selection2}' ({label2})"
         )
 
-        # Load universe
         u = mda.Universe(topology_file, trajectory_file)
-
-        # Create atom groups
-        group1 = u.select_atoms(selection1)
-        group2 = u.select_atoms(selection2)
-
-        if len(group1) == 0:
-            return {"success": False, "error": f"Selection 1 matched 0 atoms: '{selection1}'"}
-        if len(group2) == 0:
-            return {"success": False, "error": f"Selection 2 matched 0 atoms: '{selection2}'"}
-
-        logger.info(f"Selection 1 ({label1}): {len(group1)} atoms")
-        logger.info(f"Selection 2 ({label2}): {len(group2)} atoms")
-
-        # Compute per-frame COM distances
-        frames = []
-        times = []
-        distances = []
-
-        for ts in u.trajectory[::frame_interval]:
-            com1 = group1.center_of_mass()
-            com2 = group2.center_of_mass()
-            dist = float(np.linalg.norm(com1 - com2))
-            frames.append(ts.frame)
-            times.append(ts.time / 1000.0)  # ps -> ns
-            distances.append(dist)
-
-        distances_arr = np.array(distances)
-
-        # Statistics
-        mean_dist = float(np.mean(distances_arr))
-        std_dist = float(np.std(distances_arr))
-        min_dist = float(np.min(distances_arr))
-        max_dist = float(np.max(distances_arr))
-
-        # Determine output file
-        if not output_file:
-            safe1 = label1.replace(" ", "_")
-            safe2 = label2.replace(" ", "_")
-            output_file = f"com_distance_{safe1}_vs_{safe2}.csv"
-
-        # Write CSV
-        with open(output_file, "w") as f:
-            f.write("frame,time_ns,distance_angstrom\n")
-            for fr, t, d in zip(frames, times, distances):
-                f.write(f"{fr},{t:.4f},{d:.4f}\n")
-
-        logger.info(f"COM distance data saved to {output_file}")
-
-        # Determine analysis type label
-        analysis_type = f"INTER_COM_Distance_{label1}_vs_{label2}"
-
-        # Write to analysis summary
-        if working_dir:
-            try:
-                append_analysis_summary(
-                    working_dir=working_dir,
-                    analysis_type=analysis_type,
-                    statistics={
-                        "n_frames": len(distances),
-                        "mean_distance_angstrom": mean_dist,
-                        "std_distance_angstrom": std_dist,
-                        "min_distance_angstrom": min_dist,
-                        "max_distance_angstrom": max_dist,
-                    },
-                    files={
-                        "topology": topology_file,
-                        "trajectory": trajectory_file,
-                        "data": output_file,
-                    },
-                    metadata={
-                        "selection1": selection1,
-                        "selection2": selection2,
-                        "label1": label1,
-                        "label2": label2,
-                        "frame_interval": frame_interval,
-                    },
-                )
-            except Exception as e:
-                logger.warning(f"Failed to write to summary file: {e}")
-
+        result = compute_com_distance_from_universe(
+            u,
+            topology_file=topology_file,
+            trajectory_file=trajectory_file,
+            selection1=selection1,
+            selection2=selection2,
+            label1=label1,
+            label2=label2,
+            output_file=output_file,
+            working_dir=working_dir,
+            frame_interval=frame_interval,
+        )
+        if working_dir and original_dir:
             os.chdir(original_dir)
-
-        return {
-            "success": True,
-            "mean_distance": mean_dist,
-            "std_distance": std_dist,
-            "min_distance": min_dist,
-            "max_distance": max_dist,
-            "n_frames": len(distances),
-            "selection1": selection1,
-            "selection2": selection2,
-            "label1": label1,
-            "label2": label2,
-            "output_file": output_file,
-            "message": (
-                f"COM distance ({label1} vs {label2}): "
-                f"mean={mean_dist:.2f} Å, std={std_dist:.2f} Å, "
-                f"min={min_dist:.2f} Å, max={max_dist:.2f} Å"
-            ),
-        }
+        return result
 
     except Exception as e:
         logger.exception(f"COM distance calculation failed: {e}")
@@ -325,12 +513,27 @@ def calculate_ligand_pocket_distance(
         frames, times, distances = [], [], []
 
         for ts in u.trajectory[::frame_interval]:
+            try:
+                pocket_frozen.wrap(compound="residues")
+                ligand.wrap(compound="residues")
+            except Exception:
+                pass
             com_pocket = pocket_frozen.center_of_mass()
             com_ligand = ligand.center_of_mass()
-            dist = float(np.linalg.norm(com_pocket - com_ligand))
+            dist = minimum_image_distance(
+                com_pocket, com_ligand, getattr(ts, "dimensions", None)
+            )
             frames.append(int(ts.frame))
             times.append(float(ts.time) / 1000.0)  # ps → ns
             distances.append(dist)
+
+        # Strip residual transient PBC spikes before stats + CSV output.
+        cleaned, _, n_spikes = clean_pbc_distance_series(distances)
+        if n_spikes:
+            logger.info(
+                "Ligand pocket distance: removed %d transient PBC spike(s)", n_spikes
+            )
+            distances = [float(v) for v in cleaned]
 
         distances_arr = np.array(distances)
         mean_dist = float(np.mean(distances_arr))

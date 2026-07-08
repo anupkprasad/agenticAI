@@ -127,11 +127,75 @@ class MDWorkflow:
             # Save incremental state after key stages (used by non-HITL run())
             if node_name in self._SAVE_AFTER_NODES:
                 try:
+                    if result.get("is_multi_simulation"):
+                        from agentic.multi_sim_progress import (
+                            ensure_per_sim_working_directory,
+                            mark_sim_pipeline_stage,
+                            workflow_sim_label_for_hitl,
+                        )
+
+                        if node_name == "input_validation" and result.get("input_validated"):
+                            sim_label = (
+                                workflow_sim_label_for_hitl(result)
+                                or (result.get("multi_sim_progress") or {}).get(
+                                    "active_sim_label"
+                                )
+                            )
+                            if sim_label:
+                                mark_sim_pipeline_stage(
+                                    result, sim_label, input_validated=True
+                                )
+                        elif node_name == "planner" and result.get("execution_plan"):
+                            sim_label = (
+                                workflow_sim_label_for_hitl(result)
+                                or (result.get("multi_sim_progress") or {}).get(
+                                    "active_sim_label"
+                                )
+                            )
+                            if sim_label:
+                                mark_sim_pipeline_stage(
+                                    result,
+                                    sim_label,
+                                    planned=True,
+                                    enriched=True,
+                                )
+                        ensure_per_sim_working_directory(result)
                     self._save_progress(result, node_name)
                 except Exception as exc:
                     logger.debug(f"Incremental save after {node_name} failed: {exc}")
             return result
         return wrapped_node
+
+    @staticmethod
+    def _compute_recursion_limit(state: MDState) -> int:
+        """
+        LangGraph step budget for one ``invoke()`` call.
+
+        Scale with *remaining* per-sim work (not total queue size) so resume
+        runs are not capped after re-processing already-finished simulations.
+        """
+        if not state.get("is_multi_simulation"):
+            return 40
+        progress = state.get("multi_sim_progress") or {}
+        sim_order = progress.get("sim_order") or []
+        sims = progress.get("sims") or {}
+        agents = progress.get("required_agents") or ["analysis", "reporter"]
+        remaining = 0
+        for label in sim_order:
+            rec = sims.get(label) or {}
+            if rec.get("status") == "done":
+                continue
+            agent_map = rec.get("agents") or {}
+            if any(agent_map.get(a) != "done" for a in agents):
+                remaining += 1
+            elif rec.get("status") != "done":
+                remaining += 1
+        if not sim_order:
+            remaining = len(state.get("sim_prompts") or [])
+        steps_per_sim = 12
+        combined_headroom = 50 if state.get("run_combined_analysis") else 0
+        budget = steps_per_sim * max(remaining, 1) + combined_headroom
+        return min(max(budget, 80), 800)
     
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph workflow with proper agent hierarchy."""
@@ -156,6 +220,7 @@ class MDWorkflow:
         workflow.add_node("human_reporter_check", self._wrap_node("human_reporter_check", self.checkpoints.human_reporter_check))
         workflow.add_node("final_report", self._wrap_node("final_report", self._final_report_node))
         workflow.add_node("hpc_pool_wait", self._wrap_node("hpc_pool_wait", self._hpc_pool_wait_node))
+        workflow.add_node("parallel_pool_wait", self._wrap_node("parallel_pool_wait", self._parallel_pool_wait_node))
         
         # Set entry point
         workflow.set_entry_point("supervisor")
@@ -176,11 +241,18 @@ class MDWorkflow:
                 "human_reporter_check": "human_reporter_check",
                 "human_hpc_pool_check": "human_hpc_pool_check",
                 "hpc_pool_wait": "hpc_pool_wait",
+                "parallel_pool_wait": "parallel_pool_wait",
                 "final_report": "final_report",
                 END: END
             }
         )
         
+        workflow.add_conditional_edges(
+            "parallel_pool_wait",
+            lambda state: state.get("next_node", "supervisor"),
+            {"supervisor": "supervisor"},
+        )
+
         workflow.add_conditional_edges(
             "hpc_pool_wait",
             lambda state: state.get("next_node", "supervisor"),
@@ -339,7 +411,7 @@ class MDWorkflow:
         valid_nodes = [
             "input_validation", "planner", "preprocess", "setup", 
             "hpc", "analysis", "reporter", "human_reporter_check",
-            "human_hpc_pool_check", "hpc_pool_wait", "final_report"
+            "human_hpc_pool_check", "hpc_pool_wait", "parallel_pool_wait", "final_report"
         ]
         
         if next_node in valid_nodes:
@@ -378,7 +450,25 @@ class MDWorkflow:
         time.sleep(interval)
         state["next_node"] = "supervisor"
         return state
-    
+
+    def _parallel_pool_wait_node(self, state: MDState) -> MDState:
+        """Poll while local parallel workers run prep or analysis/reporter."""
+        import time
+        from agentic.multi_sim_parallel_pool import (
+            init_parallel_pool,
+            persist_parallel_pool_checkpoint,
+        )
+
+        pool = state.get("parallel_pool") or {}
+        phase = pool.get("phase") or "analysis"
+        init_parallel_pool(state, phase=phase)
+        interval = int(state.get("parallel_pool_poll_sec") or 30)
+        persist_parallel_pool_checkpoint(state)
+        logger.debug("Parallel pool: sleeping %ss before next worker check", interval)
+        time.sleep(interval)
+        state["next_node"] = "supervisor"
+        return state
+
     def _final_report_node(self, state: MDState) -> MDState:
         """Generate enhanced final workflow report using LLM when available."""
         
@@ -655,6 +745,21 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         progress = f"Workflow in progress — last completed stage: **{stage}**"
         self._save_execution_report(state, progress, stage=stage)
 
+    def _active_sim_working_dir(self, state: MDState) -> Optional[str]:
+        """Resolve the directory for the active per-simulation checkpoint."""
+        progress = state.get("multi_sim_progress") or {}
+        label = progress.get("active_sim_label")
+        if not label:
+            return None
+        rec = (progress.get("sims") or {}).get(label) or {}
+        wd = rec.get("working_dir")
+        if wd:
+            return str(Path(wd).resolve())
+        base = state.get("multi_sim_base_dir") or state.get("working_directory")
+        if base:
+            return str((Path(base) / label).resolve())
+        return None
+
     def _save_workflow_state(self, state: MDState):
         """Save serializable workflow state to working_dir/supervisor/state.jsonl."""
         try:
@@ -663,7 +768,15 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
 
                 ensure_multi_sim_progress(state)
 
-            working_dir = state.get("working_directory", ".")
+            multi_base_dir = state.get("multi_sim_base_dir")
+            active_wd = self._active_sim_working_dir(state)
+            per_sim_wd = active_wd or state.get("working_directory", ".")
+            # Base checkpoint is authoritative for multi-sim resume.
+            if state.get("is_multi_simulation") and multi_base_dir:
+                working_dir = str(Path(str(multi_base_dir)).resolve())
+            else:
+                working_dir = per_sim_wd
+
             supervisor_dir = Path(working_dir) / "supervisor"
             supervisor_dir.mkdir(parents=True, exist_ok=True)
             state_path = supervisor_dir / "state.jsonl"
@@ -687,18 +800,25 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 from agentic.multi_sim_progress import multisim_workflow_incomplete
 
                 if multisim_workflow_incomplete(state.get("multi_sim_progress")):
-                    persist_status = state.get("workflow_status") or "in_progress:checkpoint"
+                    persist_status = "in_progress:interrupted"
+            elif (
+                state.get("is_multi_simulation")
+                and persist_status not in ("completed", "failed")
+            ):
+                from agentic.multi_sim_progress import multisim_workflow_incomplete
+
+                if multisim_workflow_incomplete(state.get("multi_sim_progress")):
                     if not str(persist_status).startswith("in_progress"):
                         persist_status = "in_progress:checkpoint"
 
-            # HITL: keep multi-sim base working_directory stable when view is per-sim
-            if (
-                state.get("is_multi_simulation")
-                and state.get("multi_sim_base_dir")
-                and state.get("hitl_target_sim_label")
-            ):
+            # Keep base working_directory in the resume checkpoint for multi-sim.
+            if state.get("is_multi_simulation") and multi_base_dir:
                 serializable_state["working_directory"] = str(
-                    Path(state["multi_sim_base_dir"]).resolve()
+                    Path(str(multi_base_dir)).resolve()
+                )
+            elif state.get("hitl_target_sim_label") and multi_base_dir:
+                serializable_state["working_directory"] = str(
+                    Path(str(multi_base_dir)).resolve()
                 )
             
             entry = {
@@ -707,25 +827,21 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 "state": serializable_state,
             }
             
-            # Overwrite with a single entry so the file is always the latest state
             state_path.write_text(json.dumps(entry, indent=2, default=str) + "\n", encoding="utf-8")
 
-            # In multi-simulation mode, mirror the latest state at the base
-            # working directory as a resume checkpoint for subsequent reruns.
-            multi_base_dir = state.get("multi_sim_base_dir")
+            # Mirror to active per-sim directory when different from base.
             if state.get("is_multi_simulation") and multi_base_dir:
                 base_dir = Path(str(multi_base_dir)).resolve()
-                current_dir = Path(str(working_dir)).resolve()
+                current_dir = Path(str(per_sim_wd)).resolve()
                 if base_dir != current_dir:
-                    base_supervisor_dir = base_dir / "supervisor"
-                    base_supervisor_dir.mkdir(parents=True, exist_ok=True)
-                    base_state_path = base_supervisor_dir / "state.jsonl"
-                    base_state_path.write_text(
+                    per_sim_supervisor = current_dir / "supervisor"
+                    per_sim_supervisor.mkdir(parents=True, exist_ok=True)
+                    (per_sim_supervisor / "state.jsonl").write_text(
                         json.dumps(entry, indent=2, default=str) + "\n",
-                        encoding="utf-8"
+                        encoding="utf-8",
                     )
             
-            logger.info(f"Workflow state saved to {state_path}")
+            logger.debug(f"Workflow state saved to {state_path}")
             
         except Exception as e:
             logger.error(f"Failed to save workflow state: {e}")
@@ -862,6 +978,9 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "multi_sim_base_dir": None,
             "combined_only": False,
             "resume_failed_only": None,
+            "multisim_resume_applied": False,
+            "workflow_loop_streak": 0,
+            "workflow_loop_key": None,
             "retry_labels": None,
             "_resume_succeeded_labels": None,
             "hpc_pool": None,
@@ -870,6 +989,14 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "hpc_check_interval": None,
             "post_hpc_analysis_only": False,
             "hpc_pool_phase_complete": False,
+            "parallel_pool": None,
+            "parallel_workers": "auto",
+            "parallel_mem_gb_per_job": None,
+            "parallel_cpus_per_job": None,
+            "parallel_workers_resolved": None,
+            "llm_concurrency": "auto",
+            "parallel_pool_poll_sec": 30,
+            "_allowed_hpc_jobs_explicit": False,
         }
 
         if config:
@@ -1087,11 +1214,25 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
 
             if state.get("is_multi_simulation"):
                 from agentic.multi_sim_progress import (
+                    reconcile_multisim_progress_from_disk,
                     rebuild_progress_from_disk,
                     sync_state_from_progress,
+                    multisim_workflow_incomplete,
+                    prepare_multisim_resume_state,
                 )
 
-                if state.get("multi_sim_progress") and not state.get("combined_only"):
+                if state.get("resume_failed_only") and not state.get("combined_only"):
+                    reconcile_multisim_progress_from_disk(state, working_dir)
+                    if multisim_workflow_incomplete(state.get("multi_sim_progress")):
+                        prepare_multisim_resume_state(state)
+                    from agentic.multi_sim_progress import merge_completed_states_from_progress
+
+                    merge_completed_states_from_progress(state)
+                    # Fresh --resume invocation: allow supervisor to bind once from disk.
+                    state["multisim_resume_applied"] = False
+                    state["workflow_loop_streak"] = 0
+                    state["workflow_loop_key"] = None
+                elif state.get("multi_sim_progress") and not state.get("combined_only"):
                     sync_state_from_progress(state)
                     from agentic.multi_sim_progress import ensure_per_sim_working_directory
 
@@ -1101,13 +1242,22 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
 
             if state.get("is_multi_simulation") and (is_completed_snapshot or not same_subtask_signature):
                 if state.get("resume_failed_only"):
-                    # Resume: keep sim_prompts + progress; re-enter per-sim loop.
-                    state["multi_sim_phase"] = None
+                    # Resume: keep sim_prompts + progress; supervisor routes from
+                    # reconciled multi_sim_progress (combined reporter only when done).
+                    progress = state.get("multi_sim_progress") or {}
+                    phase = progress.get("phase") or state.get("multi_sim_phase")
+                    if phase:
+                        state["multi_sim_phase"] = phase
+                    elif state.get("multi_sim_phase") is None:
+                        state["multi_sim_phase"] = "executing_sims"
                     state["execution_plan"] = None
                     state["plan_executed"] = False
+                    if progress.get("phase") == "combined_reporter":
+                        state["current_agent_idx"] = 1
                     logger.info(
                         "[resume] Multi-sim state preserved — supervisor will continue "
-                        "from multi_sim_progress"
+                        "from reconciled multi_sim_progress (phase=%s)",
+                        state.get("multi_sim_phase"),
                     )
                 else:
                     state["multi_sim_phase"] = None
@@ -1160,6 +1310,11 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             elif state.get("hpc_pool") or state.get("multi_sim_phase") == "hpc_pool":
                 if resume_hpc_pool_if_needed(state):
                     logger.info("[resume] Re-entered cross-sim HPC pool from saved state")
+            elif state.get("parallel_pool") or state.get("multi_sim_phase") == "parallel_pool":
+                from agentic.multi_sim_parallel_pool import resume_parallel_pool_if_needed
+
+                if resume_parallel_pool_if_needed(state):
+                    logger.info("[resume] Re-entered parallel worker pool from saved state")
 
         # HITL re-run after per-sim work already exists: skip the full per-sim loop
         # and enter combined analysis + reporter (with human checkpoints).
@@ -1237,17 +1392,53 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         Returns:
             Final state dictionary
         """
+        import signal
+
         initial_state = self._initialize_state(user_goal, config)
         # Respect explicit config for human loop but default to automatic mode here
         initial_state["human_in_loop"] = bool(initial_state.get("human_in_loop", False))
+
+        active: Dict[str, Any] = {"state": initial_state}
+        self._active_run_state = active
+
+        def _checkpoint_interrupt() -> None:
+            st = active.get("state") or {}
+            base = st.get("multi_sim_base_dir") or st.get("working_directory")
+            saved = self._load_workflow_state(base) if base else None
+            target = saved if (saved or {}).get("parallel_pool") else st
+            if target.get("multi_sim_phase") == "parallel_pool" and target.get("parallel_pool"):
+                try:
+                    from agentic.multi_sim_parallel_pool import persist_parallel_pool_interrupt
+
+                    persist_parallel_pool_interrupt(target)
+                    active["state"] = target
+                    logger.info("Saved parallel pool checkpoint after interrupt")
+                except Exception as exc:
+                    logger.warning("Parallel pool interrupt checkpoint failed: %s", exc)
+
+        def _signal_handler(signum, frame):  # noqa: ARG001
+            _checkpoint_interrupt()
+            raise KeyboardInterrupt()
+
+        prev_int = signal.signal(signal.SIGINT, _signal_handler)
+        prev_term = signal.signal(signal.SIGTERM, _signal_handler)
         
         try:
-            # Multi-sim needs many iterations (each sim ≈ 15 graph steps)
-            recursion_limit = 500 if initial_state.get("is_multi_simulation") else 50
+            recursion_limit = self._compute_recursion_limit(initial_state)
+            logger.info("LangGraph recursion_limit=%s for this run", recursion_limit)
             final_state = self.graph.invoke(
                 initial_state, {"recursion_limit": recursion_limit}
             )
+            active["state"] = final_state
             return final_state
+
+        except KeyboardInterrupt:
+            _checkpoint_interrupt()
+            initial_state.setdefault("errors", []).append(
+                "Workflow interrupted during parallel pool — use --resume to continue"
+            )
+            initial_state["workflow_status"] = "in_progress:interrupted"
+            return active.get("state") or initial_state
             
         except Exception as e:
             import traceback
@@ -1261,8 +1452,23 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             print("Full traceback:")
             print(error_traceback)
             print(f"{'='*60}\n")
-            initial_state["errors"].append(f"Workflow error: {str(e)}")
-            return initial_state
+            st = active.get("state") or initial_state
+            base = st.get("multi_sim_base_dir") or st.get("working_directory")
+            saved = self._load_workflow_state(base) if base else None
+            target = saved if (saved or {}).get("parallel_pool") else st
+            if target.get("multi_sim_phase") == "parallel_pool" and target.get("parallel_pool"):
+                try:
+                    from agentic.multi_sim_parallel_pool import persist_parallel_pool_interrupt
+
+                    persist_parallel_pool_interrupt(target)
+                except Exception:
+                    pass
+            target.setdefault("errors", []).append(f"Workflow error: {str(e)}")
+            return target
+        finally:
+            signal.signal(signal.SIGINT, prev_int)
+            signal.signal(signal.SIGTERM, prev_term)
+            self._active_run_state = None
 
     def _next_after_field_agent(self, state: MDState, default: str = "supervisor") -> str:
         """After a field agent runs, return to HITL checkpoint if this was a delegated task."""
@@ -1396,6 +1602,17 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             elif current_node == "hpc_pool_wait":
                 state = self._hpc_pool_wait_node(state)
                 self._save_progress(state, "hpc_pool_wait")
+                current_node = state.get("next_node", "supervisor")
+
+            elif current_node == "parallel_pool_wait":
+                state = self._parallel_pool_wait_node(state)
+                # Quiet checkpoint only — avoid execution_report spam every poll.
+                try:
+                    from agentic.multi_sim_parallel_pool import persist_parallel_pool_checkpoint
+
+                    persist_parallel_pool_checkpoint(state)
+                except Exception:
+                    pass
                 current_node = state.get("next_node", "supervisor")
 
             elif current_node == "human_analysis_check":

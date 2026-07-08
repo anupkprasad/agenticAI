@@ -244,8 +244,10 @@ def _revalidate_pool_sim(rec: Dict[str, Any]) -> None:
 
 def init_hpc_pool(state: Dict[str, Any]) -> Dict[str, Any]:
     """Build or refresh ``state['hpc_pool']`` from ``sim_prompts``."""
+    from agentic.parallel_resources import resolve_allowed_hpc_jobs
+
     sim_prompts = state.get("sim_prompts") or []
-    max_concurrent = int(state.get("allowed_hpc_jobs") or state.get("max_concurrent") or 5)
+    max_concurrent = resolve_allowed_hpc_jobs(state)
     interval = parse_hpc_check_interval(
         state.get("hpc_check_interval"),
         default_sec=int(state.get("hpc_check_interval_sec") or 7200),
@@ -590,6 +592,12 @@ def hpc_pool_supervisor_tick(state: Dict[str, Any]) -> Dict[str, Any]:
     # Phase 1: finish preprocess + simsetup for every simulation before any submit.
     prep_label = _next_prep_label(pool, state.get("sim_prompts") or [])
     if prep_label is not None:
+        from agentic.parallel_resources import should_use_parallel_pool
+        from agentic.multi_sim_parallel_pool import start_parallel_prep_if_enabled
+
+        if should_use_parallel_pool(state) and not state.get("hpc_pool_prep_parallel"):
+            if start_parallel_prep_if_enabled(state):
+                return state
         state["hpc_pool_needs_prep_start"] = prep_label
         state["next_node"] = "supervisor"
         return state

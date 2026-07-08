@@ -110,6 +110,87 @@ def _simulations_from_hpc_pool(final_state: Dict[str, Any]) -> List[Dict[str, An
     return rows
 
 
+def _simulations_merged_from_state(final_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Merge session snapshots with disk-done sims from ``multi_sim_progress``."""
+    from agentic.multi_sim_progress import merge_completed_states_from_progress
+
+    merged_state = dict(final_state)
+    merge_completed_states_from_progress(merged_state)
+    completed = list(merged_state.get("completed_sim_states") or [])
+    progress = final_state.get("multi_sim_progress") or {}
+    progress_sims = progress.get("sims") or {}
+    sim_order = progress.get("sim_order") or []
+    order_index = {label: i for i, label in enumerate(sim_order)}
+
+    rows: List[Dict[str, Any]] = []
+    seen: set = set()
+    for sim in sorted(
+        completed,
+        key=lambda s: order_index.get(str(s.get("label")), int(s.get("sim_index") or 999)),
+    ):
+        label = sim.get("label")
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        rec = progress_sims.get(label) or {}
+        agents = rec.get("agents") or {}
+        disk_done = (
+            rec.get("status") == "done"
+            or (
+                agents.get("analysis") == "done"
+                and agents.get("reporter") == "done"
+            )
+        )
+        success = _sim_succeeded(sim) or disk_done
+        status = "success" if success else _sim_status(sim)
+        if (
+            not success
+            and agents.get("analysis") == "done"
+            and agents.get("reporter") != "done"
+        ):
+            status = "in_progress"
+        rows.append(
+            {
+                "label": label,
+                "status": status,
+                "success": success,
+                "skipped": bool(sim.get("skipped")),
+                "skip_reason": sim.get("skip_reason"),
+                "working_directory": sim.get("working_directory") or rec.get("working_dir"),
+                "job_id": sim.get("job_id"),
+                "job_status": sim.get("job_status"),
+                "topology": sim.get("topology"),
+                "trajectory_path": sim.get("trajectory_path"),
+                "errors": sim.get("errors") or [],
+                "warnings": (sim.get("warnings") or [])[:5],
+            }
+        )
+
+    for label in sim_order:
+        if label in seen:
+            continue
+        rec = progress_sims.get(label) or {}
+        agents = rec.get("agents") or {}
+        if agents.get("analysis") == "done" and agents.get("reporter") == "done":
+            status = "success"
+        elif agents.get("analysis") == "done":
+            status = "in_progress"
+        else:
+            status = "pending"
+        rows.append(
+            {
+                "label": label,
+                "status": status,
+                "success": status == "success",
+                "skipped": False,
+                "working_directory": rec.get("working_dir"),
+                "errors": [],
+                "warnings": [],
+            }
+        )
+    return rows
+
+
 def build_run_summary(
     final_state: Dict[str, Any],
     *,
@@ -127,49 +208,8 @@ def build_run_summary(
     total = _expected_simulation_count(final_state, pdb_list) if is_multi else 1
 
     simulations: List[Dict[str, Any]] = []
-    if is_multi and completed:
-        for sim in completed:
-            status = _sim_status(sim)
-            simulations.append(
-                {
-                    "label": sim.get("label"),
-                    "status": status,
-                    "success": _sim_succeeded(sim),
-                    "skipped": bool(sim.get("skipped")),
-                    "skip_reason": sim.get("skip_reason"),
-                    "working_directory": sim.get("working_directory"),
-                    "job_id": sim.get("job_id"),
-                    "job_status": sim.get("job_status"),
-                    "topology": sim.get("topology"),
-                    "trajectory_path": sim.get("trajectory_path"),
-                    "errors": sim.get("errors") or [],
-                    "warnings": (sim.get("warnings") or [])[:5],
-                }
-            )
-    elif is_multi:
-        simulations = _simulations_from_hpc_pool(final_state)
-        progress = final_state.get("multi_sim_progress") or {}
-        progress_sims = progress.get("sims") or {}
-        if simulations and progress_sims:
-            for row in simulations:
-                label = row.get("label")
-                rec = progress_sims.get(label) or {}
-                agents = rec.get("agents") or {}
-                if agents.get("analysis") == "done" and agents.get("reporter") == "done":
-                    row["status"] = "success"
-                    row["success"] = True
-                elif agents.get("analysis") == "done":
-                    row["status"] = "in_progress"
-        if not simulations:
-            for sp in final_state.get("sim_prompts") or []:
-                simulations.append(
-                    {
-                        "label": sp.get("label"),
-                        "status": "unknown",
-                        "working_directory": sp.get("working_dir"),
-                        "case_description": sp.get("case_description"),
-                    }
-                )
+    if is_multi:
+        simulations = _simulations_merged_from_state(final_state)
 
     n_success = sum(
         1 for s in simulations if s.get("status") == "success" or s.get("success")
@@ -182,6 +222,8 @@ def build_run_summary(
             and not s.get("success"))
     )
     n_submitted = sum(1 for s in simulations if s.get("status") == "submitted")
+    n_pending = sum(1 for s in simulations if s.get("status") == "pending")
+    n_in_progress = sum(1 for s in simulations if s.get("status") == "in_progress")
 
     combined_dir = str(Path(working_dir) / "combinedAnalysis")
     analysis_dir = final_state.get("analysis_directory") or str(Path(working_dir) / "analysis")
@@ -212,6 +254,8 @@ def build_run_summary(
             "submitted_running": n_submitted,
             "skipped": n_skipped,
             "failed": n_failed,
+            "pending": n_pending,
+            "in_progress": n_in_progress,
             "snapshots_recorded": len(completed),
         },
         "simulations": simulations,
@@ -258,6 +302,10 @@ def format_run_summary_terminal(summary: Dict[str, Any]) -> str:
         if missing:
             lines.append(f"  Not in master plan: {', '.join(missing)}")
         lines.append(f"  Succeeded: {counts.get('completed_success', 0)}")
+        pending_n = counts.get("pending", 0)
+        in_prog = counts.get("in_progress", 0)
+        if pending_n or in_prog:
+            lines.append(f"  Remaining: {pending_n + in_prog} ({in_prog} in progress)")
         lines.append(f"  Submitted: {counts.get('submitted_running', 0)}")
         lines.append(f"  Skipped:   {counts.get('skipped', 0)}")
         lines.append(f"  Failed:    {counts.get('failed', 0)}")

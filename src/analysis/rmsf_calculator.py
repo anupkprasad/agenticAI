@@ -28,6 +28,108 @@ except ImportError:
     HAS_NUMPY = False
 
 
+def compute_rmsf_from_universe(
+    u,
+    *,
+    topology_file: str,
+    trajectory_file: str,
+    selection: str = "protein and name CA",
+    output_file: Optional[str] = None,
+    working_dir: Optional[str] = None,
+    align_trajectory: bool = True,
+    align_selection: Optional[str] = None,
+    skip_align: bool = False,
+) -> Dict[str, Any]:
+    """Compute RMSF from a pre-loaded Universe."""
+    if not HAS_MDA or not HAS_NUMPY:
+        return {"success": False, "error": "MDAnalysis and numpy are required for RMSF"}
+
+    if align_trajectory and not skip_align:
+        from MDAnalysis.analysis import align
+
+        align_sel = align_selection if align_selection else selection
+        u.trajectory[0]
+        reference = u.copy()
+        align.AlignTraj(u, reference, select=align_sel, in_memory=True).run()
+
+    atoms = u.select_atoms(selection)
+    if len(atoms) == 0:
+        return {"success": False, "error": f"No atoms selected with selection: {selection}"}
+
+    R = rms.RMSF(atoms).run()
+    rmsf_values = R.results.rmsf
+    residue_ids = [atom.resid for atom in atoms]
+    residue_names = [atom.resname for atom in atoms]
+
+    mean_rmsf = float(np.mean(rmsf_values))
+    std_rmsf = float(np.std(rmsf_values))
+    min_rmsf = float(np.min(rmsf_values))
+    max_rmsf = float(np.max(rmsf_values))
+
+    sorted_indices = np.argsort(rmsf_values)
+    most_flexible_idx = sorted_indices[-5:][::-1]
+    least_flexible_idx = sorted_indices[:5]
+
+    most_flexible = [
+        {"residue_id": int(residue_ids[i]), "residue_name": residue_names[i], "rmsf": float(rmsf_values[i])}
+        for i in most_flexible_idx
+    ]
+    least_flexible = [
+        {"residue_id": int(residue_ids[i]), "residue_name": residue_names[i], "rmsf": float(rmsf_values[i])}
+        for i in least_flexible_idx
+    ]
+
+    output_filename = output_file or "rmsf.dat"
+    with open(output_filename, "w") as f:
+        f.write("# Residue\tRMSF(Angstrom)\n")
+        for res_id, rmsf_val in zip(residue_ids, rmsf_values):
+            f.write(f"{res_id}\t{rmsf_val:.4f}\n")
+
+    if working_dir:
+        try:
+            append_analysis_summary(
+                working_dir=working_dir,
+                analysis_type="RMSF",
+                statistics={
+                    "n_residues": len(rmsf_values),
+                    "mean_rmsf_angstrom": mean_rmsf,
+                    "std_rmsf_angstrom": std_rmsf,
+                    "min_rmsf_angstrom": min_rmsf,
+                    "max_rmsf_angstrom": max_rmsf,
+                    "most_flexible_residue": most_flexible[0]["residue_id"] if most_flexible else None,
+                    "most_flexible_rmsf": most_flexible[0]["rmsf"] if most_flexible else None,
+                },
+                files={"topology": topology_file, "trajectory": trajectory_file, "data": output_filename},
+                metadata={
+                    "selection": selection,
+                    "top_5_flexible": most_flexible,
+                    "top_5_rigid": least_flexible,
+                    "alignment_performed": align_trajectory and not skip_align,
+                    "align_selection": align_selection if align_selection else selection,
+                    "pre_aligned_universe": skip_align,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write to summary file: {e}")
+
+    return {
+        "success": True,
+        "mean_rmsf": mean_rmsf,
+        "std_rmsf": std_rmsf,
+        "min_rmsf": min_rmsf,
+        "max_rmsf": max_rmsf,
+        "n_residues": len(rmsf_values),
+        "most_flexible": most_flexible,
+        "least_flexible": least_flexible,
+        "selection": selection,
+        "output_file": output_filename,
+        "message": (
+            f"RMSF calculation complete: mean={mean_rmsf:.2f} Å, "
+            f"most flexible residue at {most_flexible[0]['residue_id'] if most_flexible else 'n/a'}"
+        ),
+    }
+
+
 @tool
 def calculate_rmsf(
     topology_file: str,
@@ -88,139 +190,19 @@ def calculate_rmsf(
         # Use MDAnalysis if available
         if HAS_MDA and HAS_NUMPY:
             logger.info(f"Calculating RMSF using MDAnalysis for {trajectory_file}")
-            
-            # Load universe
-            u = mda.Universe(topology_file, trajectory_file)
-            
-            # Perform alignment if requested (CRITICAL for meaningful RMSF)
-            if align_trajectory:
-                from MDAnalysis.analysis import align
-                
-                align_sel = align_selection if align_selection else selection
-                logger.info(f"Aligning trajectory using selection: {align_sel}")
-                
-                # Set reference to first frame
-                u.trajectory[0]
-                reference = u.copy()
-                
-                # Align trajectory in memory
-                aligner = align.AlignTraj(
-                    u,
-                    reference,
-                    select=align_sel,
-                    in_memory=True
-                )
-                aligner.run()
-                logger.info(f"Trajectory aligned: {len(u.trajectory)} frames")
-            
-            # Select atoms for RMSF calculation
-            atoms = u.select_atoms(selection)
-            
-            if len(atoms) == 0:
-                if working_dir:
-                    os.chdir(original_dir)
-                return {
-                    "success": False,
-                    "error": f"No atoms selected with selection: {selection}"
-                }
-            
-            # Calculate RMSF
-            R = rms.RMSF(atoms).run()
-            rmsf_values = R.results.rmsf
-            
-            # Get residue information
-            residue_ids = [atom.resid for atom in atoms]
-            residue_names = [atom.resname for atom in atoms]
-            
-            # Calculate statistics
-            mean_rmsf = float(np.mean(rmsf_values))
-            std_rmsf = float(np.std(rmsf_values))
-            min_rmsf = float(np.min(rmsf_values))
-            max_rmsf = float(np.max(rmsf_values))
-            
-            # Identify most/least flexible residues
-            sorted_indices = np.argsort(rmsf_values)
-            most_flexible_idx = sorted_indices[-5:][::-1]  # Top 5 most flexible
-            least_flexible_idx = sorted_indices[:5]  # Top 5 least flexible
-            
-            most_flexible = [
-                {
-                    "residue_id": int(residue_ids[i]),
-                    "residue_name": residue_names[i],
-                    "rmsf": float(rmsf_values[i])
-                }
-                for i in most_flexible_idx
-            ]
-            
-            least_flexible = [
-                {
-                    "residue_id": int(residue_ids[i]),
-                    "residue_name": residue_names[i],
-                    "rmsf": float(rmsf_values[i])
-                }
-                for i in least_flexible_idx
-            ]
-            
-            # Save data if requested (use filename only, already in working_dir)
-            if output_file:
-                output_filename = output_file
-            else:
-                output_filename = "rmsf.dat"
-            
-            with open(output_filename, 'w') as f:
-                f.write("# Residue\tRMSF(Angstrom)\n")
-                for res_id, rmsf_val in zip(residue_ids, rmsf_values):
-                    f.write(f"{res_id}\t{rmsf_val:.4f}\n")
-            
-            logger.info(f"RMSF data saved to {output_filename}")
-            
-            # Write to analysis summary file
-            if working_dir:
-                try:
-                    append_analysis_summary(
-                        working_dir=working_dir,
-                        analysis_type="RMSF",
-                        statistics={
-                            "n_residues": len(rmsf_values),
-                            "mean_rmsf_angstrom": mean_rmsf,
-                            "std_rmsf_angstrom": std_rmsf,
-                            "min_rmsf_angstrom": min_rmsf,
-                            "max_rmsf_angstrom": max_rmsf,
-                            "most_flexible_residue": most_flexible[0]['residue_id'] if most_flexible else None,
-                            "most_flexible_rmsf": most_flexible[0]['rmsf'] if most_flexible else None
-                        },
-                        files={
-                            "topology": topology_file,
-                            "trajectory": trajectory_file,
-                            "data": output_file
-                        },
-                        metadata={
-                            "selection": selection,
-                            "top_5_flexible": most_flexible,
-                            "top_5_rigid": least_flexible,
-                            "alignment_performed": align_trajectory,
-                            "align_selection": align_selection if align_selection else selection
-                        }
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to write to summary file: {e}")
-            
+            result = compute_rmsf_from_universe(
+                mda.Universe(topology_file, trajectory_file),
+                topology_file=topology_file,
+                trajectory_file=trajectory_file,
+                selection=selection,
+                output_file=output_file,
+                working_dir=working_dir,
+                align_trajectory=align_trajectory,
+                align_selection=align_selection,
+            )
             if working_dir:
                 os.chdir(original_dir)
-            
-            return {
-                "success": True,
-                "mean_rmsf": mean_rmsf,
-                "std_rmsf": std_rmsf,
-                "min_rmsf": min_rmsf,
-                "max_rmsf": max_rmsf,
-                "n_residues": len(rmsf_values),
-                "most_flexible": most_flexible,
-                "least_flexible": least_flexible,
-                "selection": selection,
-                "output_file": output_file,
-                "message": f"RMSF calculation complete: mean={mean_rmsf:.2f} Å, most flexible residue at {most_flexible[0]['residue_id']}"
-            }
+            return result
         
         # Fallback: Use GROMACS gmx rmsf
         else:

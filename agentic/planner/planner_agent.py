@@ -32,6 +32,7 @@ from .planning_guidelines import (
     metric_covered_by_registry,
     partition_metrics_by_registry,
 )
+from src.supervisor.component_parser import detect_component_cases
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,28 @@ def _goal_requests_combined_analysis(goal: str, agent_list: List[str], subtask_t
     return any(re.search(p, text) for p in positive_patterns)
 
 
-def _coerce_bool(value: Any, default: bool = False) -> bool:
+def _llm_sim_prompts_collapsed_per_pdb(
+    sim_prompts_list: List[str],
+    pdb_list: List[str],
+    expanded_entries: List[Dict[str, Any]],
+) -> bool:
+    """True when LLM merged multiple cases (e.g. apo+holo) into one prompt per PDB."""
+    if len(sim_prompts_list) != len(pdb_list):
+        return False
+    if len(expanded_entries) <= len(pdb_list):
+        return False
+    multi_case_re = re.compile(
+        r"\b(?:both|two)\s+(?:the\s+)?(?:protein[\-\s]?only|apo|holo|systems?|cases?)\b"
+        r"|\bapo\s*(?:and|&|\+)\s*holo\b"
+        r"|\bboth\s+(?:apo|holo|systems|cases)\b",
+        re.IGNORECASE,
+    )
+    hits = sum(
+        1 for text in sim_prompts_list if multi_case_re.search(_coerce_plan_text(text))
+    )
+    return hits >= max(1, len(sim_prompts_list) // 2)
+
+
     """Parse booleans from strict JSON booleans or common string variants."""
     if isinstance(value, bool):
         return value
@@ -177,6 +199,29 @@ def _salvage_sim_prompts_from_response(response: str) -> Optional[List[str]]:
         if len(prompt.strip()) > 40:
             prompts.append(prompt)
     return prompts if prompts else None
+
+
+def _enrich_protein_name_from_goal(uid: str, current_name: str, *goal_texts: str) -> str:
+    """Resolve gene name from goal text when master plan only has UniProt accession."""
+    try:
+        from src.reporter.protein_identity import (
+            _gene_from_goal,
+            _looks_like_uniprot,
+            _parse_id_name_map,
+        )
+    except ImportError:
+        return current_name
+
+    combined = " ".join(t for t in goal_texts if t)
+    id_map = _parse_id_name_map(combined)
+    if uid.lower() in id_map:
+        return id_map[uid.lower()]
+    if current_name and not _looks_like_uniprot(current_name) and current_name.upper() != uid.upper():
+        return current_name
+    gene = _gene_from_goal(uid, combined)
+    if gene:
+        return gene
+    return current_name
 
 
 def _build_per_sim_analysis_prompt(
@@ -443,62 +488,6 @@ class MDPlanner:
             logger.warning(f"Config not found: {self.config_path}, using defaults")
             return {"planner": {"templates": {}}}
 
-    def _detect_component_cases(self, prompt: str) -> List[Dict[str, str]]:
-        """Infer component-specific simulation cases from user goal text."""
-        p = (prompt or "").lower()
-        p = (
-            p.replace("\u2011", "-")
-            .replace("\u2012", "-")
-            .replace("\u2013", "-")
-            .replace("\u2014", "-")
-            .replace("\u2212", "-")
-        )
-
-        has_protein_only = bool(re.search(r"\bprotein[\s\-]*(only|alone)\b", p))
-        has_atp = "atp" in p
-        has_holo = "holo" in p
-        has_mg = bool(re.search(r"\bmg(?:2\+?|\u00b2\+?)?\b", p))
-        has_case_language = bool(
-            re.search(
-                r"two\s+different\s+cases?|two\s+systems\s+per\s+file|"
-                r"case\s*[:\-]|\bcase\s*1\b|\bcase\s*2\b|"
-                r"\(\s*1\s*\)|\(\s*2\s*\)|\b1\.\b|\b2\.\b",
-                p,
-            )
-        )
-
-        if has_case_language and has_protein_only and (has_atp or has_holo):
-            full_suffix = "ATP_MG" if has_mg else "ATP"
-            full_desc = "protein + ATP + MG" if has_mg else "protein + ATP"
-            full_directive = (
-                "Keep protein with ATP ligand and Mg ions from the source PDB."
-                if has_mg else
-                "Keep protein with ATP ligand from the source PDB."
-            )
-            return [
-                {
-                    "case_id": "protein_only",
-                    "suffix": "",
-                    "description": "protein only",
-                    "directive": "Use protein-only system. Remove ATP, ligands, and non-essential ions.",
-                },
-                {
-                    "case_id": "protein_with_ligand",
-                    "suffix": full_suffix,
-                    "description": full_desc,
-                    "directive": full_directive,
-                },
-            ]
-
-        return [
-            {
-                "case_id": "default",
-                "suffix": "",
-                "description": "default system from input PDB",
-                "directive": "Use the full biologically relevant system present in the input PDB.",
-            }
-        ]
-
     def create_multi_sim_master_plan(self, state: MDState) -> MDState:
         """Build per-sim prompts and optional combined analysis plan with planner tools context."""
         from src.utils.pdb_paths import unique_pdb_paths
@@ -549,11 +538,18 @@ class MDPlanner:
         if protein_name_map:
             logger.info(f"PLANNER [multi-sim]: Protein name map: {protein_name_map}")
 
-        component_cases = self._detect_component_cases(enriched_prompt)
+        component_cases = detect_component_cases(
+            original_goal,
+            enriched_prompt,
+            pdb_count=len(pdb_list),
+        )
         expanded_entries: List[Dict[str, Any]] = []
         for pdb in pdb_list:
             uid = Path(pdb).stem
             protein_name = protein_name_map.get(uid.lower(), uid.upper())
+            protein_name = _enrich_protein_name_from_goal(
+                uid, protein_name, original_goal, enriched_prompt,
+            )
             for case in component_cases:
                 suffix = case.get("suffix", "")
                 sim_label = f"{uid}_{suffix}" if suffix else uid
@@ -635,6 +631,7 @@ class MDPlanner:
             "2) run_combined_analysis: boolean; true only when the user explicitly or clearly asks for comparison, aggregation, cross-simulation trends, combined plots, or a combined report.\n"
             "3) combined_analysis_plan: natural-language plan when run_combined_analysis is true; otherwise an empty string.\n\n"
             "CRITICAL prompt requirements for sim_prompts:\n"
+            "- Each prompt must target exactly ONE simulation entry (one label, one case). Never merge apo and holo (or multiple component cases) into a single sim_prompt.\n"
             "- Each prompt must be a natural-language goal for one simulation, not a metadata record. Mention the label, source system, working directory, and relevant case in prose so agents have context.\n"
             "- Preserve user intent exactly. If the user names specific analyses such as RMSF only, request only those analyses plus directly required plots/tables. Do not add RMSD, Rg, COM distance, DCCM, DSSP, SASA, or literature unless requested.\n"
             "- If the user asks broadly for protein dynamics without naming metrics, choose a small justified set of dynamics analyses supported by the tools, such as RMSD/RMSF/Rg/DCCM or interaction distances when relevant to the biological question.\n"
@@ -702,40 +699,23 @@ class MDPlanner:
                         sim_prompts_list = None
                         prompt_source = "deterministic_fallback"
 
-                if (
-                    sim_prompts_list
-                    and len(sim_prompts_list) != len(expanded_entries)
-                    and len(sim_prompts_list) >= 1
-                ):
-                    logger.warning(
-                        "PLANNER [multi-sim]: LLM returned %d/%d sim_prompts; "
-                        "filling missing entries with deterministic prompts",
-                        len(sim_prompts_list),
-                        len(expanded_entries),
-                    )
-                    prompt_source = "llm_partial"
-                    for idx in range(len(sim_prompts_list), len(expanded_entries)):
-                        if post_sim_subtask:
-                            sim_prompts_list.append(
-                                _build_per_sim_analysis_prompt(
-                                    expanded_entries[idx],
-                                    original_goal=original_goal,
-                                    enriched_prompt=enriched_prompt,
-                                    agents_desc=agents_desc,
-                                )
-                            )
-                        else:
-                            entry = expanded_entries[idx]
-                            pdb_name = Path(entry["pdb"]).name
-                            sim_prompts_list.append(
-                                (
-                                    f"Prepare simulation for {entry['protein_name']} using "
-                                    f"source structure {pdb_name}. Use simulation label "
-                                    f"{entry['label']} under {entry['working_dir']}. "
-                                    f"Case: {entry['case_description']}: {entry['case_directive']}. "
-                                    f"Run workflow steps: {agents_desc}."
-                                ).strip()
-                            )
+                if sim_prompts_list and len(sim_prompts_list) != len(expanded_entries):
+                    if _llm_sim_prompts_collapsed_per_pdb(
+                        sim_prompts_list, pdb_list, expanded_entries
+                    ):
+                        logger.warning(
+                            "PLANNER [multi-sim]: LLM merged multiple cases into one prompt "
+                            "per PDB; switching to deterministic per-entry prompts"
+                        )
+                    else:
+                        logger.warning(
+                            "PLANNER [multi-sim]: LLM returned %d/%d sim_prompts; "
+                            "switching to deterministic per-entry prompts",
+                            len(sim_prompts_list),
+                            len(expanded_entries),
+                        )
+                    sim_prompts_list = None
+                    prompt_source = "deterministic_fallback"
 
                 decomposition_complete = (
                     prompt_source == "llm"

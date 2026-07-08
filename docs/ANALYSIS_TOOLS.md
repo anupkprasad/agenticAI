@@ -12,13 +12,13 @@ For external dependencies (GROMACS, MDAnalysis, etc.) see [TOOLS.md](TOOLS.md).
 
 ## Quick index
 
-| Category | Tools |
-|----------|-------|
-| Global structure | RMSD, RMSF, Rg, SASA, DSSP, energy |
-| Binding site | ligand-pocket distance, contacts, pocket SASA, residence, pocket RMSF |
-| Collective motion | DCCM, PCA, FEL, FEL features |
-| Plotting | plot_md_data, plot_pca_projection, combined overlays |
-| Multi-simulation | collect_metric_files, compute_comparison_table, collect_fel_features_table, … |
+| Category          | Tools                                                                          |
+| ----------------- | ------------------------------------------------------------------------------ |
+| Global structure  | RMSD, RMSF, Rg, SASA, DSSP, energy                                             |
+| Binding site      | ligand-pocket distance, contacts, pocket SASA, residence, pocket RMSF          |
+| Collective motion | DCCM, PCA, FEL, FEL features                                                   |
+| Plotting          | plot_md_data, plot_pca_projection, combined overlays                           |
+| Multi-simulation  | collect_metric_files, compute_comparison_table, collect_fel_features_table, … |
 
 ---
 
@@ -32,8 +32,8 @@ For external dependencies (GROMACS, MDAnalysis, etc.) see [TOOLS.md](TOOLS.md).
 \mathrm{RMSD}(t) = \sqrt{\frac{1}{N}\sum_{i=1}^{N}\left|\mathbf{r}_i(t)-\mathbf{r}_i(\mathrm{ref})\right|^2}
 \]
 
-**Default selection:** `protein and name CA`  
-**Output:** `rmsd.dat`, `rmsd.png`  
+**Default selection:** `protein and name CA`
+**Output:** `rmsd.dat`, `rmsd.png`
 **Interpretation:** Low, stable RMSD → folded, equilibrated structure. Large drift → unfolding or domain motion.
 
 ---
@@ -46,7 +46,7 @@ For external dependencies (GROMACS, MDAnalysis, etc.) see [TOOLS.md](TOOLS.md).
 \mathrm{RMSF}_i = \sqrt{\left\langle\left|\mathbf{r}_i(t)-\langle\mathbf{r}_i\rangle\right|^2\right\rangle}
 \]
 
-**Output:** `rmsf.dat`, `rmsf.png`  
+**Output:** `rmsf.dat`, `rmsf.png`
 **Interpretation:** High RMSF → flexible loops; low RMSF → rigid core or secondary structure.
 
 ---
@@ -67,7 +67,7 @@ R_g = \sqrt{\frac{\sum_i m_i |\mathbf{r}_i-\mathbf{r}_{\mathrm{COM}}|^2}{\sum_i 
 
 **Observable:** Solvent-accessible surface area via GROMACS `gmx sasa` (Shrake–Rupley algorithm).
 
-**Output:** `sasa.csv`  
+**Output:** `sasa.csv`
 **Interpretation:** Increased SASA → unfolding or pocket opening.
 
 ---
@@ -102,7 +102,7 @@ This matches `calculate_ligand_pocket_distance`.
 
 **Observable:** Distance between ligand centre-of-mass and pocket centre-of-mass.
 
-**Output:** `ligand_pocket_distance.csv`  
+**Output:** `ligand_pocket_distance.csv`
 **Use:** Binding-site stability; compare mean/std across 35 systems.
 
 ---
@@ -111,12 +111,12 @@ This matches `calculate_ligand_pocket_distance`.
 
 **Observables (per frame):**
 
-| Column | Definition |
-|--------|------------|
-| `n_hbonds` | Protein↔ligand hydrogen bonds (MDAnalysis `HydrogenBondAnalysis`, d ≤ 3 Å, angle ≥ 150°) |
-| `n_contacts` | Heavy-atom pairs with distance ≤ 4 Å |
+| Column         | Definition                                                                                     |
+| -------------- | ---------------------------------------------------------------------------------------------- |
+| `n_hbonds`   | Protein↔ligand hydrogen bonds (MDAnalysis`HydrogenBondAnalysis`, d ≤ 3 Å, angle ≥ 150°) |
+| `n_contacts` | Heavy-atom pairs with distance ≤ 4 Å                                                         |
 
-**Output:** `protein_ligand_contacts.csv`  
+**Output:** `protein_ligand_contacts.csv`
 **Summary stats:** mean/max contacts and H-bonds; frames with any H-bond.
 
 **Interpretation:** Persistent H-bonds and high contact counts → stable binding footprint.
@@ -127,7 +127,7 @@ This matches `calculate_ligand_pocket_distance`.
 
 **Observable:** SASA of **pocket subset only** (not whole protein), via `gmx sasa` + generated index group.
 
-**Requires:** `.tpr` topology  
+**Requires:** `.tpr` topology
 **Output:** `pocket_sasa.csv` (time_ns, pocket_sasa_nm²)
 
 **Interpretation:** Lower pocket SASA → buried/closed pocket; increase over time → pocket opening or ligand exposure.
@@ -140,12 +140,12 @@ This matches `calculate_ligand_pocket_distance`.
 
 **Metrics:**
 
-| Metric | Meaning |
-|--------|---------|
-| `fraction_bound` | Fraction of trajectory spent bound |
-| `n_unbinding_events` | Bound → unbound transitions |
-| `longest_bound_ns` | Longest continuous bound period |
-| `mean_bound_event_ns` | Mean duration of bound episodes |
+| Metric                  | Meaning                            |
+| ----------------------- | ---------------------------------- |
+| `fraction_bound`      | Fraction of trajectory spent bound |
+| `n_unbinding_events`  | Bound → unbound transitions       |
+| `longest_bound_ns`    | Longest continuous bound period    |
+| `mean_bound_event_ns` | Mean duration of bound episodes    |
 
 **Outputs:** `ligand_residence.csv`, `ligand_residence.json`
 
@@ -155,7 +155,7 @@ This matches `calculate_ligand_pocket_distance`.
 
 **Observable:** RMSF for **Cα atoms of pocket residues only** (after protein Cα alignment).
 
-**Output:** `pocket_rmsf.dat` (Residue, ResName, RMSF), `pocket_rmsf.png`  
+**Output:** `pocket_rmsf.dat` (Residue, ResName, RMSF), `pocket_rmsf.png`
 **Interpretation:** Flexible pocket vs rigid lock-and-key binding across protein family.
 
 Note: `.dat` files include string columns (`ResName`); `plot_md_data` parses numeric columns automatically.
@@ -194,7 +194,7 @@ C_{ij} = \frac{\langle \Delta\mathbf{r}_i \cdot \Delta\mathbf{r}_j \rangle}{\sqr
 
 **Method:** Align trajectory; build covariance of atomic coordinates; diagonalise → principal components.
 
-**Defaults:** Cα selection, 10 components, every frame (`frame_interval=1`)  
+**Defaults:** Cα selection, 10 components, every frame (`frame_interval=1`)
 **Outputs:** `pca_projections.dat`, `pca_variance.dat`
 
 ---
@@ -207,7 +207,7 @@ C_{ij} = \frac{\langle \Delta\mathbf{r}_i \cdot \Delta\mathbf{r}_j \rangle}{\sqr
 F = -k_B T \ln P \quad\text{(kJ/mol, minimum set to 0)}
 \]
 
-**Defaults:** PC1 vs PC2, 50 bins, T = 310 K  
+**Defaults:** PC1 vs PC2, 50 bins, T = 310 K
 **Outputs:** `fel_pc1_pc2.png`, `fel_pc1_pc2_grid.csv`
 
 ---
@@ -232,13 +232,13 @@ Only these **final numbered basins (1…n)** appear on `fel_basins.png` as red s
 
 #### Metrics
 
-| Metric | Formula / definition |
-|--------|----------------------|
-| Basin depth | max F in basin − F at minimum (kJ/mol) |
-| Basin area | Grid-cell fraction; population = frame occupancy |
-| Barrier height | Saddle F along path between minima − lower minimum |
-| Major basin population | max(pᵢ) |
-| Landscape entropy | \(S = -\sum_i p_i \ln p_i\) over **final** basin populations |
+| Metric                 | Formula / definition                                               |
+| ---------------------- | ------------------------------------------------------------------ |
+| Basin depth            | max F in basin − F at minimum (kJ/mol)                            |
+| Basin area             | Grid-cell fraction; population = frame occupancy                   |
+| Barrier height         | Saddle F along path between minima − lower minimum                |
+| Major basin population | max(pᵢ)                                                           |
+| Landscape entropy      | \(S = -\sum_i p_i \ln p_i\) over **final** basin populations |
 
 **Outputs:** `fel_features.json`, `fel_features.csv`, `fel_basins.csv`, `fel_basins.png`
 
@@ -251,16 +251,17 @@ Higher **landscape entropy** → more evenly distributed conformational states �
 **Purpose:** Write one **representative PDB per numbered FEL basin** (same basins as `fel_basins.png`, max 8) so you can load transient conformations in PyMOL/Chimera.
 
 **Algorithm:**
+
 1. Read basin minima from `fel_features.json` (`min_x`, `min_y` on the PC1/PC2 grid)
 2. Find the trajectory frame whose (PC1, PC2) is closest to each basin minimum
 3. Extract that frame from `hpc/mdWrap.xtc` (protein + ligand, aligned)
 
 **Outputs** (under `{sim}/analysis/`):
 
-| File | Description |
-|------|-------------|
-| `basin_01.pdb`, `basin_02.pdb`, … | One structure per basin (in `{sim}/analysis/`) |
-| `fel_basin_structures.csv` | basin_id, population, PC coords, frame_index, time_ns, pdb_file |
+| File                                   | Description                                                     |
+| -------------------------------------- | --------------------------------------------------------------- |
+| `basin_01.pdb`, `basin_02.pdb`, … | One structure per basin (in`{sim}/analysis/`)                 |
+| `fel_basin_structures.csv`           | basin_id, population, PC coords, frame_index, time_ns, pdb_file |
 
 ```python
 from src.analysis.pca_analyzer import export_fel_basin_structures
@@ -277,12 +278,12 @@ Runs automatically after `analyze_fel_landscape_features` when FEL is requested.
 
 ## Plotting helpers
 
-| Tool | Purpose |
-|------|---------|
-| `plot_md_data` | Line plot from `.dat` / `.csv` |
-| `plot_pca_projection` | PCx vs PCy scatter (time-coloured) |
-| `plot_md_multipanel` | Multi-panel figures |
-| `wrap_trajectory` | PBC-correct trajectory (`gmx trjconv`) |
+| Tool                    | Purpose                                  |
+| ----------------------- | ---------------------------------------- |
+| `plot_md_data`        | Line plot from`.dat` / `.csv`        |
+| `plot_pca_projection` | PCx vs PCy scatter (time-coloured)       |
+| `plot_md_multipanel`  | Multi-panel figures                      |
+| `wrap_trajectory`     | PBC-correct trajectory (`gmx trjconv`) |
 
 ---
 
@@ -290,19 +291,48 @@ Runs automatically after `analyze_fel_landscape_features` when FEL is requested.
 
 Run at `{base}/analysis/` after all per-simulation runs complete.
 
-| Tool | Purpose |
-|------|---------|
-| `collect_metric_files` | Gather standard filenames from each `{base}/{label}/analysis/` |
-| `plot_combined_overlay` | Overlay RMSD/RMSF/Rg/energy traces |
-| `compute_comparison_table` | Mean/std/min/max per metric per simulation |
-| `run_combined_com_distance_analysis` | Overlay ligand-pocket distances |
-| `run_combined_binding_rmsf_overlay` | Overlay pocket or ligand RMSF profiles across holo sims |
-| `run_combined_rmsf_segment_analysis` | Bar chart for residue window |
-| `collect_fel_features_table` | One CSV of FEL features for all sims → clustering / ML |
-| `collect_classification_features_table` | **Full feature matrix** — binding + FEL scalars; raw + z-score CSV + XLSX |
-| `cluster_classification_features` | Hierarchical (default) or k-means on z-score matrix + labeled PCA/dendrogram plots |
-| `plot_cluster_feature_trajectories` | After clustering: one PNG per time-series metric, **one subplot per cluster** |
-| `plot_cluster_rmsf_profiles` | After clustering: pocket/ligand RMSF profiles, **one subplot per cluster** |
+| Tool                                      | Purpose                                                                                       |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `collect_metric_files`                  | Gather standard filenames from each`{base}/{label}/analysis/`                               |
+| `plot_combined_overlay`                 | Overlay RMSD/RMSF/Rg/energy traces                                                            |
+| `compute_comparison_table`              | Mean/std/min/max per metric per simulation                                                    |
+| `run_combined_com_distance_analysis`    | Overlay ligand-pocket distances                                                               |
+| `run_combined_binding_rmsf_overlay`     | Overlay pocket or ligand RMSF profiles across holo sims                                       |
+| `run_combined_rmsf_segment_analysis`    | Bar chart for residue window                                                                  |
+| `collect_fel_features_table`            | One CSV of FEL features for all sims → clustering / ML                                       |
+| `collect_classification_features_table` | **Full feature matrix** — binding + FEL scalars; raw + z-score CSV + XLSX              |
+| `cluster_classification_features`       | Hierarchical (default) or k-means on z-score matrix + labeled PCA/dendrogram/phylo-tree plots |
+| `plot_cluster_feature_trajectories`     | After clustering: one PNG per time-series metric,**one subplot per cluster**            |
+| `plot_cluster_rmsf_profiles`            | After clustering: pocket/ligand RMSF profiles,**one subplot per cluster**               |
+| `build_sequence_phylo_tree`             | **On request**: sequence-based phylogenetic tree from sequences extracted from each input PDB (pairwise % identity → UPGMA) |
+| `build_structure_phylo_tree`            | **On request**: structure-based phylogenetic tree from CA coordinates (sequence-guided superposition → CA-RMSD → UPGMA)     |
+
+---
+
+## Phylogenetic trees (sequence & structure)
+
+Two on-demand combined-analysis tools build phylogenetic trees across all
+simulations. They run **only when the user explicitly asks** for a
+phylogenetic / sequence / structure tree — the request is detected by
+`detect_phylo_tree_requested()` in `agentic/planner/planning_guidelines.py`
+(a bare "phylogenetic tree" defaults to the sequence tree). These are distinct
+from the FEL-feature `classification_phylo_tree.png`, which is derived from
+dynamics features rather than the provided structures.
+
+Both tools resolve a PDB per simulation (base-level `{base}/{label}.pdb` first,
+then per-sim reporter frames / FEL basins), extract sequences with Biopython,
+and reuse the circular phylogram renderer from `classification_clustering.py`
+so the figures match the existing tree style.
+
+| Tool | Distance metric | Outputs (in `{base}/analysis/`) |
+| --- | --- | --- |
+| `build_sequence_phylo_tree`  | `1 − pairwise % identity` (BLOSUM62 global alignment) | `sequence_phylo_tree.png`, `sequence_phylo_tree.nwk`, `sequence_phylo_distance_matrix.csv` |
+| `build_structure_phylo_tree` | CA-RMSD after sequence-guided Kabsch superposition of common residues | `structure_phylo_tree.png`, `structure_phylo_tree.nwk`, `structure_phylo_distance_matrix.csv` |
+
+Trees are clustered with UPGMA (`scipy` average linkage), colored by up to six
+sub-clusters, and logged to `analysis_summary.jsonl` as
+`Sequence_Phylogenetic_Tree` / `Structure_Phylogenetic_Tree`. The combined
+report renders them in a dedicated **Phylogenetic Trees** section.
 
 ---
 
@@ -329,11 +359,11 @@ matrix. It is **not** part of default combined analysis.
 
 **Which columns appear** depends on metrics named in the goal:
 
-| User says | Metric groups featurized |
-|-----------|-------------------------|
-| "unsupervised classification" (no list) | Default: com, contacts, pocket_sasa, residence, pocket_rmsf, ligand_rmsf, fel |
-| "classify using RMSF and pocket distance only" | `pocket_rmsf`, `com` only |
-| "classification with FEL and contacts" | `fel`, `contacts` (+ run PCA/FEL per sim first) |
+| User says                                      | Metric groups featurized                                                      |
+| ---------------------------------------------- | ----------------------------------------------------------------------------- |
+| "unsupervised classification" (no list)        | Default: com, contacts, pocket_sasa, residence, pocket_rmsf, ligand_rmsf, fel |
+| "classify using RMSF and pocket distance only" | `pocket_rmsf`, `com` only                                                 |
+| "classification with FEL and contacts"         | `fel`, `contacts` (+ run PCA/FEL per sim first)                           |
 
 ```python
 from src.analysis.classification_collector import collect_classification_features_table
@@ -346,12 +376,12 @@ collect_classification_features_table.func(
 
 **Outputs:**
 
-| File | Use |
-|------|-----|
-| `classification_features.csv` | Raw values (Å, nm², fractions) — interpret physically |
-| `classification_features_zscore.csv` | Z-scores across simulations — **input for clustering / ML** |
-| `classification_features.xlsx` | Same data + feature dictionary (README, Raw, ZScore sheets) |
-| `classification_features.json` | Column list, definitions, normalization notes |
+| File                                   | Use                                                               |
+| -------------------------------------- | ----------------------------------------------------------------- |
+| `classification_features.csv`        | Raw values (Å, nm², fractions) — interpret physically          |
+| `classification_features_zscore.csv` | Z-scores across simulations —**input for clustering / ML** |
+| `classification_features.xlsx`       | Same data + feature dictionary (README, Raw, ZScore sheets)       |
+| `classification_features.json`       | Column list, definitions, normalization notes                     |
 
 **Which file is used for classification?**
 
@@ -365,21 +395,21 @@ collect_classification_features_table.func(
 
 All possible columns are defined in `CLASSIFICATION_FEATURE_DEFINITIONS` (`src/analysis/classification_collector.py`). Metric groups map to columns as follows:
 
-| Metric group | Columns | Per-sim source | Calculation summary |
-|--------------|---------|----------------|---------------------|
-| `com` | `ligand_pocket_distance_mean_A`, `ligand_pocket_distance_std_A` | `ligand_pocket_distance.csv` | Mean / std of ligand–pocket COM distance over frames (Å) |
-| `contacts` | `mean_contacts`, `mean_hbonds`, `max_contacts` | `protein_ligand_contacts.csv` | Mean of `n_contacts`, mean of `n_hbonds`, max contacts |
-| `pocket_sasa` | `mean_pocket_sasa_nm2`, `std_pocket_sasa_nm2` | `pocket_sasa.csv` | Mean / std of pocket SASA (nm²) |
-| `residence` | `fraction_bound`, `n_unbinding_events`, `longest_bound_ns`, `mean_bound_event_ns` | `ligand_residence.json` | Bound fraction, unbinding count, longest/mean bound duration (ns) |
-| `pocket_rmsf` | `mean_pocket_rmsf_A`, `max_pocket_rmsf_A` | `pocket_rmsf.dat` | Mean / max per-residue RMSF in pocket (Å) |
-| `ligand_rmsf` | `mean_ligand_rmsf_A`, `max_ligand_rmsf_A` | `ligand_rmsf.json` / `.dat` | Mean / max ligand atom RMSF (Å) |
-| `fel` | `n_basins`, `landscape_entropy`, `major_basin_population`, `max_barrier_height_kJ_mol`, `mean_basin_depth_kJ_mol` | `fel_features.json` | Basin count, S = −Σ p ln p, largest basin occupancy, max barrier and mean depth (kJ/mol) |
-| `rmsd` | `mean_rmsd_A`, `std_rmsd_A` | `rmsd.dat` | Mean / std protein Cα RMSD (Å) |
-| `rmsf` | `mean_protein_rmsf_A`, `max_protein_rmsf_A` | `rmsf.dat` | Mean / max protein Cα RMSF (Å) — **overlays only; not used for classification** |
-| `rg` | `mean_rg_A`, `std_rg_A` | `gyration.dat` | Mean / std radius of gyration (Å) |
-| `sasa` | `mean_protein_sasa_nm2`, `std_protein_sasa_nm2` | `sasa.csv` / `sasa.dat` | Mean / std whole-protein SASA (nm²) |
-| `energy` | `mean_potential_energy_kJ_mol` | `energy.dat` | Mean potential energy (kJ/mol) |
-| `dccm` | `mean_abs_dccm` | `dccm_summary.json` | Mean \|cross-correlation\| of Cα fluctuations (0–1) |
+| Metric group    | Columns                                                                                                                     | Per-sim source                  | Calculation summary                                                                        |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------ |
+| `com`         | `ligand_pocket_distance_mean_A`, `ligand_pocket_distance_std_A`                                                         | `ligand_pocket_distance.csv`  | Mean / std of ligand–pocket COM distance over frames (Å)                                 |
+| `contacts`    | `mean_contacts`, `mean_hbonds`, `max_contacts`                                                                        | `protein_ligand_contacts.csv` | Mean of`n_contacts`, mean of `n_hbonds`, max contacts                                  |
+| `pocket_sasa` | `mean_pocket_sasa_nm2`, `std_pocket_sasa_nm2`                                                                           | `pocket_sasa.csv`             | Mean / std of pocket SASA (nm²)                                                           |
+| `residence`   | `fraction_bound`, `n_unbinding_events`, `longest_bound_ns`, `mean_bound_event_ns`                                   | `ligand_residence.json`       | Bound fraction, unbinding count, longest/mean bound duration (ns)                          |
+| `pocket_rmsf` | `mean_pocket_rmsf_A`, `max_pocket_rmsf_A`                                                                               | `pocket_rmsf.dat`             | Mean / max per-residue RMSF in pocket (Å)                                                 |
+| `ligand_rmsf` | `mean_ligand_rmsf_A`, `max_ligand_rmsf_A`                                                                               | `ligand_rmsf.json` / `.dat` | Mean / max ligand atom RMSF (Å)                                                           |
+| `fel`         | `n_basins`, `landscape_entropy`, `major_basin_population`, `max_barrier_height_kJ_mol`, `mean_basin_depth_kJ_mol` | `fel_features.json`           | Basin count, S = −Σ p ln p, largest basin occupancy, max barrier and mean depth (kJ/mol) |
+| `rmsd`        | `mean_rmsd_A`, `std_rmsd_A`                                                                                             | `rmsd.dat`                    | Mean / std protein Cα RMSD (Å)                                                           |
+| `rmsf`        | `mean_protein_rmsf_A`, `max_protein_rmsf_A`                                                                             | `rmsf.dat`                    | Mean / max protein Cα RMSF (Å) —**overlays only; not used for classification**    |
+| `rg`          | `mean_rg_A`, `std_rg_A`                                                                                                 | `gyration.dat`                | Mean / std radius of gyration (Å)                                                         |
+| `sasa`        | `mean_protein_sasa_nm2`, `std_protein_sasa_nm2`                                                                         | `sasa.csv` / `sasa.dat`     | Mean / std whole-protein SASA (nm²)                                                       |
+| `energy`      | `mean_potential_energy_kJ_mol`                                                                                            | `energy.dat`                  | Mean potential energy (kJ/mol)                                                             |
+| `dccm`        | `mean_abs_dccm`                                                                                                           | `dccm_summary.json`           | Mean\|cross-correlation\| of Cα fluctuations (0–1)                                       |
 
 **Default classification bundle** (when the goal says "classification" without naming metrics):
 
@@ -389,10 +419,10 @@ Whole-protein RMSF (`rmsf` group: `mean_protein_rmsf_A`, `max_protein_rmsf_A`) i
 
 Each row also includes:
 
-| Column | Meaning |
-|--------|---------|
-| `label` | Simulation folder name (e.g. `p23458`) |
-| `sim_directory` | Absolute path to `{base}/{label}/` |
+| Column                 | Meaning                                               |
+| ---------------------- | ----------------------------------------------------- |
+| `label`              | Simulation folder name (e.g.`p23458`)               |
+| `sim_directory`      | Absolute path to`{base}/{label}/`                   |
 | `n_features_present` | Count of non-null feature columns for that simulation |
 
 ---
@@ -420,11 +450,11 @@ where:
 
 **Example** (`agenticB5R1`, default bundle, 8 holo systems):
 
-| File | Role |
-|------|------|
-| `classification_features.csv` | Raw: `ligand_pocket_distance_mean_A = 2.64` (o15197), `mean_contacts = 51.2`, … |
-| `classification_features_zscore.csv` | Normalized: same row might show `-0.61` for distance mean, `-0.71` for contacts |
-| `classification_features.xlsx` | Sheets: `README`, `Feature_Definitions`, `Raw_Features`, `ZScore_Features` |
+| File                                   | Role                                                                                |
+| -------------------------------------- | ----------------------------------------------------------------------------------- |
+| `classification_features.csv`        | Raw:`ligand_pocket_distance_mean_A = 2.64` (o15197), `mean_contacts = 51.2`, … |
+| `classification_features_zscore.csv` | Normalized: same row might show`-0.61` for distance mean, `-0.71` for contacts  |
+| `classification_features.xlsx`       | Sheets:`README`, `Feature_Definitions`, `Raw_Features`, `ZScore_Features`   |
 
 ---
 
@@ -432,12 +462,12 @@ where:
 
 **Yes — features are normalized before clustering.** The pipeline automatically writes z-scores; you do **not** need a separate normalization step.
 
-| Method | Recommended input |
-|--------|-------------------|
+| Method                           | Recommended input                                                        |
+| -------------------------------- | ------------------------------------------------------------------------ |
 | k-means, hierarchical clustering | `classification_features_zscore.csv` or XLSX `ZScore_Features` sheet |
-| PCA / UMAP visualization | z-score columns |
-| Random forest / SVM (supervised) | z-score or raw (tree models handle scales; SVM prefers z-score) |
-| Reporting / thresholds | `classification_features.csv` (raw) |
+| PCA / UMAP visualization         | z-score columns                                                          |
+| Random forest / SVM (supervised) | z-score or raw (tree models handle scales; SVM prefers z-score)          |
+| Reporting / thresholds           | `classification_features.csv` (raw)                                    |
 
 **Do not** z-score within a single simulation time series — only **across simulations** for each summary feature.
 
@@ -445,21 +475,22 @@ where:
 
 After the feature table is built, run **`cluster_classification_features`** on the z-score CSV (automatic in combined analysis when classification is requested).
 
-| Parameter | Default | Notes |
-|-----------|---------|-------|
-| `method` | `hierarchical` | Set `kmeans` if the goal mentions k-means |
-| `linkage_method` | `ward` | Ward, average, or complete (hierarchical only) |
+| Parameter          | Default                 | Notes                                                         |
+| ------------------ | ----------------------- | ------------------------------------------------------------- |
+| `method`         | `hierarchical`        | Set`kmeans` if the goal mentions k-means                    |
+| `linkage_method` | `ward`                | Ward, average, or complete (hierarchical only)                |
 | `n_clusters` (k) | auto (√n, capped 2–8) | Number of groups to cut the tree into; e.g. k=3 → 3 clusters |
-| `user_goal` | — | Parses `p23458:JAK1` style maps for plot labels |
+| `user_goal`      | —                      | Parses`p23458:JAK1` style maps for plot labels              |
 
 **Outputs** (under `{base}/analysis/`):
 
-| File | Description |
-|------|-------------|
-| `classification_cluster_assignments.csv` | label, display_name, cluster_id, method |
-| `classification_clusters_pca.png` | 2D PCA scatter, colored by cluster, **protein name annotations** |
-| `classification_dendrogram.png` | Hierarchical dendrogram with protein names (hierarchical only) |
-| `classification_clusters.json` | Parameters + assignment summary |
+| File                                       | Description                                                                |
+| ------------------------------------------ | -------------------------------------------------------------------------- |
+| `classification_cluster_assignments.csv` | label, display_name, cluster_id, method                                    |
+| `classification_clusters_pca.png`        | 2D PCA scatter, colored by cluster,**protein name annotations**      |
+| `classification_dendrogram.png`          | Hierarchical dendrogram with protein names (hierarchical only)             |
+| `classification_phylo_tree.png`          | Unrooted circular phylogenetic tree colored by cluster (hierarchical only) |
+| `classification_clusters.json`           | Parameters + assignment summary                                            |
 
 **What does k mean on the dendrogram?**
 
@@ -475,17 +506,17 @@ The dendrogram itself shows merge **heights** (dissimilarity); k is the cut leve
 
 After cluster assignments exist, run **`plot_cluster_feature_trajectories`** to compare **time-series** features grouped by cluster. Each metric produces one figure with **k subplots** (one panel per cluster); proteins in the same cluster are overlaid in that panel.
 
-| Metric group | Output file | Y-axis |
-|--------------|-------------|--------|
-| `pocket_sasa` | `pocket_sasa_by_cluster.png` | Pocket SASA (nm²) vs time |
-| `com` | `com_distance_by_cluster.png` | Ligand–pocket COM distance (Å) vs time |
-| `contacts` | `contacts_by_cluster.png` | Heavy-atom contacts vs time |
-| `residence` | `ligand_residence_by_cluster.png` | Bound state (0/1) vs time |
+| Metric group    | Output file                         | Y-axis                                   |
+| --------------- | ----------------------------------- | ---------------------------------------- |
+| `pocket_sasa` | `pocket_sasa_by_cluster.png`      | Pocket SASA (nm²) vs time               |
+| `com`         | `com_distance_by_cluster.png`     | Ligand–pocket COM distance (Å) vs time |
+| `contacts`    | `contacts_by_cluster.png`         | Heavy-atom contacts vs time              |
+| `residence`   | `ligand_residence_by_cluster.png` | Bound state (0/1) vs time                |
 
 Time-series metrics use **`plot_cluster_feature_trajectories`**. Pocket/ligand RMSF uses **`plot_cluster_rmsf_profiles`** (ordinal residue/atom index on x; one line per protein per cluster panel).
 
-| Profile | Cluster output | Combined output |
-|---------|----------------|-----------------|
+| Profile         | Cluster output                 | Combined output             |
+| --------------- | ------------------------------ | --------------------------- |
 | `pocket_rmsf` | `pocket_rmsf_by_cluster.png` | `pocket_rmsf_overlay.png` |
 | `ligand_rmsf` | `ligand_rmsf_by_cluster.png` | `ligand_rmsf_overlay.png` |
 
@@ -531,7 +562,7 @@ cluster_classification_features.func(
 **Unsupervised (no labels yet):**
 
 - Load z-score matrix → sims with missing features are skipped automatically
-- `cluster_classification_features` (hierarchical default) → inspect cluster assignments and PCA/dendrogram plots
+- `cluster_classification_features` (hierarchical default) → inspect cluster assignments and PCA/dendrogram/phylo-tree plots
 - Compare clusters to binding/residence/FEL metrics in the raw CSV
 
 **Supervised (when you have labels):**
@@ -586,22 +617,50 @@ n_basins, landscape_entropy, major_basin_population, max_barrier_height_kJ_mol
 
 Use **identical basenames** in every `{label}/analysis/` directory so combined tools can collect them. See `agentic/planner/planning_guidelines.py` → `STANDARD_OUTPUT_FILES`.
 
-| Metric | Data file |
-|--------|-----------|
-| RMSF | `rmsf.dat` |
-| Rg | `gyration.dat` |
-| Ligand pocket | `ligand_pocket_distance.csv` |
-| Contacts | `protein_ligand_contacts.csv` |
-| Pocket SASA | `pocket_sasa.csv` |
-| Residence | `ligand_residence.csv` |
-| Pocket RMSF | `pocket_rmsf.dat` |
-| Ligand RMSF | `ligand_rmsf.dat`, `ligand_rmsf.json` |
+| Metric                | Data file                                       |
+| --------------------- | ----------------------------------------------- |
+| Analysis summary      | `analysis_summary.jsonl`                        |
+| RMSF                  | `rmsf.dat`                                    |
+| Rg                    | `gyration.dat`                                |
+| Ligand pocket         | `ligand_pocket_distance.csv`                  |
+| Contacts              | `protein_ligand_contacts.csv`                 |
+| Pocket SASA           | `pocket_sasa.csv`                             |
+| Residence             | `ligand_residence.csv`                        |
+| Pocket RMSF           | `pocket_rmsf.dat`                             |
+| Ligand RMSF           | `ligand_rmsf.dat`, `ligand_rmsf.json`       |
 | Classification matrix | `{base}/analysis/classification_features.csv` |
-| PCA | `pca_projections.dat` |
-| FEL | `fel_pc1_pc2_grid.csv` |
-| FEL features | `fel_features.json` |
+| PCA                   | `pca_projections.dat`                         |
+| FEL                   | `fel_pc1_pc2_grid.csv`                        |
+| FEL features          | `fel_features.json`                           |
 
 Do **not** prefix with simulation label (use `rmsf.dat`, not `p23458_rmsf.dat`).
+
+---
+
+## HTML report outputs (Reporter)
+
+Per-simulation and combined reports use **fixed filenames** so agents, resume logic, and
+`--combined-only` can discover them without globbing arbitrary names.
+
+| Scope            | Path                                      | Completion marker                          |
+| ---------------- | ----------------------------------------- | ------------------------------------------ |
+| Per simulation   | `{base}/{label}/reporter/report.html`     | `analysis_summary.jsonl` + `report.html`   |
+| Combined (multi) | `{base}/reporter/combined_report.html`    | `combined_report.html` at project base     |
+
+The Reporter agent always writes per-sim reports as `report.html` (not protein-specific names
+like `kinase_report.html`). Combined mode writes `combined_report.html` at the project base.
+
+**Multi-sim phases:** after all per-sim analysis/reporter work, the supervisor advances
+`multi_sim_phase` to `combined_analysis` then `combined_reporter`. Combined reporter
+completeness is checked only against `{base}/reporter/combined_report.html` — not against
+per-sim `report.html` files in individual simulation directories.
+
+**Resume / skip:** parallel pool and `--resume` treat a per-sim reporter as done when
+`{label}/analysis/analysis_summary.jsonl` and `{label}/reporter/report.html` both exist.
+Combined reporter is done when `{base}/reporter/combined_report.html` exists.
+
+See also [README.md](../README.md) (Output Layout) and [CONVENTIONS.md](CONVENTIONS.md)
+(multi-sim phases).
 
 ---
 
@@ -628,18 +687,18 @@ calculate_pocket_rmsf.func(
 
 ## Source files
 
-| File | Tools |
-|------|-------|
-| `rmsd_calculator.py` | RMSD |
-| `rmsf_calculator.py` | RMSF |
-| `gyration_calculator.py` | Rg |
-| `sasa_calculator.py` | SASA (whole protein) |
-| `com_distance_calculator.py` | COM distance, ligand-pocket distance |
-| `binding_site_analyzer.py` | Contacts, pocket SASA, residence, pocket/ligand RMSF |
-| `classification_collector.py` | `collect_classification_features_table` |
-| `classification_clustering.py` | `cluster_classification_features` |
-| `dccm_calculator.py` | DCCM |
-| `pca_analyzer.py` | PCA, FEL, FEL features |
-| `dssp_analyzer.py` | Secondary structure |
-| `energy_analyzer.py` | Energy, trajectory metrics |
-| `combined_analysis.py` | Cross-simulation pipelines |
+| File                             | Tools                                                |
+| -------------------------------- | ---------------------------------------------------- |
+| `rmsd_calculator.py`           | RMSD                                                 |
+| `rmsf_calculator.py`           | RMSF                                                 |
+| `gyration_calculator.py`       | Rg                                                   |
+| `sasa_calculator.py`           | SASA (whole protein)                                 |
+| `com_distance_calculator.py`   | COM distance, ligand-pocket distance                 |
+| `binding_site_analyzer.py`     | Contacts, pocket SASA, residence, pocket/ligand RMSF |
+| `classification_collector.py`  | `collect_classification_features_table`            |
+| `classification_clustering.py` | `cluster_classification_features`                  |
+| `dccm_calculator.py`           | DCCM                                                 |
+| `pca_analyzer.py`              | PCA, FEL, FEL features                               |
+| `dssp_analyzer.py`             | Secondary structure                                  |
+| `energy_analyzer.py`           | Energy, trajectory metrics                           |
+| `combined_analysis.py`         | Cross-simulation pipelines                           |
