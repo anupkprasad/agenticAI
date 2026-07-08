@@ -188,6 +188,15 @@ class MDState(TypedDict):
     post_hpc_analysis_only: Optional[bool]
     hpc_pool_phase_complete: Optional[bool]
 
+    # Cross-sim parallel worker pool (local prep / analysis+reporter)
+    parallel_pool: Optional[Dict[str, Any]]
+    parallel_workers: Optional[Any]              # "auto" or int (1 = sequential)
+    parallel_mem_gb_per_job: Optional[float]
+    parallel_cpus_per_job: Optional[float]
+    parallel_workers_resolved: Optional[int]
+    llm_concurrency: Optional[Any]                 # "auto" or int (Ollama parallel slots)
+    _allowed_hpc_jobs_explicit: Optional[bool]
+
     # Human-in-the-loop session (persisted in state.jsonl across checkpoints)
     hitl_active_agent: Optional[str]               # Field agent selected in HITL chat
     hitl_target_sim_label: Optional[str]           # Multi-sim: bound simulation label (e.g. p23458)

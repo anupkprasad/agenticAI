@@ -36,6 +36,8 @@ _COMBINED_ANALYSIS_PLOT_GLOBS = (
     "dssp_activation_loop_*.png",
     "classification_*.png",
     "*_by_cluster.png",
+    "sequence_phylo_tree.png",
+    "structure_phylo_tree.png",
 )
 
 
@@ -843,7 +845,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
 **IMPORTANT PATH GUIDELINES:**
 - The analysis_summary.jsonl file is typically in the "analysis/" subdirectory
 - For read_analysis_summary: Use "analysis/analysis_summary.jsonl" or just "analysis_summary.jsonl" (tool will search)
-- For generate_html_report: Use simple filename like "report.html" or "kinase_report.html" or "md_analysis_report.html"
+- For generate_html_report: ALWAYS use the exact filename "report.html" (do not invent per-protein names). The per-sim report filename must be consistent so the combined report can find it.
 - Do NOT include "working_dir" in tool_params - it will be automatically set to the reporter's output directory
 - All files will be created in the reporter's dedicated directory (working_dir/reporter/)
 
@@ -1818,7 +1820,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
             tool_params={
                 "analysis_data": {},  # Populated during execution
                 "report_type": agent_input.report_type.value,
-                "output_file": "analysis_report.html"
+                "output_file": "report.html"
             },
             reason="Generate final report"
         ))
@@ -1999,6 +2001,11 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 
                 if effective_tool == "generate_html_report":
                     from src.reporter.figure_selector import ReportFigurePolicy
+                    # Force a consistent, general filename for every per-sim
+                    # report so combined-level discovery/aggregation is trivial.
+                    # The LLM plan may propose arbitrary names (e.g.
+                    # "kinase_report.html"); we always normalize to report.html.
+                    params["output_file"] = "report.html"
                     params["analysis_data"] = analysis_data
                     params["literature_refs"] = literature_refs
                     params["literature_review"] = literature_review
@@ -2130,7 +2137,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 "final_impression": self._generate_final_impression(analysis_data, literature_refs, state),
                 "pdb_data": self._extract_pdb_for_viewer(state, analysis_data),
                 "enriched_prompt": state.get("enriched_prompt") or state.get("user_goal"),
-                "output_file": "analysis_report.html",
+                "output_file": "report.html",
                 "report_type": agent_input.report_type.value if hasattr(agent_input.report_type, "value") else str(agent_input.report_type),
             }
             fallback_result = self.tool_executor.execute_tool("generate_html_report", fallback_params)

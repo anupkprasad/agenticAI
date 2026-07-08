@@ -293,8 +293,15 @@ def _select_significant_pdbs_for_combined(
     max_total: int = 16,
     user_goal: Optional[str] = None,
     enriched_prompt: Optional[str] = None,
+    highlight_plan: Optional[Any] = None,
 ) -> Dict[str, str]:
-    """Collect significant structures across all simulations for the 3D viewer."""
+    """Collect significant structures across all simulations for the 3D viewer.
+
+    When a ``highlight_plan`` (``StructureHighlightPlan``) is provided, the
+    number of metastates embedded per simulation follows the plan — story-
+    relevant proteins get multiple conformational states while the rest are
+    limited or skipped — instead of one structure for every simulation.
+    """
     from src.reporter.figure_selector import resolve_report_narrative
 
     narrative = resolve_report_narrative(
@@ -318,6 +325,14 @@ def _select_significant_pdbs_for_combined(
         if len(frames) >= cap:
             break
         display = resolve_display_label(label, label_name_map)
+
+        # Per-sim metastate budget from the highlight plan (0 → skip this sim).
+        sim_max = max_per_sim
+        if highlight_plan is not None:
+            sim_max = highlight_plan.structures_for(display)
+            if sim_max <= 0:
+                continue
+
         analysis_dir = Path(sim_dir) / "analysis"
         jsonl = analysis_dir / "analysis_summary.jsonl"
         records = _read_jsonl(str(jsonl)) if jsonl.exists() else []
@@ -333,7 +348,7 @@ def _select_significant_pdbs_for_combined(
                 key=lambda kv: _population_from_viewer_label(kv[0]),
                 reverse=True,
             )
-            for b_label, pdb_text in ranked[:max_per_sim]:
+            for b_label, pdb_text in ranked[:sim_max]:
                 if len(frames) >= cap:
                     break
                 viewer_key = f"{display} — {b_label}"
@@ -341,16 +356,16 @@ def _select_significant_pdbs_for_combined(
                 added_this_sim += 1
 
         # Priority 2: trajectory frames from analysis time series
-        if added_this_sim < max_per_sim:
+        if added_this_sim < sim_max:
             sig = collect_significant_structures(
                 analysis_data,
                 sim_dir,
                 sim_dir,
                 "hpc",
-                max_total=max(max_per_sim - added_this_sim, 1),
+                max_total=max(sim_max - added_this_sim, 1),
             )
             for t_label, pdb_text in sig.items():
-                if len(frames) >= cap or added_this_sim >= max_per_sim:
+                if len(frames) >= cap or added_this_sim >= sim_max:
                     break
                 viewer_key = f"{display} — {t_label}"
                 if viewer_key not in frames:
@@ -2126,14 +2141,28 @@ def _build_per_sim_highlights_section(
     enriched_prompt: Optional[str] = None,
     exclude_paths: Optional[Set[str]] = None,
     max_highlights: Optional[int] = None,
+    allowed_labels: Optional[Set[str]] = None,
+    structure_highlight: Optional[Any] = None,
 ) -> str:
-    """Embed goal-selected per-simulation figures (capped for large cohorts)."""
+    """Embed goal-selected per-simulation figures (capped for large cohorts).
+
+    When ``allowed_labels`` is given, only those (story-relevant) simulations
+    contribute per-sim highlight figures, matching the 3D-viewer subset.
+    """
     from src.reporter.figure_selector import (
         ReportFigurePolicy,
         resolve_report_narrative,
         select_per_sim_highlight_figures,
     )
     from src.reporter.html_generator import _collect_image_paths, _encode_image_base64
+
+    # Restrict to the featured simulations when the plan asks for it.
+    if allowed_labels:
+        filtered = [(s, d) for s, d in zip(sims_summary, sim_dirs)
+                    if s.get("label") in allowed_labels]
+        if filtered:
+            sims_summary = [s for s, _ in filtered]
+            sim_dirs = [d for _, d in filtered]
 
     narrative = resolve_report_narrative(
         user_goal or "",
@@ -2154,6 +2183,10 @@ def _build_per_sim_highlights_section(
         narrative=narrative,
     )
 
+    rationale_map = {}
+    if structure_highlight is not None:
+        rationale_map = getattr(structure_highlight, "rationale", {}) or {}
+
     cards: List[str] = []
     for fig in figures:
         search_dirs = [
@@ -2163,6 +2196,9 @@ def _build_per_sim_highlights_section(
         if not uri:
             continue
         caption = fig["caption"]
+        _story = rationale_map.get(fig.get("label", ""))
+        if _story:
+            caption = f"{caption} — {_story}"
         fname = Path(fig["path"]).name
         cards.append(
             f'<div class="plot-card">'
@@ -2196,6 +2232,69 @@ def _collect_per_sim_dssp_figures(
         {"label": e["label"], "heatmap": e["heatmap"], "timeseries": None}
         for e in _collect_activation_loop_dssp_heatmaps(sim_dirs, labels)
     ]
+
+
+def _build_phylo_trees_section(
+    overlay_plots: List[str],
+    base_analysis_dir: Optional[str] = None,
+) -> str:
+    """
+    Dedicated section for on-request sequence/structure phylogenetic trees.
+
+    These are distinct from the FEL-feature ``classification_phylo_tree`` shown
+    in the classification section: they are derived from sequences extracted
+    from the input PDBs and from CA structural superposition, respectively.
+    """
+    specs = (
+        (
+            "sequence_phylo_tree.png",
+            "Sequence-based phylogenetic tree",
+            "Unrooted tree from pairwise sequence identity of residues extracted "
+            "from every input PDB (UPGMA of 1 − % identity).",
+        ),
+        (
+            "structure_phylo_tree.png",
+            "Structure-based phylogenetic tree",
+            "Unrooted tree from CA-RMSD after sequence-guided structural "
+            "superposition of every pair of input PDBs (UPGMA).",
+        ),
+    )
+
+    def _locate(name: str) -> Optional[str]:
+        for p in overlay_plots or []:
+            if Path(p).name == name and Path(p).is_file():
+                return str(p)
+        if base_analysis_dir:
+            cand = Path(base_analysis_dir) / name
+            if cand.is_file():
+                return str(cand)
+        return None
+
+    cards: List[str] = []
+    for fname, title, caption in specs:
+        path = _locate(fname)
+        if not path:
+            continue
+        uri = _encode_image(path)
+        if uri is None:
+            continue
+        cards.append(
+            f'<div class="plot-card">'
+            f'<img src="{uri}" alt="{_html_mod.escape(title)}" loading="lazy">'
+            f'<p><b>{_html_mod.escape(title)}</b><br>{_html_mod.escape(caption)}</p>'
+            f'</div>\n'
+        )
+
+    if not cards:
+        return ""
+
+    return (
+        "<h2>&#127793; Phylogenetic Trees</h2>\n"
+        "<p>Cross-simulation relationships inferred directly from the provided "
+        "structures. Newick trees and pairwise distance matrices are written "
+        "alongside these figures in the analysis directory.</p>\n"
+        '<div class="plot-grid">\n' + "".join(cards) + "</div>\n"
+    )
 
 
 def _build_classification_dynamics_section(
@@ -2710,6 +2809,11 @@ def generate_combined_html_report(
         base_analysis_dir=base_analysis_dir,
     )
 
+    phylo_trees_html = _build_phylo_trees_section(
+        overlay_plots,
+        base_analysis_dir=base_analysis_dir,
+    )
+
     # Comparative Dynamics Summary — multi-panel figure (Panels A–G)
     comparative_html = _build_comparative_dynamics_section(
         overlay_plots, sims_summary, sim_dirs, labels,
@@ -2724,7 +2828,11 @@ def generate_combined_html_report(
     # Summary, so a supplementary figure dump would only duplicate them.
     extra_plots_section = ""
 
-    # 3D viewer: significant structures per simulation (FEL basins preferred)
+    # 3D viewer: significant structures per simulation (FEL basins preferred).
+    # A StructureHighlightPlan (goal/data/LLM-driven) decides which proteins get
+    # multiple metastates and which are skipped, so the viewer tells a story
+    # instead of dumping one structure per simulation.
+    structure_highlight = getattr(report_plan, "structure_highlight", None)
     pdb_frames = _select_significant_pdbs_for_combined(
         sim_dirs,
         labels,
@@ -2733,11 +2841,16 @@ def generate_combined_html_report(
         max_total=max(len(sim_dirs) * 2, 16),
         user_goal=user_goal,
         enriched_prompt=enriched_prompt,
+        highlight_plan=structure_highlight,
     )
     viewer_html = _build_3d_viewer_html(pdb_frames) if pdb_frames else ""
 
     # Paths already shown in classification / comparative sections — exclude from per-sim highlights
     comparative_paths = collect_paths_for_combined_sections(overlay_plots, narrative)
+
+    _highlight_labels = None
+    if structure_highlight is not None and getattr(structure_highlight, "restrict_highlights", False):
+        _highlight_labels = set(structure_highlight.highlight_labels)
 
     per_sim_highlights_html = _build_per_sim_highlights_section(
         sims_summary,
@@ -2746,6 +2859,8 @@ def generate_combined_html_report(
         report_focus=report_focus,
         enriched_prompt=enriched_prompt,
         exclude_paths=comparative_paths,
+        allowed_labels=_highlight_labels,
+        structure_highlight=structure_highlight,
     )
 
     # Literature: prefer freshly searched refs; fall back to per-sim HTML aggregation
@@ -2850,6 +2965,10 @@ def generate_combined_html_report(
 {classification_html}
 
 {"<div class='section-divider'></div>" if classification_html else ""}
+
+{phylo_trees_html}
+
+{"<div class='section-divider'></div>" if phylo_trees_html else ""}
 
 {comparative_html}
 

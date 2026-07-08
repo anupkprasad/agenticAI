@@ -223,6 +223,22 @@ tools:
       profile_type: "pocket_rmsf"
     phase: combined_analysis
 
+  build_sequence_phylo_tree:
+    description: "Sequence-based phylogenetic tree from sequences extracted from each simulation's PDB (pairwise % identity, UPGMA)"
+    defaults:
+      plot_file: "sequence_phylo_tree.png"
+      newick_file: "sequence_phylo_tree.nwk"
+      distance_matrix_file: "sequence_phylo_distance_matrix.csv"
+    phase: combined_analysis
+
+  build_structure_phylo_tree:
+    description: "Structure-based phylogenetic tree from CA coordinates of each simulation's PDB (sequence-aligned CA-RMSD, UPGMA)"
+    defaults:
+      plot_file: "structure_phylo_tree.png"
+      newick_file: "structure_phylo_tree.nwk"
+      distance_matrix_file: "structure_phylo_distance_matrix.csv"
+    phase: combined_analysis
+
 # LLM-powered analysis planning configuration
 llm:
   planning_prompt_template: |

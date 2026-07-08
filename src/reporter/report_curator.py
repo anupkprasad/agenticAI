@@ -41,6 +41,30 @@ class SubsectionPlan:
 
 
 @dataclass
+class StructureHighlightPlan:
+    """Which simulations to feature with 3D metastates, and how many each.
+
+    Enables the reporter to embed *multiple* conformational states for the few
+    proteins that matter to the story (connected via ``rationale``) rather than
+    one structure for every simulation.
+    """
+
+    highlight_labels: Set[str] = field(default_factory=set)
+    structures_per_label: Dict[str, int] = field(default_factory=dict)
+    rationale: Dict[str, str] = field(default_factory=dict)
+    default_per_sim: int = 1
+    restrict_highlights: bool = False
+
+    def structures_for(self, display_name: str) -> int:
+        """Number of metastates to embed for a simulation (0 = skip)."""
+        if display_name in self.structures_per_label:
+            return max(0, int(self.structures_per_label[display_name]))
+        if self.restrict_highlights and self.highlight_labels:
+            return 0
+        return self.default_per_sim
+
+
+@dataclass
 class CombinedReportPlan:
     headline: str
     classification_section: Optional[SubsectionPlan] = None
@@ -48,6 +72,7 @@ class CombinedReportPlan:
     included_overlay_plots: List[str] = field(default_factory=list)
     excluded_plots: Dict[str, str] = field(default_factory=dict)
     subsection_summaries: Dict[str, str] = field(default_factory=dict)
+    structure_highlight: Optional[StructureHighlightPlan] = None
 
 
 def parse_label_name_map_strict(
@@ -342,6 +367,239 @@ def _subsection_summary_for_plots(
     return ""
 
 
+def _float_or_none(row: Dict[str, str], key: str) -> Optional[float]:
+    raw = row.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_structure_highlight_plan(
+    sim_dirs: Sequence[str],
+    sim_labels: Sequence[str],
+    base_analysis_dir: Optional[str] = None,
+    label_name_map: Optional[Dict[str, str]] = None,
+    user_goal: str = "",
+    enriched_prompt: str = "",
+    narrative: Any = None,
+    llm_client: Any = None,
+    literature_snippet: str = "",
+) -> StructureHighlightPlan:
+    """Decide which proteins to feature with multiple 3D metastates.
+
+    Small cohorts (or non-classification studies) keep the previous behaviour —
+    every simulation contributes up to two structures. For large cohorts or
+    classification-driven studies the plan restricts the 3D viewer / per-sim
+    highlights to a story-relevant subset: one representative per dynamic
+    cluster (most conformationally diverse) plus binding-site extremes. When an
+    LLM is available it refines the subset and the connecting rationale.
+    """
+    display_names = display_names_for_sims(sim_labels, label_name_map)
+    disp_by_label = {sl.lower(): dn for sl, dn in zip(sim_labels, display_names)}
+    n_sims = len(sim_labels)
+
+    base = Path(base_analysis_dir) if base_analysis_dir else None
+    features = _load_features_table(base) if base and base.is_dir() else []
+    clusters = _load_cluster_assignments(base) if base and base.is_dir() else {}
+    feat_by_label: Dict[str, Dict[str, str]] = {}
+    for row in features:
+        lbl = (row.get("label") or "").strip().lower()
+        if lbl:
+            feat_by_label[lbl] = row
+
+    classification_primary = bool(getattr(narrative, "classification_primary", False))
+    max_fel = int(getattr(narrative, "max_fel_per_sim", 2) or 2)
+
+    # Small / non-classification cohort → keep every simulation (up to 2 states).
+    if n_sims <= 8 and not classification_primary:
+        return StructureHighlightPlan(
+            default_per_sim=min(2, max(max_fel, 1)),
+            restrict_highlights=False,
+        )
+
+    # Large / classification cohort → feature a story-relevant subset.
+    highlight: Set[str] = set()
+    per_label: Dict[str, int] = {}
+    rationale: Dict[str, str] = {}
+
+    def _feature_up(display: str, n: int, reason: str) -> None:
+        highlight.add(display)
+        per_label[display] = max(per_label.get(display, 0), n)
+        rationale.setdefault(display, reason)
+
+    # One representative per cluster: most conformationally diverse member.
+    if clusters and feat_by_label:
+        members_by_cluster: Dict[int, List[str]] = {}
+        for lbl, cid in clusters.items():
+            members_by_cluster.setdefault(cid, []).append(lbl)
+        for cid, members in sorted(members_by_cluster.items()):
+            def _diversity(lbl: str) -> float:
+                row = feat_by_label.get(lbl, {})
+                ent = _float_or_none(row, "landscape_entropy")
+                nb = _float_or_none(row, "n_basins")
+                return (ent if ent is not None else 0.0) + 0.01 * (nb or 0.0)
+
+            rep = max(members, key=_diversity)
+            disp = disp_by_label.get(rep, rep)
+            _feature_up(
+                disp, min(2, max(max_fel, 2)),
+                f"Representative of cluster {cid} (most conformationally diverse; "
+                f"multiple metastates shown).",
+            )
+
+        # Binding-site extremes across the cohort (widest excursion, most flexible pocket).
+        def _extreme(col: str, want_max: bool) -> Optional[str]:
+            vals = [
+                (lbl, _float_or_none(row, col))
+                for lbl, row in feat_by_label.items()
+            ]
+            vals = [(l, v) for l, v in vals if v is not None]
+            if not vals:
+                return None
+            return (max if want_max else min)(vals, key=lambda kv: kv[1])[0]
+
+        widest = _extreme("ligand_pocket_distance_mean_A", True)
+        if widest:
+            _feature_up(
+                disp_by_label.get(widest, widest), 2,
+                "Widest ATP–pocket COM excursion — key binding-site outlier.",
+            )
+        flexible = _extreme("mean_pocket_rmsf_A", True)
+        if flexible:
+            _feature_up(
+                disp_by_label.get(flexible, flexible), 2,
+                "Most flexible ATP-binding pocket in the cohort.",
+            )
+
+    # Fallback when no features/clusters: feature the first several systems.
+    if not highlight:
+        for disp in display_names[: min(6, n_sims)]:
+            _feature_up(disp, 1, "Representative system.")
+
+    # Cap the featured subset so the report stays focused.
+    max_highlights = max(3, len(set(clusters.values())) + 2) if clusters else 6
+    if len(highlight) > max_highlights:
+        kept = sorted(highlight, key=lambda d: -per_label.get(d, 0))[:max_highlights]
+        highlight = set(kept)
+        per_label = {d: n for d, n in per_label.items() if d in highlight}
+        rationale = {d: r for d, r in rationale.items() if d in highlight}
+
+    plan = StructureHighlightPlan(
+        highlight_labels=highlight,
+        structures_per_label=per_label,
+        rationale=rationale,
+        default_per_sim=0,
+        restrict_highlights=True,
+    )
+
+    if llm_client and getattr(llm_client, "available", True):
+        try:
+            plan = _llm_refine_structure_highlights(
+                llm_client,
+                plan=plan,
+                user_goal=user_goal,
+                display_names=display_names,
+                feat_by_label=feat_by_label,
+                disp_by_label=disp_by_label,
+                clusters=clusters,
+                literature_snippet=literature_snippet,
+            )
+        except Exception as exc:
+            logger.warning("LLM structure-highlight refinement failed: %s", exc)
+
+    return plan
+
+
+def _llm_refine_structure_highlights(
+    llm_client,
+    *,
+    plan: StructureHighlightPlan,
+    user_goal: str,
+    display_names: Sequence[str],
+    feat_by_label: Dict[str, Dict[str, str]],
+    disp_by_label: Dict[str, str],
+    clusters: Dict[str, int],
+    literature_snippet: str,
+) -> StructureHighlightPlan:
+    """Ask the LLM which proteins deserve multiple metastates, tied to the story."""
+    rows = []
+    for lbl, row in feat_by_label.items():
+        disp = disp_by_label.get(lbl, lbl)
+        rows.append({
+            "protein": disp,
+            "cluster": clusters.get(lbl),
+            "atp_pocket_dist_A": _float_or_none(row, "ligand_pocket_distance_mean_A"),
+            "pocket_rmsf_A": _float_or_none(row, "mean_pocket_rmsf_A"),
+            "n_fel_basins": _float_or_none(row, "n_basins"),
+            "fel_entropy": _float_or_none(row, "landscape_entropy"),
+        })
+    rows = rows[:40]
+
+    prompt = f"""You are curating the 3D structure viewer of a combined MD report.
+Choose only the proteins that matter to the scientific story and, for each,
+how many conformational metastates (FEL basins, 1-3) to embed. Do NOT include
+every simulation — favour cluster representatives and clear outliers.
+
+**User goal:** {user_goal[:1500]}
+
+**Per-simulation features (JSON):**
+{json.dumps(rows, indent=1)[:4000]}
+
+**Literature context:** {literature_snippet[:800] if literature_snippet else "None"}
+
+Return JSON only:
+{{
+  "restrict": true,
+  "highlights": {{
+    "PROTEIN_NAME": {{"n_structures": 2, "reason": "one concise sentence tying it to the story"}}
+  }}
+}}
+
+Rules:
+- 3-10 proteins max. Give conformationally diverse / outlier systems 2-3 states; others 1.
+- reason must connect the structure(s) to the narrative (e.g. cryptic pocket, unbinding, activation-loop rearrangement)."""
+
+    raw = llm_client.prompt_raw(prompt, temperature=0.2, max_tokens=1500, format="json")
+    text = raw if isinstance(raw, str) else str(raw)
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return plan
+    parsed = json.loads(text[start : end + 1])
+
+    highlights = parsed.get("highlights") or {}
+    if not isinstance(highlights, dict) or not highlights:
+        return plan
+
+    valid_names = set(display_names)
+    new_per_label: Dict[str, int] = {}
+    new_rationale: Dict[str, str] = dict(plan.rationale)
+    for name, spec in highlights.items():
+        if name not in valid_names:
+            continue
+        try:
+            n = int((spec or {}).get("n_structures", 1))
+        except (TypeError, ValueError):
+            n = 1
+        new_per_label[name] = max(1, min(3, n))
+        reason = (spec or {}).get("reason")
+        if isinstance(reason, str) and reason.strip():
+            new_rationale[name] = reason.strip()
+
+    if not new_per_label:
+        return plan
+
+    return StructureHighlightPlan(
+        highlight_labels=set(new_per_label),
+        structures_per_label=new_per_label,
+        rationale=new_rationale,
+        default_per_sim=0,
+        restrict_highlights=bool(parsed.get("restrict", True)),
+    )
+
+
 def build_combined_report_plan(
     overlay_plots: Sequence[str],
     sim_dirs: Sequence[str],
@@ -430,12 +688,25 @@ def build_combined_report_plan(
         except Exception as exc:
             logger.warning("LLM report curation failed, using rule-based plan: %s", exc)
 
+    structure_highlight = build_structure_highlight_plan(
+        sim_dirs,
+        sim_labels,
+        base_analysis_dir=str(base) if base else None,
+        label_name_map=label_name_map,
+        user_goal=user_goal,
+        enriched_prompt=enriched_prompt,
+        narrative=narrative,
+        llm_client=llm_client,
+        literature_snippet=literature_snippet,
+    )
+
     return CombinedReportPlan(
         headline=headline,
         classification_section=classification,
         included_overlay_plots=filtered,
         excluded_plots=excluded,
         subsection_summaries=subsection_summaries,
+        structure_highlight=structure_highlight,
     )
 
 

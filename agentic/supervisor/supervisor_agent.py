@@ -458,6 +458,53 @@ class MDSupervisor:
             if reconcile_post_hpc_with_pool(state):
                 multi_sim_phase = state.get("multi_sim_phase")
 
+        # ── Cross-sim parallel worker pool (prep / analysis+reporter) ───
+        if multi_sim_phase == "parallel_pool":
+            from agentic.multi_sim_parallel_pool import parallel_pool_supervisor_tick
+
+            return self._ensure_valid_next_node(parallel_pool_supervisor_tick(state))
+
+        if state.pop("_parallel_start_combined", None):
+            logger.info("SUPERVISOR [multi-sim]: Parallel per-sim work complete — combined analysis")
+            return self._setup_combined_analysis(state)
+
+        # ── Combined cross-sim phases (must run analysis before reporter) ─
+        if state.get("is_multi_simulation") and multi_sim_phase in (
+            "combined_analysis",
+            "combined_reporter",
+        ):
+            from agentic.multi_sim_progress import (
+                _combined_analysis_done_on_disk,
+                _combined_reporter_done_on_disk,
+            )
+
+            base = Path(_get_multi_sim_base_dir(state))
+            analysis_done = _combined_analysis_done_on_disk(base)
+            reporter_done = _combined_reporter_done_on_disk(base)
+            if multi_sim_phase == "combined_analysis" and not analysis_done:
+                logger.info(
+                    "SUPERVISOR [multi-sim]: Combined analysis pending — entering setup"
+                )
+                return self._setup_combined_analysis(state)
+            if multi_sim_phase == "combined_reporter" and analysis_done and not reporter_done:
+                state["plan_executed"] = False
+                state["current_agent_idx"] = 1
+                state["working_directory"] = str(base)
+                state["next_node"] = "reporter"
+                log_supervisor_routing(state, "reporter", "Combined analysis on disk — reporter")
+                return state
+            if multi_sim_phase == "combined_reporter" and reporter_done:
+                logger.info(
+                    "SUPERVISOR [multi-sim]: Combined report on disk — final report"
+                )
+                state["multi_sim_phase"] = "complete"
+                state["plan_executed"] = True
+                state["next_node"] = "final_report"
+                log_supervisor_routing(
+                    state, "final_report", "Combined multi-sim workflow complete"
+                )
+                return state
+
         # ── Cross-sim HPC pool (prep sequential, SLURM jobs parallel) ───
         if multi_sim_phase == "hpc_pool":
             self._ensure_hpc_pool_prep_context(state)
@@ -517,6 +564,22 @@ class MDSupervisor:
 
             if multisim_resume_entry_allowed(state, multi_sim_phase):
                 reconcile_multisim_progress_from_disk(state)
+                from agentic.multi_sim_parallel_pool import (
+                    should_use_parallel_pool,
+                    start_parallel_agent_phase,
+                )
+                from agentic.multi_sim_progress import all_per_sim_agents_done
+
+                if (
+                    should_use_parallel_pool(state)
+                    and not all_per_sim_agents_done(state)
+                ):
+                    logger.info(
+                        "SUPERVISOR [multi-sim]: Resume — parallel analysis/reporter pool"
+                    )
+                    state["multisim_resume_applied"] = True
+                    return self._ensure_valid_next_node(start_parallel_agent_phase(state))
+
                 advanced = self._maybe_advance_if_per_sim_complete(state)
                 if advanced is not None:
                     state["multisim_resume_applied"] = True
@@ -615,7 +678,12 @@ class MDSupervisor:
         # When --combined-only is set, discover sims from per-sim
         # analysis_summary.jsonl files and jump straight to combined mode.
         if state.get("is_multi_simulation") and state.get("combined_only"):
-            if multi_sim_phase != "combined_analysis":
+            # Only (re)activate combined-only setup when we have NOT already
+            # entered a combined phase. Once phase is combined_analysis or
+            # combined_reporter, the combined pipeline is already running/finishing
+            # — re-activating here would reset it back to combined_analysis and
+            # re-run analysis+report on a loop (until the recursion limit).
+            if multi_sim_phase not in ("combined_analysis", "combined_reporter"):
                 activated = self._activate_combined_only_mode(state)
                 if activated is not None:
                     return activated
@@ -654,12 +722,50 @@ class MDSupervisor:
                     label,
                 )
                 state["plan_executed"] = False
+                self._sync_current_agent_idx_from_progress(state)
             elif multi_sim_phase == "hpc_pool" and not state.get("post_hpc_analysis_only"):
                 return self._finish_hpc_pool_prep_sim(state)
             elif multi_sim_phase == "executing_sims":
                 logger.info("SUPERVISOR [multi-sim]: Per-sim cycle complete — advancing")
                 return self._ensure_valid_next_node(self._advance_multi_sim(state))
+            elif multi_sim_phase == "combined_analysis":
+                from agentic.multi_sim_progress import _combined_analysis_done_on_disk
+
+                base = Path(_get_multi_sim_base_dir(state))
+                if _combined_analysis_done_on_disk(base):
+                    logger.info(
+                        "SUPERVISOR [multi-sim]: Combined analysis on disk — "
+                        "routing to combined reporter"
+                    )
+                    state["plan_executed"] = False
+                    state["multi_sim_phase"] = "combined_reporter"
+                    state["current_agent_idx"] = 1
+                    state["working_directory"] = str(base)
+                    state["next_node"] = "reporter"
+                    log_supervisor_routing(
+                        state, "reporter", "Combined analysis done — starting combined report"
+                    )
+                    return state
+                logger.info(
+                    "SUPERVISOR [multi-sim]: Combined analysis pending — "
+                    "continuing combined pipeline"
+                )
+                state["plan_executed"] = False
+                return self._setup_combined_analysis(state)
             elif multi_sim_phase == "combined_reporter":
+                from agentic.multi_sim_progress import _combined_reporter_done_on_disk
+
+                base = Path(_get_multi_sim_base_dir(state))
+                if not _combined_reporter_done_on_disk(base):
+                    logger.info(
+                        "SUPERVISOR [multi-sim]: Combined reporter pending — continuing"
+                    )
+                    state["plan_executed"] = False
+                    state["working_directory"] = str(base)
+                    state["current_agent_idx"] = 1
+                    state["next_node"] = "reporter"
+                    log_supervisor_routing(state, "reporter", "Combined report pending")
+                    return state
                 logger.info("SUPERVISOR [multi-sim]: Combined workflow complete — final report")
                 state["next_node"] = "final_report"
                 log_supervisor_routing(state, "final_report", "Combined multi-sim workflow complete")
@@ -793,8 +899,16 @@ class MDSupervisor:
             if should_use_hpc_pool(state):
                 logger.info("SUPERVISOR [multi-sim]: Using cross-sim HPC pool")
                 state["multi_sim_phase"] = "hpc_pool"
+                from agentic.parallel_resources import resolve_allowed_hpc_jobs
+
+                state["allowed_hpc_jobs"] = resolve_allowed_hpc_jobs(state)
                 init_hpc_pool(state)
                 return self._apply_hpc_pool_tick(state)
+
+            from agentic.multi_sim_parallel_pool import (
+                should_use_parallel_pool,
+                start_parallel_agent_phase,
+            )
 
             state["multi_sim_phase"] = "executing_sims"
             if state.get("resume_failed_only"):
@@ -828,6 +942,9 @@ class MDSupervisor:
             ):
                 if not state.get("resume_failed_only"):
                     init_multi_sim_progress(state)
+            if should_use_parallel_pool(state):
+                logger.info("SUPERVISOR [multi-sim]: Using parallel analysis/reporter pool")
+                return self._ensure_valid_next_node(start_parallel_agent_phase(state))
             return self._ensure_valid_next_node(self._start_next_sim(state))
 
         # Post-HPC analysis loop after cross-sim pool completes
@@ -862,6 +979,17 @@ class MDSupervisor:
                 and not state.get("plan_executed")
                 and not state.get("input_validated")
             ):
+                from agentic.multi_sim_parallel_pool import (
+                    should_use_parallel_pool,
+                    start_parallel_agent_phase,
+                )
+
+                if should_use_parallel_pool(state):
+                    logger.info(
+                        "SUPERVISOR [multi-sim]: Post-HPC — parallel analysis/reporter pool"
+                    )
+                    return self._ensure_valid_next_node(start_parallel_agent_phase(state))
+
                 next_label = first_incomplete_post_hpc_sim(state)
                 if next_label:
                     bind_workflow_to_sim(state, next_label)
@@ -904,20 +1032,45 @@ class MDSupervisor:
                     )
                     return self._finish_hpc_pool_prep_sim(state)
                 if state.get("multi_sim_phase") == "executing_sims":
+                    if self._per_sim_cycle_complete(state):
+                        logger.info(
+                            "SUPERVISOR [multi-sim]: Per-sim cycle complete — "
+                            "advancing multi-sim loop inline"
+                        )
+                        return self._advance_multi_sim(state)
                     logger.info(
-                        "SUPERVISOR [multi-sim]: Per-sim cycle complete — "
-                        "advancing multi-sim loop inline"
+                        "SUPERVISOR [multi-sim]: Per-sim agents not complete on disk — "
+                        "re-syncing agent index"
                     )
-                    return self._advance_multi_sim(state)
-                # combined_analysis done (multi_sim_phase was just set to
-                # "combined_reporter" by _assign_field_agent_tasks), or any
-                # other case where next_node was left as "supervisor".
+                    state["plan_executed"] = False
+                    self._sync_current_agent_idx_from_progress(state)
+                    return self._route_active_sim_pipeline(state)
+                # combined_analysis finished in-field — start combined reporter.
+                if state.get("multi_sim_phase") == "combined_reporter":
+                    if state.get("next_node") == "final_report":
+                        log_supervisor_routing(
+                            state, "final_report", "Combined multi-sim workflow complete"
+                        )
+                        return state
+                    logger.info(
+                        "SUPERVISOR: Combined analysis complete — starting combined reporter"
+                    )
+                    state["plan_executed"] = False
+                    state["current_agent_idx"] = 1
+                    state["next_node"] = "reporter"
+                    return state
+                if state.get("multi_sim_phase") == "combined_analysis":
+                    logger.info(
+                        "SUPERVISOR: Combined analysis still pending — re-entering setup"
+                    )
+                    state["plan_executed"] = False
+                    return self._setup_combined_analysis(state)
                 if state.get("next_node") == "supervisor":
                     logger.info(
                         "SUPERVISOR: plan_executed with next_node=supervisor — "
-                        "redirecting to final_report"
+                        "returning to supervisor for phase transition"
                     )
-                    state["next_node"] = "final_report"
+                    state["plan_executed"] = False
             return state
 
         # ── Fallback ──────────────────────────────────────────────────────
@@ -1248,6 +1401,44 @@ class MDSupervisor:
         elif reporter_out and wd:
             if not _artifact_in_sim_dir(str(reporter_out), wd):
                 state["reporter_output"] = None
+
+        if wd:
+            from agentic.multi_sim_progress import (
+                per_sim_analysis_done_on_disk,
+                per_sim_reporter_done_on_disk,
+            )
+
+            if state.get("reporter_output") and not per_sim_reporter_done_on_disk(wd):
+                state["reporter_output"] = None
+            if state.get("analysis_results") and not per_sim_analysis_done_on_disk(wd):
+                if state.get("analysis_results") != {"_resume_from_disk": True}:
+                    state["analysis_results"] = {}
+                    state.pop("analysis_directory", None)
+                    state.pop("analysis_dir", None)
+
+    def _sync_current_agent_idx_from_progress(self, state: MDState) -> None:
+        """Align ``current_agent_idx`` with the next pending agent for the active sim."""
+        from agentic.multi_sim_progress import _next_pending_agent
+
+        progress = state.get("multi_sim_progress") or {}
+        label = progress.get("active_sim_label")
+        if not label:
+            return
+        next_agent = _next_pending_agent(progress, label)
+        subtask_type = state.get("subtask_type") or "full_task"
+        required = get_agent_execution_order(subtask_type, state)
+        agent_filter = state.get("hpc_pool_agent_filter")
+        if agent_filter:
+            required = [a for a in required if a in agent_filter]
+        elif state.get("post_hpc_analysis_only"):
+            required = [a for a in required if a in ("analysis", "reporter")]
+        if not next_agent:
+            state["current_agent_idx"] = len(required)
+            return
+        if next_agent in required:
+            state["current_agent_idx"] = required.index(next_agent)
+        else:
+            state["current_agent_idx"] = 0
 
     def _finish_hpc_pool_prep_sim(self, state: MDState) -> MDState:
         """Mark prep done for the active sim and return to the cross-sim pool."""
@@ -1946,7 +2137,7 @@ class MDSupervisor:
                 elif agent == "reporter" and wd and per_sim_reporter_done_on_disk(wd):
                     mark_agent_status(state, finished_label, agent, "done")
             rec = (progress.get("sims") or {}).get(finished_label)
-            if rec and _sim_all_agents_done(rec, progress.get("required_agents") or []):
+            if rec and _sim_all_agents_done(progress, finished_label):
                 rec["status"] = "done"
             elif rec:
                 rec["status"] = "in_progress"
@@ -1999,10 +2190,12 @@ class MDSupervisor:
         basepath = _get_multi_sim_base_dir(state)
         state["multi_sim_base_dir"] = basepath
 
-        # Idempotent: combined analysis already finished — go to reporter.
+        # Idempotent: combined analysis already finished on disk — go to reporter.
+        from agentic.multi_sim_progress import _combined_analysis_done_on_disk
+
         if (
             state.get("multi_sim_phase") == "combined_analysis"
-            and state.get("analysis_results")
+            and _combined_analysis_done_on_disk(Path(basepath))
         ):
             logger.info(
                 "SUPERVISOR [multi-sim]: Combined analysis already complete — "
@@ -3272,11 +3465,51 @@ class MDSupervisor:
             return state
         
         elif current_agent == "analysis":
-            if state.get("analysis_results"):
+            wd = state.get("working_directory") or ""
+            from agentic.multi_sim_progress import (
+                per_sim_analysis_done_on_disk,
+                _combined_analysis_done_on_disk,
+            )
+
+            # Combined-analysis phase: advance to reporter only when base-level
+            # combined artifacts exist. Do NOT use per-sim analysis_results or
+            # per_sim_analysis_done_on_disk — those are true for every finished sim
+            # and would skip the cross-sim analysis entirely.
+            if state.get("multi_sim_phase") == "combined_analysis":
+                base = Path(
+                    state.get("multi_sim_base_dir")
+                    or state.get("working_directory")
+                    or ""
+                ).resolve()
+                if base and _combined_analysis_done_on_disk(base):
+                    logger.info(
+                        "FIELD_AGENT_ASSIGNMENT: Combined analysis on disk — "
+                        "transitioning to combined reporter"
+                    )
+                    state["multi_sim_phase"] = "combined_reporter"
+                    state["current_agent_idx"] = current_agent_idx + 1
+                    return self._assign_field_agent_tasks(state)
+                state["working_directory"] = str(base) if base else state.get("working_directory")
+                state["analysis_dir"] = str(base / "analysis") if base else state.get("analysis_dir")
+                state["analysis_directory"] = state.get("analysis_dir")
+                retry_count = state.get("analysis_retry_count", 0)
+                if retry_count >= 3:
+                    state["errors"].append("Combined analysis failed after 3 retries")
+                    state["current_agent_idx"] = current_agent_idx + 1
+                    return self._assign_field_agent_tasks(state)
+                state["next_node"] = "analysis"
+                state["analysis_retry_count"] = retry_count + 1
+                logger.info("FIELD_AGENT_ASSIGNMENT: Routing to combined analysis")
+                log_supervisor_routing(state, "analysis", "Executing combined analysis agent")
+                return state
+
+            if state.get("analysis_results") and per_sim_analysis_done_on_disk(wd):
                 logger.info("FIELD_AGENT_ASSIGNMENT: Analysis already complete, moving to next agent")
                 self._mark_post_hpc_agent_done(state, "analysis")
                 state["current_agent_idx"] = current_agent_idx + 1
                 return self._assign_field_agent_tasks(state)
+            if state.get("analysis_results"):
+                state["analysis_results"] = {}
             
             # Check retry limit
             retry_count = state.get("analysis_retry_count", 0)
@@ -3292,11 +3525,85 @@ class MDSupervisor:
             return state
         
         elif current_agent == "reporter":
-            if state.get("reporter_output"):
+            wd = state.get("working_directory") or ""
+            from agentic.multi_sim_progress import (
+                per_sim_reporter_done_on_disk,
+                _combined_reporter_done_on_disk,
+            )
+
+            # In the combined-reporter phase the deliverable is the base-level
+            # combined_report.html — NOT a per-sim report.html. The per-sim
+            # predicate returns True as soon as any finished per-sim dir has a
+            # report.html, and working_directory may still point at that stale
+            # per-sim dir. That wrongly marks the combined reporter "done" and
+            # skips it. Use the combined predicate against the base dir instead.
+            if state.get("multi_sim_phase") == "combined_reporter":
+                base = (
+                    state.get("multi_sim_base_dir")
+                    or state.get("working_directory")
+                    or ""
+                )
+                if base:
+                    base = str(Path(base).resolve())
+                    # Ensure the reporter runs at the base dir, not a stale sim dir.
+                    state["working_directory"] = base
+                    state["reporter_dir"] = str(Path(base) / "reporter")
+                    state["analysis_dir"] = str(Path(base) / "analysis")
+                    state["analysis_directory"] = str(Path(base) / "analysis")
+                combined_done = bool(base and _combined_reporter_done_on_disk(Path(base)))
+                force_reporter = bool(
+                    state.get("combined_only")
+                    or state.get("force_combined_reporter")
+                )
+                # One-shot guard: if the reporter has already been dispatched this
+                # run (reporter_output set, or retry counter incremented) and the
+                # report now exists on disk, it is genuinely done — advance. This
+                # prevents an endless regenerate loop under force_reporter below.
+                # (reporter_output can be reset during state threading between
+                # nodes, so we also trust the scalar retry counter.)
+                already_dispatched = bool(
+                    state.get("reporter_output")
+                    or state.get("reporter_retry_count", 0) > 0
+                )
+                if already_dispatched and combined_done:
+                    logger.info(
+                        "FIELD_AGENT_ASSIGNMENT: Combined report generated this run — "
+                        "moving to next agent"
+                    )
+                    self._mark_post_hpc_agent_done(state, "reporter")
+                    state["current_agent_idx"] = current_agent_idx + 1
+                    return self._assign_field_agent_tasks(state)
+                if combined_done and not force_reporter:
+                    logger.info(
+                        "FIELD_AGENT_ASSIGNMENT: Combined reporter already complete "
+                        "(combined_report.html present), moving to next agent"
+                    )
+                    self._mark_post_hpc_agent_done(state, "reporter")
+                    state["current_agent_idx"] = current_agent_idx + 1
+                    return self._assign_field_agent_tasks(state)
+                if force_reporter and combined_done and already_dispatched:
+                    logger.info(
+                        "FIELD_AGENT_ASSIGNMENT: Combined report already generated "
+                        "this run — finishing combined workflow"
+                    )
+                    self._mark_post_hpc_agent_done(state, "reporter")
+                    state["current_agent_idx"] = current_agent_idx + 1
+                    return self._assign_field_agent_tasks(state)
+                if force_reporter and combined_done:
+                    logger.info(
+                        "FIELD_AGENT_ASSIGNMENT: Regenerating combined report "
+                        "(combined_only/force) — existing combined_report.html will be overwritten"
+                    )
+            elif per_sim_reporter_done_on_disk(wd):
                 logger.info("FIELD_AGENT_ASSIGNMENT: Reporter already complete, moving to next agent")
                 self._mark_post_hpc_agent_done(state, "reporter")
                 state["current_agent_idx"] = current_agent_idx + 1
                 return self._assign_field_agent_tasks(state)
+            if state.get("reporter_output"):
+                logger.info(
+                    "FIELD_AGENT_ASSIGNMENT: Clearing stale reporter_output (no HTML on disk)"
+                )
+                state["reporter_output"] = None
             
             # Check retry limit
             retry_count = state.get("reporter_retry_count", 0)

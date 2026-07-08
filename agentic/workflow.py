@@ -220,6 +220,7 @@ class MDWorkflow:
         workflow.add_node("human_reporter_check", self._wrap_node("human_reporter_check", self.checkpoints.human_reporter_check))
         workflow.add_node("final_report", self._wrap_node("final_report", self._final_report_node))
         workflow.add_node("hpc_pool_wait", self._wrap_node("hpc_pool_wait", self._hpc_pool_wait_node))
+        workflow.add_node("parallel_pool_wait", self._wrap_node("parallel_pool_wait", self._parallel_pool_wait_node))
         
         # Set entry point
         workflow.set_entry_point("supervisor")
@@ -240,11 +241,18 @@ class MDWorkflow:
                 "human_reporter_check": "human_reporter_check",
                 "human_hpc_pool_check": "human_hpc_pool_check",
                 "hpc_pool_wait": "hpc_pool_wait",
+                "parallel_pool_wait": "parallel_pool_wait",
                 "final_report": "final_report",
                 END: END
             }
         )
         
+        workflow.add_conditional_edges(
+            "parallel_pool_wait",
+            lambda state: state.get("next_node", "supervisor"),
+            {"supervisor": "supervisor"},
+        )
+
         workflow.add_conditional_edges(
             "hpc_pool_wait",
             lambda state: state.get("next_node", "supervisor"),
@@ -403,7 +411,7 @@ class MDWorkflow:
         valid_nodes = [
             "input_validation", "planner", "preprocess", "setup", 
             "hpc", "analysis", "reporter", "human_reporter_check",
-            "human_hpc_pool_check", "hpc_pool_wait", "final_report"
+            "human_hpc_pool_check", "hpc_pool_wait", "parallel_pool_wait", "final_report"
         ]
         
         if next_node in valid_nodes:
@@ -442,7 +450,25 @@ class MDWorkflow:
         time.sleep(interval)
         state["next_node"] = "supervisor"
         return state
-    
+
+    def _parallel_pool_wait_node(self, state: MDState) -> MDState:
+        """Poll while local parallel workers run prep or analysis/reporter."""
+        import time
+        from agentic.multi_sim_parallel_pool import (
+            init_parallel_pool,
+            persist_parallel_pool_checkpoint,
+        )
+
+        pool = state.get("parallel_pool") or {}
+        phase = pool.get("phase") or "analysis"
+        init_parallel_pool(state, phase=phase)
+        interval = int(state.get("parallel_pool_poll_sec") or 30)
+        persist_parallel_pool_checkpoint(state)
+        logger.debug("Parallel pool: sleeping %ss before next worker check", interval)
+        time.sleep(interval)
+        state["next_node"] = "supervisor"
+        return state
+
     def _final_report_node(self, state: MDState) -> MDState:
         """Generate enhanced final workflow report using LLM when available."""
         
@@ -815,7 +841,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                         encoding="utf-8",
                     )
             
-            logger.info(f"Workflow state saved to {state_path}")
+            logger.debug(f"Workflow state saved to {state_path}")
             
         except Exception as e:
             logger.error(f"Failed to save workflow state: {e}")
@@ -963,6 +989,14 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "hpc_check_interval": None,
             "post_hpc_analysis_only": False,
             "hpc_pool_phase_complete": False,
+            "parallel_pool": None,
+            "parallel_workers": "auto",
+            "parallel_mem_gb_per_job": None,
+            "parallel_cpus_per_job": None,
+            "parallel_workers_resolved": None,
+            "llm_concurrency": "auto",
+            "parallel_pool_poll_sec": 30,
+            "_allowed_hpc_jobs_explicit": False,
         }
 
         if config:
@@ -1276,6 +1310,11 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             elif state.get("hpc_pool") or state.get("multi_sim_phase") == "hpc_pool":
                 if resume_hpc_pool_if_needed(state):
                     logger.info("[resume] Re-entered cross-sim HPC pool from saved state")
+            elif state.get("parallel_pool") or state.get("multi_sim_phase") == "parallel_pool":
+                from agentic.multi_sim_parallel_pool import resume_parallel_pool_if_needed
+
+                if resume_parallel_pool_if_needed(state):
+                    logger.info("[resume] Re-entered parallel worker pool from saved state")
 
         # HITL re-run after per-sim work already exists: skip the full per-sim loop
         # and enter combined analysis + reporter (with human checkpoints).
@@ -1353,9 +1392,36 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         Returns:
             Final state dictionary
         """
+        import signal
+
         initial_state = self._initialize_state(user_goal, config)
         # Respect explicit config for human loop but default to automatic mode here
         initial_state["human_in_loop"] = bool(initial_state.get("human_in_loop", False))
+
+        active: Dict[str, Any] = {"state": initial_state}
+        self._active_run_state = active
+
+        def _checkpoint_interrupt() -> None:
+            st = active.get("state") or {}
+            base = st.get("multi_sim_base_dir") or st.get("working_directory")
+            saved = self._load_workflow_state(base) if base else None
+            target = saved if (saved or {}).get("parallel_pool") else st
+            if target.get("multi_sim_phase") == "parallel_pool" and target.get("parallel_pool"):
+                try:
+                    from agentic.multi_sim_parallel_pool import persist_parallel_pool_interrupt
+
+                    persist_parallel_pool_interrupt(target)
+                    active["state"] = target
+                    logger.info("Saved parallel pool checkpoint after interrupt")
+                except Exception as exc:
+                    logger.warning("Parallel pool interrupt checkpoint failed: %s", exc)
+
+        def _signal_handler(signum, frame):  # noqa: ARG001
+            _checkpoint_interrupt()
+            raise KeyboardInterrupt()
+
+        prev_int = signal.signal(signal.SIGINT, _signal_handler)
+        prev_term = signal.signal(signal.SIGTERM, _signal_handler)
         
         try:
             recursion_limit = self._compute_recursion_limit(initial_state)
@@ -1363,7 +1429,16 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             final_state = self.graph.invoke(
                 initial_state, {"recursion_limit": recursion_limit}
             )
+            active["state"] = final_state
             return final_state
+
+        except KeyboardInterrupt:
+            _checkpoint_interrupt()
+            initial_state.setdefault("errors", []).append(
+                "Workflow interrupted during parallel pool — use --resume to continue"
+            )
+            initial_state["workflow_status"] = "in_progress:interrupted"
+            return active.get("state") or initial_state
             
         except Exception as e:
             import traceback
@@ -1377,8 +1452,23 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             print("Full traceback:")
             print(error_traceback)
             print(f"{'='*60}\n")
-            initial_state["errors"].append(f"Workflow error: {str(e)}")
-            return initial_state
+            st = active.get("state") or initial_state
+            base = st.get("multi_sim_base_dir") or st.get("working_directory")
+            saved = self._load_workflow_state(base) if base else None
+            target = saved if (saved or {}).get("parallel_pool") else st
+            if target.get("multi_sim_phase") == "parallel_pool" and target.get("parallel_pool"):
+                try:
+                    from agentic.multi_sim_parallel_pool import persist_parallel_pool_interrupt
+
+                    persist_parallel_pool_interrupt(target)
+                except Exception:
+                    pass
+            target.setdefault("errors", []).append(f"Workflow error: {str(e)}")
+            return target
+        finally:
+            signal.signal(signal.SIGINT, prev_int)
+            signal.signal(signal.SIGTERM, prev_term)
+            self._active_run_state = None
 
     def _next_after_field_agent(self, state: MDState, default: str = "supervisor") -> str:
         """After a field agent runs, return to HITL checkpoint if this was a delegated task."""
@@ -1512,6 +1602,17 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             elif current_node == "hpc_pool_wait":
                 state = self._hpc_pool_wait_node(state)
                 self._save_progress(state, "hpc_pool_wait")
+                current_node = state.get("next_node", "supervisor")
+
+            elif current_node == "parallel_pool_wait":
+                state = self._parallel_pool_wait_node(state)
+                # Quiet checkpoint only — avoid execution_report spam every poll.
+                try:
+                    from agentic.multi_sim_parallel_pool import persist_parallel_pool_checkpoint
+
+                    persist_parallel_pool_checkpoint(state)
+                except Exception:
+                    pass
                 current_node = state.get("next_node", "supervisor")
 
             elif current_node == "human_analysis_check":

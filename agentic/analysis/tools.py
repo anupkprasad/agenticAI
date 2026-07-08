@@ -83,6 +83,10 @@ from src.analysis.combined_analysis import (
     run_combined_rmsf_segment_apo_holo_analysis,
     run_combined_binding_rmsf_overlay,
 )
+from src.analysis.phylo_tree import (
+    build_sequence_phylo_tree,
+    build_structure_phylo_tree,
+)
 
 # Import dynamic tool loader for programmer-generated tools
 from agentic.utils import get_dynamic_tool_loader
@@ -135,6 +139,8 @@ __all__ = [
     "run_combined_rmsf_apo_holo_analysis",
     "run_combined_dccm_apo_holo_analysis",
     "run_combined_rmsf_segment_apo_holo_analysis",
+    "build_sequence_phylo_tree",
+    "build_structure_phylo_tree",
     "AnalysisToolExecutor",
     "get_analysis_tools",
     "get_tool_metadata",
@@ -168,6 +174,8 @@ COMBINED_ANALYSIS_TOOL_NAMES = frozenset({
     "cluster_classification_features",
     "plot_cluster_feature_trajectories",
     "plot_cluster_rmsf_profiles",
+    "build_sequence_phylo_tree",
+    "build_structure_phylo_tree",
 })
 
 _PER_SIM_ANALYSIS_TOOLS = [
@@ -220,6 +228,8 @@ _COMBINED_ANALYSIS_TOOLS = [
     cluster_classification_features,
     plot_cluster_feature_trajectories,
     plot_cluster_rmsf_profiles,
+    build_sequence_phylo_tree,
+    build_structure_phylo_tree,
 ]
 
 
@@ -397,6 +407,8 @@ class AnalysisToolExecutor:
                 "cluster_classification_features": cluster_classification_features,
                 "plot_cluster_feature_trajectories": plot_cluster_feature_trajectories,
                 "plot_cluster_rmsf_profiles": plot_cluster_rmsf_profiles,
+                "build_sequence_phylo_tree": build_sequence_phylo_tree,
+                "build_structure_phylo_tree": build_structure_phylo_tree,
             })
         
         # Record built-in tool names BEFORE loading programmer tools

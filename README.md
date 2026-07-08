@@ -27,7 +27,7 @@ system can:
   CHARMM36 (SP2/THP/TP2), not parameterized as separate ligands
 - **Supervisor → Planner → Agents** — validated routing, planner-owned master plans, and tool-based execution
 - **Resume / retry** — re-run failed multi-sim jobs without redoing successes
-- **Cross-sim HPC pool** — prep sequentially, submit up to N SLURM jobs in parallel, then post-HPC analysis ([docs/HPC_POOL.md](docs/HPC_POOL.md))
+- **Cross-sim HPC pool** — prep in parallel (auto-sized), submit up to N SLURM jobs in parallel, then post-HPC analysis ([docs/HPC_POOL.md](docs/HPC_POOL.md), [docs/PARALLEL_POOL.md](docs/PARALLEL_POOL.md))
 
 ---
 
@@ -232,11 +232,15 @@ python run_agenticAIWork.py --goal "..." [options]
 | `--force-field` | `amber99sb-ildn` | GROMACS force field (e.g. `charmm36-jul2022`) |
 | `--water-model` | `tip3p` | Water model |
 | `--max-concurrent` | `4` | Max concurrent sims in multi-sim mode (legacy) |
-| `--allowed-hpc-jobs` | `5` | Max concurrent SLURM jobs in cross-sim HPC pool |
+| `--parallel-workers` | `auto` | Max parallel local workers for prep / analysis+reporter (`auto` or integer; `1`=sequential) |
+| `--parallel-mem-gb` | phase default | Estimated GiB RAM per parallel worker |
+| `--parallel-cpus` | phase default | Estimated CPU cores per parallel worker |
+| `--llm-concurrency` | `auto` (4) | Cap parallel workers to match Ollama `OLLAMA_NUM_PARALLEL` slots |
+| `--allowed-hpc-jobs` | auto | Max concurrent SLURM jobs in cross-sim HPC pool |
 | `--hpc-check-interval` | `2h` | SLURM poll interval during HPC pool wait (`2h`, `120m`, `7200`) |
 | `--resume` | off | Re-run only failed/incomplete multi-sim jobs |
 | `--retry-labels` | — | Force-retry specific simulation labels |
-| `--combined-only` | off | Multi-sim: only combined analysis + report |
+| `--combined-only` | off | Multi-sim: only combined analysis + report at `{base}/analysis/` and `{base}/reporter/combined_report.html` |
 
 ---
 
@@ -270,17 +274,28 @@ Multi-sim run under `--working-dir /work/pseudo`:
     preprocess/       # protein.pdb, protein_h.pdb, ...
     simsetup/         # topol.top, *.gro, *.mdp
     hpc/              # SLURM script, trajectories
-    analysis/         # RMSD, RMSF, DCCM plots
-    reporter/         # report.html
+    analysis/         # RMSD, RMSF, DCCM plots, analysis_summary.jsonl
+    reporter/         # report.html (fixed name — every per-sim report)
     agent_conversation.log
   p21860_ATP_MG/      # or skipped with reason in run_summary
   analysis/           # combined plots when requested by user intent or --combined-only
   reporter/
-    combined_report.html
+    combined_report.html   # fixed name — cross-simulation HTML report
   run_summary.md      # human-readable outcome
   run_summary.json    # structured outcome
   agent_conversation.log
 ```
+
+**Report naming (automation-friendly):** every per-simulation HTML report is always
+`{label}/reporter/report.html`. The combined multi-sim report is always
+`{base}/reporter/combined_report.html`. Do not rely on protein-specific filenames
+(e.g. `kinase_report.html`) — the framework normalizes to these paths.
+
+**Multi-sim reporting phases:** when the user goal requests combined analysis, the
+supervisor runs per-sim analysis → per-sim `report.html` → combined analysis at
+`{base}/analysis/` → combined `combined_report.html`. Use `--combined-only` to
+regenerate only the base-level combined analysis and report when per-sim work is
+already complete.
 
 ---
 
@@ -491,11 +506,12 @@ python run_agenticAIWork.py \
 
 
 
-python run_agenticAIWork.py \
-  --goal "Simulations are already complete (~200 ns each) for thirty-eight protein–ATP holo systems in ./pseudoKin: o15197, o43187, o60674, p00533, p17612, p21860, p23458, p24941, p25092, p28482, p29597, p51841, p52333, q05823, q13308, q13418, q58a45, q5jzy3, q6vab6, q7rtn6, q7z7a4, q8iv63, q8ivt5, q8nb16, q8ncb2, q8ne28, q8tea7, q8wz42, q92519, q96c45, q96qs6, q96s38, q9bxu1, q9c0k7, q9nsy0, q9uhy1, q9y243, q9y616. Skip preprocess, simsetup, and HPC — run analysis and reporting only. Per simulation, compute and plot: ligand–pocket COM distance, protein–ATP contacts, pocket SASA, ligand residence/unbinding, pocket RMSF, ligand RMSF, PCA on Cα, free-energy landscape at 310 K, FEL basin features, and export representative PDB structures for each FEL basin (max 8). Combined analysis: build an unsupervised classification feature table (raw CSV, z-score CSV, XLSX), cluster with hierarchical clustering on the z-score matrix (default k), and plot cluster PCA and dendrogram labeled with protein names. After clustering, generate cluster-wise trajectory plots (pocket SASA, COM distance, contacts, residence) and cluster-wise pocket/ligand RMSF; also overlay ligand–pocket distance, pocket RMSF, and ligand RMSF across all simulations. Use id:name map o15197:EPHB6, o43187:IRAK2, o60674:JAK2, p00533:EGFR, p17612:KAPCA, p21860:ERBB3, p23458:JAK1, p24941:CDK2, p25092:GUC2C, p28482:MK01, p29597:TYK2, p51841:GUC2F, p52333:JAK3, q05823:RN5A, q13308:PTK7, q13418:ILK, q58a45:PAN3, q5jzy3:EPHAA, q6vab6:KSR2, q7rtn6:STRAA, q7z7a4:PXK, q8iv63:VRK3, q8ivt5:KSR1, q8nb16:MLKL, q8ncb2:CAMKV, q8ne28:STKL1, q8tea7:TBCK, q8wz42:TITIN, q92519:TRIB2, q96c45:ULK4, q96qs6:PSKH2, q96s38:KS6C1, q9bxu1:STK31, q9c0k7:STRAB, q9nsy0:NRBP2, q9uhy1:NRBP, q9y243:AKT3, q9y616:IRAK3. No manual class labels. Generate a combined HTML report with literature context for each kinase/pseudokinase." \
+nohup python run_agenticAIWork.py \
+  --goal "Simulations are already complete (~200 ns each) for thirty-eight protein–ATP holo systems in ./pseudoKin: o15197, o43187, o60674, p00533, p17612, p21860, p23458, p24941, p25092, p28482, p29597, p51841, p52333, q05823, q13308, q13418, q58a45, q5jzy3, q6vab6, q7rtn6, q7z7a4, q8iv63, q8ivt5, q8nb16, q8ncb2, q8ne28, q8tea7, q8wz42, q92519, q96c45, q96qs6, q96s38, q9bxu1, q9c0k7, q9nsy0, q9uhy1, q9y243, q9y616. Skip preprocess, simsetup, and HPC — run analysis and reporting only. Per simulation, compute and plot: ligand–pocket COM distance, protein–ATP contacts, pocket SASA, ligand residence/unbinding, pocket RMSF, ligand RMSF, PCA on Cα, free-energy landscape at 310 K, FEL basin features, and export representative PDB structures for each FEL basin (max 8). Combined analysis: build an unsupervised classification feature table (raw CSV, z-score CSV, XLSX), cluster with hierarchical clustering on the z-score matrix (default k), and plot cluster PCA and dendrogram labeled with protein names. After clustering, generate cluster-wise trajectory plots (pocket SASA, COM distance, contacts, residence) and cluster-wise pocket/ligand RMSF; also overlay ligand–pocket distance, pocket RMSF, and ligand RMSF across all simulations. Use id:name map o15197:EPHB6, o43187:IRAK2, o60674:JAK2, p00533:EGFR, p17612:KAPCA, p21860:ERBB3, p23458:JAK1, p24941:CDK2, p25092:GUC2C, p28482:MK01, p29597:TYK2, p51841:GUC2F, p52333:JAK3, q05823:RN5A, q13308:PTK7, q13418:ILK, q58a45:PAN3, q5jzy3:EPHAA, q6vab6:KSR2, q7rtn6:STRAA, q7z7a4:PXK, q8iv63:VRK3, q8ivt5:KSR1, q8nb16:MLKL, q8ncb2:CAMKV, q8ne28:STKL1, q8tea7:TBCK, q8wz42:TITIN, q92519:TRIB2, q96c45:ULK4, q96qs6:PSKH2, q96s38:KS6C1, q9bxu1:STK31, q9c0k7:STRAB, q9nsy0:NRBP2, q9uhy1:NRBP, q9y243:AKT3, q9y616:IRAK3. No manual class labels. Generate a combined HTML report with literature context for each kinase/pseudokinase. please build a phylogenetic tree from the sequences and PDB structures of provide data and compare this with the dynamics based phylogentic tree" \
   --working-dir ./pseudoKin \
   --subtask analysis reporter \
-  --simtype multisim
+  --simtype multisim  \
+  --combined-only > output.log 2>&1 &
 
 
 

@@ -362,6 +362,108 @@ def merge_completed_states_from_progress(state: Dict[str, Any]) -> None:
     )
 
 
+def sync_parallel_pool_to_multi_sim_progress(state: Dict[str, Any]) -> None:
+    """
+    Mirror ``parallel_pool`` worker statuses into ``multi_sim_progress``.
+
+    Keeps the authoritative routing record consistent with the live pool so
+    ``state.jsonl`` and ``--resume`` reflect running / done sims correctly.
+    """
+    pool = state.get("parallel_pool")
+    if not pool:
+        return
+    progress = ensure_multi_sim_progress(state)
+    if not progress:
+        return
+
+    phase = pool.get("phase") or "analysis"
+    progress["phase"] = "parallel_pool"
+    agents_req = progress.get("required_agents") or _required_agents(state)
+    first_running: Optional[str] = None
+    first_running_agent: Optional[str] = None
+
+    for label in progress.get("sim_order") or []:
+        pool_rec = (pool.get("sims") or {}).get(label)
+        sim_rec = _sim_record(progress, label)
+        if not pool_rec or not sim_rec:
+            continue
+
+        pool_status = pool_rec.get("status") or "pending"
+        wd = pool_rec.get("working_dir") or sim_rec.get("working_dir") or ""
+        if wd:
+            sim_rec["working_dir"] = wd
+        agent_map = sim_rec.setdefault("agents", {})
+
+        if phase == "prep":
+            prep_agents = ("preprocessing", "simsetup")
+            if pool_status in ("done", "skipped"):
+                for a in prep_agents:
+                    if a in agent_map or a in agents_req:
+                        agent_map[a] = "done"
+                sim_rec["status"] = "done"
+            elif pool_status == "failed":
+                sim_rec["status"] = "failed"
+                sim_rec["error"] = pool_rec.get("error")
+            elif pool_status == "running":
+                sim_rec["status"] = "in_progress"
+                for a in prep_agents:
+                    if a in agent_map or a in agents_req:
+                        agent_map[a] = "in_progress"
+                if first_running is None:
+                    first_running = label
+                    first_running_agent = prep_agents[0]
+            continue
+
+        analysis_done = per_sim_analysis_done_on_disk(wd) if wd else False
+        reporter_done = per_sim_reporter_done_on_disk(wd) if wd else False
+
+        if pool_status in ("done", "skipped"):
+            if "analysis" in agent_map or "analysis" in agents_req:
+                agent_map["analysis"] = "done"
+            if "reporter" in agent_map or "reporter" in agents_req:
+                agent_map["reporter"] = "done"
+            sim_rec["status"] = "done"
+            sim_rec.pop("error", None)
+        elif pool_status == "failed":
+            sim_rec["status"] = "failed"
+            sim_rec["error"] = pool_rec.get("error")
+        elif pool_status == "running":
+            sim_rec["status"] = "in_progress"
+            if reporter_done:
+                agent_map["analysis"] = "done"
+                agent_map["reporter"] = "done"
+                sim_rec["status"] = "done"
+            elif analysis_done:
+                agent_map["analysis"] = "done"
+                agent_map["reporter"] = "in_progress"
+                if first_running is None:
+                    first_running = label
+                    first_running_agent = "reporter"
+            else:
+                agent_map["analysis"] = "in_progress"
+                if "reporter" in agent_map or "reporter" in agents_req:
+                    agent_map.setdefault("reporter", "pending")
+                if first_running is None:
+                    first_running = label
+                    first_running_agent = "analysis"
+        elif pool_status == "pending":
+            if analysis_done and reporter_done:
+                agent_map["analysis"] = "done"
+                agent_map["reporter"] = "done"
+                sim_rec["status"] = "done"
+            elif analysis_done:
+                agent_map["analysis"] = "done"
+                agent_map["reporter"] = "pending"
+                sim_rec["status"] = "pending"
+            elif sim_rec.get("status") not in ("done", "in_progress"):
+                sim_rec["status"] = "pending"
+
+    if first_running:
+        progress["active_sim_label"] = first_running
+        progress["active_agent"] = first_running_agent
+    state["multi_sim_progress"] = progress
+
+
 def sync_post_hpc_progress_from_disk(state: Dict[str, Any]) -> None:
     """Align multi_sim_progress with on-disk post-HPC artifacts."""
     if not state.get("post_hpc_analysis_only"):
@@ -677,7 +779,12 @@ def multisim_resume_entry_allowed(state: Dict[str, Any], multi_sim_phase: Option
         return False
     if multi_sim_phase is None:
         return True
-    return multi_sim_phase in ("executing_sims", "combined_analysis", "combined_reporter")
+    return multi_sim_phase in (
+        "executing_sims",
+        "combined_analysis",
+        "combined_reporter",
+        "parallel_pool",
+    )
 
 
 def _reconcile_sim_agents_from_disk(rec: Dict[str, Any], agents: List[str]) -> None:

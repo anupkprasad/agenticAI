@@ -1343,6 +1343,81 @@ Output as JSON:
             except Exception as _exc:
                 logger.warning(f"Combined DSSP analysis failed: {_exc}")
 
+            # ── Phylogenetic trees (sequence / structure) — only on request ──
+            try:
+                from agentic.planner.planning_guidelines import (
+                    detect_phylo_tree_requested,
+                )
+
+                phylo_req = detect_phylo_tree_requested(
+                    state.get("user_goal_original") or "",
+                    state.get("combined_analysis_plan") or "",
+                    state.get("master_enriched_prompt")
+                    or state.get("enriched_prompt")
+                    or "",
+                )
+                if phylo_req.get("sequence") or phylo_req.get("structure"):
+                    from .tools import (
+                        build_sequence_phylo_tree,
+                        build_structure_phylo_tree,
+                    )
+
+                    if phylo_req.get("sequence"):
+                        seq_tree = build_sequence_phylo_tree.func(
+                            sim_dirs=sim_dirs,
+                            labels=labels,
+                            working_dir=analysis_dir,
+                            base_dir=working_dir,
+                            label_name_map=_name_map_a or None,
+                            user_goal=_goal_text,
+                        )
+                        if seq_tree.get("success") and seq_tree.get("plot_path"):
+                            if seq_tree["plot_path"] not in plots:
+                                plots.append(seq_tree["plot_path"])
+                            log_agent_action(
+                                "analysis",
+                                "Sequence phylogenetic tree generated",
+                                {
+                                    "output": seq_tree.get("plot_path"),
+                                    "n_sequences": seq_tree.get("n_sequences"),
+                                    "missing": seq_tree.get("missing", []),
+                                },
+                            )
+                        else:
+                            logger.warning(
+                                "Sequence phylo tree: %s",
+                                seq_tree.get("error") or seq_tree.get("message"),
+                            )
+
+                    if phylo_req.get("structure"):
+                        struct_tree = build_structure_phylo_tree.func(
+                            sim_dirs=sim_dirs,
+                            labels=labels,
+                            working_dir=analysis_dir,
+                            base_dir=working_dir,
+                            label_name_map=_name_map_a or None,
+                            user_goal=_goal_text,
+                        )
+                        if struct_tree.get("success") and struct_tree.get("plot_path"):
+                            if struct_tree["plot_path"] not in plots:
+                                plots.append(struct_tree["plot_path"])
+                            log_agent_action(
+                                "analysis",
+                                "Structure phylogenetic tree generated",
+                                {
+                                    "output": struct_tree.get("plot_path"),
+                                    "n_structures": struct_tree.get("n_structures"),
+                                    "missing": struct_tree.get("missing", []),
+                                },
+                            )
+                        else:
+                            logger.warning(
+                                "Structure phylo tree: %s",
+                                struct_tree.get("error") or struct_tree.get("message"),
+                            )
+            except Exception as _exc:
+                logger.warning(f"Phylogenetic tree analysis failed: {_exc}")
+
             # ── Classification feature matrix (only when user explicitly requests) ─
             classification_table = None
             classification_clustering = None

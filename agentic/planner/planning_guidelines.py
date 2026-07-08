@@ -348,6 +348,68 @@ def detect_requested_metrics(goal: str) -> Optional[FrozenSet[str]]:
     return frozenset(found) if found else None
 
 
+_PHYLO_GENERIC_PATTERNS: tuple[str, ...] = (
+    r"\bphylogen(?:etic|y|omic)\b",
+    r"\bphylo\s*tree\b",
+    r"\bevolutionary\s+tree\b",
+    r"\bdendrogram\s+of\s+(?:sequences?|structures?)\b",
+)
+_PHYLO_SEQUENCE_PATTERNS: tuple[str, ...] = (
+    r"\bsequence[-\s]*(?:based\s+)?(?:phylogen\w*|tree)\b",
+    r"\bsequence\s+alignment\s+tree\b",
+    r"\bmsa\b",
+)
+_PHYLO_STRUCTURE_PATTERNS: tuple[str, ...] = (
+    r"\bstructur(?:e|al)[-\s]*(?:based\s+)?(?:phylogen\w*|tree)\b",
+    r"\bstructur(?:e|al)\s+(?:similarity|comparison)\s+tree\b",
+)
+
+
+def _normalize_goal_text(*goal_texts: str) -> str:
+    parts = []
+    for text in goal_texts:
+        if not text:
+            continue
+        parts.append(
+            text.lower()
+            .replace("\u2011", "-")
+            .replace("\u2012", "-")
+            .replace("\u2013", "-")
+            .replace("\u2014", "-")
+        )
+    return " ".join(parts)
+
+
+def detect_phylo_tree_requested(*goal_texts: str) -> Dict[str, bool]:
+    """
+    Detect whether the user asked for sequence- and/or structure-based
+    phylogenetic trees at the combined-analysis level.
+
+    Returns a dict ``{"sequence": bool, "structure": bool}``. A bare
+    "phylogenetic tree" request (no sequence/structure qualifier) defaults to a
+    sequence tree, which is the conventional meaning.
+    """
+    text = _normalize_goal_text(*goal_texts)
+    if not text:
+        return {"sequence": False, "structure": False}
+
+    has_generic = any(re.search(p, text) for p in _PHYLO_GENERIC_PATTERNS)
+    seq = any(re.search(p, text) for p in _PHYLO_SEQUENCE_PATTERNS)
+    struct = any(re.search(p, text) for p in _PHYLO_STRUCTURE_PATTERNS)
+
+    if has_generic:
+        # Qualifiers mentioned anywhere alongside a phylo request.
+        mentions_sequence = bool(re.search(r"\bsequences?\b", text))
+        mentions_structure = bool(re.search(r"\b(?:structures?|pdb|3d)\b", text))
+        seq = seq or mentions_sequence
+        struct = struct or mentions_structure
+        # Bare "phylogenetic tree" with no qualifier → sequence tree by default.
+        if not seq and not struct:
+            seq = True
+
+    return {"sequence": bool(seq), "structure": bool(struct)}
+
+
 def detect_classification_requested(*goal_texts: str) -> bool:
     """True when the user explicitly asks for classification / clustering / feature matrix."""
     for text in goal_texts:

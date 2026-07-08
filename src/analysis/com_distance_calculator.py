@@ -16,6 +16,7 @@ from typing import Dict, Any, Optional
 from pathlib import Path
 from langchain.tools import tool
 from .summary_logger import append_analysis_summary
+from .pbc_utils import minimum_image_distance, clean_pbc_distance_series
 
 logger = logging.getLogger(__name__)
 
@@ -137,10 +138,23 @@ def compute_com_distance_from_universe(
 
     frames, times, distances = [], [], []
     for ts in u.trajectory[::frame_interval]:
-        dist = float(np.linalg.norm(group1.center_of_mass() - group2.center_of_mass()))
+        try:
+            group1.wrap(compound="residues")
+            group2.wrap(compound="residues")
+        except Exception:
+            pass
+        dist = minimum_image_distance(
+            group1.center_of_mass(), group2.center_of_mass(), getattr(ts, "dimensions", None)
+        )
         frames.append(int(ts.frame))
         times.append(float(ts.time))
         distances.append(dist)
+
+    # Remove residual transient PBC spikes so stats/plots are not corrupted.
+    cleaned, _, n_removed = clean_pbc_distance_series(distances)
+    if n_removed:
+        logger.info("COM distance (%s vs %s): removed %d PBC spike(s)", label1, label2, n_removed)
+        distances = [float(v) for v in cleaned]
 
     return finalize_com_distance_result(
         frames, times, distances,
@@ -261,12 +275,22 @@ def compute_ligand_pocket_distance_from_universe(
 
     frames, times, distances = [], [], []
     for ts in u.trajectory[::frame_interval]:
-        dist = float(np.linalg.norm(
-            pocket_frozen.center_of_mass() - ligand.center_of_mass()
-        ))
+        try:
+            pocket_frozen.wrap(compound="residues")
+            ligand.wrap(compound="residues")
+        except Exception:
+            pass
+        dist = minimum_image_distance(
+            pocket_frozen.center_of_mass(), ligand.center_of_mass(), getattr(ts, "dimensions", None)
+        )
         frames.append(int(ts.frame))
         times.append(float(ts.time))
         distances.append(dist)
+
+    cleaned, _, n_removed = clean_pbc_distance_series(distances)
+    if n_removed:
+        logger.info("Ligand-pocket distance: removed %d PBC spike(s)", n_removed)
+        distances = [float(v) for v in cleaned]
 
     return finalize_ligand_pocket_distance_result(
         frames,
@@ -489,12 +513,27 @@ def calculate_ligand_pocket_distance(
         frames, times, distances = [], [], []
 
         for ts in u.trajectory[::frame_interval]:
+            try:
+                pocket_frozen.wrap(compound="residues")
+                ligand.wrap(compound="residues")
+            except Exception:
+                pass
             com_pocket = pocket_frozen.center_of_mass()
             com_ligand = ligand.center_of_mass()
-            dist = float(np.linalg.norm(com_pocket - com_ligand))
+            dist = minimum_image_distance(
+                com_pocket, com_ligand, getattr(ts, "dimensions", None)
+            )
             frames.append(int(ts.frame))
             times.append(float(ts.time) / 1000.0)  # ps → ns
             distances.append(dist)
+
+        # Strip residual transient PBC spikes before stats + CSV output.
+        cleaned, _, n_spikes = clean_pbc_distance_series(distances)
+        if n_spikes:
+            logger.info(
+                "Ligand pocket distance: removed %d transient PBC spike(s)", n_spikes
+            )
+            distances = [float(v) for v in cleaned]
 
         distances_arr = np.array(distances)
         mean_dist = float(np.mean(distances_arr))
