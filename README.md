@@ -517,9 +517,14 @@ nohup python run_agenticAIWork.py \
 
 
 
-
-
-
+nohup python run_agenticAIWork.py \
+  --goal "Run the full MD workflow (preprocess, simsetup, HPC submission, analysis, and reporting) for twelve human apo pseudokinase systems in ./pseudoKin_apo. Each PDB is protein-only with no ATP or cofactors. Set up and run ~200 ns production MD for each apo protein. After setup, submit all jobs to HPC and wait for completion before analysis. Per simulation, compute and plot: backbone RMSD over time; per-residue protein RMSF (whole protein and catalytic-pocket region); catalytic-pocket SASA (pocket defined by kinase active-site residues at frame 0); radius of gyration; PCA on Cα; free-energy landscape at 310 K from PC1 and PC2; FEL basin features; and export representative PDB structures for each FEL basin (max 8). Also compute DCCM on Cα fluctuations and DSSP secondary-structure time evolution for the whole protein and the catalytic pocket / activation-loop region. Combined analysis: build an unsupervised classification feature table (raw CSV, z-score CSV, XLSX) across all twelve apo systems; cluster with hierarchical clustering on the z-score matrix (default k); plot cluster PCA and a dendrogram labeled with protein names. After clustering, generate cluster-wise trajectory plots (pocket SASA, backbone RMSD, radius of gyration, and pocket RMSF) and cluster-wise protein RMSF; also overlay pocket SASA, backbone RMSD, radius of gyration, and pocket RMSF across all simulations. Use id:name map o14936:CASK, p34925:RYK, q6p3w7:SCYL2, q6zs72:PEAK3, q86yv5:PRAG1, q8iwb6:TEX14, q8ize3:PACE1, q96kg9:SCYL1, q96ru7:TRIB3, q96ru8:TRIB1, q9h792:PEAK1, q9y4a5:TRRAP. No manual class labels. Generate per-simulation HTML reports and a combined HTML report with literature context for each pseudokinase. Build a phylogenetic tree from sequences and PDB structures of the provided data and compare it with a dynamics-based phylogenetic tree derived from the simulation analyses." \
+  --working-dir ./pseudoKin_apo \
+  --pdb-list o14936.pdb p34925.pdb q6p3w7.pdb q6zs72.pdb q86yv5.pdb q8iwb6.pdb q8ize3.pdb q96kg9.pdb q96ru7.pdb q96ru8.pdb q9h792.pdb q9y4a5.pdb \
+  --simtype multisim \
+  --allowed-hpc-jobs 4 \
+  --hpc-check-interval 3m \
+  --resume > ./pseudoKin_apo/output.log 2>&1 &
 
 
 
