@@ -5,6 +5,7 @@ Creates publication-quality 2D and 3D plots for RMSD, RMSF, Rg, Energy, COM,
 and other metrics.  Supports single-panel, multi-panel (subplot), combined-column,
 and 3D scatter/trajectory layouts.
 """
+import csv
 import os
 import logging
 from typing import Dict, Any, Optional, List, Tuple
@@ -247,6 +248,78 @@ def _parse_rmsf_profile_dat(file_path: str) -> Optional[Dict[str, Any]]:
         }
 
     return None
+
+
+def _parse_reference_pocket_rmsf_aligned(
+    file_path: str,
+    residue_map_path: str,
+    display_label: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Parse reference pocket RMSF with x-axis = reference-alignment index.
+
+    Maps each simulation's PDB residue IDs to the shared consensus index
+    from ``reference_pocket_residue_map.csv`` so mutants/deletions align across
+    proteins in cluster overlay plots.
+    """
+    base_profile = _parse_rmsf_profile_dat(file_path)
+    if not base_profile:
+        return None
+
+    map_path = Path(residue_map_path)
+    if not map_path.is_file():
+        return base_profile
+
+    resid_to_rmsf: Dict[int, float] = {}
+    for tick, y in zip(base_profile["x_tick_labels"], base_profile["y_values"]):
+        resid_str = "".join(ch for ch in str(tick) if ch.isdigit())
+        if not resid_str:
+            continue
+        resid_to_rmsf[int(resid_str)] = float(y)
+
+    resid_col = f"{display_label}_resid"
+    aa_col = f"{display_label}_aa"
+    consensus_x: List[int] = []
+    y_values: List[float] = []
+    x_tick_labels: List[str] = []
+
+    with open(map_path, newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        if resid_col not in (reader.fieldnames or []):
+            return base_profile
+        for row in reader:
+            raw_idx = (row.get("consensus_index") or "").strip()
+            raw_resid = (row.get(resid_col) or "").strip()
+            if not raw_idx or not raw_resid:
+                continue
+            try:
+                cidx = int(float(raw_idx))
+                resid = int(float(raw_resid))
+            except ValueError:
+                continue
+            if resid not in resid_to_rmsf:
+                continue
+            aa = (row.get(aa_col) or "").strip()
+            ref_aa = (row.get("reference_aa") or "").strip()
+            consensus_x.append(cidx)
+            y_values.append(resid_to_rmsf[resid])
+            x_tick_labels.append(f"{cidx}:{aa or ref_aa}")
+
+    if not y_values:
+        return base_profile
+
+    order = sorted(range(len(consensus_x)), key=lambda i: consensus_x[i])
+    consensus_x = [consensus_x[i] for i in order]
+    y_values = [y_values[i] for i in order]
+    x_tick_labels = [x_tick_labels[i] for i in order]
+
+    return {
+        "kind": "reference_pocket",
+        "x_positions": consensus_x,
+        "x_tick_labels": x_tick_labels,
+        "y_values": y_values,
+        "default_plot_type": "line",
+    }
 
 
 def _plot_rmsf_profile_on_axes(

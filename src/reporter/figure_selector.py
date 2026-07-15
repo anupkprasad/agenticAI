@@ -110,12 +110,23 @@ CLUSTER_SUPERSEDES_GLOBAL: Tuple[Tuple[str, str], ...] = (
 )
 
 CLASSIFICATION_SUMMARY_ORDER: Tuple[str, ...] = (
+    "ref_fel_pock_clusters_pca",
+    "ref_fel_pock_dendrogram_heatmap",
+    "ref_fel_pock_phylo",
+    "classification_mds_map",
     "classification_phylo_tree",
     "classification_clusters_pca",
     "classification_dendrogram",
+    "ref_fel_dendrogram",
+    "ref_fel_phylo",
 )
 
 CLUSTER_TRAJECTORY_ORDER: Tuple[str, ...] = (
+    "ref_fel_pock_com_distance_by_cluster",
+    "ref_fel_pock_hbonds_by_cluster",
+    "ref_fel_pock_sasa_by_cluster",
+    "ref_fel_pock_ligand_residence_by_cluster",
+    "ref_fel_pock_ligand_axis_angle_by_cluster",
     "com_distance_by_cluster",
     "contacts_by_cluster",
     "pocket_sasa_by_cluster",
@@ -123,6 +134,7 @@ CLUSTER_TRAJECTORY_ORDER: Tuple[str, ...] = (
 )
 
 CLUSTER_RMSF_ORDER: Tuple[str, ...] = (
+    "ref_fel_pock_rmsf_by_cluster",
     "pocket_rmsf_by_cluster",
     "ligand_rmsf_by_cluster",
 )
@@ -396,6 +408,21 @@ def partition_combined_overlay_plots(
 
     def _order_bucket(bucket_key: str, order: Tuple[str, ...]) -> None:
         items = buckets[bucket_key]
+        if bucket_key == "classification_summary":
+            panel_names = {
+                Path(p).stem
+                for p in items
+                if "dendrogram_heatmap" in Path(p).stem
+            }
+            if panel_names:
+                items = [
+                    p
+                    for p in items
+                    if Path(p).stem not in {
+                        "ref_fel_pock_dendrogram",
+                        "ref_fel_pock_features_heatmap",
+                    }
+                ]
         ranked: List[Tuple[int, str]] = []
         for p in items:
             name = _plot_name(p)
@@ -406,7 +433,9 @@ def partition_combined_overlay_plots(
 
     for path in overlay_plots:
         name = _plot_name(path)
-        if name.startswith("classification_"):
+        if name.startswith(("classification_", "ref_fel_pock_")):
+            _assign("classification_summary", path)
+        elif name.startswith("ref_fel_") and "by_cluster" not in name:
             _assign("classification_summary", path)
         elif "by_cluster" in name:
             if "rmsf" in name:

@@ -1418,6 +1418,146 @@ Output as JSON:
             except Exception as _exc:
                 logger.warning(f"Phylogenetic tree analysis failed: {_exc}")
 
+            # ── Reference-projected landscape pipeline (consensus MSA → PCA → FEL) ──
+            try:
+                from agentic.planner.planning_guidelines import (
+                    detect_reference_landscape_requested,
+                    _resolve_reference_label,
+                )
+
+                ref_land_req = detect_reference_landscape_requested(
+                    state.get("user_goal_original") or "",
+                    state.get("combined_analysis_plan") or "",
+                    state.get("master_enriched_prompt")
+                    or state.get("enriched_prompt")
+                    or "",
+                )
+                if ref_land_req.get("requested"):
+                    from .tools import run_reference_landscape_pipeline
+
+                    ref_label = _resolve_reference_label(
+                        state.get("user_goal_original") or "",
+                        state.get("user_goal") or "",
+                        state.get("combined_analysis_plan") or "",
+                        state.get("master_enriched_prompt")
+                        or state.get("enriched_prompt")
+                        or "",
+                        labels=labels,
+                        default="q8nb16",
+                    )
+                    if ref_label not in {str(l) for l in labels}:
+                        logger.warning(
+                            "Reference label %r not in simulation labels; using q8nb16",
+                            ref_label,
+                        )
+                        ref_label = "q8nb16" if "q8nb16" in {str(l) for l in labels} else labels[0]
+                    ref_pipe = run_reference_landscape_pipeline.func(
+                        sim_dirs=sim_dirs,
+                        labels=labels,
+                        working_dir=analysis_dir,
+                        reference_label=ref_label,
+                        base_dir=working_dir,
+                        user_goal=_goal_text,
+                        label_name_map=_name_map_a or None,
+                    )
+                    if ref_pipe.get("success"):
+                        clust = ref_pipe.get("clustering") or {}
+                        for key in (
+                            "dendrogram_plot",
+                            "phylo_tree_plot",
+                        ):
+                            pth = clust.get(key)
+                            if pth and pth not in plots:
+                                plots.append(pth)
+                        log_agent_action(
+                            "analysis",
+                            "Reference landscape pipeline complete",
+                            {
+                                "reference_label": ref_label,
+                                "n_projected": (ref_pipe.get("projections") or {}).get(
+                                    "n_projected"
+                                ),
+                                "assignments": clust.get("assignments_file"),
+                            },
+                        )
+                    else:
+                        logger.warning(
+                            "Reference landscape pipeline (%s): %s",
+                            ref_pipe.get("stage"),
+                            ref_pipe.get("error") or ref_pipe.get("message"),
+                        )
+            except Exception as _exc:
+                logger.warning(f"Reference landscape pipeline failed: {_exc}")
+
+            # ── Consensus-mapped reference pocket metrics ──
+            try:
+                from agentic.planner.planning_guidelines import (
+                    detect_consensus_pocket_requested,
+                    _resolve_reference_label,
+                )
+
+                cp_req = detect_consensus_pocket_requested(
+                    state.get("user_goal_original") or "",
+                    state.get("combined_analysis_plan") or "",
+                    state.get("user_goal") or "",
+                )
+                if cp_req.get("requested"):
+                    from .tools import run_consensus_pocket_metrics_batch
+
+                    cp_ref = _resolve_reference_label(
+                        state.get("user_goal_original") or "",
+                        state.get("user_goal") or "",
+                        state.get("combined_analysis_plan") or "",
+                        labels=labels,
+                        default=cp_req.get("reference_label") or "q8nb16",
+                    )
+                    if cp_ref not in {str(l) for l in labels}:
+                        from src.reporter.combined_reporter import resolve_display_label
+
+                        cp_ref = resolve_display_label(cp_ref, _name_map_a)
+                    ref_sim_dir = next(
+                        (sd for sd, lab in zip(sim_dirs, labels) if str(lab) == str(cp_ref)),
+                        "",
+                    )
+                    if not ref_sim_dir:
+                        uid_ref = cp_req.get("reference_label") or "q8nb16"
+                        ref_sim_dir = next(
+                            (
+                                sd
+                                for sd in sim_dirs
+                                if Path(sd).name.lower() == str(uid_ref).lower()
+                            ),
+                            "",
+                        )
+                        if ref_sim_dir and cp_ref not in {str(l) for l in labels}:
+                            idx = sim_dirs.index(ref_sim_dir)
+                            cp_ref = labels[idx]
+                    cp_batch = run_consensus_pocket_metrics_batch.func(
+                        sim_dirs=sim_dirs,
+                        labels=labels,
+                        working_dir=analysis_dir,
+                        reference_label=cp_ref,
+                        reference_sim_dir=ref_sim_dir,
+                        pocket_cutoff_A=cp_req.get("pocket_cutoff_A", 15.0),
+                    )
+                    if cp_batch.get("success"):
+                        log_agent_action(
+                            "analysis",
+                            "Consensus pocket metrics batch complete",
+                            {
+                                "manifest": cp_batch.get("manifest_file"),
+                                "failed_labels": cp_batch.get("failed_labels"),
+                            },
+                        )
+                    else:
+                        logger.warning(
+                            "Consensus pocket batch (%s): %s",
+                            cp_batch.get("stage"),
+                            cp_batch.get("error") or cp_batch.get("message"),
+                        )
+            except Exception as _cp_exc:
+                logger.warning("Consensus pocket batch failed: %s", _cp_exc)
+
             # ── Classification feature matrix (only when user explicitly requests) ─
             classification_table = None
             classification_clustering = None
@@ -1432,14 +1572,64 @@ Output as JSON:
                         plot_cluster_feature_trajectories,
                         plot_cluster_rmsf_profiles,
                         CLUSTER_TRAJECTORY_METRIC_GROUPS,
+                        CLUSTER_REFERENCE_POCKET_TRAJECTORY_METRIC_GROUPS,
                         CLUSTER_RMSF_PROFILE_GROUPS,
+                        REFERENCE_CLUSTERING_OUTPUT_FILES,
+                        is_reference_structure_clustering,
+                        reference_archetype_metric_groups,
+                        resolve_n_clusters_for_goal,
                     )
 
+                    ref_clustering = is_reference_structure_clustering(class_groups)
+                    collect_groups = (
+                        list(reference_archetype_metric_groups(class_groups))
+                        if ref_clustering
+                        else sorted(class_groups)
+                    )
+                    ref_outputs = REFERENCE_CLUSTERING_OUTPUT_FILES
+                    allowed_labels = [Path(d).name for d in sim_dirs]
+                    if ref_clustering:
+                        manifest_path = Path(analysis_dir) / "reference_pocket_batch_manifest.json"
+                        if manifest_path.is_file():
+                            try:
+                                from src.analysis.reference_labels import (
+                                    build_uniprot_display_map,
+                                    is_reference_pocket_usable,
+                                )
+
+                                with open(manifest_path, encoding="utf-8") as _mfh:
+                                    pocket_manifest = json.load(_mfh)
+                                base_path = Path(analysis_dir)
+                                filtered = [
+                                    uid
+                                    for uid in allowed_labels
+                                    if is_reference_pocket_usable(
+                                        uid,
+                                        pocket_manifest,
+                                        base_analysis=base_path,
+                                    )
+                                ]
+                                if filtered:
+                                    allowed_labels = sorted(filtered)
+                            except Exception:
+                                pass
+
+                    collect_kwargs: Dict[str, Any] = {
+                        "base_directory": working_dir,
+                        "working_dir": analysis_dir,
+                        "requested_metric_groups": collect_groups,
+                        "allowed_labels": allowed_labels,
+                    }
+                    if ref_clustering:
+                        collect_kwargs.update(
+                            output_file=ref_outputs["features_csv"],
+                            zscore_output_file=ref_outputs["zscore_csv"],
+                            manifest_file=ref_outputs["manifest_json"],
+                            xlsx_output_file=ref_outputs["xlsx"],
+                        )
+
                     class_result = collect_classification_features_table.func(
-                        base_directory=working_dir,
-                        working_dir=analysis_dir,
-                        requested_metric_groups=sorted(class_groups),
-                        allowed_labels=[Path(d).name for d in sim_dirs],
+                        **collect_kwargs
                     )
                     if class_result.get("success"):
                         classification_table = class_result.get("output_file")
@@ -1472,41 +1662,80 @@ Output as JSON:
                             user_goal_text,
                             state.get("combined_analysis_plan") or "",
                         )
-                        cluster_result = cluster_classification_features.func(
-                            working_dir=analysis_dir,
-                            features_file=(
+                        n_sims = int(class_result.get("n_simulations") or len(allowed_labels))
+                        n_clusters = resolve_n_clusters_for_goal(
+                            n_sims,
+                            user_goal_text,
+                            reference_based=ref_clustering,
+                        )
+                        cluster_kwargs: Dict[str, Any] = {
+                            "working_dir": analysis_dir,
+                            "features_file": (
                                 Path(zscore_path).name
                                 if zscore_path
-                                else "classification_features_zscore.csv"
+                                else (
+                                    ref_outputs["zscore_csv"]
+                                    if ref_clustering
+                                    else "classification_features_zscore.csv"
+                                )
                             ),
-                            method=cluster_method,
-                            user_goal=user_goal_text,
-                            label_name_map=_name_map_a or None,
+                            "method": cluster_method,
+                            "user_goal": user_goal_text,
+                            "label_name_map": _name_map_a or None,
+                            "n_clusters": n_clusters,
+                        }
+                        if ref_clustering:
+                            cluster_kwargs.update(
+                                assignments_file=ref_outputs["assignments_csv"],
+                                scatter_plot_file=ref_outputs["pca_png"],
+                                dendrogram_file=ref_outputs["dendrogram_png"],
+                                phylo_tree_file=ref_outputs["phylo_png"],
+                                heatmap_file=ref_outputs["heatmap_png"],
+                                panel_file=ref_outputs.get("panel_png"),
+                                summary_file=ref_outputs["summary_json"],
+                            )
+                        cluster_result = cluster_classification_features.func(
+                            **cluster_kwargs
                         )
                         if cluster_result.get("success"):
                             classification_clustering = cluster_result
                             scatter = cluster_result.get("scatter_plot")
+                            panel = cluster_result.get("panel_plot")
                             dendro = cluster_result.get("dendrogram_plot")
                             phylo = cluster_result.get("phylo_tree_plot")
+                            heatmap = cluster_result.get("heatmap_plot")
                             if scatter:
                                 plots.append(scatter)
-                            if dendro:
+                            if panel:
+                                plots.append(panel)
+                            elif dendro:
                                 plots.append(dendro)
+                            if heatmap:
+                                plots.append(heatmap)
                             if phylo:
                                 plots.append(phylo)
                             log_agent_action(
                                 "analysis",
-                                "Classification clustering complete",
+                                (
+                                    "Reference-structure clustering complete"
+                                    if ref_clustering
+                                    else "Classification clustering complete"
+                                ),
                                 {
                                     "method": cluster_result.get("method"),
                                     "n_clusters": cluster_result.get("n_clusters"),
                                     "assignments": cluster_result.get("assignments_file"),
                                 },
                             )
-                            traj_groups = sorted(
-                                g
-                                for g in class_groups
-                                if g in CLUSTER_TRAJECTORY_METRIC_GROUPS
+                            traj_groups = list(
+                                CLUSTER_REFERENCE_POCKET_TRAJECTORY_METRIC_GROUPS
+                                if ref_clustering or "reference_pocket" in class_groups
+                                else CLUSTER_TRAJECTORY_METRIC_GROUPS
+                            )
+                            default_assignments = (
+                                ref_outputs["assignments_csv"]
+                                if ref_clustering
+                                else "classification_cluster_assignments.csv"
                             )
                             if traj_groups:
                                 traj_result = plot_cluster_feature_trajectories.func(
@@ -1514,7 +1743,7 @@ Output as JSON:
                                     assignments_file=(
                                         Path(cluster_result["assignments_file"]).name
                                         if cluster_result.get("assignments_file")
-                                        else "classification_cluster_assignments.csv"
+                                        else default_assignments
                                     ),
                                     metric_groups=traj_groups,
                                 )
@@ -1535,10 +1764,12 @@ Output as JSON:
                                         "Cluster trajectory plots: %s",
                                         traj_result.get("error"),
                                     )
-                            rmsf_profile_types = sorted(
-                                g
-                                for g in class_groups
-                                if g in CLUSTER_RMSF_PROFILE_GROUPS
+                            rmsf_profile_types = (
+                                ["reference_pocket_rmsf"]
+                                if "reference_pocket" in class_groups
+                                else sorted(
+                                    g for g in class_groups if g in CLUSTER_RMSF_PROFILE_GROUPS
+                                )
                             )
                             if rmsf_profile_types:
                                 rmsf_cluster = plot_cluster_rmsf_profiles.func(
@@ -1546,7 +1777,7 @@ Output as JSON:
                                     assignments_file=(
                                         Path(cluster_result["assignments_file"]).name
                                         if cluster_result.get("assignments_file")
-                                        else "classification_cluster_assignments.csv"
+                                        else default_assignments
                                     ),
                                     profile_types=rmsf_profile_types,
                                 )

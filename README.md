@@ -506,8 +506,30 @@ python run_agenticAIWork.py \
 
 
 
+###################################
+
+
 nohup python run_agenticAIWork.py \
-  --goal "Simulations are already complete (~200 ns each) for thirty-eight protein–ATP holo systems in ./pseudoKin: o15197, o43187, o60674, p00533, p17612, p21860, p23458, p24941, p25092, p28482, p29597, p51841, p52333, q05823, q13308, q13418, q58a45, q5jzy3, q6vab6, q7rtn6, q7z7a4, q8iv63, q8ivt5, q8nb16, q8ncb2, q8ne28, q8tea7, q8wz42, q92519, q96c45, q96qs6, q96s38, q9bxu1, q9c0k7, q9nsy0, q9uhy1, q9y243, q9y616. Skip preprocess, simsetup, and HPC — run analysis and reporting only. Per simulation, compute and plot: ligand–pocket COM distance, protein–ATP contacts, pocket SASA, ligand residence/unbinding, pocket RMSF, ligand RMSF, PCA on Cα, free-energy landscape at 310 K, FEL basin features, and export representative PDB structures for each FEL basin (max 8). Combined analysis: build an unsupervised classification feature table (raw CSV, z-score CSV, XLSX), cluster with hierarchical clustering on the z-score matrix (default k), and plot cluster PCA and dendrogram labeled with protein names. After clustering, generate cluster-wise trajectory plots (pocket SASA, COM distance, contacts, residence) and cluster-wise pocket/ligand RMSF; also overlay ligand–pocket distance, pocket RMSF, and ligand RMSF across all simulations. Use id:name map o15197:EPHB6, o43187:IRAK2, o60674:JAK2, p00533:EGFR, p17612:KAPCA, p21860:ERBB3, p23458:JAK1, p24941:CDK2, p25092:GUC2C, p28482:MK01, p29597:TYK2, p51841:GUC2F, p52333:JAK3, q05823:RN5A, q13308:PTK7, q13418:ILK, q58a45:PAN3, q5jzy3:EPHAA, q6vab6:KSR2, q7rtn6:STRAA, q7z7a4:PXK, q8iv63:VRK3, q8ivt5:KSR1, q8nb16:MLKL, q8ncb2:CAMKV, q8ne28:STKL1, q8tea7:TBCK, q8wz42:TITIN, q92519:TRIB2, q96c45:ULK4, q96qs6:PSKH2, q96s38:KS6C1, q9bxu1:STK31, q9c0k7:STRAB, q9nsy0:NRBP2, q9uhy1:NRBP, q9y243:AKT3, q9y616:IRAK3. No manual class labels. Generate a combined HTML report with literature context for each kinase/pseudokinase. please build a phylogenetic tree from the sequences and PDB structures of provide data and compare this with the dynamics based phylogentic tree" \
+  --goal "Simulations are already complete (~200 ns each) for thirty-eight protein–ATP holo systems in ./
+  pseudoKin: o15197, o43187, o60674, p00533, p17612, p21860, p23458, p24941, p25092, p28482, p29597, p51841, 
+  p52333, q05823, q13308, q13418, q58a45, q5jzy3, q6vab6, q7rtn6, q7z7a4, q8iv63, q8ivt5, q8nb16, q8ncb2, 
+  q8ne28, q8tea7, q8wz42, q92519, q96c45, q96qs6, q96s38, q9bxu1, q9c0k7, q9nsy0, q9uhy1, q9y243, q9y616. 
+  Skip preprocess, simsetup, and HPC — run analysis and reporting only. Per simulation, compute and plot: 
+  ligand–pocket COM distance, protein–ATP contacts, pocket SASA, ligand residence/unbinding, pocket RMSF, 
+  ligand RMSF, PCA on Cα, free-energy landscape at 310 K, FEL basin features, and export representative PDB 
+  structures for each FEL basin (max 8). Combined analysis: build an unsupervised classification feature 
+  table (raw CSV, z-score CSV, XLSX), cluster with hierarchical clustering on the z-score matrix (default 
+  k), and plot cluster PCA and dendrogram labeled with protein names. After clustering, generate 
+  cluster-wise trajectory plots (pocket SASA, COM distance, contacts, residence) and cluster-wise pocket/
+  ligand RMSF; also overlay ligand–pocket distance, pocket RMSF, and ligand RMSF across all simulations. Use 
+  id:name map o15197:EPHB6, o43187:IRAK2, o60674:JAK2, p00533:EGFR, p17612:KAPCA, p21860:ERBB3, p23458:JAK1, 
+  p24941:CDK2, p25092:GUC2C, p28482:MK01, p29597:TYK2, p51841:GUC2F, p52333:JAK3, q05823:RN5A, q13308:PTK7, 
+  q13418:ILK, q58a45:PAN3, q5jzy3:EPHAA, q6vab6:KSR2, q7rtn6:STRAA, q7z7a4:PXK, q8iv63:VRK3, q8ivt5:KSR1, 
+  q8nb16:MLKL, q8ncb2:CAMKV, q8ne28:STKL1, q8tea7:TBCK, q8wz42:TITIN, q92519:TRIB2, q96c45:ULK4, 
+  q96qs6:PSKH2, q96s38:KS6C1, q9bxu1:STK31, q9c0k7:STRAB, q9nsy0:NRBP2, q9uhy1:NRBP, q9y243:AKT3, 
+  q9y616:IRAK3. No manual class labels. Generate a combined HTML report with literature context for each 
+  kinase/pseudokinase. please build a phylogenetic tree from the sequences and PDB structures of provide 
+  data and compare this with the dynamics based phylogentic tree" \
   --working-dir ./pseudoKin \
   --subtask analysis reporter \
   --simtype multisim  \
@@ -517,13 +539,54 @@ nohup python run_agenticAIWork.py \
 
 
 
+
+# Combined-only: reference-based FEL + reference-mapped pocket classification (38 holo pseudoKin)
+# Prerequisites: per-simulation analysis complete (trajectories + per-sim independent FEL in {uid}/analysis/).
+# Back up first if needed: cp -a pseudoKin/analysis pseudoKin/analysis_bckp
+#
+#   bash scripts/clean_pseudokin_combined_analysis.sh
+#   # optional: remove legacy mirrored reference copies under per-sim analysis/
+#   # CLEAN_PER_SIM_MIRROR=1 bash scripts/clean_pseudokin_combined_analysis.sh --per-sim-mirror
+#
+# Outputs (reference-based only; no classification_*):
+#   pseudoKin/analysis/reference_msa_alignment.*     — MSA + residue map (MLKL reference)
+#   pseudoKin/analysis/reference_fel/{uniprot}/       — reference-projected PCA + shared-bin FEL
+#   pseudoKin/analysis/reference_pocket/{uniprot}/   — MLKL-mapped pocket metrics
+#   pseudoKin/analysis/reference_grouping_features.*   — feature table for clustering (raw + z-score)
+#   pseudoKin/analysis/reference_clusters*             — k=4 hierarchical clustering + dendrogram/phylo/PCA
+#   pseudoKin/analysis/reference_pocket_*_by_cluster.png — pocket validation plots (COM, H-bonds, residence, RMSF)
+#   pseudoKin/analysis/reference_fel_*                 — supplementary FEL-only landscape clustering
+
+nohup python run_agenticAIWork.py \
+  --goal "Simulations are complete for thirty-eight protein–ATP holo systems in ./pseudoKin: o15197, o43187, o60674, p00533, p17612, p21860, p23458, p24941, p25092, p28482, p29597, p51841, p52333, q05823, q13308, q13418, q58a45, q5jzy3, q6vab6, q7rtn6, q7z7a4, q8iv63, q8ivt5, q8nb16, q8ncb2, q8ne28, q8tea7, q8wz42, q92519, q96c45, q96qs6, q96s38, q9bxu1, q9c0k7, q9nsy0, q9uhy1, q9y243, q9y616. Run combined analysis only. Do not rerun per-simulation independent PCA/FEL or ATP-proximity pocket analyses in {uniprot}/analysis/. (1) Build consensus sequence alignment with reference_label=q8nb16 (MLKL) and run the reference landscape pipeline: project every trajectory onto the MLKL reference PCA basis and calculate shared-bin reference FELs at 310 K. Save outputs only under pseudoKin/analysis/reference_fel/{uniprot}/ and pseudoKin/analysis/reference_msa_alignment.*. (2) Define the MLKL reference pocket as mapped consensus residues within 15 Å of ATP at frame 0, map to every protein, and run reference pocket metrics batch: reference-pocket ATP COM distance, pocket-restricted H-bonds (not heavy-atom contact counts), COM-distance-based residence, pocket RMSF, pocket net formal charge, and pocket SASA when GROMACS is available. Save per-protein outputs only under pseudoKin/analysis/reference_pocket/{uniprot}/. (3) Unsupervised reference-structure classification: build reference_grouping_features table using only reference_pocket + reference_fel features (exclude independent FEL, ATP-proximity pocket, ligand RMSF, and whole-protein SASA). Cluster hierarchically with k=4 on the z-score matrix. Write reference_cluster_assignments.csv, reference_clusters.json, reference_clusters_pca.png, reference_clusters_dendrogram.png, and reference_clusters_phylo_tree.png — do not write classification_* outputs. (4) Generate reference_pocket_* cluster-validation plots for COM distance, H-bonds, residence, and consensus-index-aligned pocket RMSF. Supplementary: reference FEL landscape clustering (reference_fel_dendrogram.png, reference_fel_phylo_tree.png). Use id:name map o15197:EPHB6, o43187:IRAK2, o60674:JAK2, p00533:EGFR, p17612:KAPCA, p21860:ERBB3, p23458:JAK1, p24941:CDK2, p25092:GUC2C, p28482:MK01, p29597:TYK2, p51841:GUC2F, p52333:JAK3, q05823:RN5A, q13308:PTK7, q13418:ILK, q58a45:PAN3, q5jzy3:EPHAA, q6vab6:KSR2, q7rtn6:STRAA, q7z7a4:PXK, q8iv63:VRK3, q8ivt5:KSR1, q8nb16:MLKL, q8ncb2:CAMKV, q8ne28:STKL1, q8tea7:TBCK, q8wz42:TITIN, q92519:TRIB2, q96c45:ULK4, q96qs6:PSKH2, q96s38:KS6C1, q9bxu1:STK31, q9c0k7:STRAB, q9nsy0:NRBP2, q9uhy1:NRBP, q9y243:AKT3, q9y616:IRAK3. Generate the combined HTML report with literature context." \
+  --working-dir ./pseudoKin \
+  --subtask analysis reporter \
+  --simtype multisim \
+  --combined-only > ./pseudoKin/output.log 2>&1 &
+
+
+
+# Full pipeline (per-sim + combined): use --resume, NOT --combined-only.
+# Per sim (×38): ligand pocket COM, contacts, SASA, residence, pocket/ligand RMSF, PCA, FEL, basin PDBs.
+# Combined (after all per-sim): same reference steps as combined-only block above.
+
+nohup python run_agenticAIWork.py \
+  --goal "Simulations are already complete (~200 ns each) for thirty-eight protein–ATP holo systems in ./pseudoKin: o15197, o43187, o60674, p00533, p17612, p21860, p23458, p24941, p25092, p28482, p29597, p51841, p52333, q05823, q13308, q13418, q58a45, q5jzy3, q6vab6, q7rtn6, q7z7a4, q8iv63, q8ivt5, q8nb16, q8ncb2, q8ne28, q8tea7, q8wz42, q92519, q96c45, q96qs6, q96s38, q9bxu1, q9c0k7, q9nsy0, q9uhy1, q9y243, q9y616. Skip preprocess, simsetup, and HPC. For every simulation, run per-simulation analysis and reporting: ligand pocket distance (ATP, protein atoms within 5 Å of ATP at frame 0), pocket-restricted contacts, pocket SASA, ligand residence time, pocket RMSF and ligand RMSF, PCA on Cα, free-energy landscape at 310 K from PC1 and PC2, FEL basin features, and export representative PDB structures for each FEL basin (max 8). After all per-simulation analyses complete, run the same combined reference analysis as the --combined-only goal above (reference FEL, 15 Å MLKL reference pocket with H-bonds and net charge, k=4 reference clustering with reference_* outputs only). Use the same id:name map. Generate per-simulation HTML reports and a combined HTML report with literature context." \
+  --working-dir ./pseudoKin \
+  --subtask analysis reporter \
+  --simtype multisim \
+  --resume > ./pseudoKin/output.log 2>&1 &
+
+
+
+
+
 nohup python run_agenticAIWork.py \
   --goal "Run the full MD workflow (preprocess, simsetup, HPC submission, analysis, and reporting) for twelve human apo pseudokinase systems in ./pseudoKin_apo. Each PDB is protein-only with no ATP or cofactors. Set up and run ~200 ns production MD for each apo protein. After setup, submit all jobs to HPC and wait for completion before analysis. Per simulation, compute and plot: backbone RMSD over time; per-residue protein RMSF (whole protein and catalytic-pocket region); catalytic-pocket SASA (pocket defined by kinase active-site residues at frame 0); radius of gyration; PCA on Cα; free-energy landscape at 310 K from PC1 and PC2; FEL basin features; and export representative PDB structures for each FEL basin (max 8). Also compute DCCM on Cα fluctuations and DSSP secondary-structure time evolution for the whole protein and the catalytic pocket / activation-loop region. Combined analysis: build an unsupervised classification feature table (raw CSV, z-score CSV, XLSX) across all twelve apo systems; cluster with hierarchical clustering on the z-score matrix (default k); plot cluster PCA and a dendrogram labeled with protein names. After clustering, generate cluster-wise trajectory plots (pocket SASA, backbone RMSD, radius of gyration, and pocket RMSF) and cluster-wise protein RMSF; also overlay pocket SASA, backbone RMSD, radius of gyration, and pocket RMSF across all simulations. Use id:name map o14936:CASK, p34925:RYK, q6p3w7:SCYL2, q6zs72:PEAK3, q86yv5:PRAG1, q8iwb6:TEX14, q8ize3:PACE1, q96kg9:SCYL1, q96ru7:TRIB3, q96ru8:TRIB1, q9h792:PEAK1, q9y4a5:TRRAP. No manual class labels. Generate per-simulation HTML reports and a combined HTML report with literature context for each pseudokinase. Build a phylogenetic tree from sequences and PDB structures of the provided data and compare it with a dynamics-based phylogenetic tree derived from the simulation analyses." \
   --working-dir ./pseudoKin_apo \
-  --pdb-list o14936.pdb p34925.pdb q6p3w7.pdb q6zs72.pdb q86yv5.pdb q8iwb6.pdb q8ize3.pdb q96kg9.pdb q96ru7.pdb q96ru8.pdb q9h792.pdb q9y4a5.pdb \
   --simtype multisim \
   --allowed-hpc-jobs 4 \
-  --hpc-check-interval 3m \
+  --hpc-check-interval 60m  \
   --resume > ./pseudoKin_apo/output.log 2>&1 &
 
 
@@ -537,36 +600,6 @@ python run_agenticAIWork.py \
   --combined-only
 
 
-
-
- q96c45.pdb, q9bxu1.pdb, q9c0k7.pdb, q9y616.pdb
-
-
-  python run_agenticAIWork.py \
-  --goal "Please run full MD for these uniprot ids: p23458.pdb, p29597.pdb, q7rtn6.pdb, q96c45.pdb, p21860.pdb and p52333.pdb Please setup and run all simulations only for 1 ns. In combined analysis, please compare the RMSF of protein in cross simulations and ligand pocket distance in cross simulaitons only. please do not invent new anlysis. The given uniprotid:protein name are p23458:JAK1, p29597:TYK2, q7rtn6:STRAA, q96c45:ULK4, p21860:ERBB3 and p52333:JAK3. Calculate the DCCM for JAK1 and TYK2 to compare the dynamics between these two proteins. In report preparation, please focus on relevant pseudokinase literature of these simulated proteins." \
-  --working-dir ./agenticB5R1_t1 \
-  --simtype multisim \
-  --allowed-hpc-jobs 4 \
-  --hpc-check-interval 3m \
-  --resume
-
-
-
-
-
-  python run_agenticAIWork.py \
-  --goal "Please run full MD for these pdb files P34925.pdb, Q6P3W7.pdb, Q6ZS72.pdb, Q86YV5.pdb, Q8IWB6.pdb
-Q8IZE3:PACE1
-Q96KG9:SCYL1
-Q96RU7:TRIB3
-Q96RU8:TRIB1
-Q9H792:PEAK1
-Q9Y4A5.pdb Please setup and run all simulations only for 1 ns. In combined analysis, please compare the RMSF of protein in cross simulations and ligand pocket distance in cross simulaitons only. please do not invent new anlysis. The given uniprotid:protein name are p23458:JAK1, p29597:TYK2, q7rtn6:STRAA, q96c45:ULK4, p21860:ERBB3 and p52333:JAK3. Calculate the DCCM for JAK1 and TYK2 to compare the dynamics between these two proteins. In report preparation, please focus on relevant pseudokinase literature of these simulated proteins." \
-  --working-dir ./agenticB5R1_t1 \
-  --simtype multisim \
-  --allowed-hpc-jobs 4 \
-  --hpc-check-interval 3m \
-  --resume
 
 
 ```

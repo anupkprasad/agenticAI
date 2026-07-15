@@ -683,9 +683,21 @@ def calculate_free_energy_landscape(
                     ])
 
         fig, ax = plt.subplots(figsize=(7.5, 6))
-        levels = np.linspace(0, np.nanmax(F), 20)
-        cf = ax.contourf(X, Y, F, levels=levels, cmap="viridis_r")
-        ax.contour(X, Y, F, levels=levels[::2], colors="k", linewidths=0.35, alpha=0.4)
+        P = fel["probability"]
+        F_plot = F.astype(float).copy()
+        F_plot[P <= 0] = np.nan
+        finite = F_plot[np.isfinite(F_plot)]
+        if finite.size:
+            F_plot = F_plot - float(np.nanmin(finite))
+        levels, vmin, vmax = _fel_surface_levels(F_plot, P)
+        cf = ax.contourf(
+            X, Y, F_plot, levels=levels, cmap=FEL_BASIN_CMAP,
+            vmin=vmin, vmax=vmax, extend="max",
+        )
+        iso = [lv for lv in FEL_ENERGY_CONTOUR_KJ if vmin < lv < vmax]
+        if iso:
+            ax.contour(X, Y, F_plot, levels=iso, colors="0.15", linewidths=0.45, alpha=0.55)
+        ax.set_facecolor("0.97")
         fig.colorbar(cf, ax=ax, label="Relative free energy (kJ/mol)")
         ax.set_xlabel(f"PC{pc_x} (Å)")
         ax.set_ylabel(f"PC{pc_y} (Å)")
@@ -735,6 +747,181 @@ def calculate_free_energy_landscape(
 
 
 # ── FEL landscape feature extraction (classification metrics) ─────────────────
+
+DEFAULT_MIN_BASIN_POPULATION = 0.05
+FEL_BASIN_CMAP = "RdYlBu"  # blue = minima (low ΔF), red = high energy
+FEL_BASIN_MARKER_COLOR = "#2d1650"  # indigo — distinct from RdYlBu_r red/blue
+FEL_SURFACE_VMAX_PAD_KJ = 8.0
+FEL_SURFACE_VMAX_FLOOR_KJ = 18.0
+FEL_ENERGY_CONTOUR_KJ = (5.0, 10.0, 15.0, 20.0)
+
+
+def _fel_surface_levels(
+    F: np.ndarray,
+    P: np.ndarray,
+) -> Tuple[np.ndarray, float, float]:
+    """Contour levels for FEL plots; unsampled bins should be NaN in ``F``."""
+    if np.any(np.isnan(F)):
+        sampled = F[np.isfinite(F)]
+    else:
+        sampled = F[P > 0]
+    if sampled.size == 0:
+        sampled = F[np.isfinite(F)]
+    vmin = 0.0
+    p98 = float(np.percentile(sampled, 98)) if sampled.size else float(np.nanmax(F))
+    vmax = max(p98 + FEL_SURFACE_VMAX_PAD_KJ, FEL_SURFACE_VMAX_FLOOR_KJ)
+    vmax = min(vmax, float(np.nanmax(F)))
+    levels = np.linspace(vmin, vmax, 24)
+    return levels, vmin, vmax
+
+
+def plot_fel_basins_on_axes(
+    ax,
+    *,
+    x_centers: np.ndarray,
+    y_centers: np.ndarray,
+    free_energy: np.ndarray,
+    probability: np.ndarray,
+    basins: List[Dict[str, Any]],
+    smooth_sigma: float = 1.0,
+    pc_x: int = 1,
+    pc_y: int = 2,
+    title: Optional[str] = None,
+    show_population_pct: bool = True,
+    basin_marker_color: str = FEL_BASIN_MARKER_COLOR,
+    annotation_fontsize: float = 9,
+    marker_size: float = 16,
+):
+    """
+    Draw a masked FEL surface (blue minima → red high energy) with basin markers.
+
+    Only basins supplied in ``basins`` are annotated (expected: already ≥ cutoff).
+    """
+    F = free_energy.astype(float)
+    P = probability
+    F_plot = F.copy()
+    F_plot[P <= 0] = np.nan
+    finite = F_plot[np.isfinite(F_plot)]
+    if finite.size:
+        F_plot = F_plot - float(np.nanmin(finite))
+
+    X, Y = np.meshgrid(x_centers, y_centers)
+    levels, vmin, vmax = _fel_surface_levels(F_plot, P)
+    cf = ax.contourf(
+        X,
+        Y,
+        F_plot,
+        levels=levels,
+        cmap=FEL_BASIN_CMAP,
+        vmin=vmin,
+        vmax=vmax,
+        extend="max",
+        alpha=0.95,
+    )
+
+    finite = F_plot[np.isfinite(F_plot)]
+    if finite.size:
+        iso_levels = [lv for lv in FEL_ENERGY_CONTOUR_KJ if vmin < lv < vmax]
+        if iso_levels:
+            ax.contour(
+                X,
+                Y,
+                F_plot,
+                levels=iso_levels,
+                colors="0.15",
+                linewidths=0.45,
+                alpha=0.55,
+            )
+
+    F_smooth = _smooth_fel_grid(F, smooth_sigma)
+    minima = [(int(b["min_y"]), int(b["min_x"])) for b in basins]
+    if minima:
+        basin_labels = _assign_fel_basins(F_smooth, minima)
+        basin_levels = sorted({int(x) for x in basin_labels.flat if x > 0})
+        if basin_levels:
+            ax.contour(
+                X,
+                Y,
+                basin_labels,
+                levels=basin_levels,
+                colors="white",
+                linewidths=1.8,
+                alpha=0.95,
+                zorder=4,
+            )
+            ax.contour(
+                X,
+                Y,
+                basin_labels,
+                levels=basin_levels,
+                colors="black",
+                linewidths=0.55,
+                alpha=0.75,
+                zorder=4,
+            )
+
+    for b in basins:
+        bx = float(x_centers[int(b["min_x"])])
+        by = float(y_centers[int(b["min_y"])])
+        bid = int(b["basin_id"])
+        label = str(bid)
+        if show_population_pct:
+            label = f"{bid}, {100.0 * float(b.get('population', 0)):.0f}%"
+        ax.plot(
+            bx,
+            by,
+            marker="*",
+            color=basin_marker_color,
+            markersize=marker_size,
+            markeredgecolor="white",
+            markeredgewidth=0.8,
+            zorder=5,
+        )
+        # Stagger label offsets so annotations sit clear of the star/basin core.
+        offsets = (
+            (14, 12),
+            (-18, 12),
+            (14, -16),
+            (-18, -16),
+            (0, 18),
+            (20, 0),
+            (-22, 0),
+            (10, 20),
+        )
+        dx, dy = offsets[(bid - 1) % len(offsets)]
+        ax.annotate(
+            label,
+            (bx, by),
+            textcoords="offset points",
+            xytext=(dx, dy),
+            fontsize=annotation_fontsize,
+            fontweight="bold",
+            color="0.15",
+            ha="center",
+            va="center",
+            bbox=dict(
+                boxstyle="round,pad=0.28",
+                facecolor="0.92",
+                edgecolor="0.45",
+                linewidth=0.7,
+                alpha=0.92,
+            ),
+            arrowprops=dict(
+                arrowstyle="-",
+                color="0.45",
+                lw=0.8,
+                shrinkA=0,
+                shrinkB=4,
+            ),
+            zorder=6,
+        )
+
+    ax.set_facecolor("0.97")
+    ax.set_xlabel(f"PC{pc_x} (Å)")
+    ax.set_ylabel(f"PC{pc_y} (Å)")
+    if title:
+        ax.set_title(title)
+    return cf
 
 
 def load_fel_grid_csv(path: str) -> Dict[str, Any]:
@@ -922,7 +1109,7 @@ def analyze_fel_landscape_core(
     P: np.ndarray,
     *,
     smooth_sigma: float = 1.0,
-    min_basin_population: float = 0.01,
+    min_basin_population: float = DEFAULT_MIN_BASIN_POPULATION,
     min_prominence_kj_mol: float = 0.5,
 ) -> Dict[str, Any]:
     """
@@ -935,9 +1122,10 @@ def analyze_fel_landscape_core(
        minimum **prominence** (≥ ``min_prominence_kj_mol`` or 8% of F range).
     3. **Assign basins** by steepest descent from each grid cell to the nearest
        minimum; compute **population** pᵢ = Σ P(cell) per basin.
-    4. **Filter & merge:** drop basins with population < ``min_basin_population``;
-       iteratively merge the smallest basin into the largest until at most
+    4. **Filter & merge:** drop basins with population < ``min_basin_population``
+       (default 5%); iteratively merge the smallest basin into the largest until at most
        **8 basins** remain (or all meet the population threshold).
+    5. **Label basins:** assign ``basin_id`` 1…n by **population** (highest = 1).
 
     Only these final merged basins appear in ``fel_basins.png`` and in
     ``n_basins`` / ``landscape_entropy`` (S = −Σ pᵢ ln pᵢ).
@@ -1001,6 +1189,8 @@ def analyze_fel_landscape_core(
     for new_id, b in enumerate(basins, start=1):
         b["basin_id"] = new_id
 
+    n_minima_detected = len(basins)
+
     # Merge tiny basins into the major basin until population threshold is met
     max_basins = 8
     while len(basins) > 1:
@@ -1023,6 +1213,13 @@ def analyze_fel_landscape_core(
         basins.pop(smallest)
         for new_id, b in enumerate(basins, start=1):
             b["basin_id"] = new_id
+
+    # Rank basins by population (highest occupancy = basin 1).
+    basins.sort(
+        key=lambda b: (-float(b["population"]), float(b["free_energy_min_kJ_mol"])),
+    )
+    for new_id, b in enumerate(basins, start=1):
+        b["basin_id"] = new_id
 
     populations = np.asarray([b["population"] for b in basins], dtype=float)
     populations = populations / max(populations.sum(), 1e-12)
@@ -1055,6 +1252,7 @@ def analyze_fel_landscape_core(
         "success": True,
         "n_basins": len(basins),
         "n_minima": len(basins),  # backward-compatible alias
+        "n_minima_detected": n_minima_detected,
         "landscape_entropy": landscape_entropy,
         "grid_entropy": grid_entropy,
         "major_basin_population": float(major_basin["population"]),
@@ -1145,7 +1343,7 @@ def analyze_fel_landscape_features(
     bins: int = 50,
     temperature_k: float = 310.0,
     smooth_sigma: float = 1.0,
-    min_basin_population: float = 0.01,
+    min_basin_population: float = DEFAULT_MIN_BASIN_POPULATION,
     min_prominence_kj_mol: float = 0.5,
     output_json: Optional[str] = None,
     output_csv: Optional[str] = None,
@@ -1180,7 +1378,7 @@ def analyze_fel_landscape_features(
         bins (optional): Number of 2D histogram bins per axis.
         temperature_k (optional): Temperature in Kelvin used for FEL conversion.
         smooth_sigma (optional): Gaussian smoothing sigma for basin detection.
-        min_basin_population (optional): Minimum basin population fraction.
+        min_basin_population (optional): Minimum basin population fraction (default 5%).
         min_prominence_kj_mol (optional): Minimum basin prominence in kJ/mol.
         output_json (optional): Output JSON file for FEL feature summary.
         output_csv (optional): Output one-row CSV summary file.
@@ -1262,44 +1460,23 @@ def analyze_fel_landscape_features(
         )
 
         if plot_out and HAS_MATPLOTLIB:
-            F = loaded["free_energy"]
-            F_smooth = _smooth_fel_grid(F, smooth_sigma)
-            final_minima = [(b["min_y"], b["min_x"]) for b in features["basins"]]
-            labels = _assign_fel_basins(F_smooth, final_minima)
             fig, ax = plt.subplots(figsize=(8, 6.5))
-            X, Y = np.meshgrid(loaded["x_centers"], loaded["y_centers"])
-            cf = ax.contourf(X, Y, F, levels=20, cmap="viridis_r", alpha=0.9)
-            fig.colorbar(cf, ax=ax, label="Relative free energy (kJ/mol)")
-            # Basin boundaries (white lines between assigned regions)
-            basin_levels = sorted({int(x) for x in labels.flat if x > 0})
-            if basin_levels:
-                ax.contour(
-                    X, Y, labels, levels=basin_levels,
-                    colors="white", linewidths=0.7, alpha=0.85,
-                )
-            # Numbered markers — one per final classified basin only
-            for b in features["basins"]:
-                bx = loaded["x_centers"][b["min_x"]]
-                by = loaded["y_centers"][b["min_y"]]
-                bid = b["basin_id"]
-                ax.plot(bx, by, marker="*", color="red", markersize=14, zorder=5)
-                ax.annotate(
-                    str(bid),
-                    (bx, by),
-                    textcoords="offset points",
-                    xytext=(6, 6),
-                    fontsize=11,
-                    fontweight="bold",
-                    color="white",
-                    bbox=dict(boxstyle="round,pad=0.2", facecolor="red", alpha=0.85),
-                    zorder=6,
-                )
-            n_show = features.get("n_basins", features["n_minima"])
-            ax.set_xlabel(f"PC{pc_x} (Å)")
-            ax.set_ylabel(f"PC{pc_y} (Å)")
-            ax.set_title(
-                f"FEL basins (n={n_show}, S={features['landscape_entropy']:.2f})"
+            cf = plot_fel_basins_on_axes(
+                ax=ax,
+                x_centers=loaded["x_centers"],
+                y_centers=loaded["y_centers"],
+                free_energy=loaded["free_energy"],
+                probability=loaded["probability"],
+                basins=features["basins"],
+                smooth_sigma=smooth_sigma,
+                pc_x=pc_x,
+                pc_y=pc_y,
+                title=(
+                    f"FEL basins (n={features.get('n_basins', features['n_minima'])}, "
+                    f"S={features['landscape_entropy']:.2f})"
+                ),
             )
+            fig.colorbar(cf, ax=ax, label="Relative free energy (kJ/mol)")
             fig.tight_layout()
             fig.savefig(plot_out, dpi=150, bbox_inches="tight")
             plt.close(fig)
@@ -1336,6 +1513,7 @@ def analyze_fel_landscape_features(
             "message": msg,
             **{k: features[k] for k in (
                 "n_minima",
+                "n_minima_detected",
                 "landscape_entropy",
                 "grid_entropy",
                 "major_basin_population",

@@ -32,7 +32,7 @@ from .planning_guidelines import (
     metric_covered_by_registry,
     partition_metrics_by_registry,
 )
-from src.supervisor.component_parser import detect_component_cases
+from src.supervisor.component_case_resolver import resolve_component_cases, resolve_sim_label_and_dir
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,23 @@ def _coerce_pdb_analysis(pdb_analysis: Optional[Dict[str, Any]]) -> Dict[str, An
 
 
 _SIMULATION_STAGE_AGENTS = frozenset({"preprocess", "simsetup", "hpcjob"})
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    """Normalize LLM JSON boolean fields."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "1"):
+            return True
+        if lowered in ("false", "no", "0"):
+            return False
+    return default
 
 
 def _coerce_plan_text(value: Any, default: str = "") -> str:
@@ -538,12 +555,54 @@ class MDPlanner:
         if protein_name_map:
             logger.info(f"PLANNER [multi-sim]: Protein name map: {protein_name_map}")
 
-        component_cases = detect_component_cases(
+        all_pdb_analyses = state.get("all_pdb_analyses") or []
+        pdb_analysis_map: Dict[str, Dict[str, Any]] = {}
+        for idx, pdb in enumerate(pdb_list):
+            if idx < len(all_pdb_analyses):
+                pdb_analysis_map[Path(pdb).name] = all_pdb_analyses[idx]
+
+        pdb_summary_lines: List[str] = []
+        for pdb in pdb_list:
+            pdb_name = Path(pdb).name
+            analysis = pdb_analysis_map.get(pdb_name) or {}
+            comps = analysis.get("components_available", {})
+            comp_desc = []
+            if comps.get("protein"):
+                comp_desc.append("protein")
+            if comps.get("ligand"):
+                ligands = analysis.get("ligand", {}).get("residue_names", [])
+                comp_desc.append(f"ligand({','.join(ligands[:2])})" if ligands else "ligand")
+            if comps.get("ions"):
+                comp_desc.append("ions")
+            line = f"  - {pdb_name}"
+            if comp_desc:
+                line += f": {','.join(comp_desc)}"
+            pdb_summary_lines.append(line)
+
+        component_cases = resolve_component_cases(
             original_goal,
             enriched_prompt,
             pdb_count=len(pdb_list),
+            pdb_summaries=pdb_summary_lines,
+            llm_client=self.llm,
+            is_error_response=_is_mock_or_error_llm_response,
+            prefer_llm=bool(state.get("use_llm", True)),
         )
+        # Absolute guard: component cases are templates applied to every PDB, never
+        # one entry per structure. Cap protects against future LLM pathologies.
+        if len(component_cases) > 4:
+            logger.warning(
+                "PLANNER [multi-sim]: truncating %d component cases to 4",
+                len(component_cases),
+            )
+            component_cases = component_cases[:4]
+        logger.info(
+            "PLANNER [multi-sim]: Component cases resolved: %s",
+            [c.get("description") for c in component_cases],
+        )
+
         expanded_entries: List[Dict[str, Any]] = []
+        multi_component_cases = len(component_cases) > 1
         for pdb in pdb_list:
             uid = Path(pdb).stem
             protein_name = protein_name_map.get(uid.lower(), uid.upper())
@@ -552,8 +611,10 @@ class MDPlanner:
             )
             for case in component_cases:
                 suffix = case.get("suffix", "")
-                sim_label = f"{uid}_{suffix}" if suffix else uid
-                sim_dir = str((Path(base_working_dir) / sim_label).resolve())
+                sim_label, sim_dir = resolve_sim_label_and_dir(
+                    uid, suffix, base_working_dir,
+                    multi_component_cases=multi_component_cases,
+                )
                 expanded_entries.append(
                     {
                         "pdb": pdb,
@@ -568,12 +629,6 @@ class MDPlanner:
                 )
 
         state["sim_working_dirs"] = [e["working_dir"] for e in expanded_entries]
-
-        all_pdb_analyses = state.get("all_pdb_analyses") or []
-        pdb_analysis_map: Dict[str, Dict[str, Any]] = {}
-        for idx, pdb in enumerate(pdb_list):
-            if idx < len(all_pdb_analyses):
-                pdb_analysis_map[Path(pdb).name] = all_pdb_analyses[idx]
 
         sim_context_lines: List[str] = []
         for i, entry in enumerate(expanded_entries, 1):
@@ -651,7 +706,18 @@ class MDPlanner:
         run_combined_analysis = default_combined
         decomposition_complete = False
         parsed = None
+        # Large campaigns: skip LLM JSON dump of N prompts (often truncated /
+        # duplicated). Deterministic per-entry prompts keep the master plan
+        # compact and faithful to shared intent.
+        _use_llm_decomp = len(expanded_entries) <= 24
         try:
+            if not _use_llm_decomp:
+                logger.info(
+                    "PLANNER [multi-sim]: %d entries — using deterministic prompts "
+                    "(skip LLM per-sim prompt JSON)",
+                    len(expanded_entries),
+                )
+                raise RuntimeError("skip_llm_decomp_large_campaign")
             response = self.llm.prompt_raw(
                 decomposition_prompt, temperature=0.35, max_tokens=8192, format="json"
             )
@@ -723,7 +789,10 @@ class MDPlanner:
                     and _strip_markdown_json_fence(response).rstrip().endswith("}")
                 )
         except Exception as exc:
-            logger.warning(f"PLANNER [multi-sim]: LLM decomposition failed: {exc}")
+            if str(exc) != "skip_llm_decomp_large_campaign":
+                logger.warning(f"PLANNER [multi-sim]: LLM decomposition failed: {exc}")
+            else:
+                logger.debug("PLANNER [multi-sim]: %s", exc)
 
         # Truncated JSON often omits combined fields; never drop combined work when
         # the user goal clearly requested it unless a complete JSON says otherwise.
@@ -887,6 +956,25 @@ class MDPlanner:
         }
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Compact master plan: one shared intent + table of sims (avoid N× copy-paste).
+        case_descs = sorted(
+            {
+                str(s.get("case_description") or "default")
+                for s in sim_prompts
+            }
+        )
+        shared_template = ""
+        if sim_prompts:
+            sample = _coerce_plan_text(sim_prompts[0].get("prompt"), default="")
+            # Prefer a short shared synopsis over repeating full prompts.
+            shared_template = (
+                f"For each simulation label below, run the same pipeline ({agents_desc}) "
+                f"using that label's PDB / working directory and case directive. "
+                f"Cases in this campaign: {', '.join(case_descs)}."
+            )
+            if len(sim_prompts) <= 12 and sample:
+                shared_template += f"\n\nExample per-sim wording:\n{sample}"
+
         md_lines = [
             "# Multi-Simulation Master Plan",
             "",
@@ -901,21 +989,29 @@ class MDPlanner:
             "",
             enriched_prompt or "_N/A_",
             "",
-            "## Per-Simulation Prompts",
+            "## Shared per-simulation intent",
             "",
+            shared_template or "_N/A_",
+            "",
+            "## Simulation inventory",
+            "",
+            "| # | Label | Protein | PDB | Case | Directory |",
+            "|---|-------|---------|-----|------|-----------|",
         ]
         for idx, sim in enumerate(sim_prompts, 1):
-            md_lines += [
-                f"### {idx}. {sim.get('label', f'sim_{idx}')}",
-                "",
-                f"- **PDB:** {sim.get('pdb', 'N/A')}",
-                f"- **Directory:** {sim.get('working_dir', 'N/A')}",
-                f"- **Case:** {sim.get('case_description', 'N/A')}",
-                "",
-                _coerce_plan_text(sim.get("prompt"), default="_No prompt text._"),
-                "",
-            ]
+            pdb_name = Path(str(sim.get("pdb") or "")).name or str(sim.get("pdb") or "N/A")
+            md_lines.append(
+                "| {idx} | {label} | {protein} | {pdb} | {case} | `{dir}` |".format(
+                    idx=idx,
+                    label=sim.get("label", f"sim_{idx}"),
+                    protein=sim.get("protein_name") or "",
+                    pdb=pdb_name,
+                    case=sim.get("case_description", "N/A"),
+                    dir=sim.get("working_dir", "N/A"),
+                )
+            )
         md_lines += [
+            "",
             "## Combined Analysis Plan",
             "",
             _coerce_plan_text(

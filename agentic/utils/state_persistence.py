@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
+
+logger = logging.getLogger(__name__)
 
 # Keys dropped entirely from persisted state (rebuilt from disk or logs if needed).
 _OMIT_KEYS: Set[str] = {
@@ -284,6 +287,161 @@ def compact_state_for_persistence(state: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def build_pool_status_snapshot(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Unified live status for ``pool_status.json`` across workflow stages.
+
+    Covers parallel prep/analysis pools, HPC SLURM pool, sequential per-sim
+    execution, and combined analysis/reporter.
+    """
+    if not state.get("is_multi_simulation"):
+        return None
+
+    phase = state.get("multi_sim_phase")
+    hpc_pool = state.get("hpc_pool") or {}
+    hpc_active = (
+        phase == "hpc_pool"
+        or (
+            hpc_pool
+            and hpc_pool.get("phase") != "complete"
+            and not state.get("hpc_pool_phase_complete")
+        )
+    )
+
+    if hpc_active:
+        from agentic.multi_sim_hpc_pool import snapshot_hpc_pool_status
+
+        return snapshot_hpc_pool_status(state)
+
+    parallel_pool = state.get("parallel_pool")
+    if parallel_pool:
+        from agentic.multi_sim_parallel_pool import init_parallel_pool
+
+        init_parallel_pool(state, phase=parallel_pool.get("phase") or "analysis")
+
+    if parallel_pool or phase == "parallel_pool":
+        from agentic.multi_sim_parallel_pool import snapshot_parallel_pool_status
+        from agentic.multi_sim_progress import sync_parallel_pool_to_multi_sim_progress
+
+        sync_parallel_pool_to_multi_sim_progress(state)
+        pool = state.get("parallel_pool") or parallel_pool
+        if pool:
+            snap = snapshot_parallel_pool_status(pool)
+            snap["workflow_phase"] = phase or "parallel_pool"
+            progress = state.get("multi_sim_progress") or {}
+            if progress.get("sims"):
+                snap["simulations"] = {
+                    label: {
+                        "worker": (pool.get("sims") or {}).get(label, {}).get("status"),
+                        **{
+                            k: v
+                            for k, v in ((progress.get("sims") or {}).get(label) or {})
+                            .get("agents", {})
+                            .items()
+                            if k in ("analysis", "reporter", "preprocessing", "simsetup", "hpc")
+                        },
+                        "status": ((progress.get("sims") or {}).get(label) or {}).get("status"),
+                    }
+                    for label in progress.get("sim_order") or sorted((pool.get("sims") or {}).keys())
+                }
+            return snap
+
+    if phase in ("executing_sims", "combined_analysis", "combined_reporter", "complete"):
+        try:
+            from agentic.multi_sim_progress import reconcile_progress_from_disk
+
+            if state.get("multi_sim_progress"):
+                reconcile_progress_from_disk(state)
+        except Exception as exc:
+            logger.debug("pool_status disk reconcile skipped: %s", exc)
+        return _snapshot_from_multi_sim_progress(state)
+
+    if state.get("hpc_pool_status_snapshot"):
+        return dict(state["hpc_pool_status_snapshot"])
+    if state.get("parallel_pool_status"):
+        out = dict(state["parallel_pool_status"])
+        out.setdefault("workflow_phase", phase)
+        return out
+    return None
+
+
+def _snapshot_from_multi_sim_progress(state: Dict[str, Any]) -> Dict[str, Any]:
+    from datetime import datetime, timezone
+
+    progress = state.get("multi_sim_progress") or {}
+    sims = progress.get("sims") or {}
+    by_status: Dict[str, List[str]] = {
+        "running": [],
+        "pending": [],
+        "done": [],
+        "failed": [],
+    }
+    sim_details: Dict[str, Any] = {}
+    summary_lines: List[str] = []
+
+    for label in progress.get("sim_order") or sorted(sims.keys()):
+        rec = sims.get(label) or {}
+        agents = rec.get("agents") or {}
+        entry = {
+            "status": rec.get("status"),
+            "preprocessing": agents.get("preprocessing"),
+            "simsetup": agents.get("simsetup"),
+            "hpc": agents.get("hpc"),
+            "analysis": agents.get("analysis"),
+            "reporter": agents.get("reporter"),
+        }
+        if rec.get("error"):
+            entry["error"] = rec.get("error")
+        sim_details[label] = entry
+
+        parts = [f"status={rec.get('status') or 'pending'}"]
+        for agent_key in ("preprocessing", "simsetup", "hpc", "analysis", "reporter"):
+            if agents.get(agent_key):
+                parts.append(f"{agent_key}={agents[agent_key]}")
+        summary_lines.append(f"  {label}: {' '.join(parts)}")
+
+        st = rec.get("status") or "pending"
+        if st == "in_progress":
+            st = "running"
+        bucket = st if st in by_status else "pending"
+        by_status[bucket].append(label)
+
+    workers = int(state.get("parallel_workers_resolved") or 0)
+    pool_type = "parallel_analysis" if workers > 1 else "sequential"
+
+    snap: Dict[str, Any] = {
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "workflow_phase": state.get("multi_sim_phase"),
+        "pool_type": pool_type,
+        "phase": progress.get("phase"),
+        "max_workers": workers or None,
+        "active_sim": progress.get("active_sim_label"),
+        "active_agent": progress.get("active_agent"),
+        "simulations": sim_details,
+        "summary_lines": summary_lines,
+        "running": sorted(by_status["running"]),
+        "pending": sorted(by_status["pending"]),
+        "done": sorted(by_status["done"]),
+        "failed": sorted(by_status["failed"]),
+        "pending_count": len(by_status["pending"]),
+        "done_count": len(by_status["done"]),
+        "failed_count": len(by_status["failed"]),
+    }
+    if progress.get("combined"):
+        snap["combined"] = progress["combined"]
+    return snap
+
+
+def write_pool_status_json(state: Dict[str, Any], supervisor_dir: Path) -> None:
+    """Write ``pool_status.json`` when multi-sim pool tracking is active."""
+    pool_status = build_pool_status_snapshot(state)
+    if pool_status:
+        (supervisor_dir / "pool_status.json").write_text(
+            json.dumps(pool_status, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+
 def save_workflow_state_quiet(state: Dict[str, Any]) -> None:
     """Persist ``state.jsonl`` without updating execution_report.md (pool polls)."""
     import json
@@ -318,6 +476,8 @@ def save_workflow_state_quiet(state: Dict[str, Any]) -> None:
         persist_status = "in_progress:interrupted"
     elif state.get("multi_sim_phase") == "parallel_pool":
         persist_status = "in_progress:parallel_pool"
+    elif state.get("multi_sim_phase") == "hpc_pool":
+        persist_status = "in_progress:hpc_pool"
 
     if state.get("is_multi_simulation") and multi_base_dir:
         serializable_state["working_directory"] = working_dir
@@ -329,10 +489,4 @@ def save_workflow_state_quiet(state: Dict[str, Any]) -> None:
     }
     state_path.write_text(json.dumps(entry, indent=2, default=str) + "\n", encoding="utf-8")
 
-    # Lightweight live status for ``tail`` / ``watch`` (does not grow like full state).
-    pool_status = serializable_state.get("parallel_pool_status")
-    if pool_status:
-        (supervisor_dir / "pool_status.json").write_text(
-            json.dumps(pool_status, indent=2) + "\n",
-            encoding="utf-8",
-        )
+    write_pool_status_json(state, supervisor_dir)

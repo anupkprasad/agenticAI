@@ -89,18 +89,33 @@ def _count_pending(pool: Dict[str, Any]) -> int:
 
 
 def _all_done(pool: Dict[str, Any]) -> bool:
+    """True when every sim has a terminal status (success, skip, or failed)."""
     sims = pool.get("sims") or {}
     if not sims:
         return False
-    return all(rec.get("status") in ("done", "skipped") for rec in sims.values())
+    return all(rec.get("status") in ("done", "skipped", "failed") for rec in sims.values())
 
 
-def _reconcile_sim_from_disk(rec: Dict[str, Any], phase: str) -> None:
-    if rec.get("status") in ("running",):
-        return
+def _terminal_success(rec: Dict[str, Any]) -> bool:
+    return rec.get("status") in ("done", "skipped")
+
+
+def _reconcile_sim_from_disk(
+    rec: Dict[str, Any],
+    phase: str,
+    *,
+    label: str = "",
+    state: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Mark pool records done/skipped when artifacts exist on disk."""
+    status = rec.get("status")
+    if status == "running":
+        if state and label and _is_actively_running(label, state):
+            return
+        # Worker finished or parent restarted — trust on-disk artifacts over stale "running".
     job = {"working_dir": rec.get("working_dir"), "phase": phase, "agent_list": rec.get("agent_list")}
     if job_already_complete(job):
-        rec["status"] = "skipped" if rec.get("status") == "pending" else "done"
+        rec["status"] = "skipped" if status == "pending" else "done"
         rec["completed_at"] = rec.get("completed_at") or _utc_now()
         rec.pop("error", None)
 
@@ -130,6 +145,8 @@ def snapshot_parallel_pool_status(pool: Dict[str, Any]) -> Dict[str, Any]:
         by_status[bucket].append(label)
     return {
         "updated_at": _utc_now(),
+        "workflow_phase": "parallel_pool",
+        "pool_type": f"parallel_{pool.get('phase') or 'analysis'}",
         "phase": pool.get("phase"),
         "max_workers": pool.get("max_workers"),
         "llm_concurrency": (pool.get("resource_estimate") or {}).get("llm_concurrency"),
@@ -141,6 +158,10 @@ def snapshot_parallel_pool_status(pool: Dict[str, Any]) -> Dict[str, Any]:
         "pending_count": len(by_status["pending"]),
         "done_count": len(by_status["done"]) + len(by_status["skipped"]),
         "failed_count": len(by_status["failed"]),
+        "simulations": {
+            label: {"worker": (sims.get(label) or {}).get("status")}
+            for label in sorted(sims.keys())
+        },
     }
 
 
@@ -229,6 +250,10 @@ def resume_parallel_pool_if_needed(state: Dict[str, Any]) -> bool:
 
 def init_parallel_pool(state: Dict[str, Any], *, phase: str) -> Dict[str, Any]:
     """Build or refresh ``state['parallel_pool']`` from ``sim_prompts``."""
+    # One-shot: reopen previously failed labels only when the campaign (re)starts
+    # with --resume / requeue_failed_sims. Cleared so mid-run failures stay terminal.
+    requeue_failed = bool(state.pop("requeue_failed_sims", False))
+
     sim_prompts = state.get("sim_prompts") or []
     pending = sum(
         1
@@ -257,17 +282,25 @@ def init_parallel_pool(state: Dict[str, Any], *, phase: str) -> Dict[str, Any]:
         elif rec.get("status") == "running":
             rec["status"] = "pending"
             rec.pop("started_at", None)
-        elif rec.get("status") not in ("failed",):
+        elif rec.get("status") == "failed":
+            job = build_per_sim_job_spec(state, sp, phase=phase)
+            if job_already_complete(job):
+                rec["status"] = "skipped"
+                rec["skip_reason"] = "artifacts on disk after prior failure"
+                rec.pop("error", None)
+            elif requeue_failed:
+                rec["status"] = "pending"
+                rec.pop("error", None)
+                rec.pop("completed_at", None)
+                logger.info("Parallel pool: re-queued failed sim %s for retry", label)
+        else:
             job = build_per_sim_job_spec(state, sp, phase=phase)
             if job_already_complete(job):
                 rec["status"] = "skipped"
                 rec["skip_reason"] = "artifacts on disk"
             elif rec.get("status") not in ("done",):
                 rec["status"] = "pending"
-        elif rec.get("status") == "failed" and state.get("resume_failed_only"):
-            rec["status"] = "pending"
-            rec.pop("error", None)
-        _reconcile_sim_from_disk(rec, phase)
+        _reconcile_sim_from_disk(rec, phase, label=label, state=state)
         sims[label] = rec
 
     pool = {
@@ -400,6 +433,9 @@ def parallel_pool_supervisor_tick(state: Dict[str, Any]) -> Dict[str, Any]:
     One supervisor iteration for ``multi_sim_phase == 'parallel_pool'``.
 
     Sets ``state['next_node']`` to ``parallel_pool_wait`` or ``supervisor``.
+
+    A failed simulation is terminal for that label only — other pending sims keep
+    running. The phase finishes when every sim is done / skipped / failed.
     """
     pool = state.get("parallel_pool") or {}
     phase = pool.get("phase") or "analysis"
@@ -417,9 +453,12 @@ def parallel_pool_supervisor_tick(state: Dict[str, Any]) -> Dict[str, Any]:
     ]
     if failures:
         state["parallel_pool_failed"] = failures
-        state["next_node"] = "supervisor"
-        logger.error("Parallel pool: failed sims: %s", failures)
-        return state
+        # Do NOT return early — keep scheduling unrelated sims.
+        logger.error(
+            "Parallel pool: %d failed sim(s) recorded (continuing others): %s",
+            len(failures),
+            failures,
+        )
 
     if _all_done(pool):
         shutdown_pool_runner(state)
@@ -434,22 +473,39 @@ def parallel_pool_supervisor_tick(state: Dict[str, Any]) -> Dict[str, Any]:
         persist_parallel_pool_checkpoint(state)
         return state
 
+    # No running/pending left but pool not terminal yet (race) — re-enter supervisor.
     state["next_node"] = "supervisor"
     return state
 
 
 def _finish_parallel_phase(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Transition after all parallel workers complete."""
+    """Transition after all parallel workers reach a terminal status."""
     pool = state.get("parallel_pool") or {}
     phase = pool.get("phase")
+    failures = [
+        label
+        for label, rec in (pool.get("sims") or {}).items()
+        if rec.get("status") == "failed"
+    ]
     log_pool_to_base(state, f"Parallel {phase} phase complete", pool=pool)
+    if failures:
+        state["errors"] = list(state.get("errors") or [])
+        state["errors"].append(
+            f"Parallel {phase} pool finished with {len(failures)} failed "
+            f"simulation(s): {', '.join(failures)} — continuing campaign"
+        )
+        logger.warning(
+            "Parallel %s pool complete with failures (continuing): %s",
+            phase,
+            failures,
+        )
     state.pop("parallel_pool", None)
 
     if phase == "prep":
         from agentic.multi_sim_hpc_pool import mark_prep_done
 
         for label, rec in (pool.get("sims") or {}).items():
-            if rec.get("status") in ("done", "skipped"):
+            if _terminal_success(rec):
                 mark_prep_done(state, label)
         state.pop("hpc_pool_prep_parallel", None)
         state["multi_sim_phase"] = "hpc_pool"
@@ -494,6 +550,18 @@ def start_parallel_agent_phase(state: Dict[str, Any]) -> Dict[str, Any]:
         pool=state["parallel_pool"],
     )
     return parallel_pool_supervisor_tick(state)
+
+
+def _parallel_prep_still_running(state: Dict[str, Any]) -> bool:
+    """True while parallel prep workers are active or pending."""
+    pool = state.get("parallel_pool") or {}
+    if pool.get("phase") != "prep":
+        return False
+    if state.get("multi_sim_phase") == "parallel_pool":
+        return _count_running(pool) > 0 or _count_pending(pool) > 0
+    if state.get("hpc_pool_prep_parallel"):
+        return _count_running(pool) > 0 or _count_pending(pool) > 0
+    return False
 
 
 def start_parallel_prep_if_enabled(state: Dict[str, Any]) -> bool:
@@ -566,6 +634,7 @@ __all__ = [
     "parallel_pool_supervisor_tick",
     "start_parallel_agent_phase",
     "start_parallel_prep_if_enabled",
+    "_parallel_prep_still_running",
     "pool_summary",
     "snapshot_parallel_pool_status",
     "persist_parallel_pool_checkpoint",

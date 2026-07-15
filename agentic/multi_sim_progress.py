@@ -661,6 +661,12 @@ def _load_per_sim_checkpoint(working_dir: str) -> Optional[Dict[str, Any]]:
     try:
         entry = json.loads(state_path.read_text(encoding="utf-8"))
         return entry.get("state") or entry
+    except RecursionError:
+        logger.warning(
+            "Per-sim state at %s is too deeply nested to parse; using disk artifacts only",
+            state_path,
+        )
+        return None
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("Could not read per-sim state at %s: %s", state_path, exc)
         return None
@@ -1427,11 +1433,22 @@ def prepare_multisim_resume_state(state: Dict[str, Any]) -> Optional[str]:
     progress["active_agent"] = next_agent
     state["multi_sim_progress"] = progress
     state["current_sim_index"] = rec.get("index", 0)
-    state["multi_sim_phase"] = "executing_sims"
-    state["plan_executed"] = False
-    state["execution_plan"] = None
-    sync_state_from_progress(state, rebind=True)
-    apply_sim_pipeline_to_state(state)
+    # Never demote an active cross-sim pool phase back to sequential executing_sims.
+    # That rebind thrash was aborting --resume mid hpc_pool / parallel_pool.
+    pool_phase = state.get("multi_sim_phase")
+    if pool_phase not in ("hpc_pool", "parallel_pool"):
+        state["multi_sim_phase"] = "executing_sims"
+        state["plan_executed"] = False
+        state["execution_plan"] = None
+        sync_state_from_progress(state, rebind=True)
+        apply_sim_pipeline_to_state(state)
+    else:
+        state["plan_executed"] = False
+        logger.info(
+            "[resume] Keeping multi_sim_phase=%s (not forcing executing_sims for %s)",
+            pool_phase,
+            label,
+        )
     logger.info(
         "[resume] Multi-sim progress → sim %s agent %s (index %s)",
         label,

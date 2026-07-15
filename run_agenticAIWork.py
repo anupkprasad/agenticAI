@@ -1659,6 +1659,27 @@ def _prefetch_uniprot_structures(
     return reused, downloaded
 
 
+def _structure_needs_download(
+    entry: Dict[str, Any],
+    goal: str,
+    parsed: Dict[str, Any],
+) -> bool:
+    """True only when the structure file is missing and the user did not supply a local PDB."""
+    pdb_path = entry.get("pdb_path") or ""
+    if pdb_path and Path(pdb_path).is_file():
+        return False
+    if parsed.get("needs_download") is False:
+        return False
+    goal_lower = (goal or "").lower()
+    if re.search(r"\b(?:download|fetch|retrieve)\b.*\b(?:structure|pdb|alphafold|uniprot)\b", goal_lower):
+        return True
+    if re.search(r"\b(?:structure|pdb).*\b(?:download|fetch|retrieve)\b", goal_lower):
+        return True
+    if parsed.get("needs_download") is True:
+        return True
+    return not bool(pdb_path and Path(pdb_path).exists())
+
+
 def _build_structure_request_config(entry: Dict[str, Any], goal: str) -> Dict[str, Any]:
     """Normalize structure request metadata passed into workflow state."""
     from src.preprocess.structure_request_parser import (
@@ -1689,7 +1710,7 @@ def _build_structure_request_config(entry: Dict[str, Any], goal: str) -> Dict[st
         "start_resid": start_resid,
         "end_resid": end_resid,
         "domain_label": domain_label,
-        "needs_download": True,
+        "needs_download": _structure_needs_download(entry, goal, parsed),
     }
     if domain_lookup:
         config.update(
@@ -1952,6 +1973,8 @@ def main(argv=None):
         "use_llm": use_llm,
         "working_directory": args.working_dir,
         "resume_failed_only": getattr(args, "resume", False),
+        # One-shot consumed by parallel pool init — reopen failed sims on --resume.
+        "requeue_failed_sims": getattr(args, "resume", False),
         "retry_labels": list(getattr(args, "retry_labels", None) or []),
         "combined_only": getattr(args, "combined_only", False),
         "allowed_hpc_jobs": getattr(args, "allowed_hpc_jobs", None),

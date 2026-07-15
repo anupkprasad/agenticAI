@@ -285,6 +285,253 @@ def _select_representative_pdbs(
     )
 
 
+def _cluster_rep_prefix_map(base_analysis_dir: Optional[str]) -> Dict[str, str]:
+    """Map representative display name → viewer prefix (e.g. ``Cluster 2 rep``)."""
+    if not base_analysis_dir:
+        return {}
+    from src.reporter.report_curator import (
+        build_reference_archetype_narrative,
+        is_reference_archetype_study,
+    )
+
+    base = Path(base_analysis_dir)
+    if not is_reference_archetype_study(base):
+        return {}
+    narrative = build_reference_archetype_narrative(base)
+    if not narrative:
+        return {}
+    prefix_map: Dict[str, str] = {}
+    for block in narrative.get("clusters") or []:
+        disp = (block.get("representative_display") or "").strip()
+        if disp:
+            prefix_map[disp] = f"Cluster {block['cluster_id']} rep"
+    return prefix_map
+
+
+def _load_reference_fel_json(base: Path, display_name: str) -> Optional[Dict[str, Any]]:
+    path = base / "reference_fel" / display_name / "fel_features.json"
+    if not path.is_file():
+        return None
+    try:
+        with path.open(encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except Exception as exc:
+        logger.warning("Could not read %s: %s", path, exc)
+        return None
+
+
+def _reference_fel_plot_paths(base: Path, display_name: str) -> List[Tuple[str, str]]:
+    """Return (path, caption) pairs for per-system reference FEL figures."""
+    fel_dir = base / "reference_fel" / display_name
+    if not fel_dir.is_dir():
+        return []
+    candidates = [
+        ("reference_fel_basins.png", "Reference FEL basins"),
+        ("reference_fel_pc1_pc2.png", "Reference FEL (PC1 vs PC2)"),
+        ("reference_pca_pc1_pc2.png", "Reference PCA (PC1 vs PC2)"),
+    ]
+    out: List[Tuple[str, str]] = []
+    for fname, caption in candidates:
+        path = fel_dir / fname
+        if path.is_file():
+            out.append((str(path), caption))
+    return out
+
+
+def _fmt_metric(value: Optional[float], *, unit: str = "", decimals: int = 2) -> str:
+    if value is None:
+        return "—"
+    text = f"{value:.{decimals}f}"
+    return f"{text}{unit}" if unit else text
+
+
+_METRIC_LABELS: Dict[str, Tuple[str, str, int]] = {
+    "reference_pocket_ligand_distance_std_A": ("ATP–pocket COM (std)", " Å", 2),
+    "reference_pocket_ligand_distance_p95_A": ("ATP–pocket COM (p95)", " Å", 2),
+    "reference_pocket_fraction_bound": ("Fraction bound (≤15 Å)", "", 2),
+    "reference_pocket_std_ligand_axis_angle_deg": ("Axis angle fluctuation (std)", "°", 1),
+    "reference_pocket_ligand_axis_angle_p95_deg": ("Axis angle (p95)", "°", 1),
+    "ref_landscape_entropy": ("FEL landscape entropy", "", 2),
+    "ref_major_basin_population": ("Major basin population", "", 2),
+}
+
+
+def _build_reference_archetype_findings_section(
+    base_analysis_dir: Optional[str] = None,
+) -> str:
+    """
+    Overall + per-cluster findings for reference FEL+pocket archetype studies.
+
+    Each cluster card highlights one representative with pocket metrics, FEL basin
+    table, and reference FEL figures when available.
+    """
+    if not base_analysis_dir:
+        return ""
+    from src.reporter.report_curator import (
+        build_reference_archetype_narrative,
+        is_reference_archetype_study,
+        _load_features_table,
+    )
+
+    base = Path(base_analysis_dir)
+    if not is_reference_archetype_study(base):
+        return ""
+
+    narrative = build_reference_archetype_narrative(base)
+    if not narrative:
+        return ""
+
+    features = _load_features_table(base)
+    feat_by_label: Dict[str, Dict[str, str]] = {}
+    for row in features:
+        lbl = (row.get("label") or "").strip().lower()
+        if lbl:
+            feat_by_label[lbl] = row
+
+    clusters = narrative.get("clusters") or []
+    if not clusters:
+        return ""
+
+    # Overall bullet summary
+    overall_bits: List[str] = []
+    for block in clusters:
+        cid = block["cluster_id"]
+        title = block.get("archetype_title", "dynamic archetype")
+        n = block.get("n_members", 0)
+        rep = block.get("representative_display", "")
+        overall_bits.append(
+            f"<li><strong>Cluster {cid}</strong> ({n} systems, {title}): "
+            f"representative <strong>{_html_mod.escape(rep)}</strong></li>"
+        )
+
+    html_parts: List[str] = [
+        "<h2>&#128221; Overall Findings &amp; Cluster Archetypes</h2>\n",
+        f"<p>{_html_mod.escape(narrative['overall_summary'])}</p>\n",
+        "<h3>Summary by cluster</h3>\n",
+        "<ul class=\"findings-summary-list\">\n",
+        *overall_bits,
+        "</ul>\n",
+        "<h3>Cluster representatives (FEL + pocket dynamics)</h3>\n",
+        '<p class="findings-note">One centroid-nearest kinase per cluster demonstrates '
+        "the binding-site coupling and reference FEL metastates for that archetype. "
+        "Matching 3D structures appear in the interactive viewer below.</p>\n",
+        '<div class="archetype-grid">\n',
+    ]
+
+    for block in clusters:
+        cid = block["cluster_id"]
+        title = block.get("archetype_title", "Dynamic archetype")
+        rep_disp = block.get("representative_display", "")
+        rep_uid = (block.get("representative_uid") or "").strip().lower()
+        members = block.get("members_display") or []
+        profile = block.get("profile") or {}
+
+        member_text = ", ".join(_html_mod.escape(m) for m in members)
+        if len(members) > 12:
+            member_text = (
+                ", ".join(_html_mod.escape(m) for m in members[:10])
+                + f", … (+{len(members) - 10} more)"
+            )
+
+        card = [
+            f'<div class="archetype-card archetype-cluster-{cid}">',
+            f'<div class="archetype-card-header">'
+            f'<span class="archetype-badge">Cluster {cid}</span> '
+            f'{_html_mod.escape(title)}</div>',
+            f'<p class="archetype-members"><strong>{block.get("n_members", len(members))} members:</strong> '
+            f"{member_text}</p>",
+            f'<p class="archetype-rep"><strong>Representative:</strong> '
+            f'{_html_mod.escape(rep_disp)} '
+            f'<span class="viewer-hint">(viewer: Cluster {cid} rep — …)</span></p>',
+        ]
+
+        # Cluster-mean metrics
+        if profile:
+            card.append('<table class="archetype-metrics"><tr><th>Metric (cluster mean)</th><th>Value</th></tr>')
+            for key, (label, unit, dec) in _METRIC_LABELS.items():
+                if key in profile:
+                    card.append(
+                        f"<tr><td>{_html_mod.escape(label)}</td>"
+                        f"<td>{_fmt_metric(profile.get(key), unit=unit, decimals=dec)}</td></tr>"
+                    )
+            card.append("</table>")
+
+        # Representative-specific metrics
+        rep_row = feat_by_label.get(rep_uid, {})
+        if rep_row:
+            card.append(
+                f"<h4>Representative pocket + FEL scalars ({_html_mod.escape(rep_disp)})</h4>"
+            )
+            card.append(
+                '<table class="archetype-metrics"><tr><th>Metric</th><th>Value</th></tr>'
+            )
+            for key, (label, unit, dec) in _METRIC_LABELS.items():
+                raw = rep_row.get(key)
+                if raw not in (None, ""):
+                    try:
+                        val = float(raw)
+                    except ValueError:
+                        continue
+                    card.append(
+                        f"<tr><td>{_html_mod.escape(label)}</td>"
+                        f"<td>{_fmt_metric(val, unit=unit, decimals=dec)}</td></tr>"
+                    )
+            card.append("</table>")
+
+        # FEL basin table
+        fel = _load_reference_fel_json(base, rep_disp) if rep_disp else None
+        if fel:
+            n_min = fel.get("n_minima")
+            card.append(
+                f"<h4>Reference FEL metastates ({_html_mod.escape(rep_disp)})</h4>"
+            )
+            if n_min is not None:
+                card.append(
+                    f"<p>Landscape entropy {_fmt_metric(fel.get('landscape_entropy'))}; "
+                    f"major basin #{fel.get('major_basin_id')} "
+                    f"({_fmt_metric((fel.get('major_basin_population') or 0) * 100, unit='%', decimals=1)} "
+                    f"population).</p>"
+                )
+            basins = fel.get("basins") or []
+            if basins:
+                card.append(
+                    '<table class="archetype-metrics fel-basin-table">'
+                    "<tr><th>Basin</th><th>Population</th>"
+                    "<th>ΔG min (kJ/mol)</th><th>Depth (kJ/mol)</th></tr>"
+                )
+                for b in sorted(basins, key=lambda x: -(x.get("population") or 0)):
+                    pop = (b.get("population") or 0) * 100
+                    card.append(
+                        f"<tr><td>{b.get('basin_id', '?')}</td>"
+                        f"<td>{_fmt_metric(pop, unit='%', decimals=1)}</td>"
+                        f"<td>{_fmt_metric(b.get('free_energy_min_kJ_mol'), decimals=2)}</td>"
+                        f"<td>{_fmt_metric(b.get('basin_depth_kJ_mol'), decimals=2)}</td></tr>"
+                    )
+                card.append("</table>")
+
+        # FEL figures for representative
+        fel_plots = _reference_fel_plot_paths(base, rep_disp) if rep_disp else []
+        if fel_plots:
+            card.append('<div class="plot-grid archetype-fel-plots">')
+            for path, caption in fel_plots:
+                uri = _encode_image(path, search_dirs=[base])
+                if uri:
+                    card.append(
+                        f'<div class="plot-card">'
+                        f'<p><strong>{_html_mod.escape(caption)}</strong></p>'
+                        f'<img src="{uri}" alt="{_html_mod.escape(caption)}" loading="lazy">'
+                        f"</div>"
+                    )
+            card.append("</div>")
+
+        card.append("</div>")
+        html_parts.append("\n".join(card))
+
+    html_parts.append("</div>\n")
+    return "".join(html_parts)
+
+
 def _select_significant_pdbs_for_combined(
     sim_dirs: List[str],
     labels: List[str],
@@ -294,6 +541,7 @@ def _select_significant_pdbs_for_combined(
     user_goal: Optional[str] = None,
     enriched_prompt: Optional[str] = None,
     highlight_plan: Optional[Any] = None,
+    base_analysis_dir: Optional[str] = None,
 ) -> Dict[str, str]:
     """Collect significant structures across all simulations for the 3D viewer.
 
@@ -313,18 +561,43 @@ def _select_significant_pdbs_for_combined(
         max_per_sim = min(max_per_sim, narrative.max_fel_per_sim)
     cap = narrative.max_pdb_structures if narrative.max_pdb_structures else max_total
     cap = cap if cap and cap > 0 else max(len(sim_dirs) * max_per_sim, 8)
+    if highlight_plan is not None and highlight_plan.highlight_labels:
+        planned = sum(
+            highlight_plan.structures_for(str(d))
+            for d in highlight_plan.highlight_labels
+        )
+        if planned > 0:
+            cap = max(cap, planned)
 
     from src.reporter.structure_extractor import (
         collect_significant_structures,
         load_fel_basin_structures,
     )
 
+    cluster_rep_prefix = _cluster_rep_prefix_map(base_analysis_dir)
+    uid_to_disp: Dict[str, str] = {}
+    if base_analysis_dir:
+        try:
+            from src.analysis.reference_labels import build_uniprot_display_map
+
+            uid_to_disp = build_uniprot_display_map(Path(base_analysis_dir))
+        except Exception:
+            pass
+
     frames: Dict[str, str] = {}
+
+    def _viewer_key(display: str, sub_label: str) -> str:
+        prefix = cluster_rep_prefix.get(display)
+        if prefix:
+            return f"{prefix} — {display} — {sub_label}"
+        return f"{display} — {sub_label}"
 
     for sim_dir, label in zip(sim_dirs, labels):
         if len(frames) >= cap:
             break
         display = resolve_display_label(label, label_name_map)
+        if uid_to_disp and label.lower() in uid_to_disp:
+            display = uid_to_disp[label.lower()]
 
         # Per-sim metastate budget from the highlight plan (0 → skip this sim).
         sim_max = max_per_sim
@@ -351,7 +624,7 @@ def _select_significant_pdbs_for_combined(
             for b_label, pdb_text in ranked[:sim_max]:
                 if len(frames) >= cap:
                     break
-                viewer_key = f"{display} — {b_label}"
+                viewer_key = _viewer_key(display, b_label)
                 frames[viewer_key] = pdb_text
                 added_this_sim += 1
 
@@ -367,7 +640,7 @@ def _select_significant_pdbs_for_combined(
             for t_label, pdb_text in sig.items():
                 if len(frames) >= cap or added_this_sim >= sim_max:
                     break
-                viewer_key = f"{display} — {t_label}"
+                viewer_key = _viewer_key(display, t_label)
                 if viewer_key not in frames:
                     frames[viewer_key] = pdb_text
                     added_this_sim += 1
@@ -387,7 +660,7 @@ def _select_significant_pdbs_for_combined(
                     try:
                         pdb_text = chosen.read_text(encoding="utf-8", errors="replace")
                         timepoint = _parse_timepoint(chosen.name)
-                        frames[f"{display} ({timepoint})"] = pdb_text
+                        frames[_viewer_key(display, timepoint)] = pdb_text
                     except Exception as exc:
                         logger.warning(f"Could not read PDB {chosen}: {exc}")
 
@@ -1086,6 +1359,34 @@ tr:hover td { background: #dbeafe; transition: background 0.15s; }
 }
 .plot-card img { width: 100%; height: auto; border-radius: 5px; }
 .plot-card p { margin: 8px 0 0; font-size: 13px; color: #6b7280; font-style: italic; }
+/* ---- Reference archetype findings ---- */
+.findings-summary-list { margin: 12px 0 24px; padding-left: 22px; line-height: 1.65; }
+.findings-summary-list li { margin: 8px 0; }
+.findings-note { color: #374151; font-size: 14px; margin: 8px 0 18px; }
+.archetype-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr));
+    gap: 20px; margin: 20px 0;
+}
+.archetype-card {
+    border: 1px solid #c7d2fe; border-radius: 10px; padding: 18px 20px;
+    background: linear-gradient(180deg, #fafbff 0%, #ffffff 100%);
+    box-shadow: 0 2px 10px rgba(99,102,241,0.08);
+}
+.archetype-card-header {
+    font-size: 1.05em; font-weight: 700; color: #312e81; margin-bottom: 10px;
+    border-bottom: 2px solid #e0e7ff; padding-bottom: 8px;
+}
+.archetype-badge {
+    display: inline-block; background: #6366f1; color: white;
+    padding: 2px 10px; border-radius: 999px; font-size: 0.85em; margin-right: 6px;
+}
+.archetype-members, .archetype-rep { font-size: 14px; margin: 8px 0; line-height: 1.5; }
+.viewer-hint { color: #6b7280; font-size: 12px; font-style: italic; }
+.archetype-metrics { font-size: 13px; margin: 10px 0 14px; }
+.archetype-metrics th { background: #4338ca; font-size: 12px; padding: 7px 10px; }
+.archetype-metrics td { padding: 6px 10px; }
+.archetype-card h4 { color: #3730a3; font-size: 0.95em; margin: 14px 0 6px; }
+.archetype-fel-plots .plot-card { flex: 1 1 240px; }
 /* ---- Section divider ---- */
 .section-divider {
     height: 2px;
@@ -2308,7 +2609,7 @@ def _build_classification_dynamics_section(
     """
     Dedicated section for unsupervised classification / cluster-based dynamics.
 
-    Highlights the FEL-derived phylogenetic tree, cluster assignments, and
+    Highlights the MDS similarity map, cluster assignments, and
     per-cluster trajectory overlays that distinguish dynamic regimes.
     """
     from src.reporter.figure_selector import (
@@ -2331,14 +2632,15 @@ def _build_classification_dynamics_section(
             enriched_prompt or "",
         )
         if not narrative.classification_primary and not any(
-            "classification_" in Path(p).name.lower() or "by_cluster" in Path(p).name.lower()
+            Path(p).name.lower().startswith(("classification_", "ref_fel_pock_", "ref_fel_"))
+            or "by_cluster" in Path(p).name.lower()
             for p in overlay_plots
         ):
             return ""
         parts = partition_combined_overlay_plots(overlay_plots)
         intro = (
             "Unsupervised grouping of simulations from conformational and binding-site "
-            "dynamics features. The phylogenetic tree and cluster overlays summarise "
+            "dynamics features. The MDS map, dendrogram, and cluster overlays summarise "
             "which systems share similar dynamic regimes and how ATP–pocket coupling "
             "differs between clusters."
         )
@@ -2364,8 +2666,10 @@ def _build_classification_dynamics_section(
 
     def _caption_for(path: str) -> str:
         name = Path(path).stem.replace("_", " ").title()
+        if "heatmap" in path.lower():
+            return "Z-score feature heatmap by simulation (cluster colors)"
         if "phylo" in path.lower():
-            return "Unrooted phylogenetic tree from FEL-based dynamic features"
+            return "Unrooted similarity tree from dynamic features"
         if "pca" in name.lower() and "cluster" in name.lower():
             return "PCA projection coloured by unsupervised cluster assignment"
         if "dendrogram" in name.lower():
@@ -2385,7 +2689,9 @@ def _build_classification_dynamics_section(
         return name
 
     html_parts: List[str] = [
-        "<h2>&#128202; Dynamic Classification &amp; Cluster Analysis</h2>\n",
+        "<h2>&#128202; Reference-Structure Classification (FEL + Pocket)</h2>\n"
+        if any("ref_fel_pock_" in Path(p).name.lower() for p in (summary + trajectories + rmsf))
+        else "<h2>&#128202; Dynamic Classification &amp; Cluster Analysis</h2>\n",
         f"<p>{_html_mod.escape(intro)}</p>\n",
     ]
 
@@ -2809,6 +3115,10 @@ def generate_combined_html_report(
         base_analysis_dir=base_analysis_dir,
     )
 
+    archetype_findings_html = _build_reference_archetype_findings_section(
+        base_analysis_dir=base_analysis_dir,
+    )
+
     phylo_trees_html = _build_phylo_trees_section(
         overlay_plots,
         base_analysis_dir=base_analysis_dir,
@@ -2842,6 +3152,7 @@ def generate_combined_html_report(
         user_goal=user_goal,
         enriched_prompt=enriched_prompt,
         highlight_plan=structure_highlight,
+        base_analysis_dir=base_analysis_dir,
     )
     viewer_html = _build_3d_viewer_html(pdb_frames) if pdb_frames else ""
 
@@ -2957,6 +3268,10 @@ def generate_combined_html_report(
 {sim_overview_html}
 
 <div class="section-divider"></div>
+
+{archetype_findings_html}
+
+{"<div class='section-divider'></div>" if archetype_findings_html else ""}
 
 {viewer_html}
 

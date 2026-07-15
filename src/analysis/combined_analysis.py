@@ -1822,6 +1822,13 @@ _BINDING_RMSF_CONFIG: Dict[str, Dict[str, str]] = {
         "xlabel": "Ligand atom index",
         "ylabel": "RMSF (Å)",
     },
+    "reference_pocket_rmsf": {
+        "file_pattern": "reference_pocket_rmsf",
+        "output_file": "reference_pocket_rmsf_overlay.png",
+        "title": "Reference pocket RMSF — all simulations",
+        "xlabel": "Reference-aligned pocket index",
+        "ylabel": "RMSF (Å)",
+    },
 }
 
 

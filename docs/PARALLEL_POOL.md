@@ -113,9 +113,15 @@ On **Ctrl+C / kill / disconnect**, the framework saves an interrupt checkpoint:
 disk, and `workflow_status` is set to `in_progress:interrupted`. Run again
 with `--resume` and the same `--working-dir`.
 
-While the pool runs, `parallel_pool_status` (and `pool_status.json`) are the
-live source of truth for worker slots. `multi_sim_progress` is kept in sync on
-every checkpoint so both sections of `state.jsonl` agree.
+While the pool runs, ``pool_status.json`` is the live source of truth. It reflects
+the active stage:
+
+- **parallel prep/analysis** — worker slots (`parallel_pool`)
+- **HPC pool** — per-sim ``prep`` + ``hpc`` status and SLURM job IDs (matches terminal HPC summary)
+- **sequential post-HPC** — per-sim agent status from ``multi_sim_progress``
+
+``multi_sim_progress`` is kept in sync on every checkpoint so both sections of
+``state.jsonl`` agree.
 
 ## State
 

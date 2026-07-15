@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from langchain.tools import tool
 from scipy.cluster import hierarchy, vq
+from scipy.spatial.distance import pdist, squareform
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,144 @@ from src.reporter.combined_reporter import _parse_label_name_map, resolve_displa
 
 _META_COLUMNS = frozenset({"label", "sim_directory", "n_features_present"})
 
+# Reference FEL + reference-mapped pocket clustering outputs (combined analysis).
+REFERENCE_CLUSTER_METRIC_GROUPS = frozenset(
+    {"reference_pocket", "reference_fel", "reference_pca",
+     "reference_pocket_archetype", "reference_fel_archetype"}
+)
+REFERENCE_CLUSTERING_OUTPUT_FILES: Dict[str, str] = {
+    "features_csv": "ref_fel_pock_features.csv",
+    "zscore_csv": "ref_fel_pock_features_zscore.csv",
+    "manifest_json": "ref_fel_pock_features.json",
+    "xlsx": "ref_fel_pock_features.xlsx",
+    "assignments_csv": "ref_fel_pock_cluster_assignments.csv",
+    "summary_json": "ref_fel_pock_clusters.json",
+    "pca_png": "ref_fel_pock_clusters_pca.png",
+    "dendrogram_png": "ref_fel_pock_dendrogram.png",
+    "phylo_png": "ref_fel_pock_phylo_tree.png",
+    "heatmap_png": "ref_fel_pock_features_heatmap.png",
+    "panel_png": "ref_fel_pock_dendrogram_heatmap.png",
+}
+
+# Parallel hybrid: local FEL + reference-pocket archetype (separate output dir).
+LOCAL_FEL_REF_POCK_CLUSTERING_OUTPUT_FILES: Dict[str, str] = {
+    "features_csv": "local_fel_ref_pock_features.csv",
+    "zscore_csv": "local_fel_ref_pock_features_zscore.csv",
+    "manifest_json": "local_fel_ref_pock_features.json",
+    "xlsx": "local_fel_ref_pock_features.xlsx",
+    "assignments_csv": "local_fel_ref_pock_cluster_assignments.csv",
+    "summary_json": "local_fel_ref_pock_clusters.json",
+    "pca_png": "local_fel_ref_pock_clusters_pca.png",
+    "dendrogram_png": "local_fel_ref_pock_dendrogram.png",
+    "phylo_png": "local_fel_ref_pock_phylo_tree.png",
+    "heatmap_png": "local_fel_ref_pock_features_heatmap.png",
+    "panel_png": "local_fel_ref_pock_dendrogram_heatmap.png",
+    "mds_png": "local_fel_ref_pock_mds_map.png",
+}
+
+# Consensus-mapped Cα local FEL + reference pocket (sibling of local_fel_ref_pock).
+CONSENSUS_LOCAL_FEL_REF_POCK_CLUSTERING_OUTPUT_FILES: Dict[str, str] = {
+    "features_csv": "consensus_local_fel_ref_pock_features.csv",
+    "zscore_csv": "consensus_local_fel_ref_pock_features_zscore.csv",
+    "manifest_json": "consensus_local_fel_ref_pock_features.json",
+    "xlsx": "consensus_local_fel_ref_pock_features.xlsx",
+    "assignments_csv": "consensus_local_fel_ref_pock_cluster_assignments.csv",
+    "summary_json": "consensus_local_fel_ref_pock_clusters.json",
+    "pca_png": "consensus_local_fel_ref_pock_clusters_pca.png",
+    "dendrogram_png": "consensus_local_fel_ref_pock_dendrogram.png",
+    "phylo_png": "consensus_local_fel_ref_pock_phylo_tree.png",
+    "heatmap_png": "consensus_local_fel_ref_pock_features_heatmap.png",
+    "panel_png": "consensus_local_fel_ref_pock_dendrogram_heatmap.png",
+    "mds_png": "consensus_local_fel_ref_pock_mds_map.png",
+}
+
+REF_FEL_CLUSTERING_OUTPUT_FILES: Dict[str, str] = {
+    "features_table": "ref_fel_features_table.json",
+    "assignments_csv": "ref_fel_cluster_assignments.csv",
+    "summary_json": "ref_fel_clusters.json",
+    "dendrogram_png": "ref_fel_dendrogram.png",
+    "phylo_png": "ref_fel_phylo_tree.png",
+}
+
+
+def is_reference_structure_clustering(
+    metric_groups: Optional[Sequence[str]],
+) -> bool:
+    """True when clustering should use reference_* outputs only (not classification_*)."""
+    if not metric_groups:
+        return False
+    groups = {g for g in metric_groups if g in REFERENCE_CLUSTER_METRIC_GROUPS}
+    return bool(groups) and (
+        "reference_pocket" in groups
+        or "reference_fel" in groups
+        or "reference_pocket_archetype" in groups
+        or "reference_fel_archetype" in groups
+    )
+
+
+def reference_archetype_metric_groups(
+    metric_groups: Optional[Sequence[str]],
+) -> Tuple[str, ...]:
+    """Use curated archetype features when reference pocket+FEL clustering is requested."""
+    from src.analysis.classification_collector import REFERENCE_ARCHETYPE_METRIC_GROUPS
+
+    if not metric_groups:
+        return tuple()
+    groups = set(metric_groups)
+    if groups & {
+        "reference_pocket",
+        "reference_fel",
+        "reference_pocket_archetype",
+        "reference_fel_archetype",
+    }:
+        return REFERENCE_ARCHETYPE_METRIC_GROUPS
+    return tuple(g for g in metric_groups if g in REFERENCE_CLUSTER_METRIC_GROUPS)
+
+
+# Reference archetype clustering: up-weight COM/angle deviation so low-variation
+# binders group together (Ward uses column * sqrt(weight) on z-scored features).
+REFERENCE_ARCHETYPE_COUPLING_DEVIATION_WEIGHT = 2.0
+REFERENCE_ARCHETYPE_COUPLING_DEVIATION_FEATURES: Tuple[str, ...] = (
+    "reference_pocket_ligand_distance_std_A",
+    "reference_pocket_ligand_distance_p95_A",
+    "reference_pocket_std_ligand_axis_angle_deg",
+    "reference_pocket_ligand_axis_angle_p95_deg",
+)
+
+
+def reference_archetype_feature_weights(
+    coupling_deviation_weight: float = REFERENCE_ARCHETYPE_COUPLING_DEVIATION_WEIGHT,
+) -> Dict[str, float]:
+    """Per-feature Ward weights for reference pocket + FEL archetype clustering."""
+    from src.analysis.classification_collector import CLASSIFICATION_FEATURE_GROUPS
+
+    weights: Dict[str, float] = {}
+    for group in ("reference_pocket_archetype", "reference_fel_archetype"):
+        for col in CLASSIFICATION_FEATURE_GROUPS.get(group, ()):
+            weights[col] = 1.0
+    for col in REFERENCE_ARCHETYPE_COUPLING_DEVIATION_FEATURES:
+        if col in weights:
+            weights[col] = float(coupling_deviation_weight)
+    return weights
+
+
+def _apply_feature_weights(
+    X: np.ndarray,
+    feature_cols: Sequence[str],
+    feature_weights: Optional[Dict[str, float]],
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    """Scale z-score columns by sqrt(weight) for weighted Euclidean / Ward clustering."""
+    if not feature_weights:
+        return X, {}
+    Xw = np.array(X, dtype=float, copy=True)
+    applied: Dict[str, float] = {}
+    for j, col in enumerate(feature_cols):
+        w = float(feature_weights.get(col, 1.0))
+        if w != 1.0:
+            Xw[:, j] *= np.sqrt(w)
+            applied[col] = w
+    return Xw, applied
+
 
 def _default_n_clusters(n_samples: int) -> int:
     """Heuristic cluster count when the user does not specify one."""
@@ -47,13 +186,34 @@ def _default_n_clusters(n_samples: int) -> int:
 def _parse_n_clusters_from_text(text: str) -> Optional[int]:
     if not text:
         return None
+    m = re.search(r"\bk\s*=\s*(\d{1,2})\b", text, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
     m = re.search(r"\b(\d{1,2})\s+clusters?\b", text, re.IGNORECASE)
     if m:
         return int(m.group(1))
     m = re.search(r"\bcluster(?:ing)?\s+(?:into|with|using)\s+(\d{1,2})\b", text, re.IGNORECASE)
     if m:
         return int(m.group(1))
+    m = re.search(r"\b(?:default|use|with)\s+k\s*[=:]?\s*(\d{1,2})\b", text, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
     return None
+
+
+def resolve_n_clusters_for_goal(
+    n_samples: int,
+    user_goal_text: str = "",
+    *,
+    reference_based: bool = False,
+) -> int:
+    """Resolve k from goal text; reference workflows avoid sqrt(n) auto-k by default."""
+    parsed = _parse_n_clusters_from_text(user_goal_text)
+    if parsed is not None:
+        return max(1, min(parsed, n_samples))
+    if reference_based:
+        return max(1, min(4, n_samples))
+    return _default_n_clusters(n_samples)
 
 
 def clustering_method_for_goal(*goal_texts: str) -> str:
@@ -220,6 +380,105 @@ def _cluster_hierarchical(
     return labels.astype(int), Z
 
 
+def _cluster_representatives(
+    X: np.ndarray,
+    labels: Sequence[str],
+    display_names: Sequence[str],
+    cluster_ids: np.ndarray,
+) -> Dict[str, Dict[str, Any]]:
+    """Pick medoid (closest to centroid) per cluster in z-score feature space."""
+    reps: Dict[str, Dict[str, Any]] = {}
+    for cid in sorted({int(c) for c in cluster_ids}):
+        idx = [i for i, c in enumerate(cluster_ids) if int(c) == cid]
+        if not idx:
+            continue
+        sub = X[idx]
+        centroid = sub.mean(axis=0)
+        dists = np.linalg.norm(sub - centroid, axis=1)
+        best_local = int(np.argmin(dists))
+        best_idx = idx[best_local]
+        reps[str(cid)] = {
+            "label": labels[best_idx],
+            "display_name": display_names[best_idx],
+            "distance_to_centroid": float(dists[best_local]),
+        }
+    return reps
+
+
+def _load_representative_overrides(out_dir: Path) -> Dict[str, str]:
+    """Load optional ``{cluster_id: label_or_display_name}`` overrides from analysis dir."""
+    for fname in (
+        "ref_fel_pock_representative_overrides.json",
+        "representative_overrides.json",
+    ):
+        path = out_dir / fname
+        if not path.is_file():
+            continue
+        try:
+            with path.open(encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict):
+                continue
+            return {
+                str(k): str(v).strip()
+                for k, v in data.items()
+                if not str(k).startswith("_") and v
+            }
+        except Exception as exc:
+            logger.warning("Could not read representative overrides %s: %s", path, exc)
+    return {}
+
+
+def _apply_representative_overrides(
+    reps: Dict[str, Dict[str, Any]],
+    overrides: Dict[str, str],
+    labels: Sequence[str],
+    display_names: Sequence[str],
+    cluster_ids: Sequence[int],
+) -> Dict[str, Dict[str, Any]]:
+    """Replace medoid representatives when overrides name a cluster member."""
+    if not overrides:
+        return reps
+
+    label_to_idx = {lbl.lower(): i for i, lbl in enumerate(labels)}
+    display_to_idx = {disp.lower(): i for i, disp in enumerate(display_names)}
+
+    out = dict(reps)
+    for cid_key, target in overrides.items():
+        try:
+            cid = int(cid_key)
+        except (TypeError, ValueError):
+            continue
+        key = target.lower()
+        idx = label_to_idx.get(key)
+        if idx is None:
+            idx = display_to_idx.get(key)
+        if idx is None:
+            logger.warning(
+                "Representative override %s → %r not found among cluster members",
+                cid_key,
+                target,
+            )
+            continue
+        if int(cluster_ids[idx]) != cid:
+            logger.warning(
+                "Representative override %s → %r belongs to cluster %s, not %s; skipping",
+                cid_key,
+                target,
+                cluster_ids[idx],
+                cid,
+            )
+            continue
+        out[str(cid)] = {
+            "label": labels[idx],
+            "display_name": display_names[idx],
+            "distance_to_centroid": None,
+            "override": True,
+            "override_reason": f"Manual override: {target}",
+        }
+    return out
+
+
 def _cluster_kmeans(X: np.ndarray, n_clusters: int, seed: int = 42) -> np.ndarray:
     rng = np.random.default_rng(seed)
     if X.shape[0] <= n_clusters:
@@ -237,11 +496,24 @@ def _apply_display_names(
     labels: Sequence[str],
     user_goal: str = "",
     label_name_map: Optional[Dict[str, str]] = None,
+    base_analysis_dir: Optional[Path] = None,
 ) -> List[str]:
     name_map: Dict[str, str] = dict(label_name_map or {})
     parsed = _parse_label_name_map(user_goal)
     for key, val in parsed.items():
         name_map.setdefault(key.lower(), val)
+    if base_analysis_dir is not None:
+        try:
+            from src.analysis.reference_labels import build_uniprot_display_map
+
+            for uid, disp in build_uniprot_display_map(Path(base_analysis_dir)).items():
+                name_map.setdefault(uid.lower(), disp)
+        except Exception:
+            logger.debug(
+                "Could not load reference display-name map from %s",
+                base_analysis_dir,
+                exc_info=True,
+            )
     out: List[str] = []
     for label in labels:
         base = _label_base(label)
@@ -258,6 +530,9 @@ def _plot_cluster_scatter(
     title: str,
     pc1_var: float,
     pc2_var: float,
+    *,
+    xlabel: Optional[str] = None,
+    ylabel: Optional[str] = None,
 ) -> None:
     if not HAS_MPL:
         return
@@ -286,8 +561,8 @@ def _plot_cluster_scatter(
             fontweight="bold",
             zorder=3,
         )
-    ax.set_xlabel(f"PC1 ({pc1_var * 100:.1f}% var)")
-    ax.set_ylabel(f"PC2 ({pc2_var * 100:.1f}% var)")
+    ax.set_xlabel(xlabel or f"PC1 ({pc1_var * 100:.1f}% var)")
+    ax.set_ylabel(ylabel or f"PC2 ({pc2_var * 100:.1f}% var)")
     ax.set_title(title)
     ax.legend(loc="best", fontsize=9)
     ax.grid(True, alpha=0.3)
@@ -296,35 +571,447 @@ def _plot_cluster_scatter(
     plt.close(fig)
 
 
+def _cmdscale_mds_2d(X: np.ndarray) -> Tuple[np.ndarray, float, float]:
+    """
+    Classical multidimensional scaling (2D) from row-wise feature vectors.
+
+    Preserves pairwise Euclidean distances in z-score feature space — appropriate
+    for simulation archetype similarity maps (not evolutionary trees).
+    """
+    n = X.shape[0]
+    if n < 2:
+        return np.zeros((n, 2)), 0.0, 0.0
+    dist_sq = squareform(pdist(X, metric="euclidean")) ** 2
+    J = np.eye(n) - np.ones((n, n)) / n
+    B = -0.5 * J @ dist_sq @ J
+    evals, evecs = np.linalg.eigh(B)
+    order = np.argsort(evals)[::-1]
+    evals = evals[order]
+    evecs = evecs[:, order]
+    pos = evals > 1e-10
+    if int(pos.sum()) < 1:
+        return np.zeros((n, 2)), 0.0, 0.0
+    n_keep = min(2, int(pos.sum()))
+    vals = np.maximum(evals[:n_keep], 0.0)
+    coords = evecs[:, :n_keep] * np.sqrt(vals)
+    if coords.shape[1] == 1:
+        coords = np.column_stack([coords[:, 0], np.zeros(n)])
+    total = float(vals.sum()) or 1.0
+    mds1_frac = float(vals[0] / total)
+    mds2_frac = float(vals[1] / total) if len(vals) > 1 else 0.0
+    return coords, mds1_frac, mds2_frac
+
+
+def _plot_mds_cluster_map(
+    X: np.ndarray,
+    display_names: Sequence[str],
+    cluster_ids: Sequence[int],
+    output_path: Path,
+    title: str,
+) -> None:
+    """2D MDS map of z-score feature distances, colored by cluster assignment."""
+    coords, mds1_frac, mds2_frac = _cmdscale_mds_2d(X)
+    _plot_cluster_scatter(
+        coords,
+        display_names,
+        cluster_ids,
+        output_path,
+        title=title,
+        pc1_var=mds1_frac,
+        pc2_var=mds2_frac,
+        xlabel=f"MDS 1 ({mds1_frac * 100:.1f}% of distance variance)",
+        ylabel=f"MDS 2 ({mds2_frac * 100:.1f}% of distance variance)",
+    )
+
+
+def _short_feature_label(col: str) -> str:
+    """Compact axis label for classification heatmaps."""
+    try:
+        from src.reporter.combined_reporter import _METRIC_LABELS
+
+        if col in _METRIC_LABELS:
+            return _METRIC_LABELS[col][0]
+    except Exception:
+        pass
+    return (
+        col.replace("reference_pocket_", "")
+        .replace("ref_", "")
+        .replace("_", " ")
+    )
+
+
+# High-contrast palette for k=4 reference / classification dendrograms and phylo trees.
+CLUSTER_COLORS_K4: Tuple[str, ...] = (
+    "#E41A1C",  # cluster 1 — red
+    "#377EB8",  # cluster 2 — blue
+    "#4DAF4A",  # cluster 3 — green
+    "#FF7F00",  # cluster 4 — orange
+)
+
+# Ward k=4 archetype labels (reference pocket + reference FEL clustering).
+REFERENCE_CLUSTER_ARCHETYPE_NAMES: Dict[int, str] = {
+    1: "Dissociated",
+    2: "Dominant-basin coupling",
+    3: "Canonical-like",
+    4: "Tight rigid",
+}
+
+
+def _cluster_legend_label(
+    cid: int,
+    count: int,
+    archetype_names: Optional[Dict[int, str]] = None,
+) -> str:
+    names = archetype_names if archetype_names is not None else REFERENCE_CLUSTER_ARCHETYPE_NAMES
+    name = names.get(int(cid), "")
+    if name:
+        return f"C{cid}: {name} (n={count})"
+    return f"Cluster {cid} (n={count})"
+
+
+def _cluster_color_map(
+    cluster_ids: Sequence[int],
+    *,
+    palette: Optional[Sequence[str]] = None,
+) -> Tuple[List[int], Dict[int, Any]]:
+    """Return sorted cluster ids and a stable color per cluster id (1→red, 2→blue, …)."""
+    from matplotlib.colors import to_hex
+
+    clusters = sorted(set(int(c) for c in cluster_ids))
+    # Stable ColorBrewer/Set1-like palette covering k≤5 (matches K4 prefix).
+    default_pal = CLUSTER_COLORS_K4 + ("#984EA3",)
+    pal = palette or (default_pal if len(clusters) <= len(default_pal) else None)
+    if pal is not None:
+        colors = {cid: pal[(int(cid) - 1) % len(pal)] for cid in clusters}
+        return clusters, colors
+    cmap = plt.cm.get_cmap("tab10", max(len(clusters), 1))
+    colors = {cid: to_hex(cmap(i)) for i, cid in enumerate(clusters)}
+    return clusters, colors
+
+
+def _link_color_func_for_clusters(
+    linkage_matrix: np.ndarray,
+    cluster_ids: Sequence[int],
+    cluster_colors: Dict[int, str],
+) -> Any:
+    """Color dendrogram branches by final cluster assignment (not scipy distance threshold)."""
+    from matplotlib.colors import to_hex
+
+    n = len(cluster_ids)
+    node_cluster: Dict[int, int] = {i: int(cluster_ids[i]) for i in range(n)}
+    for i, row in enumerate(linkage_matrix):
+        a, b = int(row[0]), int(row[1])
+        ca, cb = node_cluster[a], node_cluster[b]
+        node_cluster[n + i] = ca if ca == cb else -1
+
+    def link_color_func(k: int) -> str:
+        cid = node_cluster.get(int(k), -1)
+        if cid < 0:
+            return "#B0B0B0"
+        c = cluster_colors[cid]
+        # Dendrogram requires hex/named colors — never str(rgba_tuple).
+        return c if isinstance(c, str) else to_hex(c)
+
+    return link_color_func
+
+
+def _align_subplot_heights(anchor_ax, *axes) -> None:
+    """Match vertical position and height of axes to a reference subplot."""
+    pos = anchor_ax.get_position()
+    for ax in axes:
+        p = ax.get_position()
+        ax.set_position([p.x0, pos.y0, p.width, pos.height])
+
+
+def _draw_simulation_label_bar(
+    ax,
+    names_ord: Sequence[str],
+    cids_ord: Sequence[int],
+    cluster_colors: Dict[int, str],
+    *,
+    fontsize: float = 8.5,
+) -> None:
+    """Colored cluster strip with black protein names centered on each row."""
+    from matplotlib.patches import Rectangle
+
+    n = len(names_ord)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(n - 0.5, -0.5)
+    for i, (name, cid) in enumerate(zip(names_ord, cids_ord)):
+        ax.add_patch(
+            Rectangle(
+                (0.02, i - 0.46),
+                0.96,
+                0.92,
+                facecolor=cluster_colors[int(cid)],
+                edgecolor="white",
+                linewidth=0.6,
+            )
+        )
+        ax.text(
+            0.5,
+            i,
+            name,
+            ha="center",
+            va="center",
+            color="black",
+            fontsize=fontsize,
+            fontweight="bold",
+            clip_on=True,
+        )
+    ax.axis("off")
+
+
+def _plot_dendrogram_heatmap_panel(
+    linkage_matrix: np.ndarray,
+    X: np.ndarray,
+    feature_cols: Sequence[str],
+    display_names: Sequence[str],
+    cluster_ids: Sequence[int],
+    output_path: Path,
+    *,
+    dendrogram_title: str = "Hierarchical clustering dendrogram",
+    heatmap_title: str = "Classification features (z-score)",
+    archetype_names: Optional[Dict[int, str]] = None,
+    legend_ncol: Optional[int] = None,
+) -> Optional[List[int]]:
+    """
+    Single figure: dendrogram (branches right→left) + cluster label bar + feature heatmap.
+
+    Rows share the same simulation order top→bottom. Protein names appear in black
+    on the colored cluster bar; the heatmap has no y-axis labels.
+    """
+    if not HAS_MPL:
+        return None
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
+    from matplotlib.patches import Patch
+
+    n = len(display_names)
+    clusters, cluster_colors = _cluster_color_map(cluster_ids)
+    link_colors = _link_color_func_for_clusters(
+        linkage_matrix, cluster_ids, cluster_colors
+    )
+
+    fig_h = max(7.0, n * 0.38)
+    fig = plt.figure(figsize=(16.5, fig_h))
+    gs = fig.add_gridspec(
+        1,
+        4,
+        width_ratios=[1.05, 0.30, 1.25, 0.04],
+        wspace=0.05,
+        left=0.05,
+        right=0.96,
+        top=0.90,
+        bottom=0.12,
+    )
+    ax_dend = fig.add_subplot(gs[0, 0])
+    ax_bar = fig.add_subplot(gs[0, 1])
+    ax_hm = fig.add_subplot(gs[0, 2])
+    ax_cbar = fig.add_subplot(gs[0, 3])
+
+    ddata = hierarchy.dendrogram(
+        linkage_matrix,
+        labels=[""] * n,
+        orientation="left",
+        leaf_font_size=9,
+        ax=ax_dend,
+        link_color_func=link_colors,
+        above_threshold_color="#B0B0B0",
+        color_threshold=0,
+    )
+    ax_dend.invert_yaxis()
+    leaf_order_tb = [int(i) for i in ddata["leaves"]]
+
+    ax_dend.set_title(dendrogram_title, fontsize=11, pad=8)
+    ax_dend.set_xlabel("Distance")
+    ax_dend.set_ylabel("")
+    ax_dend.tick_params(axis="y", left=False, labelleft=False)
+
+    _align_subplot_heights(ax_dend, ax_bar, ax_hm, ax_cbar)
+
+    order = leaf_order_tb
+    X_ord = X[order, :]
+    names_ord = [display_names[i] for i in order]
+    cids_ord = [int(cluster_ids[i]) for i in order]
+    feat_labels = [_short_feature_label(c) for c in feature_cols]
+
+    _draw_simulation_label_bar(ax_bar, names_ord, cids_ord, cluster_colors)
+
+    vmax = float(np.nanmax(np.abs(X_ord))) if np.isfinite(X_ord).any() else 2.5
+    vmax = max(vmax, 1.0)
+    im = ax_hm.imshow(
+        X_ord,
+        aspect="auto",
+        cmap="RdBu_r",
+        vmin=-vmax,
+        vmax=vmax,
+        interpolation="nearest",
+    )
+    ax_hm.set_xticks(np.arange(len(feature_cols)))
+    ax_hm.set_xticklabels(feat_labels, rotation=20, ha="center", fontsize=9)
+    ax_hm.set_yticks([])
+    ax_hm.set_ylabel("")
+    ax_hm.set_title(heatmap_title, fontsize=11, pad=8)
+
+    cbar = fig.colorbar(
+        ScalarMappable(norm=im.norm, cmap=im.cmap),
+        cax=ax_cbar,
+    )
+    cbar.set_label("z-score", fontsize=9)
+
+    counts: Dict[int, int] = {}
+    for cid in cluster_ids:
+        counts[int(cid)] = counts.get(int(cid), 0) + 1
+    handles = [
+        Patch(
+            facecolor=cluster_colors[cid],
+            edgecolor="black",
+            label=_cluster_legend_label(
+                cid, counts.get(cid, 0), archetype_names=archetype_names
+            ),
+        )
+        for cid in clusters
+    ]
+    fig.legend(
+        handles=handles,
+        loc="lower center",
+        ncol=int(legend_ncol) if legend_ncol else min(len(clusters), 2),
+        fontsize=9,
+        framealpha=0.9,
+        bbox_to_anchor=(0.5, 0.02),
+    )
+
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return leaf_order_tb
+
+
 def _plot_dendrogram(
     linkage_matrix: np.ndarray,
     display_names: Sequence[str],
     output_path: Path,
     title: str,
-) -> None:
-    if not HAS_MPL:
-        return
-    fig, ax = plt.subplots(figsize=(max(8, len(display_names) * 0.55), 6))
-    hierarchy.dendrogram(
+    cluster_ids: Optional[Sequence[int]] = None,
+    n_clusters: Optional[int] = None,
+    leaf_order_tb: Optional[Sequence[int]] = None,
+) -> Optional[List[int]]:
+    """Horizontal dendrogram (left→right); returns leaf order top→bottom."""
+    if not HAS_MPL or cluster_ids is None:
+        return None
+    from matplotlib.patches import Patch
+
+    n = len(display_names)
+    clusters, cluster_colors = _cluster_color_map(cluster_ids)
+    link_colors = _link_color_func_for_clusters(
+        linkage_matrix, cluster_ids, cluster_colors
+    )
+
+    fig, ax = plt.subplots(figsize=(7.5, max(6, n * 0.38)))
+    ddata = hierarchy.dendrogram(
         linkage_matrix,
         labels=list(display_names),
-        leaf_rotation=45,
+        orientation="right",
         leaf_font_size=9,
         ax=ax,
+        link_color_func=link_colors,
+        above_threshold_color="#B0B0B0",
+        color_threshold=0,
     )
+    ax.invert_yaxis()
+    leaf_order = (
+        [int(i) for i in leaf_order_tb]
+        if leaf_order_tb is not None
+        else [int(i) for i in ddata["leaves"]]
+    )
+
+    for tick, leaf_idx in zip(ax.get_ymajorticklabels(), leaf_order):
+        cid = int(cluster_ids[leaf_idx])
+        tick.set_color(cluster_colors[cid])
+        tick.set_fontweight("bold")
+
+    counts: Dict[int, int] = {}
+    for cid in cluster_ids:
+        counts[int(cid)] = counts.get(int(cid), 0) + 1
+    handles = [
+        Patch(
+            facecolor=cluster_colors[cid],
+            edgecolor="black",
+            label=_cluster_legend_label(cid, counts.get(cid, 0)),
+        )
+        for cid in clusters
+    ]
+    ax.legend(handles=handles, loc="lower right", fontsize=9, framealpha=0.9)
     ax.set_title(title)
-    ax.set_ylabel("Distance")
+    ax.set_xlabel("Distance")
     fig.tight_layout()
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
+    return leaf_order
 
 
-def _cluster_color_map(cluster_ids: Sequence[int]):
-    """Return sorted cluster ids and a color for each."""
-    clusters = sorted(set(cluster_ids))
-    cmap = plt.cm.get_cmap("tab10", max(len(clusters), 1))
-    colors = {cid: cmap(i) for i, cid in enumerate(clusters)}
-    return clusters, colors
+def _plot_cluster_feature_heatmap(
+    X: np.ndarray,
+    feature_cols: Sequence[str],
+    display_names: Sequence[str],
+    cluster_ids: Sequence[int],
+    leaf_order: Sequence[int],
+    output_path: Path,
+    title: str,
+) -> None:
+    """Z-scored feature heatmap; rows top→bottom match dendrogram leaf order."""
+    if not HAS_MPL or not len(leaf_order):
+        return
+    from matplotlib.cm import ScalarMappable
+
+    order = [int(i) for i in leaf_order]
+    X_ord = X[order, :]
+    names_ord = [display_names[i] for i in order]
+    cids_ord = [int(cluster_ids[i]) for i in order]
+    _, cluster_colors = _cluster_color_map(cluster_ids)
+
+    feat_labels = [_short_feature_label(c) for c in feature_cols]
+    fig_h = max(5.5, len(order) * 0.34)
+    fig_w = max(9.0, len(feature_cols) * 1.05 + 3.5)
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    gs = fig.add_gridspec(
+        1,
+        2,
+        width_ratios=[0.22, 1],
+        wspace=0.04,
+        left=0.08,
+        right=0.92,
+        top=0.94,
+        bottom=0.12,
+    )
+    ax_bar = fig.add_subplot(gs[0, 0])
+    ax_hm = fig.add_subplot(gs[0, 1])
+
+    _draw_simulation_label_bar(ax_bar, names_ord, cids_ord, cluster_colors)
+
+    vmax = float(np.nanmax(np.abs(X_ord))) if np.isfinite(X_ord).any() else 2.5
+    vmax = max(vmax, 1.0)
+    im = ax_hm.imshow(
+        X_ord,
+        aspect="auto",
+        cmap="RdBu_r",
+        vmin=-vmax,
+        vmax=vmax,
+        interpolation="nearest",
+    )
+    ax_hm.set_xticks(np.arange(len(feature_cols)))
+    ax_hm.set_xticklabels(feat_labels, rotation=35, ha="right", fontsize=9)
+    ax_hm.set_yticks([])
+    ax_hm.set_title(title)
+    cbar = fig.colorbar(
+        ScalarMappable(norm=im.norm, cmap=im.cmap),
+        ax=ax_hm,
+        fraction=0.046,
+        pad=0.04,
+    )
+    cbar.set_label("z-score", fontsize=9)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 def _tree_leaf_count(node) -> int:
@@ -489,15 +1176,20 @@ def cluster_classification_features(
     scatter_plot_file: str = "classification_clusters_pca.png",
     dendrogram_file: str = "classification_dendrogram.png",
     phylo_tree_file: str = "classification_phylo_tree.png",
+    heatmap_file: str = "classification_features_heatmap.png",
+    panel_file: Optional[str] = None,
     summary_file: str = "classification_clusters.json",
+    feature_weights: Optional[Dict[str, float]] = None,
+    cluster_archetype_names: Optional[Dict[int, str]] = None,
+    legend_ncol: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Cluster simulations from a classification feature table (z-score CSV recommended).
 
     Default method is hierarchical agglomerative clustering (Ward linkage).
     Use method='kmeans' for k-means. Writes cluster assignments and a PCA scatter
-    plot with protein/simulation name labels; hierarchical runs also get a dendrogram
-    and an unrooted circular phylogenetic tree colored by cluster.
+    plot with protein/simulation name labels; hierarchical runs also get a horizontal
+    dendrogram, circular similarity tree, and z-score feature heatmap.
 
     Args:
         working_dir: Directory containing the features CSV (usually base/analysis).
@@ -512,9 +1204,15 @@ def cluster_classification_features(
             this fraction of simulations (default 0.25) before clustering.
         assignments_file: Output CSV with label, display_name, cluster_id.
         scatter_plot_file: PCA scatter colored by cluster with name annotations.
-        dendrogram_file: Dendrogram PNG (hierarchical only).
-        phylo_tree_file: Unrooted circular phylogram PNG colored by cluster (hierarchical only).
+        dendrogram_file: Horizontal dendrogram PNG (hierarchical only).
+        phylo_tree_file: Unrooted circular similarity tree PNG (hierarchical only).
+        heatmap_file: Z-score feature heatmap per simulation (hierarchical only).
         summary_file: JSON summary of clustering parameters and results.
+        feature_weights: Optional map of feature column → relative weight (default 1).
+            Columns are multiplied by sqrt(weight) after z-scoring so Ward distance
+            emphasizes selected features (e.g. 2.0 doubles COM/angle deviation influence).
+        cluster_archetype_names: Optional {cluster_id: short name} for dendrogram/
+            panel legends (overrides REFERENCE_CLUSTER_ARCHETYPE_NAMES when set).
     """
     original_dir = os.getcwd()
     try:
@@ -551,14 +1249,19 @@ def cluster_classification_features(
                 ", ".join(dropped_cols),
             )
 
+        out_dir = feat_path.parent
         display_names = _apply_display_names(
-            labels, user_goal=user_goal, label_name_map=label_name_map
+            labels,
+            user_goal=user_goal,
+            label_name_map=label_name_map,
+            base_analysis_dir=out_dir,
         )
         n_samples = X_filtered.shape[0]
         k = n_clusters or _parse_n_clusters_from_text(user_goal) or _default_n_clusters(n_samples)
         k = max(1, min(k, n_samples))
 
         X, impute_stats = _impute_column_means(X_filtered)
+        X, applied_weights = _apply_feature_weights(X, feature_cols, feature_weights)
         coords, pc1_var, pc2_var = _pca_2d(X)
 
         linkage_matrix = None
@@ -605,28 +1308,74 @@ def cluster_classification_features(
 
         dendro_path = None
         phylo_path = None
+        heatmap_path = None
+        panel_path = None
         if method_key == "hierarchical" and linkage_matrix is not None and HAS_MPL:
-            dendro_path = out_dir / dendrogram_file
-            _plot_dendrogram(
-                linkage_matrix,
-                display_names,
-                dendro_path,
-                title=f"Hierarchical clustering dendrogram (k={k})",
-            )
+            leaf_order: Optional[List[int]] = None
+            if panel_file:
+                panel_path = out_dir / panel_file
+                leaf_order = _plot_dendrogram_heatmap_panel(
+                    linkage_matrix,
+                    X,
+                    feature_cols,
+                    display_names,
+                    cluster_ids,
+                    panel_path,
+                    dendrogram_title=f"Hierarchical clustering dendrogram (k={k})",
+                    heatmap_title=f"Classification features by simulation (k={k})",
+                    archetype_names=cluster_archetype_names,
+                    legend_ncol=legend_ncol if legend_ncol is not None else (
+                        3 if k >= 5 else None
+                    ),
+                )
+            else:
+                dendro_path = out_dir / dendrogram_file
+                leaf_order = _plot_dendrogram(
+                    linkage_matrix,
+                    display_names,
+                    dendro_path,
+                    title=f"Hierarchical clustering dendrogram (k={k})",
+                    cluster_ids=cluster_ids,
+                    n_clusters=k,
+                )
+                if leaf_order:
+                    heatmap_path = out_dir / heatmap_file
+                    _plot_cluster_feature_heatmap(
+                        X,
+                        feature_cols,
+                        display_names,
+                        cluster_ids,
+                        leaf_order,
+                        heatmap_path,
+                        title=f"Classification features by simulation (k={k})",
+                    )
             phylo_path = out_dir / phylo_tree_file
             _plot_unrooted_phylo_tree(
                 linkage_matrix,
                 display_names,
                 cluster_ids,
                 phylo_path,
-                title=f"Unrooted phylogenetic tree (k={k}) — z-score features",
+                title=f"Unrooted similarity tree (k={k}) — z-score features",
             )
 
+        cluster_representatives = _cluster_representatives(
+            X, labels, display_names, cluster_ids
+        )
+        rep_overrides = _load_representative_overrides(out_dir)
+        if rep_overrides:
+            cluster_representatives = _apply_representative_overrides(
+                cluster_representatives,
+                rep_overrides,
+                labels,
+                display_names,
+                cluster_ids,
+            )
         summary = {
             "method": method_key,
             "n_clusters": k,
             "n_simulations": n_samples,
             "feature_columns": feature_cols,
+            "feature_weights": applied_weights or None,
             "dropped_feature_columns": dropped_cols,
             "imputation": impute_stats,
             "row_order": labels,
@@ -634,18 +1383,30 @@ def cluster_classification_features(
                 "Hierarchical Ward clustering is deterministic for a fixed z-score "
                 "matrix. Re-runs differ when the feature table changes (metric "
                 "groups, missing per-sim outputs, or re-computed analysis values)."
+                + (
+                    " Feature weights scale columns by sqrt(weight) before linkage."
+                    if applied_weights
+                    else ""
+                )
             ),
             "features_file": str(feat_path),
             "assignments_file": str(assign_path),
             "scatter_plot": str(scatter_path) if scatter_path else None,
             "dendrogram_plot": str(dendro_path) if dendro_path else None,
             "phylo_tree_plot": str(phylo_path) if phylo_path else None,
+            "heatmap_plot": str(heatmap_path) if heatmap_path else None,
+            "panel_plot": str(panel_path) if panel_path else None,
             "linkage_method": linkage_method if method_key == "hierarchical" else None,
             "labels": labels,
             "display_names": display_names,
             "cluster_assignments": {
                 labels[i]: int(cluster_ids[i]) for i in range(len(labels))
             },
+            "cluster_representatives": cluster_representatives,
+            "cluster_archetype_names": (
+                {str(k): v for k, v in sorted((cluster_archetype_names or {}).items())}
+                or None
+            ),
         }
         summary_path = out_dir / summary_file
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -666,8 +1427,11 @@ def cluster_classification_features(
             "scatter_plot": str(scatter_path) if scatter_path else None,
             "dendrogram_plot": str(dendro_path) if dendro_path else None,
             "phylo_tree_plot": str(phylo_path) if phylo_path else None,
+            "heatmap_plot": str(heatmap_path) if heatmap_path else None,
+            "panel_plot": str(panel_path) if panel_path else None,
             "summary_file": str(summary_path),
             "cluster_assignments": summary["cluster_assignments"],
+            "cluster_representatives": cluster_representatives,
             "display_names": display_names,
             "feature_columns": feature_cols,
             "dropped_feature_columns": dropped_cols,
@@ -681,12 +1445,316 @@ def cluster_classification_features(
             os.chdir(original_dir)
 
 
+def _resolve_two_stage_k(n_clusters: int, n_samples: int) -> Tuple[int, int]:
+    """Split a target cluster count into pocket-stage k and FEL sub-stage k."""
+    total = max(1, min(int(n_clusters), n_samples))
+    if total <= 1:
+        return 1, 1
+    k_pocket = max(2, min(int(round(np.sqrt(total))), n_samples))
+    k_fel = max(1, min(total // k_pocket, n_samples))
+    return k_pocket, k_fel
+
+
+def _split_feature_groups(
+    feature_cols: Sequence[str],
+) -> Tuple[List[str], List[str]]:
+    """Partition z-score columns into reference pocket vs FEL archetype groups."""
+    from src.analysis.classification_collector import CLASSIFICATION_FEATURE_GROUPS
+
+    pocket_set = set(CLASSIFICATION_FEATURE_GROUPS.get("reference_pocket_archetype", ()))
+    fel_set = set(CLASSIFICATION_FEATURE_GROUPS.get("reference_fel_archetype", ()))
+    pocket_cols = [c for c in feature_cols if c in pocket_set]
+    fel_cols = [c for c in feature_cols if c in fel_set]
+    return pocket_cols, fel_cols
+
+
+def _two_stage_cluster_assignments(
+    X_pocket: np.ndarray,
+    X_fel: np.ndarray,
+    *,
+    k_pocket: int,
+    k_fel: int,
+    linkage_method: str = "ward",
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Stage 1: pocket features → k_pocket groups.
+    Stage 2: FEL features → k_fel sub-groups within each pocket group.
+
+    Returns (final_cluster_ids, pocket_cluster_ids, fel_subcluster_ids, pocket_linkage).
+    """
+    n_samples = X_pocket.shape[0]
+    k_pocket = max(1, min(int(k_pocket), n_samples))
+    k_fel = max(1, int(k_fel))
+
+    X_p, _ = _impute_column_means(X_pocket)
+    pocket_ids, pocket_linkage = _cluster_hierarchical(
+        X_p, k_pocket, linkage_method=linkage_method
+    )
+
+    final_ids = np.zeros(n_samples, dtype=int)
+    fel_sub_ids = np.zeros(n_samples, dtype=int)
+    combo_to_final: Dict[Tuple[int, int], int] = {}
+    next_final = 1
+
+    for pocket_cid in sorted({int(c) for c in pocket_ids}):
+        group_idx = [i for i, c in enumerate(pocket_ids) if int(c) == pocket_cid]
+        n_group = len(group_idx)
+        if n_group == 1:
+            local_fel = np.array([1], dtype=int)
+        else:
+            k_sub = min(k_fel, n_group)
+            X_f, _ = _impute_column_means(X_fel[np.asarray(group_idx)])
+            local_fel, _ = _cluster_hierarchical(
+                X_f, k_sub, linkage_method=linkage_method
+            )
+        for local_i, global_i in enumerate(group_idx):
+            fel_cid = int(local_fel[local_i])
+            fel_sub_ids[global_i] = fel_cid
+            key = (int(pocket_cid), fel_cid)
+            if key not in combo_to_final:
+                combo_to_final[key] = next_final
+                next_final += 1
+            final_ids[global_i] = combo_to_final[key]
+
+    return final_ids, pocket_ids.astype(int), fel_sub_ids.astype(int), pocket_linkage
+
+
+@tool
+def cluster_reference_archetype_two_stage(
+    working_dir: str = "",
+    features_file: str = "ref_fel_pock_features_zscore.csv",
+    n_clusters: Optional[int] = None,
+    k_pocket: Optional[int] = None,
+    k_fel: Optional[int] = None,
+    linkage_method: str = "ward",
+    user_goal: str = "",
+    label_name_map: Optional[Dict[str, str]] = None,
+    min_features_present: int = 1,
+    max_column_missing_fraction: float = 0.25,
+    assignments_file: str = "ref_fel_pock_cluster_assignments.csv",
+    scatter_plot_file: str = "ref_fel_pock_clusters_pca.png",
+    dendrogram_file: str = "ref_fel_pock_dendrogram.png",
+    phylo_tree_file: str = "ref_fel_pock_phylo_tree.png",
+    summary_file: str = "ref_fel_pock_clusters.json",
+) -> Dict[str, Any]:
+    """
+    Two-stage reference archetype clustering: pocket coupling first, then FEL within groups.
+
+    Stage 1 uses ``reference_pocket_archetype`` z-scores (COM/angle/bound).
+    Stage 2 sub-clusters each pocket group on ``reference_fel_archetype`` features.
+    Default k=4 → k_pocket=2 and k_fel=2 (up to four pocket×FEL combinations).
+    """
+    original_dir = os.getcwd()
+    try:
+        feat_path = Path(features_file)
+        if not feat_path.is_absolute():
+            base = Path(working_dir) if working_dir else Path(".")
+            feat_path = (base / features_file).resolve()
+        if not feat_path.is_file():
+            return {"success": False, "error": f"Features file not found: {feat_path}"}
+
+        labels, _, sim_dirs, X_raw, feature_cols = _load_feature_matrix(
+            feat_path, min_features_present=min_features_present
+        )
+        X_filtered, feature_cols, dropped_cols = _filter_usable_feature_columns(
+            X_raw,
+            feature_cols,
+            max_missing_fraction=max_column_missing_fraction,
+        )
+        pocket_cols, fel_cols = _split_feature_groups(feature_cols)
+        if not pocket_cols:
+            return {"success": False, "error": "No reference pocket archetype columns found"}
+        if not fel_cols:
+            return {"success": False, "error": "No reference FEL archetype columns found"}
+
+        pocket_idx = [feature_cols.index(c) for c in pocket_cols]
+        fel_idx = [feature_cols.index(c) for c in fel_cols]
+        X_pocket = X_filtered[:, pocket_idx]
+        X_fel = X_filtered[:, fel_idx]
+
+        out_dir = feat_path.parent
+        display_names = _apply_display_names(
+            labels,
+            user_goal=user_goal,
+            label_name_map=label_name_map,
+            base_analysis_dir=out_dir,
+        )
+        n_samples = X_filtered.shape[0]
+        total_k = n_clusters or _parse_n_clusters_from_text(user_goal) or 4
+        total_k = max(1, min(total_k, n_samples))
+        if k_pocket is None or k_fel is None:
+            resolved_pocket, resolved_fel = _resolve_two_stage_k(total_k, n_samples)
+            k_pocket = k_pocket if k_pocket is not None else resolved_pocket
+            k_fel = k_fel if k_fel is not None else resolved_fel
+
+        cluster_ids, pocket_ids, fel_sub_ids, pocket_linkage = _two_stage_cluster_assignments(
+            X_pocket,
+            X_fel,
+            k_pocket=int(k_pocket),
+            k_fel=int(k_fel),
+            linkage_method=linkage_method,
+        )
+        k_final = len({int(c) for c in cluster_ids})
+
+        X_all, impute_stats = _impute_column_means(X_filtered)
+        coords, pc1_var, pc2_var = _pca_2d(X_all)
+
+        assign_path = out_dir / assignments_file
+        with open(assign_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(
+                fh,
+                fieldnames=[
+                    "label",
+                    "display_name",
+                    "sim_directory",
+                    "cluster_id",
+                    "pocket_cluster_id",
+                    "fel_subcluster_id",
+                    "method",
+                ],
+            )
+            writer.writeheader()
+            for i, label in enumerate(labels):
+                writer.writerow(
+                    {
+                        "label": label,
+                        "display_name": display_names[i],
+                        "sim_directory": sim_dirs[i],
+                        "cluster_id": int(cluster_ids[i]),
+                        "pocket_cluster_id": int(pocket_ids[i]),
+                        "fel_subcluster_id": int(fel_sub_ids[i]),
+                        "method": "two_stage_hierarchical",
+                    }
+                )
+
+        scatter_path = dendro_path = phylo_path = None
+        if HAS_MPL:
+            scatter_path = out_dir / scatter_plot_file
+            _plot_cluster_scatter(
+                coords,
+                display_names,
+                cluster_ids,
+                scatter_path,
+                title=f"Two-stage clustering (k={k_final}, pocket k={k_pocket}, FEL k={k_fel})",
+                pc1_var=pc1_var,
+                pc2_var=pc2_var,
+            )
+            dendro_path = out_dir / dendrogram_file
+            _plot_dendrogram(
+                pocket_linkage,
+                display_names,
+                dendro_path,
+                title=f"Stage 1 pocket dendrogram (k={k_pocket}) — final k={k_final}",
+                cluster_ids=cluster_ids,
+                n_clusters=k_final,
+            )
+            phylo_path = out_dir / phylo_tree_file
+            _plot_unrooted_phylo_tree(
+                pocket_linkage,
+                display_names,
+                cluster_ids,
+                phylo_path,
+                title=f"Stage 1 pocket tree — final two-stage clusters (k={k_final})",
+            )
+
+        cluster_representatives = _cluster_representatives(
+            X_all, labels, display_names, cluster_ids
+        )
+        rep_overrides = _load_representative_overrides(out_dir)
+        if rep_overrides:
+            cluster_representatives = _apply_representative_overrides(
+                cluster_representatives,
+                rep_overrides,
+                labels,
+                display_names,
+                cluster_ids,
+            )
+
+        summary = {
+            "method": "two_stage_hierarchical",
+            "n_clusters": k_final,
+            "n_clusters_target": total_k,
+            "stage1_k_pocket": int(k_pocket),
+            "stage2_k_fel": int(k_fel),
+            "n_simulations": n_samples,
+            "pocket_feature_columns": pocket_cols,
+            "fel_feature_columns": fel_cols,
+            "feature_columns": feature_cols,
+            "feature_weights": None,
+            "dropped_feature_columns": dropped_cols,
+            "imputation": impute_stats,
+            "row_order": labels,
+            "reproducibility_note": (
+                "Two-stage Ward clustering: stage 1 on pocket z-scores, stage 2 on "
+                "FEL z-scores within each pocket group. Dendrogram/phylo reflect stage 1 only."
+            ),
+            "features_file": str(feat_path),
+            "assignments_file": str(assign_path),
+            "scatter_plot": str(scatter_path) if scatter_path else None,
+            "dendrogram_plot": str(dendro_path) if dendro_path else None,
+            "phylo_tree_plot": str(phylo_path) if phylo_path else None,
+            "linkage_method": linkage_method,
+            "labels": labels,
+            "display_names": display_names,
+            "pocket_cluster_assignments": {
+                labels[i]: int(pocket_ids[i]) for i in range(len(labels))
+            },
+            "fel_subcluster_assignments": {
+                labels[i]: int(fel_sub_ids[i]) for i in range(len(labels))
+            },
+            "cluster_assignments": {
+                labels[i]: int(cluster_ids[i]) for i in range(len(labels))
+            },
+            "cluster_representatives": cluster_representatives,
+        }
+        summary_path = out_dir / summary_file
+        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+        plot_note = "" if HAS_MPL else " (matplotlib unavailable — plots skipped)"
+        return {
+            "success": True,
+            "message": (
+                f"Two-stage clustering: {n_samples} simulations → {k_final} clusters "
+                f"(pocket k={k_pocket}, FEL k={k_fel}){plot_note}"
+            ),
+            "method": "two_stage_hierarchical",
+            "n_clusters": k_final,
+            "stage1_k_pocket": int(k_pocket),
+            "stage2_k_fel": int(k_fel),
+            "assignments_file": str(assign_path),
+            "scatter_plot": str(scatter_path) if scatter_path else None,
+            "dendrogram_plot": str(dendro_path) if dendro_path else None,
+            "phylo_tree_plot": str(phylo_path) if phylo_path else None,
+            "summary_file": str(summary_path),
+            "cluster_assignments": summary["cluster_assignments"],
+            "cluster_representatives": cluster_representatives,
+            "display_names": display_names,
+            "feature_columns": feature_cols,
+            "dropped_feature_columns": dropped_cols,
+            "imputation": impute_stats,
+        }
+    except Exception as exc:
+        logger.exception("cluster_reference_archetype_two_stage failed")
+        return {"success": False, "error": str(exc)}
+    finally:
+        if original_dir:
+            os.chdir(original_dir)
+
+
 # Trajectory metrics that have per-frame time series (not per-residue scalars).
 CLUSTER_TRAJECTORY_METRIC_GROUPS: Tuple[str, ...] = (
     "com",
     "contacts",
     "pocket_sasa",
     "residence",
+)
+
+CLUSTER_REFERENCE_POCKET_TRAJECTORY_METRIC_GROUPS: Tuple[str, ...] = (
+    "reference_pocket_com",
+    "reference_pocket_hbonds",
+    "reference_pocket_sasa",
+    "reference_pocket_residence",
+    "reference_pocket_ligand_axis_angle",
 )
 
 _CLUSTER_TRAJECTORY_CONFIG: Dict[str, Dict[str, Any]] = {
@@ -721,6 +1789,46 @@ _CLUSTER_TRAJECTORY_CONFIG: Dict[str, Dict[str, Any]] = {
         "x_col": 0,
         "y_col": 1,
     },
+    "reference_pocket_com": {
+        "title": "Reference Pocket — Ligand COM Distance",
+        "ylabel": "COM Distance (Å)",
+        "output_file": "ref_fel_pock_com_distance_by_cluster.png",
+        "file_pattern": "reference_pocket_ligand_distance",
+        "x_col": 1,
+        "y_col": 2,
+    },
+    "reference_pocket_hbonds": {
+        "title": "Reference Pocket — Protein–Ligand H-bonds",
+        "ylabel": "H-bonds",
+        "output_file": "ref_fel_pock_hbonds_by_cluster.png",
+        "file_pattern": "reference_pocket_contacts",
+        "x_col": 1,
+        "y_col": 2,
+    },
+    "reference_pocket_sasa": {
+        "title": "Reference Pocket SASA",
+        "ylabel": "Pocket SASA (nm²)",
+        "output_file": "ref_fel_pock_sasa_by_cluster.png",
+        "file_pattern": "reference_pocket_sasa",
+        "x_col": 0,
+        "y_col": 1,
+    },
+    "reference_pocket_residence": {
+        "title": "Reference Pocket — Ligand Bound State",
+        "ylabel": "Bound (0/1)",
+        "output_file": "ref_fel_pock_ligand_residence_by_cluster.png",
+        "file_pattern": "reference_pocket_residence",
+        "x_col": 0,
+        "y_col": 1,
+    },
+    "reference_pocket_ligand_axis_angle": {
+        "title": "Reference Pocket — Ligand Major-Axis Angle",
+        "ylabel": "Pocket–ligand axis angle (°)",
+        "output_file": "ref_fel_pock_ligand_axis_angle_by_cluster.png",
+        "file_pattern": "reference_pocket_ligand_orientation",
+        "x_col": 1,
+        "y_col": 3,
+    },
 }
 
 
@@ -728,16 +1836,57 @@ def _load_cluster_assignments(
     assignments_path: Path,
 ) -> Tuple[Dict[int, List[Dict[str, str]]], List[int]]:
     """Group assignment rows by cluster_id."""
+    from src.analysis.reference_labels import load_reference_pca_manifest
+
+    sim_dirs_by_label: Dict[str, str] = {}
+    manifest_path = (
+        assignments_path.parent / "reference_fel" / "reference_pca_manifest.json"
+    )
+    if manifest_path.is_file():
+        try:
+            manifest = load_reference_pca_manifest(assignments_path.parent)
+            sim_dirs_by_label = {
+                str(label).lower(): str(sim_dir)
+                for label, sim_dir in (
+                    manifest.get("sim_directories") or {}
+                ).items()
+                if sim_dir
+            }
+            for uid, sim_dir in sim_dirs_by_label.items():
+                sim_dirs_by_label.setdefault(
+                    Path(sim_dir).name.lower(), sim_dir
+                )
+        except Exception:
+            logger.debug(
+                "Could not load simulation directories from %s",
+                manifest_path,
+                exc_info=True,
+            )
+
     by_cluster: Dict[int, List[Dict[str, str]]] = {}
     with open(assignments_path, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
             cid = int(row["cluster_id"])
+            label = row.get("label", "")
+            display_name = row.get("display_name") or label
+            if display_name.lower() == label.lower():
+                from src.analysis.reference_labels import build_uniprot_display_map
+
+                disp_map = build_uniprot_display_map(assignments_path.parent)
+                display_name = disp_map.get(label.lower(), display_name)
+            sim_directory = row.get("sim_directory", "")
+            if not sim_directory:
+                sim_directory = (
+                    sim_dirs_by_label.get(label.lower())
+                    or sim_dirs_by_label.get(display_name.lower())
+                    or ""
+                )
             by_cluster.setdefault(cid, []).append(
                 {
-                    "label": row.get("label", ""),
-                    "display_name": row.get("display_name") or row.get("label", ""),
-                    "sim_directory": row.get("sim_directory", ""),
+                    "label": label,
+                    "display_name": display_name,
+                    "sim_directory": sim_directory,
                 }
             )
     cluster_ids = sorted(by_cluster)
@@ -752,7 +1901,26 @@ def _find_trajectory_file(sim_directory: str, metric_group: str) -> Optional[str
     )
 
     sim_path = Path(sim_directory)
+    if metric_group.startswith("reference_pocket"):
+        from src.analysis.reference_labels import is_reference_pocket_usable
+
+        manifest = (
+            sim_path.parent / "analysis" / "reference_pocket_batch_manifest.json"
+        )
+        if manifest.is_file():
+            try:
+                with open(manifest, encoding="utf-8") as fh:
+                    pocket_manifest = json.load(fh)
+                if not is_reference_pocket_usable(
+                    sim_path.name,
+                    pocket_manifest,
+                    base_analysis=sim_path.parent / "analysis",
+                ):
+                    return None
+            except Exception:
+                pass
     search_roots = [
+        sim_path.parent / "analysis" / "reference_pocket" / sim_path.name,
         sim_path / "analysis",
         sim_path,
     ]
@@ -867,9 +2035,12 @@ def _plot_metric_by_cluster_panels(
         y=1.01,
     )
     fig.tight_layout()
+    if not any_data:
+        plt.close(fig)
+        return False
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
-    return any_data
+    return True
 
 
 @tool
@@ -981,6 +2152,7 @@ def plot_cluster_feature_trajectories(
 CLUSTER_RMSF_PROFILE_GROUPS: Tuple[str, ...] = (
     "pocket_rmsf",
     "ligand_rmsf",
+    "reference_pocket_rmsf",
 )
 
 _CLUSTER_RMSF_CONFIG: Dict[str, Dict[str, str]] = {
@@ -998,10 +2170,46 @@ _CLUSTER_RMSF_CONFIG: Dict[str, Dict[str, str]] = {
         "xlabel": "Ligand atom index",
         "ylabel": "RMSF (Å)",
     },
+    "reference_pocket_rmsf": {
+        "file_pattern": "reference_pocket_rmsf",
+        "output_file": "ref_fel_pock_rmsf_by_cluster.png",
+        "title": "Reference Pocket RMSF",
+        "xlabel": "Reference-aligned pocket index",
+        "ylabel": "RMSF (Å)",
+        "align_consensus_index": True,
+    },
 }
 
 
 def _find_rmsf_profile_file(sim_directory: str, profile_type: str) -> Optional[str]:
+    if profile_type == "reference_pocket_rmsf":
+        from src.analysis.reference_labels import is_reference_pocket_usable
+
+        sim_path = Path(sim_directory)
+        manifest = (
+            sim_path.parent / "analysis" / "reference_pocket_batch_manifest.json"
+        )
+        if manifest.is_file():
+            try:
+                with open(manifest, encoding="utf-8") as fh:
+                    pocket_manifest = json.load(fh)
+                if not is_reference_pocket_usable(
+                    sim_path.name,
+                    pocket_manifest,
+                    base_analysis=sim_path.parent / "analysis",
+                ):
+                    return None
+            except Exception:
+                pass
+        candidate = (
+            sim_path.parent
+            / "analysis"
+            / "reference_pocket"
+            / sim_path.name
+            / "reference_pocket_rmsf.dat"
+        )
+        if candidate.is_file():
+            return str(candidate)
     from src.analysis.combined_analysis import _find_binding_rmsf_file
     return _find_binding_rmsf_file(sim_directory, profile_type)
 
@@ -1014,14 +2222,25 @@ def _plot_rmsf_profiles_by_cluster_panels(
     n_clusters_total: int,
     figsize_per_panel: Tuple[float, float] = (10.0, 3.5),
     dpi: int = 150,
+    consensus_residue_map: Optional[str] = None,
 ) -> bool:
     """One subplot per cluster with pocket/ligand RMSF profiles overlaid."""
     if not HAS_MPL:
         return False
 
-    from src.analysis.data_plotter import _parse_rmsf_profile_dat
+    from src.analysis.data_plotter import (
+        _parse_reference_pocket_rmsf_aligned,
+        _parse_rmsf_profile_dat,
+    )
 
     cfg = _CLUSTER_RMSF_CONFIG[profile_type]
+    align_consensus = bool(cfg.get("align_consensus_index"))
+    residue_map = consensus_residue_map
+    if align_consensus and not residue_map:
+        candidate = output_path.parent / "reference_pocket_residue_map.csv"
+        if candidate.is_file():
+            residue_map = str(candidate)
+
     n_panels = len(cluster_ids)
     fig, axes = plt.subplots(
         n_panels,
@@ -1048,7 +2267,12 @@ def _plot_rmsf_profiles_by_cluster_panels(
             fpath = _find_rmsf_profile_file(sim_dir, profile_type)
             if not fpath:
                 continue
-            profile = _parse_rmsf_profile_dat(fpath)
+            if align_consensus and residue_map:
+                profile = _parse_reference_pocket_rmsf_aligned(
+                    fpath, residue_map, display_name
+                )
+            else:
+                profile = _parse_rmsf_profile_dat(fpath)
             if not profile:
                 continue
             color = default_colors[mi % len(default_colors)]
@@ -1087,7 +2311,8 @@ def _plot_rmsf_profiles_by_cluster_panels(
         y=1.01,
     )
     fig.tight_layout()
-    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    if any_data:
+        fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     return any_data
 
@@ -1099,6 +2324,7 @@ def plot_cluster_rmsf_profiles(
     profile_types: Optional[List[str]] = None,
     figsize_per_panel: Tuple[float, float] = (10.0, 3.5),
     dpi: int = 150,
+    consensus_residue_map: str = "reference_pocket_residue_map.csv",
 ) -> Dict[str, Any]:
     """
     Plot pocket and/or ligand RMSF profiles with one subplot per cluster.
@@ -1144,6 +2370,9 @@ def plot_cluster_rmsf_profiles(
             return {"success": False, "error": "No cluster assignments found"}
 
         out_dir = assign_path.parent
+        residue_map_path = Path(consensus_residue_map)
+        if not residue_map_path.is_absolute():
+            residue_map_path = (out_dir / consensus_residue_map).resolve()
         plots: List[str] = []
         skipped: List[str] = []
 
@@ -1158,6 +2387,9 @@ def plot_cluster_rmsf_profiles(
                 n_clusters_total=len(cluster_ids),
                 figsize_per_panel=figsize_per_panel,
                 dpi=dpi,
+                consensus_residue_map=str(residue_map_path)
+                if residue_map_path.is_file()
+                else None,
             )
             if ok:
                 plots.append(str(output_path))

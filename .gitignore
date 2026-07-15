@@ -54,5 +54,8 @@ backup/
 tests/
 examples/
 
+# Stray analysis outputs accidentally written to repo root
+/reference_pocket_*
+
 # Misc
 README copy.md/

@@ -239,6 +239,93 @@ tools:
       distance_matrix_file: "structure_phylo_distance_matrix.csv"
     phase: combined_analysis
 
+  build_consensus_sequence_alignment:
+    description: "Star MSA to a reference sequence from PDBs/FASTA/sim_dirs; exports consensus residue map for cross-sim PCA"
+    defaults:
+      alignment_fasta: "reference_msa_alignment.fasta"
+      residue_map_csv: "reference_msa_residue_map.csv"
+      alignment_json: "reference_msa_alignment.json"
+      min_coverage: 0.85
+    phase: combined_analysis
+
+  fit_reference_pca_model:
+    description: "Fit reference-projected PCA on consensus Cα from a reference trajectory"
+    defaults:
+      consensus_json: "reference_msa_alignment.json"
+      output_model: "reference_pca_model.json"
+      n_components: 10
+    phase: combined_analysis
+
+  project_simulations_reference_pca:
+    description: "Project all simulation trajectories onto a saved reference PCA model (consensus Cα)"
+    defaults:
+      model_file: "reference_pca_model.json"
+      consensus_json: "reference_msa_alignment.json"
+      output_subdir: "reference_fel"
+    phase: combined_analysis
+
+  build_shared_reference_fel_landscapes:
+    description: "Build FEL in a shared PC1/PC2 grid from reference-projected PCA across simulations"
+    defaults:
+      projections_subdir: "reference_fel"
+      output_subdir: "reference_fel"
+      bins: 50
+      temperature_k: 310.0
+      min_basin_population: 0.05
+    phase: combined_analysis
+
+  cluster_reference_fel_landscapes:
+    description: "Cluster simulations from shared-reference FEL features; dendrogram + phylo tree"
+    defaults:
+      features_table: "ref_fel_features_table.json"
+      assignments_file: "ref_fel_cluster_assignments.csv"
+      dendrogram_file: "ref_fel_dendrogram.png"
+      phylo_tree_file: "ref_fel_phylo_tree.png"
+    phase: combined_analysis
+
+  run_reference_landscape_pipeline:
+    description: "End-to-end reference landscape workflow: consensus alignment → PCA → shared FEL → clustering"
+    defaults:
+      reference_label: ""
+      min_coverage: 0.85
+      n_components: 10
+      bins: 50
+      temperature_k: 310.0
+    phase: combined_analysis
+
+  define_reference_consensus_pocket:
+    description: "Define reference ATP pocket from consensus residues within cutoff of ligand at frame 0"
+    defaults:
+      consensus_json: "reference_msa_alignment.json"
+      ligand_selection: "resname ATP"
+      pocket_cutoff_A: 15.0
+      output_json: "reference_pocket_definition.json"
+      residue_map_csv: "reference_pocket_residue_map.csv"
+    phase: combined_analysis
+
+  map_consensus_pocket_residues:
+    description: "Map reference pocket definition to per-simulation PDB residue lists"
+    defaults:
+      definition_json: "reference_pocket_definition.json"
+      min_coverage: 0.5
+    phase: combined_analysis
+
+  calculate_consensus_pocket_metrics:
+    description: "Compute reference-pocket SASA, COM distance, contacts, residence, and RMSF"
+    defaults:
+      output_prefix: "reference_pocket"
+      ligand_selection: "resname ATP"
+    phase: combined_analysis
+
+  run_consensus_pocket_metrics_batch:
+    description: "End-to-end reference pocket define → map → metrics under analysis/reference_pocket"
+    defaults:
+      reference_label: "q8nb16"
+      consensus_json: "reference_msa_alignment.json"
+      pocket_cutoff_A: 15.0
+      min_coverage: 0.5
+    phase: combined_analysis
+
 # LLM-powered analysis planning configuration
 llm:
   planning_prompt_template: |

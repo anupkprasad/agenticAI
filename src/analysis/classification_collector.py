@@ -56,7 +56,67 @@ CLASSIFICATION_FEATURE_GROUPS: Dict[str, Tuple[str, ...]] = {
     "sasa": ("mean_protein_sasa_nm2", "std_protein_sasa_nm2"),
     "energy": ("mean_potential_energy_kJ_mol",),
     "dccm": ("mean_abs_dccm",),
+    "reference_pocket": (
+        "reference_pocket_ligand_distance_mean_A",
+        "reference_pocket_ligand_distance_std_A",
+        "reference_pocket_mean_hbonds",
+        "reference_pocket_mean_sasa_nm2",
+        "reference_pocket_std_sasa_nm2",
+        "reference_pocket_p95_sasa_nm2",
+        "reference_pocket_fraction_bound",
+        "reference_pocket_mean_rmsf_A",
+        "reference_pocket_max_rmsf_A",
+        "reference_pocket_mean_ligand_axis_angle_deg",
+        "reference_pocket_std_ligand_axis_angle_deg",
+        "reference_pocket_ligand_axis_angle_p95_deg",
+        "reference_pocket_ligand_distance_p95_A",
+        "reference_pocket_ligand_distance_max_A",
+        "reference_pocket_fraction_stable_coupling",
+        "reference_pocket_residue_count",
+        "reference_pocket_net_charge",
+    ),
+    "reference_fel": (
+        "ref_n_basins",
+        "ref_landscape_entropy",
+        "ref_major_basin_population",
+        "ref_max_barrier_height_kJ_mol",
+        "ref_mean_basin_depth_kJ_mol",
+        "ref_grid_entropy",
+    ),
+    "reference_pca": (
+        "ref_pc1_mean",
+        "ref_pc2_mean",
+        "ref_pc1_std",
+        "ref_pc2_std",
+    ),
 }
+
+# Curated binding/dynamics descriptors for reference-structure archetype clustering.
+# Excludes mapping artifacts (residue_count), static chemistry (net_charge),
+# redundant COM mean (correlates with p95), and correlated FEL grid/barrier metadata.
+REFERENCE_ARCHETYPE_METRIC_GROUPS: Tuple[str, ...] = (
+    "reference_pocket_archetype",
+    "reference_fel_archetype",
+)
+
+CLASSIFICATION_FEATURE_GROUPS["reference_pocket_archetype"] = (
+    "reference_pocket_ligand_distance_std_A",
+    "reference_pocket_ligand_distance_p95_A",
+    "reference_pocket_fraction_bound",
+    "reference_pocket_std_ligand_axis_angle_deg",
+    "reference_pocket_ligand_axis_angle_p95_deg",
+)
+CLASSIFICATION_FEATURE_GROUPS["reference_fel_archetype"] = (
+    "ref_landscape_entropy",
+    "ref_major_basin_population",
+)
+
+# Local (per-simulation) FEL counterpart to reference_fel_archetype — same two
+# scalars, read from {uid}/analysis/fel_features.json rather than reference_fel/.
+CLASSIFICATION_FEATURE_GROUPS["fel_archetype"] = (
+    "landscape_entropy",
+    "major_basin_population",
+)
 
 # When user asks for classification without naming specific metrics.
 DEFAULT_CLASSIFICATION_METRIC_GROUPS: Tuple[str, ...] = (
@@ -290,6 +350,195 @@ CLASSIFICATION_FEATURE_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "calculation": "mean_abs_correlation from DCCM analysis",
         "unit": "0–1",
     },
+    "reference_pocket_ligand_distance_mean_A": {
+        "metric_group": "reference_pocket",
+        "description": "Mean ligand–reference-pocket COM distance",
+        "source_file": "reference_pocket/{label}/reference_pocket_metrics.json",
+        "calculation": "Mean distance from reference_pocket_ligand_distance.csv",
+        "unit": "Å",
+    },
+    "reference_pocket_ligand_distance_std_A": {
+        "metric_group": "reference_pocket",
+        "description": "Std dev of ligand–reference-pocket COM distance",
+        "source_file": "reference_pocket/{label}/reference_pocket_metrics.json",
+        "calculation": "Std dev from reference_pocket_ligand_distance.csv",
+        "unit": "Å",
+    },
+    "reference_pocket_mean_hbonds": {
+        "metric_group": "reference_pocket",
+        "description": "Mean pocket-restricted protein–ligand H-bonds",
+        "source_file": "reference_pocket/{label}/reference_pocket_metrics.json",
+        "calculation": "Mean n_hbonds from reference_pocket_contacts.csv",
+        "unit": "count",
+    },
+    "reference_pocket_mean_sasa_nm2": {
+        "metric_group": "reference_pocket",
+        "description": "Mean SASA of reference-mapped pocket residues",
+        "source_file": "reference_pocket/{label}/reference_pocket_metrics.json",
+        "calculation": "Mean pocket_sasa_nm2 from reference_pocket_sasa.csv",
+        "unit": "nm²",
+    },
+    "reference_pocket_std_sasa_nm2": {
+        "metric_group": "reference_pocket",
+        "description": "Std dev of reference pocket SASA",
+        "source_file": "reference_pocket/{label}/reference_pocket_sasa.csv",
+        "calculation": "Std dev pocket_sasa_nm2 over frames",
+        "unit": "nm²",
+    },
+    "reference_pocket_p95_sasa_nm2": {
+        "metric_group": "reference_pocket",
+        "description": "95th percentile reference pocket SASA (opening/exposure excursion)",
+        "source_file": "reference_pocket/{label}/reference_pocket_sasa.csv",
+        "calculation": "P95 of pocket_sasa_nm2 over trajectory frames",
+        "unit": "nm²",
+    },
+    "reference_pocket_fraction_bound": {
+        "metric_group": "reference_pocket",
+        "description": "Fraction of trajectory with ligand bound to reference pocket",
+        "source_file": "reference_pocket/{label}/reference_pocket_residence.json",
+        "calculation": "fraction_bound from residence analysis",
+        "unit": "fraction",
+    },
+    "reference_pocket_mean_rmsf_A": {
+        "metric_group": "reference_pocket",
+        "description": "Mean Cα RMSF of reference-mapped pocket residues",
+        "source_file": "reference_pocket/{label}/reference_pocket_rmsf.dat",
+        "calculation": "Mean RMSF over mapped pocket Cα atoms",
+        "unit": "Å",
+    },
+    "reference_pocket_mean_ligand_axis_angle_deg": {
+        "metric_group": "reference_pocket",
+        "description": "Mean angle between pocket Cα major axis and ATP heavy-atom major axis",
+        "source_file": "reference_pocket/{label}/reference_pocket_ligand_orientation.csv",
+        "calculation": "Undirected PCA axis angle (0–90°) per frame, trajectory mean",
+        "unit": "degrees",
+    },
+    "reference_pocket_std_ligand_axis_angle_deg": {
+        "metric_group": "reference_pocket",
+        "description": "Std dev of pocket–ligand major-axis angle",
+        "source_file": "reference_pocket/{label}/reference_pocket_ligand_orientation.csv",
+        "calculation": "Std dev of axis_angle_deg time series",
+        "unit": "degrees",
+    },
+    "reference_pocket_ligand_axis_angle_p95_deg": {
+        "metric_group": "reference_pocket",
+        "description": "95th percentile pocket–ligand major-axis angle (orientation excursion)",
+        "source_file": "reference_pocket/{label}/reference_pocket_ligand_orientation.csv",
+        "calculation": "P95 of axis_angle_deg over trajectory frames",
+        "unit": "degrees",
+    },
+    "reference_pocket_ligand_distance_p95_A": {
+        "metric_group": "reference_pocket",
+        "description": "95th percentile ATP–pocket COM distance (excursion proxy)",
+        "source_file": "reference_pocket/{label}/reference_pocket_ligand_orientation.csv",
+        "calculation": "P95 of distance_angstrom over trajectory frames",
+        "unit": "Å",
+    },
+    "reference_pocket_ligand_distance_max_A": {
+        "metric_group": "reference_pocket",
+        "description": "Maximum ATP–pocket COM distance over trajectory",
+        "source_file": "reference_pocket/{label}/reference_pocket_ligand_orientation.csv",
+        "calculation": "Max of distance_angstrom over trajectory frames",
+        "unit": "Å",
+    },
+    "reference_pocket_fraction_stable_coupling": {
+        "metric_group": "reference_pocket",
+        "description": "Fraction of frames with COM ≤7 Å and axis angle ≤65°",
+        "source_file": "reference_pocket/{label}/reference_pocket_ligand_orientation.csv",
+        "calculation": "Joint COM + major-axis angle stability criterion",
+        "unit": "fraction",
+    },
+    "reference_pocket_max_rmsf_A": {
+        "metric_group": "reference_pocket",
+        "description": "Max Cα RMSF among reference-mapped pocket residues",
+        "source_file": "reference_pocket/{label}/reference_pocket_rmsf.dat",
+        "calculation": "Max RMSF over mapped pocket Cα atoms",
+        "unit": "Å",
+    },
+    "reference_pocket_residue_count": {
+        "metric_group": "reference_pocket",
+        "description": "Number of mapped reference-pocket residues in this simulation",
+        "source_file": "reference_pocket/{label}/reference_pocket_metrics.json",
+        "calculation": "len(pocket_resids) from reference mapping",
+        "unit": "count",
+    },
+    "reference_pocket_net_charge": {
+        "metric_group": "reference_pocket",
+        "description": "Net formal charge of pocket residues (Arg/Lys +1, Asp/Glu -1, His neutral)",
+        "source_file": "reference_pocket/{label}/reference_pocket_metrics.json",
+        "calculation": "n_positive - n_negative over unique pocket residues",
+        "unit": "e",
+    },
+    "ref_n_basins": {
+        "metric_group": "reference_fel",
+        "description": "Basin count from shared-reference FEL",
+        "source_file": "reference_fel/{label}/fel_features.json",
+        "calculation": "n_basins from reference-projected FEL",
+        "unit": "count",
+    },
+    "ref_landscape_entropy": {
+        "metric_group": "reference_fel",
+        "description": "Landscape entropy from shared-reference FEL",
+        "source_file": "reference_fel/{label}/fel_features.json",
+        "calculation": "landscape_entropy from reference-projected FEL",
+        "unit": "nats",
+    },
+    "ref_major_basin_population": {
+        "metric_group": "reference_fel",
+        "description": "Major basin population from shared-reference FEL",
+        "source_file": "reference_fel/{label}/fel_features.json",
+        "calculation": "major_basin_population",
+        "unit": "fraction",
+    },
+    "ref_max_barrier_height_kJ_mol": {
+        "metric_group": "reference_fel",
+        "description": "Max inter-basin barrier from shared-reference FEL",
+        "source_file": "reference_fel/{label}/fel_features.json",
+        "calculation": "max_barrier_height_kJ_mol",
+        "unit": "kJ/mol",
+    },
+    "ref_mean_basin_depth_kJ_mol": {
+        "metric_group": "reference_fel",
+        "description": "Mean basin depth from shared-reference FEL",
+        "source_file": "reference_fel/{label}/fel_features.json",
+        "calculation": "mean_basin_depth_kJ_mol",
+        "unit": "kJ/mol",
+    },
+    "ref_grid_entropy": {
+        "metric_group": "reference_fel",
+        "description": "Grid entropy from shared-reference FEL",
+        "source_file": "reference_fel/{label}/fel_features.json",
+        "calculation": "grid_entropy",
+        "unit": "nats",
+    },
+    "ref_pc1_mean": {
+        "metric_group": "reference_pca",
+        "description": "Mean PC1 from reference-projected consensus Cα PCA",
+        "source_file": "reference_fel/{label}/reference_pca_projections.dat",
+        "calculation": "Mean PC1 over trajectory",
+        "unit": "Å",
+    },
+    "ref_pc2_mean": {
+        "metric_group": "reference_pca",
+        "description": "Mean PC2 from reference-projected consensus Cα PCA",
+        "source_file": "reference_fel/{label}/reference_pca_projections.dat",
+        "calculation": "Mean PC2 over trajectory",
+        "unit": "Å",
+    },
+    "ref_pc1_std": {
+        "metric_group": "reference_pca",
+        "description": "Std dev PC1 from reference-projected PCA",
+        "source_file": "reference_fel/{label}/reference_pca_projections.dat",
+        "calculation": "Std dev PC1 over trajectory",
+        "unit": "Å",
+    },
+    "ref_pc2_std": {
+        "metric_group": "reference_pca",
+        "description": "Std dev PC2 from reference-projected PCA",
+        "source_file": "reference_fel/{label}/reference_pca_projections.dat",
+        "calculation": "Std dev PC2 over trajectory",
+        "unit": "Å",
+    },
 }
 
 
@@ -347,6 +596,22 @@ def _csv_mean_std(
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("PBC clean skipped for %s: %s", path.name, exc)
     return float(np.mean(arr)), float(np.std(arr))
+
+
+def _csv_percentile(path: Path, value_col: str, percentile: float = 95.0) -> Optional[float]:
+    if not path.is_file():
+        return None
+    vals: List[float] = []
+    with open(path, encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            try:
+                vals.append(float(row[value_col]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    if not vals:
+        return None
+    return float(np.percentile(np.asarray(vals, dtype=float), percentile))
 
 
 def _csv_column_stats(path: Path, col: str) -> Dict[str, Optional[float]]:
@@ -426,10 +691,73 @@ def _extract_from_summary(analysis_dir: Path) -> Dict[str, Any]:
     return out
 
 
-def collect_features_for_sim(sim_dir: Path) -> Dict[str, Any]:
-    """Build one feature dict for a single simulation directory."""
+def _resolve_reference_fel_json(
+    label: str,
+    adir: Path,
+    base_analysis: Path,
+) -> Dict[str, Any]:
+    """Load reference FEL features from combined ``reference_fel/{label}/`` tree."""
+    from src.analysis.reference_labels import reference_fel_paths_for_sim
+
+    candidates = reference_fel_paths_for_sim(label, base_analysis, "fel_features.json")
+    candidates.extend([
+        base_analysis / "reference_fel_features" / label / "fel_features.json",
+        adir / "reference_fel_features.json",
+    ])
+    for path in candidates:
+        data = _load_json(path)
+        if data:
+            return data
+    return {}
+
+
+def _resolve_reference_pca_projections_path(
+    label: str,
+    adir: Path,
+    base_analysis: Path,
+) -> Optional[Path]:
+    """Locate reference-projected PCA file (combined tree preferred)."""
+    from src.analysis.reference_labels import reference_fel_paths_for_sim
+
+    candidates = reference_fel_paths_for_sim(
+        label, base_analysis, "reference_pca_projections.dat"
+    )
+    candidates.extend([
+        base_analysis / "reference_projected_pca" / label / "reference_pca_projections.dat",
+        adir / "reference_pca_projections.dat",
+    ])
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def collect_features_for_sim(
+    sim_dir: Path,
+    *,
+    local_fel_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Build one feature dict for a single simulation directory.
+
+    If ``local_fel_root`` is set (e.g. ``analysis/consensus_local_fel``),
+    ``landscape_entropy`` / ``major_basin_population`` are read from
+    ``{local_fel_root}/{label}/fel_features.json`` instead of
+    ``{sim}/analysis/fel_features.json``.
+    """
     label = sim_dir.name
     adir = sim_dir / "analysis"
+    base_analysis = sim_dir.parent / "analysis"
+    reference_pocket_dir = base_analysis / "reference_pocket" / label
+    reference_pocket_manifest = (
+        _load_json(base_analysis / "reference_pocket_batch_manifest.json") or {}
+    )
+    from src.analysis.reference_labels import is_reference_pocket_usable
+
+    reference_pocket_usable = is_reference_pocket_usable(
+        label,
+        reference_pocket_manifest,
+        base_analysis=base_analysis,
+    )
     row: Dict[str, Any] = {"label": label, "sim_directory": str(sim_dir.resolve())}
 
     # Ligand–pocket distance
@@ -473,8 +801,11 @@ def collect_features_for_sim(sim_dir: Path) -> Dict[str, Any]:
     row["mean_ligand_rmsf_A"] = lrmsf.get("mean_ligand_rmsf")
     row["max_ligand_rmsf_A"] = lrmsf.get("max_ligand_rmsf")
 
-    # FEL features
-    fel = _load_json(adir / "fel_features.json") or {}
+    # FEL features (optional alternate tree, e.g. consensus_local_fel/)
+    if local_fel_root is not None:
+        fel = _load_json(Path(local_fel_root) / label / "fel_features.json") or {}
+    else:
+        fel = _load_json(adir / "fel_features.json") or {}
     row["n_basins"] = fel.get("n_basins", fel.get("n_minima"))
     row["landscape_entropy"] = fel.get("landscape_entropy")
     row["major_basin_population"] = fel.get("major_basin_population")
@@ -519,6 +850,135 @@ def collect_features_for_sim(sim_dir: Path) -> Dict[str, Any]:
     row["mean_abs_dccm"] = (
         dccm_summary.get("mean_abs_correlation") if dccm_summary else None
     )
+
+    # Reference-mapped pocket metrics (combined-analysis output tree)
+    rp_metrics = (
+        _load_json(reference_pocket_dir / "reference_pocket_metrics.json") or {}
+        if reference_pocket_usable
+        else {}
+    )
+    if rp_metrics:
+        row["reference_pocket_ligand_distance_mean_A"] = rp_metrics.get(
+            "ligand_pocket_distance_mean_A"
+        )
+        row["reference_pocket_ligand_distance_std_A"] = rp_metrics.get(
+            "ligand_pocket_distance_std_A"
+        )
+        row["reference_pocket_mean_hbonds"] = rp_metrics.get("mean_hbonds")
+        row["reference_pocket_mean_sasa_nm2"] = rp_metrics.get("mean_pocket_sasa_nm2")
+        row["reference_pocket_fraction_bound"] = rp_metrics.get("fraction_bound")
+        row["reference_pocket_mean_rmsf_A"] = rp_metrics.get("mean_pocket_rmsf_A")
+        row["reference_pocket_mean_ligand_axis_angle_deg"] = rp_metrics.get(
+            "mean_axis_angle_deg"
+        )
+        row["reference_pocket_std_ligand_axis_angle_deg"] = rp_metrics.get(
+            "std_axis_angle_deg"
+        )
+        row["reference_pocket_ligand_axis_angle_p95_deg"] = rp_metrics.get(
+            "p95_axis_angle_deg"
+        )
+        row["reference_pocket_ligand_distance_p95_A"] = rp_metrics.get(
+            "ligand_pocket_distance_p95_A"
+        )
+        row["reference_pocket_ligand_distance_max_A"] = rp_metrics.get(
+            "ligand_pocket_distance_max_A"
+        )
+        row["reference_pocket_fraction_stable_coupling"] = rp_metrics.get(
+            "fraction_stable_coupling"
+        )
+        row["reference_pocket_residue_count"] = rp_metrics.get("pocket_residue_count")
+        row["reference_pocket_net_charge"] = rp_metrics.get("pocket_net_charge")
+    rp_sasa = (
+        reference_pocket_dir / "reference_pocket_sasa.csv"
+        if reference_pocket_usable
+        else Path("__missing_reference_pocket_sasa__")
+    )
+    m, s = _csv_mean_std(rp_sasa, "pocket_sasa_nm2")
+    if m is not None:
+        row["reference_pocket_mean_sasa_nm2"] = m
+        row["reference_pocket_std_sasa_nm2"] = s
+    p95_sasa = _csv_percentile(rp_sasa, "pocket_sasa_nm2", 95.0)
+    if p95_sasa is not None:
+        row["reference_pocket_p95_sasa_nm2"] = p95_sasa
+    rp_rmsf = _parse_pocket_rmsf_dat(
+        reference_pocket_dir / "reference_pocket_rmsf.dat"
+        if reference_pocket_usable
+        else Path("__missing_reference_pocket_rmsf__")
+    )
+    if rp_rmsf["mean"] is not None:
+        row["reference_pocket_mean_rmsf_A"] = rp_rmsf["mean"]
+        row["reference_pocket_max_rmsf_A"] = rp_rmsf["max"]
+    if reference_pocket_usable:
+        orient_csv = reference_pocket_dir / "reference_pocket_ligand_orientation.csv"
+        orient_m, orient_s = _csv_mean_std(orient_csv, "axis_angle_deg")
+        if orient_m is not None:
+            row["reference_pocket_mean_ligand_axis_angle_deg"] = orient_m
+            row["reference_pocket_std_ligand_axis_angle_deg"] = orient_s
+        if orient_csv.is_file() and (
+            row.get("reference_pocket_ligand_distance_p95_A") is None
+            or row.get("reference_pocket_ligand_axis_angle_p95_deg") is None
+        ):
+            from src.analysis.consensus_pocket import summarize_ligand_orientation_csv
+
+            derived = summarize_ligand_orientation_csv(orient_csv)
+            if derived.get("success"):
+                if row.get("reference_pocket_ligand_distance_p95_A") is None:
+                    row["reference_pocket_ligand_distance_p95_A"] = derived.get(
+                        "p95_distance_A"
+                    )
+                if row.get("reference_pocket_ligand_distance_max_A") is None:
+                    row["reference_pocket_ligand_distance_max_A"] = derived.get(
+                        "max_distance_A"
+                    )
+                if row.get("reference_pocket_fraction_stable_coupling") is None:
+                    row["reference_pocket_fraction_stable_coupling"] = derived.get(
+                        "fraction_stable_coupling"
+                    )
+                if row.get("reference_pocket_mean_ligand_axis_angle_deg") is None:
+                    row["reference_pocket_mean_ligand_axis_angle_deg"] = derived.get(
+                        "mean_axis_angle_deg"
+                    )
+                if row.get("reference_pocket_std_ligand_axis_angle_deg") is None:
+                    row["reference_pocket_std_ligand_axis_angle_deg"] = derived.get(
+                        "std_axis_angle_deg"
+                    )
+                if row.get("reference_pocket_ligand_axis_angle_p95_deg") is None:
+                    row["reference_pocket_ligand_axis_angle_p95_deg"] = derived.get(
+                        "p95_axis_angle_deg"
+                    )
+    rp_res = (
+        _load_json(reference_pocket_dir / "reference_pocket_residence.json") or {}
+        if reference_pocket_usable
+        else {}
+    )
+    if rp_res.get("fraction_bound") is not None:
+        row["reference_pocket_fraction_bound"] = rp_res.get("fraction_bound")
+
+    # Reference-projected dynamics — combined ``reference_fel/{label}/`` only
+    ref_fel = _resolve_reference_fel_json(label, adir, base_analysis)
+    if ref_fel:
+        row["ref_n_basins"] = ref_fel.get("n_basins", ref_fel.get("n_minima"))
+        row["ref_landscape_entropy"] = ref_fel.get("landscape_entropy")
+        row["ref_major_basin_population"] = ref_fel.get("major_basin_population")
+        row["ref_max_barrier_height_kJ_mol"] = ref_fel.get("max_barrier_height_kJ_mol")
+        row["ref_mean_basin_depth_kJ_mol"] = ref_fel.get("mean_basin_depth_kJ_mol")
+        row["ref_grid_entropy"] = ref_fel.get("grid_entropy")
+    ref_proj_path = _resolve_reference_pca_projections_path(label, adir, base_analysis)
+    if ref_proj_path and ref_proj_path.is_file():
+        try:
+            from src.analysis.pca_analyzer import load_pca_projections
+
+            loaded = load_pca_projections(str(ref_proj_path))
+            if loaded.get("success"):
+                proj = loaded["projections"]
+                if proj.shape[1] >= 1:
+                    row["ref_pc1_mean"] = float(np.mean(proj[:, 0]))
+                    row["ref_pc1_std"] = float(np.std(proj[:, 0]))
+                if proj.shape[1] >= 2:
+                    row["ref_pc2_mean"] = float(np.mean(proj[:, 1]))
+                    row["ref_pc2_std"] = float(np.std(proj[:, 1]))
+        except Exception as exc:
+            logger.debug("reference PCA load for %s: %s", label, exc)
 
     # Summary fallbacks for missing fields
     if any(row.get(c) is None for c in FEATURE_COLUMNS):
@@ -639,8 +1099,10 @@ def _write_classification_xlsx(
         ]
         readme_df = pd.DataFrame(readme_rows, columns=["topic", "value"])
         defs_df = pd.DataFrame(_feature_definitions_rows(feature_cols))
-        raw_df = pd.DataFrame(raw_rows)[fieldnames]
-        z_df = pd.DataFrame(zrows)[z_fieldnames]
+        raw_cols = [c for c in fieldnames if c in (raw_rows[0] if raw_rows else {})]
+        z_cols = [c for c in z_fieldnames if c in (zrows[0] if zrows else {})]
+        raw_df = pd.DataFrame(raw_rows)[raw_cols]
+        z_df = pd.DataFrame(zrows)[z_cols]
 
         with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
             readme_df.to_excel(writer, sheet_name="README", index=False)
@@ -671,6 +1133,7 @@ def collect_classification_features_table(
     include_zscore: bool = True,
     requested_metric_groups: Optional[List[str]] = None,
     allowed_labels: Optional[List[str]] = None,
+    local_fel_root: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Build one classification table from all per-simulation analysis outputs.
@@ -705,12 +1168,24 @@ def collect_classification_features_table(
             original_dir = os.getcwd()
             os.chdir(working_dir)
 
-        base = Path(base_directory).resolve()
+        base = Path(base_directory)
+        if not base.is_absolute():
+            anchor = Path(original_dir) if original_dir else Path.cwd()
+            base = (anchor / base).resolve()
+        else:
+            base = base.resolve()
         if not base.is_dir():
             return {"success": False, "error": f"Base directory not found: {base}"}
 
         rows: List[Dict[str, Any]] = []
         allowed = {lbl.lower() for lbl in (allowed_labels or [])}
+        fel_root_path: Optional[Path] = None
+        if local_fel_root:
+            fel_root_path = Path(local_fel_root)
+            if not fel_root_path.is_absolute():
+                fel_root_path = (base / "analysis" / local_fel_root).resolve()
+                if not fel_root_path.is_dir():
+                    fel_root_path = Path(local_fel_root).resolve()
         for child in sorted(base.iterdir()):
             if not child.is_dir() or child.name in _BASE_AGENT_DIRS:
                 continue
@@ -718,7 +1193,9 @@ def collect_classification_features_table(
                 continue
             if not (child / "analysis").is_dir():
                 continue
-            rows.append(collect_features_for_sim(child))
+            rows.append(
+                collect_features_for_sim(child, local_fel_root=fel_root_path)
+            )
 
         if not rows:
             return {
@@ -731,6 +1208,8 @@ def collect_classification_features_table(
         metric_groups = tuple(requested_metric_groups or DEFAULT_CLASSIFICATION_METRIC_GROUPS)
         feature_cols = columns_for_metric_groups(metric_groups)
         for row in rows:
+            for col in feature_cols:
+                row.setdefault(col, None)
             row["n_features_present"] = _count_present(row, feature_cols)
 
         out_dir = Path(working_dir) if working_dir else base / "analysis"

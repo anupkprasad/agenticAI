@@ -62,6 +62,7 @@ class MDState(TypedDict):
 
     # Resume / retry control (set by --resume / --retry-labels CLI flags)
     resume_failed_only: Optional[bool]   # True → skip already-succeeded sims on re-run
+    requeue_failed_sims: Optional[bool]  # One-shot: reopen failed parallel-pool labels on --resume
     retry_labels: Optional[List[str]]    # Labels to force-retry even if previously succeeded
     _resume_succeeded_labels: Optional[List[str]]  # Internal: labels confirmed succeeded on disk
     multisim_resume_applied: Optional[bool]  # True after --resume initial bind (LangGraph-persisted)

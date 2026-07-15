@@ -153,7 +153,12 @@ def build_report_headline(
 
 
 def _load_features_table(base_analysis_dir: Path) -> List[Dict[str, str]]:
-    for name in ("classification_features.csv", "classification_features_zscore.csv"):
+    for name in (
+        "ref_fel_pock_features.csv",
+        "reference_grouping_features.csv",
+        "classification_features.csv",
+        "classification_features_zscore.csv",
+    ):
         path = base_analysis_dir / name
         if not path.is_file():
             continue
@@ -163,20 +168,231 @@ def _load_features_table(base_analysis_dir: Path) -> List[Dict[str, str]]:
 
 
 def _load_cluster_assignments(base_analysis_dir: Path) -> Dict[str, int]:
-    path = base_analysis_dir / "classification_cluster_assignments.csv"
-    if not path.is_file():
-        return {}
-    out: Dict[str, int] = {}
-    with path.open(newline="", encoding="utf-8") as fh:
-        for row in csv.DictReader(fh):
-            label = (row.get("label") or "").strip().lower()
-            try:
-                cid = int(row.get("cluster_id", ""))
-            except (TypeError, ValueError):
+    for fname in (
+        "ref_fel_pock_cluster_assignments.csv",
+        "reference_cluster_assignments.csv",
+        "classification_cluster_assignments.csv",
+    ):
+        path = base_analysis_dir / fname
+        if not path.is_file():
+            continue
+        out: Dict[str, int] = {}
+        with path.open(newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                label = (row.get("label") or "").strip().lower()
+                try:
+                    cid = int(row.get("cluster_id", ""))
+                except (TypeError, ValueError):
+                    continue
+                if label:
+                    out[label] = cid
+        if out:
+            return out
+    return {}
+
+
+def _load_cluster_summary(base_analysis_dir: Path) -> Dict[str, Any]:
+    for fname in ("ref_fel_pock_clusters.json", "reference_clusters.json", "classification_clusters.json"):
+        path = base_analysis_dir / fname
+        if not path.is_file():
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict):
                 continue
-            if label:
-                out[label] = cid
-    return out
+            data = _apply_representative_overrides_to_summary(data, base_analysis_dir)
+            return data
+        except Exception:
+            continue
+    return {}
+
+
+def _apply_representative_overrides_to_summary(
+    summary: Dict[str, Any],
+    base_analysis_dir: Path,
+) -> Dict[str, Any]:
+    """Merge optional manual representative overrides into cluster summary JSON."""
+    try:
+        from src.analysis.classification_clustering import (
+            _apply_representative_overrides,
+            _load_representative_overrides,
+        )
+    except ImportError:
+        return summary
+
+    overrides = _load_representative_overrides(base_analysis_dir)
+    if not overrides:
+        return summary
+
+    labels = summary.get("labels") or []
+    display_names = summary.get("display_names") or []
+    assignments = summary.get("cluster_assignments") or {}
+    if not labels or not display_names or len(labels) != len(display_names):
+        return summary
+
+    cluster_ids = [int(assignments.get(lbl, 0)) for lbl in labels]
+    reps = summary.get("cluster_representatives") or {}
+    updated = _apply_representative_overrides(
+        reps,
+        overrides,
+        labels,
+        display_names,
+        cluster_ids,
+    )
+    if updated != reps:
+        merged = dict(summary)
+        merged["cluster_representatives"] = updated
+        return merged
+    return summary
+
+
+def is_reference_archetype_study(base_analysis_dir: Optional[Path]) -> bool:
+    return bool(
+        base_analysis_dir
+        and base_analysis_dir.is_dir()
+        and (base_analysis_dir / "ref_fel_pock_clusters.json").is_file()
+    )
+
+
+def _load_cluster_assignment_rows(base_analysis_dir: Path) -> List[Dict[str, str]]:
+    for fname in (
+        "ref_fel_pock_cluster_assignments.csv",
+        "reference_cluster_assignments.csv",
+        "classification_cluster_assignments.csv",
+    ):
+        path = base_analysis_dir / fname
+        if not path.is_file():
+            continue
+        with path.open(newline="", encoding="utf-8") as fh:
+            return list(csv.DictReader(fh))
+    return []
+
+
+def _infer_archetype_title(profile: Dict[str, float]) -> str:
+    """Heuristic archetype label from cluster-mean pocket + FEL scalars."""
+    com_p95 = profile.get("reference_pocket_ligand_distance_p95_A")
+    bound = profile.get("reference_pocket_fraction_bound")
+    angle_std = profile.get("reference_pocket_std_ligand_axis_angle_deg")
+    angle_p95 = profile.get("reference_pocket_ligand_axis_angle_p95_deg")
+    ent = profile.get("ref_landscape_entropy")
+    major = profile.get("ref_major_basin_population")
+    if com_p95 is not None and com_p95 > 25.0:
+        return "Dissociated / non-productive ATP coupling"
+    if (
+        bound is not None
+        and bound > 0.85
+        and angle_std is not None
+        and angle_std < 12.0
+        and ent is not None
+        and ent < 0.85
+    ):
+        return "Single-basin / low-entropy binder"
+    if com_p95 is not None and com_p95 > 20.0:
+        return "Loosely coupled / excursion-prone"
+    if angle_p95 is not None and angle_p95 > 80.0 and (angle_std or 0) > 15.0:
+        return "Orientation-unstable binder"
+    if bound is not None and bound < 0.45:
+        return "Loosely coupled / partial residence"
+    return "Canonical stable binder"
+
+
+def build_reference_archetype_narrative(base_analysis_dir: Path) -> Optional[Dict[str, Any]]:
+    """
+    Build overall + per-cluster narrative for reference FEL+pocket archetype studies.
+
+    Returns None when ``ref_fel_pock_clusters.json`` is absent.
+    """
+    if not is_reference_archetype_study(base_analysis_dir):
+        return None
+
+    summary = _load_cluster_summary(base_analysis_dir)
+    rows = _load_cluster_assignment_rows(base_analysis_dir)
+    features = _load_features_table(base_analysis_dir)
+    if not rows:
+        return None
+
+    feat_by_label: Dict[str, Dict[str, str]] = {}
+    for row in features:
+        lbl = (row.get("label") or "").strip().lower()
+        if lbl:
+            feat_by_label[lbl] = row
+
+    by_cluster: Dict[int, List[Dict[str, str]]] = {}
+    for row in rows:
+        try:
+            cid = int(row.get("cluster_id", ""))
+        except (TypeError, ValueError):
+            continue
+        by_cluster.setdefault(cid, []).append(row)
+
+    rep_map = summary.get("cluster_representatives") or {}
+    cluster_blocks: List[Dict[str, Any]] = []
+    for cid in sorted(by_cluster):
+        members = by_cluster[cid]
+        display_names = sorted(
+            {(m.get("display_name") or m.get("label") or "").strip() for m in members}
+            - {""}
+        )
+        profile: Dict[str, float] = {}
+        for key in (
+            "reference_pocket_ligand_distance_std_A",
+            "reference_pocket_ligand_distance_p95_A",
+            "reference_pocket_fraction_bound",
+            "reference_pocket_std_ligand_axis_angle_deg",
+            "reference_pocket_ligand_axis_angle_p95_deg",
+            "ref_landscape_entropy",
+            "ref_major_basin_population",
+        ):
+            vals = []
+            for m in members:
+                raw = (feat_by_label.get((m.get("label") or "").lower(), {}) or {}).get(key)
+                if raw not in (None, ""):
+                    try:
+                        vals.append(float(raw))
+                    except ValueError:
+                        pass
+            if vals:
+                profile[key] = sum(vals) / len(vals)
+
+        rep_entry = rep_map.get(str(cid), rep_map.get(cid, {}))
+        if isinstance(rep_entry, dict):
+            rep_uid = (rep_entry.get("label") or "").strip()
+            rep_display = (rep_entry.get("display_name") or rep_uid).strip()
+        else:
+            rep_uid = str(rep_entry or "").strip()
+            rep_display = rep_uid
+
+        cluster_blocks.append(
+            {
+                "cluster_id": cid,
+                "n_members": len(members),
+                "members_display": display_names,
+                "archetype_title": _infer_archetype_title(profile),
+                "profile": profile,
+                "representative_uid": rep_uid,
+                "representative_display": rep_display,
+            }
+        )
+
+    n_total = len(rows)
+    n_clusters = len(by_cluster)
+    overall = (
+        f"Reference-structure clustering (MLKL-projected FEL + mapped reference pocket) "
+        f"partitioned {n_total} holo pseudokinases into {n_clusters} dynamic archetypes. "
+        f"Clustering used curated binding descriptors (COM distance, H-bonds, residence, "
+        f"pocket RMSF) plus reference FEL entropy and major-basin population. "
+        f"One centroid-nearest representative per cluster is highlighted below with "
+        f"reference FEL metastate summaries and 3D basin structures."
+    )
+
+    return {
+        "overall_summary": overall,
+        "n_simulations": n_total,
+        "n_clusters": n_clusters,
+        "clusters": cluster_blocks,
+        "feature_columns": summary.get("feature_columns") or [],
+    }
 
 
 def _cluster_metric_range(
@@ -290,25 +506,42 @@ def _rule_based_classification_summary(
     plot_paths: Sequence[str],
     display_names: Sequence[str],
 ) -> str:
+    from src.analysis.reference_labels import build_uniprot_display_map
+
     clusters = _load_cluster_assignments(base_analysis_dir)
     features = _load_features_table(base_analysis_dir)
+    summary = _load_cluster_summary(base_analysis_dir)
     n_sims = len(display_names)
     n_clusters = len(set(clusters.values())) if clusters else 0
+    representatives = summary.get("cluster_representatives") or {}
+    uid_to_disp = build_uniprot_display_map(base_analysis_dir)
+    ref_study = any(
+        Path(p).name.lower().startswith("ref_fel_pock_") for p in plot_paths
+    ) or (base_analysis_dir / "ref_fel_pock_features.csv").is_file()
 
-    parts = [
-        f"Unsupervised clustering grouped {n_sims} holo systems into "
-        f"{n_clusters or 'several'} dynamic regime(s) using binding-site and "
-        f"conformational features derived from the trajectories."
-    ]
+    if ref_study:
+        narrative = build_reference_archetype_narrative(base_analysis_dir)
+        if narrative and narrative.get("overall_summary"):
+            return narrative["overall_summary"]
+        parts = [
+            f"Reference-structure classification (MLKL-projected FEL + mapped pocket "
+            f"features) grouped {n_sims} holo systems into "
+            f"{n_clusters or 'several'} dynamic archetype(s)."
+        ]
+    else:
+        parts = [
+            f"Unsupervised clustering grouped {n_sims} holo systems into "
+            f"{n_clusters or 'several'} dynamic regime(s) using binding-site and "
+            f"conformational features derived from the trajectories."
+        ]
 
     if clusters and features:
         by_c: Dict[int, List[str]] = {}
         for row in features:
-            lbl = (row.get("label") or "").lower()
+            lbl = (row.get("label") or "").strip().lower()
             if lbl in clusters:
-                by_c.setdefault(clusters[lbl], []).append(
-                    row.get("display_name") or lbl
-                )
+                disp = uid_to_disp.get(lbl, lbl.upper())
+                by_c.setdefault(clusters[lbl], []).append(disp)
         if by_c:
             cluster_bits = []
             for cid in sorted(by_c):
@@ -316,7 +549,42 @@ def _rule_based_classification_summary(
                 cluster_bits.append(f"cluster {cid} ({members})")
             parts.append("Assignments: " + "; ".join(cluster_bits) + ".")
 
-    if any("phylo" in Path(p).name.lower() for p in plot_paths):
+    if representatives:
+        rep_bits = []
+        for cid in sorted(representatives, key=lambda x: int(x) if str(x).isdigit() else x):
+            rep_entry = representatives[cid]
+            if isinstance(rep_entry, dict):
+                rep_disp = (
+                    rep_entry.get("display_name")
+                    or rep_entry.get("label")
+                    or ""
+                ).strip()
+            else:
+                rep_disp = str(rep_entry or "").strip()
+            if rep_disp:
+                rep_bits.append(f"cluster {cid} → {rep_disp}")
+        if rep_bits:
+            parts.append(
+                "Cluster representatives (closest to centroid in feature space): "
+                + "; ".join(rep_bits) + "."
+            )
+
+    if any("ref_fel_pock_dendrogram_heatmap" in Path(p).name.lower() for p in plot_paths):
+        parts.append(
+            "The combined dendrogram and feature heatmap share row order (top→bottom); "
+            "protein names appear on the colored cluster bar with z-scored features to the right."
+        )
+    elif any("ref_fel_pock_phylo" in Path(p).name.lower() for p in plot_paths):
+        parts.append(
+            "The similarity tree reflects joint FEL + reference-pocket feature distances; "
+            "the feature heatmap shows per-simulation z-scores with matching cluster colors."
+        )
+    elif any("ref_fel_pock_features_heatmap" in Path(p).name.lower() for p in plot_paths):
+        parts.append(
+            "The feature heatmap summarises z-scored pocket and FEL descriptors per simulation, "
+            "with cluster colors aligned to the dendrogram leaf order."
+        )
+    elif any("phylo" in Path(p).name.lower() for p in plot_paths):
         parts.append(
             "The unrooted phylogenetic tree summarises FEL-based conformational "
             "relationships — the primary basis for separating dynamic classes."
@@ -361,8 +629,8 @@ def _subsection_summary_for_plots(
         )
     if section_id == "classification_summary":
         return (
-            "PCA projection, dendrogram, and phylogenetic tree visualise how simulations "
-            "partition into conformationally related groups."
+            "PCA projection, horizontal dendrogram, feature heatmap, and similarity tree "
+            "visualise how simulations partition into conformationally related groups."
         )
     return ""
 
@@ -412,9 +680,10 @@ def build_structure_highlight_plan(
 
     classification_primary = bool(getattr(narrative, "classification_primary", False))
     max_fel = int(getattr(narrative, "max_fel_per_sim", 2) or 2)
+    ref_archetype_study = is_reference_archetype_study(base)
 
     # Small / non-classification cohort → keep every simulation (up to 2 states).
-    if n_sims <= 8 and not classification_primary:
+    if n_sims <= 8 and not classification_primary and not ref_archetype_study:
         return StructureHighlightPlan(
             default_per_sim=min(2, max(max_fel, 1)),
             restrict_highlights=False,
@@ -430,24 +699,82 @@ def build_structure_highlight_plan(
         per_label[display] = max(per_label.get(display, 0), n)
         rationale.setdefault(display, reason)
 
-    # One representative per cluster: most conformationally diverse member.
-    if clusters and feat_by_label:
+    # Reference archetype study → exactly one representative per cluster (FEL metastates).
+    if ref_archetype_study and clusters:
+        summary = _load_cluster_summary(base) if base and base.is_dir() else {}
+        rep_map = summary.get("cluster_representatives") or {}
+        uid_to_disp: Dict[str, str] = {}
+        if base and base.is_dir():
+            from src.analysis.reference_labels import build_uniprot_display_map
+
+            uid_to_disp = build_uniprot_display_map(base)
+
+        narrative_ctx = build_reference_archetype_narrative(base) if base else None
+        title_by_cid = {
+            c["cluster_id"]: c["archetype_title"]
+            for c in (narrative_ctx or {}).get("clusters") or []
+        }
+
+        for cid_key in sorted(rep_map, key=lambda x: int(x) if str(x).isdigit() else x):
+            rep_entry = rep_map[cid_key]
+            if not isinstance(rep_entry, dict):
+                continue
+            rep_uid = (rep_entry.get("label") or "").strip().lower()
+            disp = (
+                rep_entry.get("display_name")
+                or uid_to_disp.get(rep_uid)
+                or disp_by_label.get(rep_uid, rep_uid)
+            )
+            try:
+                cid_int = int(cid_key)
+            except (TypeError, ValueError):
+                cid_int = cid_key
+            title = title_by_cid.get(cid_int, "dynamic archetype")
+            _feature_up(
+                str(disp),
+                3,
+                f"Cluster {cid_key} representative ({title}) — embed major FEL "
+                f"metastates to illustrate ATP–pocket coupling for this archetype.",
+            )
+
+    # Large / classification cohort → feature cluster representatives (+ optional extremes).
+    elif clusters and feat_by_label:
+        summary = _load_cluster_summary(base) if base and base.is_dir() else {}
+        rep_map = summary.get("cluster_representatives") or {}
+        uid_to_disp = {}
+        if base and base.is_dir():
+            from src.analysis.reference_labels import build_uniprot_display_map
+            uid_to_disp = build_uniprot_display_map(base)
+
         members_by_cluster: Dict[int, List[str]] = {}
         for lbl, cid in clusters.items():
             members_by_cluster.setdefault(cid, []).append(lbl)
-        for cid, members in sorted(members_by_cluster.items()):
-            def _diversity(lbl: str) -> float:
-                row = feat_by_label.get(lbl, {})
-                ent = _float_or_none(row, "landscape_entropy")
-                nb = _float_or_none(row, "n_basins")
-                return (ent if ent is not None else 0.0) + 0.01 * (nb or 0.0)
 
-            rep = max(members, key=_diversity)
-            disp = disp_by_label.get(rep, rep)
+        for cid, members in sorted(members_by_cluster.items()):
+            rep_entry = rep_map.get(str(cid), rep_map.get(cid, {}))
+            if isinstance(rep_entry, dict):
+                rep = (rep_entry.get("label") or "").strip().lower()
+            else:
+                rep = str(rep_entry or "").lower()
+            if rep and rep in feat_by_label:
+                pass
+            else:
+                def _diversity(lbl: str) -> float:
+                    row = feat_by_label.get(lbl, {})
+                    ent = _float_or_none(row, "ref_landscape_entropy")
+                    if ent is None:
+                        ent = _float_or_none(row, "landscape_entropy")
+                    nb = _float_or_none(row, "ref_n_basins")
+                    if nb is None:
+                        nb = _float_or_none(row, "n_basins")
+                    return (ent if ent is not None else 0.0) + 0.01 * (nb or 0.0)
+
+                rep = max(members, key=_diversity)
+            disp = uid_to_disp.get(rep, disp_by_label.get(rep, rep))
             _feature_up(
-                disp, min(2, max(max_fel, 2)),
-                f"Representative of cluster {cid} (most conformationally diverse; "
-                f"multiple metastates shown).",
+                disp, min(3, max(max_fel, 2)),
+                f"Cluster {cid} representative — FEL metastates and reference-pocket "
+                f"dynamics illustrate this dynamic archetype.",
             )
 
         # Binding-site extremes across the cohort (widest excursion, most flexible pocket).
@@ -495,7 +822,7 @@ def build_structure_highlight_plan(
         restrict_highlights=True,
     )
 
-    if llm_client and getattr(llm_client, "available", True):
+    if llm_client and getattr(llm_client, "available", True) and not ref_archetype_study:
         try:
             plan = _llm_refine_structure_highlights(
                 llm_client,
@@ -665,7 +992,11 @@ def build_combined_report_plan(
     if summary_plots or traj_plots or rmsf_plots:
         classification = SubsectionPlan(
             section_id="classification",
-            title="Dynamic Classification & Cluster Analysis",
+            title=(
+                "Reference-Structure Classification (FEL + Pocket)"
+                if (base and (base / "ref_fel_pock_features.csv").is_file())
+                else "Dynamic Classification & Cluster Analysis"
+            ),
             summary=intro,
             plot_paths=summary_plots + traj_plots + rmsf_plots,
             include=True,

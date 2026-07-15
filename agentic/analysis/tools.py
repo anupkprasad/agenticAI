@@ -87,6 +87,20 @@ from src.analysis.phylo_tree import (
     build_sequence_phylo_tree,
     build_structure_phylo_tree,
 )
+from src.analysis.consensus_alignment import build_consensus_sequence_alignment
+from src.analysis.reference_landscape import (
+    fit_reference_pca_model,
+    project_simulations_reference_pca,
+    build_shared_reference_fel_landscapes,
+    cluster_reference_fel_landscapes,
+    run_reference_landscape_pipeline,
+)
+from src.analysis.consensus_pocket import (
+    define_reference_consensus_pocket,
+    map_consensus_pocket_residues,
+    calculate_consensus_pocket_metrics,
+    run_consensus_pocket_metrics_batch,
+)
 
 # Import dynamic tool loader for programmer-generated tools
 from agentic.utils import get_dynamic_tool_loader
@@ -141,6 +155,16 @@ __all__ = [
     "run_combined_rmsf_segment_apo_holo_analysis",
     "build_sequence_phylo_tree",
     "build_structure_phylo_tree",
+    "build_consensus_sequence_alignment",
+    "fit_reference_pca_model",
+    "project_simulations_reference_pca",
+    "build_shared_reference_fel_landscapes",
+    "cluster_reference_fel_landscapes",
+    "run_reference_landscape_pipeline",
+    "define_reference_consensus_pocket",
+    "map_consensus_pocket_residues",
+    "calculate_consensus_pocket_metrics",
+    "run_consensus_pocket_metrics_batch",
     "AnalysisToolExecutor",
     "get_analysis_tools",
     "get_tool_metadata",
@@ -176,6 +200,16 @@ COMBINED_ANALYSIS_TOOL_NAMES = frozenset({
     "plot_cluster_rmsf_profiles",
     "build_sequence_phylo_tree",
     "build_structure_phylo_tree",
+    "build_consensus_sequence_alignment",
+    "fit_reference_pca_model",
+    "project_simulations_reference_pca",
+    "build_shared_reference_fel_landscapes",
+    "cluster_reference_fel_landscapes",
+    "run_reference_landscape_pipeline",
+    "define_reference_consensus_pocket",
+    "map_consensus_pocket_residues",
+    "calculate_consensus_pocket_metrics",
+    "run_consensus_pocket_metrics_batch",
 })
 
 _PER_SIM_ANALYSIS_TOOLS = [
@@ -230,6 +264,16 @@ _COMBINED_ANALYSIS_TOOLS = [
     plot_cluster_rmsf_profiles,
     build_sequence_phylo_tree,
     build_structure_phylo_tree,
+    build_consensus_sequence_alignment,
+    fit_reference_pca_model,
+    project_simulations_reference_pca,
+    build_shared_reference_fel_landscapes,
+    cluster_reference_fel_landscapes,
+    run_reference_landscape_pipeline,
+    define_reference_consensus_pocket,
+    map_consensus_pocket_residues,
+    calculate_consensus_pocket_metrics,
+    run_consensus_pocket_metrics_batch,
 ]
 
 
@@ -409,6 +453,16 @@ class AnalysisToolExecutor:
                 "plot_cluster_rmsf_profiles": plot_cluster_rmsf_profiles,
                 "build_sequence_phylo_tree": build_sequence_phylo_tree,
                 "build_structure_phylo_tree": build_structure_phylo_tree,
+                "build_consensus_sequence_alignment": build_consensus_sequence_alignment,
+                "fit_reference_pca_model": fit_reference_pca_model,
+                "project_simulations_reference_pca": project_simulations_reference_pca,
+                "build_shared_reference_fel_landscapes": build_shared_reference_fel_landscapes,
+                "cluster_reference_fel_landscapes": cluster_reference_fel_landscapes,
+                "run_reference_landscape_pipeline": run_reference_landscape_pipeline,
+                "define_reference_consensus_pocket": define_reference_consensus_pocket,
+                "map_consensus_pocket_residues": map_consensus_pocket_residues,
+                "calculate_consensus_pocket_metrics": calculate_consensus_pocket_metrics,
+                "run_consensus_pocket_metrics_batch": run_consensus_pocket_metrics_batch,
             })
         
         # Record built-in tool names BEFORE loading programmer tools

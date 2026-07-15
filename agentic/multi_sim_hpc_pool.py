@@ -271,8 +271,17 @@ def init_hpc_pool(state: Dict[str, Any]) -> Dict[str, Any]:
             rec.pop("last_slurm_state", None)
         elif _sim_setup_ready(wd):
             rec["prep_status"] = "done"
-            if rec.get("hpc_status") not in ("submitted", "running", "completed", "skipped"):
+            if rec.get("hpc_status") not in ("submitted", "running", "completed", "skipped", "failed"):
                 rec["hpc_status"] = "pending"
+        elif rec.get("prep_status") == "failed":
+            # Fail-soft: keep terminal prep failure unless --resume requeues.
+            if state.get("requeue_failed_sims"):
+                rec["prep_status"] = "pending"
+                rec.pop("error", None)
+                if rec.get("hpc_status") not in ("submitted", "running", "completed", "skipped"):
+                    rec["hpc_status"] = "pending"
+            else:
+                rec["hpc_status"] = "failed"
         else:
             if rec.get("prep_status") == "done":
                 logger.warning(
@@ -321,6 +330,9 @@ def _all_hpc_done(pool: Dict[str, Any]) -> bool:
     if not sims:
         return False
     for rec in sims.values():
+        # Fail-soft: prep or HPC failure is terminal for that sim only.
+        if rec.get("prep_status") == "failed" or rec.get("hpc_status") == "failed":
+            continue
         st = rec.get("hpc_status")
         wd = rec.get("working_dir") or ""
         if st == "skipped":
@@ -455,10 +467,13 @@ def _submit_ready_sims(state: Dict[str, Any], pool: Dict[str, Any]) -> List[str]
                 continue
             rec["hpc_status"] = "failed"
             rec["error"] = err
-            pool["awaiting_hitl"] = True
-            pool["hitl_reason"] = f"Submit failed for {label}: {rec['error']}"
-            logger.error("HPC pool: submit failed for %s: %s", label, rec["error"])
-            break
+            # Fail-soft: one submit failure must not block unrelated sims.
+            logger.error(
+                "HPC pool: submit failed for %s: %s — continuing other sims",
+                label,
+                rec["error"],
+            )
+            continue
 
     if submitted:
         queue = list_my_slurm_jobs.func()
@@ -485,6 +500,14 @@ def _next_prep_label(pool: Dict[str, Any], sim_prompts: List[Dict]) -> Optional[
         if rec.get("prep_status") == "pending":
             return label
     return None
+
+
+def hpc_pool_prep_pending(state: Dict[str, Any]) -> bool:
+    """True when at least one simulation still needs preprocess/simsetup."""
+    pool = state.get("hpc_pool") or {}
+    if not pool:
+        return False
+    return _next_prep_label(pool, state.get("sim_prompts") or []) is not None
 
 
 def mark_prep_done(state: Dict[str, Any], sim_label: str) -> None:
@@ -581,21 +604,41 @@ def hpc_pool_supervisor_tick(state: Dict[str, Any]) -> Dict[str, Any]:
     _sync_jobs_from_slurm(state, pool, force=False)
     pool = state["hpc_pool"]
 
-    for label, rec in (pool.get("sims") or {}).items():
-        if rec.get("hpc_status") == "failed":
-            pool["awaiting_hitl"] = True
-            pool["hitl_reason"] = rec.get("error") or f"Job failed for {label}"
-            state["hpc_pool"] = pool
-            state["next_node"] = "human_hpc_pool_check"
-            return state
+    # Fail-soft: previously any failed HPC job forced HITL and stalled the pool.
+    # Keep failed labels terminal and continue submitting/monitoring the rest.
+    failed_hpc = [
+        label
+        for label, rec in (pool.get("sims") or {}).items()
+        if rec.get("hpc_status") == "failed"
+    ]
+    if failed_hpc:
+        logger.warning(
+            "HPC pool: %d failed job(s) recorded (continuing others): %s",
+            len(failed_hpc),
+            ", ".join(failed_hpc[:8]) + ("..." if len(failed_hpc) > 8 else ""),
+        )
 
     # Phase 1: finish preprocess + simsetup for every simulation before any submit.
     prep_label = _next_prep_label(pool, state.get("sim_prompts") or [])
     if prep_label is not None:
         from agentic.parallel_resources import should_use_parallel_pool
-        from agentic.multi_sim_parallel_pool import start_parallel_prep_if_enabled
+        from agentic.multi_sim_parallel_pool import (
+            init_parallel_pool,
+            parallel_pool_supervisor_tick,
+            start_parallel_prep_if_enabled,
+            _parallel_prep_still_running,
+        )
 
-        if should_use_parallel_pool(state) and not state.get("hpc_pool_prep_parallel"):
+        if _parallel_prep_still_running(state):
+            if state.get("multi_sim_phase") != "parallel_pool":
+                state["multi_sim_phase"] = "parallel_pool"
+                if not state.get("parallel_pool"):
+                    init_parallel_pool(state, phase="prep")
+            return parallel_pool_supervisor_tick(state)
+
+        # Restart parallel prep whenever work remains (do not gate on a stale
+        # hpc_pool_prep_parallel flag — that blocked --resume after a partial run).
+        if should_use_parallel_pool(state):
             if start_parallel_prep_if_enabled(state):
                 return state
         state["hpc_pool_needs_prep_start"] = prep_label
@@ -621,6 +664,8 @@ def hpc_pool_supervisor_tick(state: Dict[str, Any]) -> Dict[str, Any]:
     if running > 0 or pending_submit:
         state["next_node"] = "hpc_pool_wait"
         state["hpc_pool_status_summary"] = pool_summary(state)
+        state["hpc_pool_status_snapshot"] = snapshot_hpc_pool_status(state)
+        persist_hpc_pool_checkpoint(state)
         log_pool_to_base(
             state,
             "Pool waiting for SLURM jobs",
@@ -633,6 +678,116 @@ def hpc_pool_supervisor_tick(state: Dict[str, Any]) -> Dict[str, Any]:
     return state
 
 
+def _hpc_pool_sim_order(state: Dict[str, Any], pool: Dict[str, Any]) -> List[str]:
+    sims = pool.get("sims") or {}
+    order: List[str] = []
+    for idx, sp in enumerate(state.get("sim_prompts") or []):
+        label = sp.get("label") or f"sim_{idx}"
+        if label in sims:
+            order.append(label)
+    for label in sims:
+        if label not in order:
+            order.append(label)
+    return order
+
+
+def _format_hpc_pool_sim_line(label: str, rec: Dict[str, Any]) -> str:
+    parts = [
+        f"prep={rec.get('prep_status')}",
+        f"hpc={rec.get('hpc_status')}",
+    ]
+    if rec.get("job_id"):
+        parts.append(f"job_id={rec.get('job_id')}")
+    if rec.get("last_slurm_state"):
+        parts.append(f"slurm={rec.get('last_slurm_state')}")
+    if rec.get("skip_reason"):
+        parts.append(f"note={rec.get('skip_reason')}")
+    return f"  {label}: {' '.join(parts)}"
+
+
+def snapshot_hpc_pool_status(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Compact HPC pool summary for ``pool_status.json`` and state checkpoints."""
+    pool = state.get("hpc_pool") or {}
+    sims = pool.get("sims") or {}
+    active = _count_running(pool)
+    max_c = pool.get("max_concurrent")
+
+    by_hpc: Dict[str, List[str]] = {
+        "submitted": [],
+        "running": [],
+        "pending": [],
+        "completed": [],
+        "skipped": [],
+        "failed": [],
+    }
+    sim_details: Dict[str, Any] = {}
+    summary_lines: List[str] = []
+
+    for label in _hpc_pool_sim_order(state, pool):
+        rec = sims.get(label) or {}
+        entry: Dict[str, Any] = {
+            "prep": rec.get("prep_status"),
+            "hpc": rec.get("hpc_status"),
+        }
+        if rec.get("job_id"):
+            entry["job_id"] = rec.get("job_id")
+        if rec.get("last_slurm_state"):
+            entry["slurm"] = rec.get("last_slurm_state")
+        if rec.get("skip_reason"):
+            entry["note"] = rec.get("skip_reason")
+        if rec.get("error"):
+            entry["error"] = rec.get("error")
+        sim_details[label] = entry
+        summary_lines.append(_format_hpc_pool_sim_line(label, rec))
+
+        hpc_st = rec.get("hpc_status") or "pending"
+        bucket = hpc_st if hpc_st in by_hpc else "pending"
+        by_hpc[bucket].append(label)
+
+    parallel_pool = state.get("parallel_pool") or {}
+    if (
+        parallel_pool.get("phase") == "prep"
+        and (
+            state.get("hpc_pool_prep_parallel")
+            or state.get("multi_sim_phase") == "parallel_pool"
+        )
+    ):
+        for label, prec in (parallel_pool.get("sims") or {}).items():
+            if label in sim_details:
+                sim_details[label]["worker"] = prec.get("status")
+
+    return {
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "workflow_phase": state.get("multi_sim_phase") or "hpc_pool",
+        "pool_type": "hpc",
+        "phase": pool.get("phase") or "active",
+        "max_concurrent": max_c,
+        "check_interval_sec": pool.get("check_interval_sec"),
+        "active_hpc_jobs": active,
+        "simulations": sim_details,
+        "summary_lines": summary_lines,
+        "running": sorted(by_hpc["submitted"] + by_hpc["running"]),
+        "pending": sorted(by_hpc["pending"]),
+        "done": sorted(by_hpc["completed"] + by_hpc["skipped"]),
+        "failed": sorted(by_hpc["failed"]),
+        "pending_count": len(by_hpc["pending"]),
+        "done_count": len(by_hpc["completed"]) + len(by_hpc["skipped"]),
+        "failed_count": len(by_hpc["failed"]),
+    }
+
+
+def persist_hpc_pool_checkpoint(state: Dict[str, Any]) -> None:
+    """Write HPC pool status to state.jsonl quietly (no conversation log spam)."""
+    if state.get("hpc_pool"):
+        state["hpc_pool_status_snapshot"] = snapshot_hpc_pool_status(state)
+    try:
+        from agentic.utils.state_persistence import save_workflow_state_quiet
+
+        save_workflow_state_quiet(state)
+    except Exception as exc:
+        logger.debug("HPC pool checkpoint save failed: %s", exc)
+
+
 def pool_summary(state: Dict[str, Any]) -> str:
     pool = state.get("hpc_pool") or {}
     active = _count_running(pool)
@@ -641,18 +796,9 @@ def pool_summary(state: Dict[str, Any]) -> str:
         f"HPC pool (active {active}/{max_c} concurrent, "
         f"check every {pool.get('check_interval_sec', '?')}s):"
     ]
-    for label, rec in (pool.get("sims") or {}).items():
-        parts = [
-            f"prep={rec.get('prep_status')}",
-            f"hpc={rec.get('hpc_status')}",
-        ]
-        if rec.get("job_id"):
-            parts.append(f"job_id={rec.get('job_id')}")
-        if rec.get("last_slurm_state"):
-            parts.append(f"slurm={rec.get('last_slurm_state')}")
-        if rec.get("skip_reason"):
-            parts.append(f"note={rec.get('skip_reason')}")
-        lines.append(f"  {label}: {' '.join(parts)}")
+    for label in _hpc_pool_sim_order(state, pool):
+        rec = (pool.get("sims") or {}).get(label) or {}
+        lines.append(_format_hpc_pool_sim_line(label, rec).lstrip())
     return "\n".join(lines)
 
 

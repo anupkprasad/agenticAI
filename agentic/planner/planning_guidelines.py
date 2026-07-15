@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, FrozenSet, Optional, Set, Any, List
+from typing import Dict, FrozenSet, Optional, Set, Any, List, Sequence
 
 # Canonical per-simulation output basenames (no label prefix).
 # Combined analysis collects these from {base}/{label}/analysis/.
@@ -410,6 +410,146 @@ def detect_phylo_tree_requested(*goal_texts: str) -> Dict[str, bool]:
     return {"sequence": bool(seq), "structure": bool(struct)}
 
 
+_REFERENCE_LANDSCAPE_PATTERNS: tuple[str, ...] = (
+    r"reference[-\s]?projected\s+pca",
+    r"reference\s+landscape",
+    r"consensus\s+sequence\s+alignment",
+    r"consensus\s+alignment",
+    r"consensus\s+cα",
+    r"consensus\s+ca",
+    r"shared\s+reference\s+fel",
+    r"shared\s+fel",
+    r"reference\s+fel",
+    r"reference\s+fel\s+cluster",
+    r"run_reference_landscape_pipeline",
+    r"build_consensus_sequence_alignment",
+)
+
+_CONSENSUS_POCKET_PATTERNS: tuple[str, ...] = (
+    r"consensus[-\s]?mapped\s+pocket",
+    r"consensus\s+pocket",
+    r"reference\s+pocket",
+    r"mapped\s+pocket",
+    r"run_consensus_pocket_metrics_batch",
+    r"define_reference_consensus_pocket",
+)
+
+
+def detect_consensus_pocket_requested(*goal_texts: str) -> Dict[str, Any]:
+    """
+    Detect whether the user asked for consensus-mapped reference pocket metrics.
+
+    Returns ``{"requested": bool, "reference_label": str|None, "pocket_cutoff_A": float}``.
+    """
+    text = _normalize_goal_text(*goal_texts)
+    if not text:
+        return {"requested": False, "reference_label": None, "pocket_cutoff_A": 15.0}
+
+    requested = any(re.search(p, text) for p in _CONSENSUS_POCKET_PATTERNS)
+    if not requested:
+        return {"requested": False, "reference_label": None, "pocket_cutoff_A": 15.0}
+
+    cutoff = 15.0
+    m = re.search(r"pocket[_\s-]?cutoff[_\s-]?a?\s*[=:]\s*(\d+(?:\.\d+)?)", text)
+    if not m:
+        m = re.search(r"within\s+(\d+(?:\.\d+)?)\s*(?:å|a|angstrom)?\s+of\s+atp", text)
+    if m:
+        cutoff = float(m.group(1))
+
+    return {
+        "requested": True,
+        "reference_label": _resolve_reference_label(*goal_texts),
+        "pocket_cutoff_A": cutoff,
+    }
+
+
+def _parse_reference_label_from_goal(text: str) -> Optional[str]:
+    """Extract reference label (e.g. q8nb16) from goal text when present."""
+    if not text:
+        return None
+    lowered = text.lower()
+
+    # Explicit forms: reference_label=q8nb16, reference label: q8nb16
+    m = re.search(
+        r"reference[_\s-]*label\s*[=:]\s*([qp][a-z0-9]{4,7})",
+        lowered,
+    )
+    if m:
+        return m.group(1)
+
+    m = re.search(
+        r"reference(?:\s+label|\s+id|\s+pseudokinase|\s+kinase)?\s*[=:]\s*([qp][a-z0-9]{4,7})",
+        lowered,
+    )
+    if m:
+        return m.group(1)
+
+    # UniProt-style id immediately after "reference is" / "reference:"
+    m = re.search(
+        r"reference\s+(?:is\s+)?([qp][a-z0-9]{4,7})\b",
+        lowered,
+    )
+    if m:
+        return m.group(1)
+
+    m = re.search(
+        r"\b([qp][a-z0-9]{4,7})\s+as\s+(?:the\s+)?reference\b",
+        lowered,
+    )
+    if m:
+        return m.group(1)
+
+    # Protein name → common pseudoKin label (MLKL = q8nb16)
+    if re.search(r"\bmlkl\b", lowered):
+        return "q8nb16"
+    return None
+
+
+def _resolve_reference_label(
+    *goal_texts: str,
+    labels: Optional[Sequence[str]] = None,
+    default: str = "q8nb16",
+) -> str:
+    """
+    Pick a reference simulation label from goal text.
+
+    Prefers ``user_goal_original``-style sources (first non-empty texts)
+    before merged combined-plan boilerplate that may contain
+    ``reference:\\nSimulations``.
+    """
+    for text in goal_texts:
+        if not text:
+            continue
+        candidate = _parse_reference_label_from_goal(text)
+        if not candidate:
+            continue
+        if labels is None or str(candidate) in {str(l) for l in labels}:
+            return str(candidate)
+    if labels and default in {str(l) for l in labels}:
+        return default
+    return default
+
+
+def detect_reference_landscape_requested(*goal_texts: str) -> Dict[str, Any]:
+    """
+    Detect whether the user asked for the reference-projected landscape pipeline.
+
+    Returns ``{"requested": bool, "reference_label": str|None}``.
+    """
+    text = _normalize_goal_text(*goal_texts)
+    if not text:
+        return {"requested": False, "reference_label": None}
+
+    requested = any(re.search(p, text) for p in _REFERENCE_LANDSCAPE_PATTERNS)
+    if not requested:
+        return {"requested": False, "reference_label": None}
+
+    return {
+        "requested": True,
+        "reference_label": _resolve_reference_label(*goal_texts),
+    }
+
+
 def detect_classification_requested(*goal_texts: str) -> bool:
     """True when the user explicitly asks for classification / clustering / feature matrix."""
     for text in goal_texts:
@@ -442,23 +582,33 @@ def classification_metric_groups_for_goal(*goal_texts: str) -> Optional[FrozenSe
     )
 
     metrics = detect_requested_metrics_union(*goal_texts)
+    cp_req = detect_consensus_pocket_requested(*goal_texts)
+    ref_req = detect_reference_landscape_requested(*goal_texts)
     if metrics is None:
-        return frozenset(DEFAULT_CLASSIFICATION_METRIC_GROUPS)
+        groups = set(DEFAULT_CLASSIFICATION_METRIC_GROUPS)
+    else:
+        groups = {m for m in metrics if m in CLASSIFICATION_FEATURE_GROUPS}
+        if "gyration" in metrics:
+            groups.add("rg")
+        if "rmsf" in groups:
+            groups.discard("rmsf")
+            groups.add("pocket_rmsf")
+        base = set(DEFAULT_CLASSIFICATION_METRIC_GROUPS)
+        extras = groups - base
+        groups = base | extras if extras else base
 
-    groups = {m for m in metrics if m in CLASSIFICATION_FEATURE_GROUPS}
-    if "gyration" in metrics:
-        groups.add("rg")
-    # Classification uses pocket-residue flexibility, not whole-protein RMSF.
-    if "rmsf" in groups:
-        groups.discard("rmsf")
-        groups.add("pocket_rmsf")
+    if cp_req.get("requested") and ref_req.get("requested"):
+        return frozenset({"reference_pocket", "reference_fel", "reference_pca"})
+    if cp_req.get("requested") or ref_req.get("requested"):
+        groups -= {"com", "contacts", "pocket_sasa", "residence", "pocket_rmsf", "fel", "ligand_rmsf", "sasa"}
+        if cp_req.get("requested"):
+            groups.add("reference_pocket")
+        if ref_req.get("requested"):
+            groups.add("reference_fel")
+            groups.add("reference_pca")
+        return frozenset(groups)
 
-    # Anchor on the stable ATP/pocket bundle; only add explicit extras (rmsd, rg, …).
-    base = set(DEFAULT_CLASSIFICATION_METRIC_GROUPS)
-    extras = groups - base
-    if extras:
-        return frozenset(base | extras)
-    return frozenset(base)
+    return frozenset(groups)
 
 
 def get_classification_tool_guide() -> str:

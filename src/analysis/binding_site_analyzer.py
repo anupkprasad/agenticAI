@@ -14,7 +14,9 @@ import logging
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from src.analysis.pbc_utils import minimum_image_distance
 
 import numpy as np
 from langchain.tools import tool
@@ -61,13 +63,56 @@ def identify_pocket_atoms(
     pocket_frozen = universe.atoms[pocket.indices]
     resids = sorted(set(int(r) for r in pocket_frozen.resids))
     meta = {
+        "pocket_definition_mode": "ligand_proximity",
         "pocket_atom_count": len(pocket_frozen),
         "pocket_residue_count": len(resids),
         "pocket_resids": resids,
         "pocket_resnames": sorted(set(pocket_frozen.resnames)),
         "ligand_atom_count": len(ligand),
+        "pocket_cutoff_A": float(cutoff),
     }
     return pocket_frozen, resids, meta
+
+
+def resolve_pocket_atoms(
+    universe: "mda.Universe",
+    *,
+    pocket_resids: Optional[List[int]] = None,
+    ligand_selection: str = "resname ATP",
+    protein_selection: str = "protein",
+    pocket_cutoff: float = 5.0,
+) -> Tuple[Any, List[int], Dict[str, Any]]:
+    """
+    Resolve pocket atoms either from an explicit residue list or ligand proximity.
+
+    When ``pocket_resids`` is provided, all protein atoms in those residues
+    define the pocket (consensus-mapped mode). Otherwise falls back to
+    ``identify_pocket_atoms`` at frame 0.
+    """
+    if pocket_resids:
+        universe.trajectory[0]
+        resid_str = " ".join(str(int(r)) for r in pocket_resids)
+        pocket_sel = f"({protein_selection}) and resid {resid_str}"
+        pocket = universe.select_atoms(pocket_sel)
+        if len(pocket) == 0:
+            raise ValueError(
+                f"No protein atoms matched consensus pocket resids: {pocket_resids[:12]}"
+                + ("..." if len(pocket_resids) > 12 else "")
+            )
+        pocket_frozen = universe.atoms[pocket.indices]
+        resids = sorted(set(int(r) for r in pocket_frozen.resids))
+        meta = {
+            "pocket_definition_mode": "consensus_resid_list",
+            "pocket_atom_count": len(pocket_frozen),
+            "pocket_residue_count": len(resids),
+            "pocket_resids": resids,
+            "pocket_resnames": sorted(set(pocket_frozen.resnames)),
+            "requested_pocket_resids": [int(r) for r in pocket_resids],
+        }
+        return pocket_frozen, resids, meta
+    return identify_pocket_atoms(
+        universe, ligand_selection, protein_selection, pocket_cutoff
+    )
 
 
 def _write_gmx_index(path: str, group_name: str, atom_indices: np.ndarray) -> None:
@@ -94,12 +139,35 @@ def _restore_cwd(original: Optional[str]) -> None:
 
 
 def _find_gmx() -> Optional[str]:
-    for cmd in ("gmx", "gmx_mpi"):
+    import os
+    import shutil
+
+    candidates: list[str] = []
+    for env_key in ("GMX", "GMX_BIN", "GROMACS_BIN"):
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            candidates.append(val)
+    candidates.extend(("gmx", "gmx_mpi"))
+    conda_prefix = os.environ.get("CONDA_PREFIX", "").strip()
+    if conda_prefix:
+        candidates.append(str(Path(conda_prefix) / "bin" / "gmx"))
+    home = os.environ.get("HOME", "").strip()
+    if home:
+        candidates.append(f"{home}/conda_envs/ollama_env/bin/gmx")
+
+    seen: set[str] = set()
+    for cmd in candidates:
+        if not cmd or cmd in seen:
+            continue
+        seen.add(cmd)
+        exe = cmd if os.path.sep in cmd else shutil.which(cmd)
+        if not exe:
+            continue
         try:
-            r = subprocess.run([cmd, "--version"], capture_output=True, timeout=5)
+            r = subprocess.run([exe, "--version"], capture_output=True, timeout=5)
             if r.returncode == 0:
-                return cmd
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+                return exe
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             continue
     return None
 
@@ -116,6 +184,35 @@ def _parse_xvg_two_columns(path: str) -> Tuple[np.ndarray, np.ndarray]:
                 xs.append(float(parts[0]))
                 ys.append(float(parts[1]))
     return np.asarray(xs), np.asarray(ys)
+
+
+def _debounce_bound_mask(
+    bound_mask: Sequence[bool],
+    *,
+    min_run: int = 2,
+) -> List[bool]:
+    """Drop brief bound/unbound flips shorter than ``min_run`` frames."""
+    if min_run <= 1 or len(bound_mask) < 3:
+        return list(bound_mask)
+
+    out = list(bound_mask)
+    changed = True
+    while changed:
+        changed = False
+        i = 0
+        while i < len(out):
+            j = i
+            while j < len(out) and out[j] == out[i]:
+                j += 1
+            run_len = j - i
+            if run_len < min_run and 0 < i and j < len(out):
+                fill = out[i - 1]
+                for k in range(i, j):
+                    if out[k] != fill:
+                        out[k] = fill
+                        changed = True
+            i = j
+    return out
 
 
 def _segment_residence(times_ns: np.ndarray, bound: np.ndarray) -> Dict[str, Any]:
@@ -186,9 +283,19 @@ def compute_protein_ligand_contacts_from_universe(
     output_file: Optional[str] = None,
     working_dir: Optional[str] = None,
     frame_interval: int = 1,
+    pocket_resids: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """Protein–ligand contacts from a pre-loaded Universe."""
-    protein = u.select_atoms(protein_selection)
+    contact_protein_selection = protein_selection
+    if pocket_resids:
+        _, resids, _ = resolve_pocket_atoms(
+            u, pocket_resids=pocket_resids, protein_selection=protein_selection
+        )
+        resid_str = " ".join(str(r) for r in resids)
+        contact_protein_selection = f"({protein_selection}) and resid {resid_str}"
+        protein = u.select_atoms(contact_protein_selection)
+    else:
+        protein = u.select_atoms(protein_selection)
     ligand = u.select_atoms(ligand_selection)
     if len(protein) == 0 or len(ligand) == 0:
         return {"success": False, "error": "Protein or ligand selection is empty"}
@@ -199,9 +306,9 @@ def compute_protein_ligand_contacts_from_universe(
 
     hbonds = HydrogenBondAnalysis(
         u,
-        donors_sel=f"({protein_selection}) or ({ligand_selection})",
-        acceptors_sel=f"({protein_selection}) or ({ligand_selection})",
-        between=[protein_selection, ligand_selection],
+        donors_sel=f"({contact_protein_selection}) or ({ligand_selection})",
+        acceptors_sel=f"({contact_protein_selection}) or ({ligand_selection})",
+        between=[contact_protein_selection, ligand_selection],
         d_a_cutoff=float(hbond_distance),
         d_h_a_angle_cutoff=float(hbond_angle),
     )
@@ -223,6 +330,7 @@ def compute_protein_ligand_contacts_from_universe(
         dist_arr = mda_distances.distance_array(
             protein_heavy.positions,
             ligand_heavy.positions,
+            box=getattr(ts, "dimensions", None),
         )
         n_contacts = int(np.sum(dist_arr <= float(contact_cutoff)))
         rows.append([frame_i, ts.time / 1000.0, n_h, n_contacts])
@@ -251,7 +359,12 @@ def compute_protein_ligand_contacts_from_universe(
                 analysis_type="ProteinLigandContacts",
                 statistics=stats,
                 files={"csv": out, "topology": topology_file, "trajectory": trajectory_file},
-                metadata={"ligand_selection": ligand_selection, "contact_cutoff_A": contact_cutoff},
+                metadata={
+                    "ligand_selection": ligand_selection,
+                    "contact_cutoff_A": contact_cutoff,
+                    "pocket_resids": pocket_resids[:20] if pocket_resids else None,
+                    "pocket_restricted": bool(pocket_resids),
+                },
             )
         except Exception as exc:
             logger.warning("Summary log failed: %s", exc)
@@ -286,19 +399,25 @@ def finalize_ligand_residence_result(
     residence = _segment_residence(times_arr, bound)
 
     csv_out = output_file or "ligand_residence.csv"
+    if working_dir and not Path(csv_out).is_absolute():
+        out_dir = Path(working_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        csv_out = str(out_dir / Path(csv_out).name)
     with open(csv_out, "w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(["time_ns", "bound", "min_contact_distance_A", "n_like_bound"])
         for t, b, d in zip(times_ns, bound_mask, min_dists):
             writer.writerow([f"{float(t):.6f}", int(b), f"{float(d):.4f}", int(b)])
 
-    json_out = "ligand_residence.json"
+    json_out = str(Path(csv_out).with_suffix(".json"))
     summary = {
         **residence,
         "bound_distance_A": bound_distance_A,
         "min_contacts": min_contacts,
         "pocket_residue_count": pocket_meta.get("pocket_residue_count", 0),
     }
+    if "bound_mode" in pocket_meta:
+        summary["bound_mode"] = pocket_meta["bound_mode"]
     summary.pop("bound_events_ns", None)
     summary.pop("unbound_events_ns", None)
     Path(json_out).write_text(_json.dumps(summary, indent=2), encoding="utf-8")
@@ -340,13 +459,24 @@ def compute_ligand_residence_from_universe(
     output_file: Optional[str] = None,
     working_dir: Optional[str] = None,
     frame_interval: int = 1,
+    pocket_resids: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """Ligand residence analysis from a pre-loaded Universe."""
-    pocket, _, meta = identify_pocket_atoms(
-        u, ligand_selection, protein_selection, pocket_cutoff
+    pocket, _, meta = resolve_pocket_atoms(
+        u,
+        pocket_resids=pocket_resids,
+        ligand_selection=ligand_selection,
+        protein_selection=protein_selection,
+        pocket_cutoff=pocket_cutoff,
     )
     ligand = u.select_atoms(ligand_selection)
-    protein_heavy = u.select_atoms(f"({protein_selection}) and not name H*")
+    if pocket_resids:
+        resid_str = " ".join(str(r) for r in meta.get("pocket_resids", pocket_resids))
+        protein_heavy = u.select_atoms(
+            f"({protein_selection}) and resid {resid_str} and not name H*"
+        )
+    else:
+        protein_heavy = u.select_atoms(f"({protein_selection}) and not name H*")
     ligand_heavy = ligand.select_atoms("not name H*")
 
     times: List[float] = []
@@ -354,13 +484,21 @@ def compute_ligand_residence_from_universe(
     min_dists: List[float] = []
     step = max(1, int(frame_interval))
 
+    box = None
     for ts in u.trajectory[::step]:
+        try:
+            pocket.wrap(compound="residues")
+            ligand.wrap(compound="residues")
+        except Exception:
+            pass
+        box = getattr(ts, "dimensions", None)
         pocket_com = pocket.center_of_mass()
         lig_com = ligand.center_of_mass()
-        com_dist = float(np.linalg.norm(lig_com - pocket_com))
+        com_dist = minimum_image_distance(pocket_com, lig_com, box)
         dist_arr = mda_distances.distance_array(
             protein_heavy.positions,
             ligand_heavy.positions,
+            box=box,
         )
         n_contacts = int(np.sum(dist_arr <= bound_distance_A))
         min_d = float(np.min(dist_arr)) if dist_arr.size else com_dist
@@ -368,6 +506,8 @@ def compute_ligand_residence_from_universe(
         times.append(ts.time / 1000.0)
         bound_mask.append(is_bound)
         min_dists.append(min_d)
+
+    bound_mask = _debounce_bound_mask(bound_mask, min_run=2)
 
     return finalize_ligand_residence_result(
         times,
@@ -393,12 +533,17 @@ def compute_pocket_rmsf_from_universe(
     working_dir: Optional[str] = None,
     align_trajectory: bool = True,
     skip_align: bool = False,
+    pocket_resids: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """Pocket RMSF from a pre-loaded (typically aligned) Universe."""
     from MDAnalysis.analysis import align, rms
 
-    _, resids, meta = identify_pocket_atoms(
-        u, ligand_selection, protein_selection, pocket_cutoff
+    _, resids, meta = resolve_pocket_atoms(
+        u,
+        pocket_resids=pocket_resids,
+        ligand_selection=ligand_selection,
+        protein_selection=protein_selection,
+        pocket_cutoff=pocket_cutoff,
     )
     resid_str = " ".join(str(r) for r in resids)
     pocket_ca_sel = f"protein and name CA and resid {resid_str}"
@@ -648,8 +793,12 @@ def calculate_pocket_sasa(
             return {"success": False, "error": f"Trajectory not found: {trajectory_file}"}
 
         u = mda.Universe(tpr, trajectory_file)
-        pocket, resids, meta = identify_pocket_atoms(
-            u, ligand_selection, protein_selection, pocket_cutoff
+        pocket, resids, meta = resolve_pocket_atoms(
+            u,
+            pocket_resids=None,
+            ligand_selection=ligand_selection,
+            protein_selection=protein_selection,
+            pocket_cutoff=pocket_cutoff,
         )
         _write_gmx_index(ndx_path, "Pocket", pocket.indices)
 

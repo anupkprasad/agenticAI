@@ -113,6 +113,12 @@ Primary library: **MDAnalysis v2.10.0**
 | `run_combined_com_distance_analysis` | COM distance overlay across simulations |
 | `collect_fel_features_table` | Aggregate `fel_features.json` from all sims into one classification CSV |
 | `collect_classification_features_table` | Full binding + FEL feature matrix (raw + z-score) for ML/clustering |
+| `build_consensus_sequence_alignment` | Star MSA to reference; consensus residue map for cross-sim PCA |
+| `fit_reference_pca_model` | Reference PCA on consensus Cα |
+| `project_simulations_reference_pca` | Project trajectories onto reference PCA |
+| `build_shared_reference_fel_landscapes` | Shared-grid FEL from reference-projected PCA |
+| `cluster_reference_fel_landscapes` | Cluster shared-reference FEL features |
+| `run_reference_landscape_pipeline` | End-to-end reference landscape workflow |
 | `plot_combined_rmsf_segment_bars` | Stacked segment RMSF bar chart |
 
 ### Additional analysis libraries

@@ -224,7 +224,7 @@ The reported **`n_basins`** (alias `n_minima`) is **not** the raw count of every
 2. **Detect local minima** on the smoothed surface (each cell lower than all 8 neighbours, with minimum **prominence** ≥ 1.5 kJ/mol or 8% of the F range).
 3. **Assign basins:** steepest descent from each grid cell to its nearest minimum; **population** \(p_i\) = sum of probability in that basin.
 4. **Filter & merge:**
-   - Drop basins with population < 5%.
+   - Drop basins with population < 5% (default).
    - While more than 8 basins remain, merge the **smallest** basin into the **largest**.
    - Stop when ≤ 8 basins and all meet the population threshold.
 
@@ -306,6 +306,77 @@ Run at `{base}/analysis/` after all per-simulation runs complete.
 | `plot_cluster_rmsf_profiles`            | After clustering: pocket/ligand RMSF profiles,**one subplot per cluster**               |
 | `build_sequence_phylo_tree`             | **On request**: sequence-based phylogenetic tree from sequences extracted from each input PDB (pairwise % identity → UPGMA) |
 | `build_structure_phylo_tree`            | **On request**: structure-based phylogenetic tree from CA coordinates (sequence-guided superposition → CA-RMSD → UPGMA)     |
+| `build_consensus_sequence_alignment`    | Star MSA to a reference (PDB list / FASTA / sim_dirs) → `consensus_alignment.fasta` + `consensus_residue_map.csv` |
+| `fit_reference_pca_model`               | Fit PCA on consensus Cα from a reference trajectory |
+| `project_simulations_reference_pca`     | Project all trajectories onto the reference PCA basis |
+| `build_shared_reference_fel_landscapes` | FEL in a **shared** PC1/PC2 grid from reference-projected PCA |
+| `cluster_reference_fel_landscapes`      | Cluster shared-reference FEL features → dendrogram + phylo tree |
+| `run_reference_landscape_pipeline`      | End-to-end wrapper: alignment → PCA → shared FEL → clustering |
+
+---
+
+## Reference-mapped pocket
+
+When ATP does not sit uniformly in the nucleotide pocket across pseudokinases,
+define the pocket on a **reference** structure and map residues to all systems
+via ``consensus_alignment.json``.
+
+| Tool | Purpose |
+| --- | --- |
+| `define_reference_consensus_pocket` | Reference pocket = consensus positions whose reference resid is within ``pocket_cutoff_A`` (default 10 Å) of the ligand at frame 0 |
+| `map_consensus_pocket_residues` | Per-simulation PDB resid lists + coverage audit |
+| `calculate_consensus_pocket_metrics` | One sim: COM distance, pocket SASA, pocket-restricted contacts, residence, pocket RMSF |
+| `run_consensus_pocket_metrics_batch` | End-to-end for all simulations |
+
+**Outputs:** ``{base}/analysis/reference_pocket_definition.json``,
+``reference_pocket_residue_map.csv``, and per-protein metrics under:
+``{base}/analysis/reference_pocket/{uniprot}/reference_pocket_*.csv/dat/json``.
+This is a combined-analysis tree; reference-pocket outputs are not written to
+``{uniprot}/analysis/``.
+
+**Classification:** use metric group ``reference_pocket`` in
+``collect_classification_features_table`` (columns prefixed
+``reference_pocket_``).
+
+Requires prior ``build_consensus_sequence_alignment`` and holo trajectories with ATP.
+
+---
+
+## Reference-projected landscape clustering
+
+For cross-simulation comparison when per-simulation PCA/FEL live in
+incomparable coordinate systems, use the **reference landscape** tools.
+Triggered when the user goal mentions *reference-projected PCA*,
+*consensus sequence alignment*, *shared reference FEL*, or
+``run_reference_landscape_pipeline`` (see ``detect_reference_landscape_requested``
+in ``agentic/planner/planning_guidelines.py``).
+
+**Typical workflow (modular or single wrapper):**
+
+| Step | Tool | Outputs (`{base}/analysis/`) |
+| --- | --- | --- |
+| 1 | `build_consensus_sequence_alignment` | `consensus_alignment.fasta`, `consensus_residue_map.csv`, `consensus_alignment.json` |
+| 2 | `fit_reference_pca_model` | `reference_pca_model.json` |
+| 3 | `project_simulations_reference_pca` | `reference_fel/{label}/reference_pca_projections.dat` |
+| 4 | `build_shared_reference_fel_landscapes` | `reference_fel/{label}/reference_fel_pc1_pc2.png`, `reference_fel/{label}/reference_fel_basins.png`, `reference_fel/{label}/fel_features.json`, `reference_fel_features_table.json` |
+| 5 | `cluster_reference_fel_landscapes` | `reference_fel_cluster_assignments.csv`, `reference_fel_dendrogram.png`, `reference_fel_phylo_tree.png` |
+
+Or run **`run_reference_landscape_pipeline`** with ``reference_label`` (e.g.
+``q8nb16`` for MLKL). After clustering, the agent runs
+``plot_cluster_feature_trajectories`` and ``plot_cluster_rmsf_profiles`` using
+``reference_fel_cluster_assignments.csv`` for mechanistic validation.
+
+**Consensus alignment inputs (one of):**
+
+- ``pdb_files`` + ``labels``
+- ``fasta_file`` (reference label must appear in FASTA)
+- ``sim_dirs`` + ``labels`` (PDB auto-resolved)
+
+Consensus columns = reference residues mapped in ≥ ``min_coverage`` fraction of
+sequences (default 0.95). Review ``consensus_residue_map.csv`` before PCA.
+
+**Reference PCA:** consensus Cα only (no ATP in coordinates). Each trajectory
+is Kabsch-aligned to the reference consensus Cα frame before projection.
 
 ---
 

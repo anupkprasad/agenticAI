@@ -174,6 +174,13 @@ class MDWorkflow:
         Scale with *remaining* per-sim work (not total queue size) so resume
         runs are not capped after re-processing already-finished simulations.
         """
+        if state.get("multi_sim_phase") == "hpc_pool":
+            pool = state.get("hpc_pool") or {}
+            interval = int(pool.get("check_interval_sec") or state.get("hpc_check_interval_sec") or 3600)
+            # supervisor + hpc_pool_wait per poll; allow ~7 days of hourly checks.
+            polls = max(48, int(7 * 86400 / max(interval, 60)))
+            return min(max(polls * 2 + 40, 120), 2000)
+
         if not state.get("is_multi_simulation"):
             return 40
         progress = state.get("multi_sim_progress") or {}
@@ -194,8 +201,14 @@ class MDWorkflow:
             remaining = len(state.get("sim_prompts") or [])
         steps_per_sim = 12
         combined_headroom = 50 if state.get("run_combined_analysis") else 0
+        # Parallel prep/analysis: parent only ticks the pool — still need headroom
+        # when many sims finish with failures and keep cycling supervisor ticks.
+        if state.get("multi_sim_phase") == "parallel_pool":
+            steps_per_sim = 4
+            combined_headroom = max(combined_headroom, 80)
         budget = steps_per_sim * max(remaining, 1) + combined_headroom
-        return min(max(budget, 80), 800)
+        # 38-sim campaigns exceed 800 steps if counting retry churn; keep a higher cap.
+        return min(max(budget, 120), 4000)
     
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph workflow with proper agent hierarchy."""
@@ -424,13 +437,18 @@ class MDWorkflow:
     def _hpc_pool_wait_node(self, state: MDState) -> MDState:
         """Sleep until the next SLURM poll while cross-sim HPC jobs run."""
         import time
-        from agentic.multi_sim_hpc_pool import init_hpc_pool, pool_summary
+        from agentic.multi_sim_hpc_pool import (
+            init_hpc_pool,
+            persist_hpc_pool_checkpoint,
+            pool_summary,
+        )
 
         pool = init_hpc_pool(state)
         interval = int(pool.get("check_interval_sec") or state.get("hpc_check_interval_sec") or 7200)
         summary = state.get("hpc_pool_status_summary") or pool_summary(state)
         from agentic.multi_sim_hpc_pool import log_pool_to_base
 
+        persist_hpc_pool_checkpoint(state)
         log_pool_to_base(
             state,
             f"Pool sleep — next SLURM check in {interval}s",
@@ -829,6 +847,10 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             
             state_path.write_text(json.dumps(entry, indent=2, default=str) + "\n", encoding="utf-8")
 
+            from agentic.utils.state_persistence import write_pool_status_json
+
+            write_pool_status_json(state, supervisor_dir)
+
             # Mirror to active per-sim directory when different from base.
             if state.get("is_multi_simulation") and multi_base_dir:
                 base_dir = Path(str(multi_base_dir)).resolve()
@@ -978,6 +1000,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "multi_sim_base_dir": None,
             "combined_only": False,
             "resume_failed_only": None,
+            "requeue_failed_sims": None,
             "multisim_resume_applied": False,
             "workflow_loop_streak": 0,
             "workflow_loop_key": None,
@@ -1223,8 +1246,43 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
 
                 if state.get("resume_failed_only") and not state.get("combined_only"):
                     reconcile_multisim_progress_from_disk(state, working_dir)
-                    if multisim_workflow_incomplete(state.get("multi_sim_progress")):
-                        prepare_multisim_resume_state(state)
+                    # Sequential resume binding fights hpc/parallel pool orchestration.
+                    phase_now = state.get("multi_sim_phase")
+                    if phase_now not in ("hpc_pool", "parallel_pool"):
+                        if multisim_workflow_incomplete(state.get("multi_sim_progress")):
+                            prepare_multisim_resume_state(state)
+                    else:
+                        logger.info(
+                            "[resume] Skipping prepare_multisim_resume_state "
+                            "(phase=%s — pool tick owns routing)",
+                            phase_now,
+                        )
+                        # Allow parallel prep to restart for remaining pending sims.
+                        state.pop("hpc_pool_prep_parallel", None)
+                        state["requeue_failed_sims"] = True
+                        pool = state.get("hpc_pool") or {}
+                        if pool.get("awaiting_hitl"):
+                            logger.warning(
+                                "[resume] Clearing stale hpc_pool.awaiting_hitl so "
+                                "unrelated sims can continue"
+                            )
+                            pool["awaiting_hitl"] = False
+                            pool.pop("hitl_reason", None)
+                            state["hpc_pool"] = pool
+                        # Drop stale per-sim bind so pool tick can choose the next prep label.
+                        progress = state.get("multi_sim_progress") or {}
+                        if progress:
+                            progress["active_sim_label"] = None
+                            progress["active_agent"] = None
+                            state["multi_sim_progress"] = progress
+                        state["hpc_pool_prep_only"] = False
+                        state.pop("hpc_pool_agent_filter", None)
+                        state["input_validated"] = None
+                        state["execution_plan"] = None
+                        state["plan_executed"] = False
+                        base = state.get("multi_sim_base_dir") or working_dir
+                        if base:
+                            state["working_directory"] = str(Path(base).resolve())
                     from agentic.multi_sim_progress import merge_completed_states_from_progress
 
                     merge_completed_states_from_progress(state)
@@ -1415,6 +1473,16 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     logger.info("Saved parallel pool checkpoint after interrupt")
                 except Exception as exc:
                     logger.warning("Parallel pool interrupt checkpoint failed: %s", exc)
+            elif target.get("multi_sim_phase") == "hpc_pool" and target.get("hpc_pool"):
+                try:
+                    from agentic.multi_sim_hpc_pool import persist_hpc_pool_checkpoint
+
+                    target["workflow_status"] = "in_progress:interrupted"
+                    persist_hpc_pool_checkpoint(target)
+                    active["state"] = target
+                    logger.info("Saved HPC pool checkpoint after interrupt")
+                except Exception as exc:
+                    logger.warning("HPC pool interrupt checkpoint failed: %s", exc)
 
         def _signal_handler(signum, frame):  # noqa: ARG001
             _checkpoint_interrupt()
@@ -1461,6 +1529,14 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     from agentic.multi_sim_parallel_pool import persist_parallel_pool_interrupt
 
                     persist_parallel_pool_interrupt(target)
+                except Exception:
+                    pass
+            elif target.get("multi_sim_phase") == "hpc_pool" and target.get("hpc_pool"):
+                try:
+                    from agentic.multi_sim_hpc_pool import persist_hpc_pool_checkpoint
+
+                    target["workflow_status"] = "in_progress:interrupted"
+                    persist_hpc_pool_checkpoint(target)
                 except Exception:
                     pass
             target.setdefault("errors", []).append(f"Workflow error: {str(e)}")

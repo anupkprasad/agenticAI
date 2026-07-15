@@ -30,99 +30,13 @@ def detect_component_cases(
 
     When the user requests multiple systems per PDB (e.g. apo + holo), returns
     one case dict per variant. Otherwise returns a single default case.
+
+    Uses the original user goal only; enriched/rephrased prompts are ignored
+    because technical details (e.g. "1.2 nm buffer") cause false apo+holo splits.
     """
-    text = _normalize_goal_text(f"{user_goal}\n{enriched_prompt}")
+    from .component_case_resolver import heuristic_component_cases
 
-    has_protein_only = bool(
-        re.search(r"\bprotein[\s\-]*(only|alone)\b", text)
-        or re.search(r"\bonly\s+the\s+protein\b", text)
-        or re.search(r"\bapo\s+(?:system|simulation|state|form|protein)\b", text)
-        or "apoprotein" in text
-    )
-    has_atp = "atp" in text
-    has_holo = bool(
-        re.search(r"\bholo\b", text)
-        or re.search(r"\bprotein\s*\+\s*atp\b", text)
-        or re.search(r"protein\s*\+\s*atp\s*\+\s*mg", text)
-    )
-    has_mg = bool(re.search(r"\bmg(?:2\+?|\u00b2\+?)?\b", text))
-    has_case_language = bool(
-        re.search(
-            r"two\s+(?:different\s+)?(?:cases?|simulation\s+systems?|systems?\s+per\s+(?:file|pdb))\b"
-            r"|two\s+systems\s+per\s+file"
-            r"|case\s*[:\-]"
-            r"|\bcase\s*1\b"
-            r"|\bcase\s*2\b"
-            r"|\(\s*1\s*\)"
-            r"|\(\s*2\s*\)"
-            r"|\b1\.\b"
-            r"|\b2\.\b"
-            r"|\bapo\s*(?:/|vs|versus|and)\s*holo\b"
-            r"|(?:\(a\)|\(b\))",
-            text,
-        )
-    )
-
-    if pdb_count > 0:
-        for match in re.finditer(
-            r"(?:total\s+)?(\d+)\s+(?:resulting\s+)?(?:simulations?|jobs?|runs?)\b",
-            text,
-        ):
-            try:
-                requested = int(match.group(1))
-            except ValueError:
-                continue
-            if requested == pdb_count * 2:
-                has_case_language = True
-                break
-        word_to_count = {
-            "two": 2,
-            "four": 4,
-            "six": 6,
-            "eight": 8,
-            "ten": 10,
-            "twelve": 12,
-            "sixteen": 16,
-        }
-        for word, count in word_to_count.items():
-            if re.search(
-                rf"\b{word}\s+(?:resulting\s+)?(?:simulations?|jobs?|runs?)\b",
-                text,
-            ) and count == pdb_count * 2:
-                has_case_language = True
-                break
-
-    if has_case_language and has_protein_only and (has_atp or has_holo):
-        full_suffix = "ATP_MG" if has_mg else "ATP"
-        full_desc = "protein + ATP + MG" if has_mg else "protein + ATP"
-        full_directive = (
-            "Keep protein with ATP ligand and Mg ions from the source PDB."
-            if has_mg
-            else "Keep protein with ATP ligand from the source PDB."
-        )
-        return [
-            {
-                "case_id": "protein_only",
-                "suffix": "",
-                "description": "protein only",
-                "directive": "Use protein-only system. Remove ATP, ligands, and non-essential ions.",
-            },
-            {
-                "case_id": "protein_with_ligand",
-                "suffix": full_suffix,
-                "description": full_desc,
-                "directive": full_directive,
-            },
-        ]
-
-    return [
-        {
-            "case_id": "default",
-            "suffix": "",
-            "description": "default system from input PDB",
-            "directive": "Use the full biologically relevant system present in the input PDB.",
-        }
-    ]
+    return heuristic_component_cases(user_goal, pdb_count=pdb_count)
 
 
 def parse_component_selection(user_goal: str, analysis: Dict[str, Any]) -> Dict[str, Any]:
