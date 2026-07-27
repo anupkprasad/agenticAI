@@ -318,6 +318,7 @@ def merge_completed_states_from_progress(state: Dict[str, Any]) -> None:
     if not progress:
         return
     agents = progress.get("required_agents") or _required_agents(state)
+    hpc_only = list(agents) == ["hpc"]
     completed = list(state.get("completed_sim_states") or [])
     by_label = {
         str(s.get("label")): s for s in completed if s.get("label")
@@ -326,32 +327,64 @@ def merge_completed_states_from_progress(state: Dict[str, Any]) -> None:
     for label in progress.get("sim_order") or []:
         rec = _sim_record(progress, label) or {}
         agent_map = rec.get("agents") or {}
-        if rec.get("status") != "done" and any(
-            agent_map.get(a) != "done" for a in agents
-        ):
-            continue
         wd = rec.get("working_dir") or ""
-        if wd and not per_sim_post_hpc_artifacts_ready(wd):
-            continue
-        if label in by_label:
-            continue
+        job_info = load_local_continuation_job(wd) if wd else None
+        hpc_submitted = bool(job_info and job_info.get("job_id"))
+        hpc_complete = bool(job_info and job_info.get("complete"))
+
+        agents_done = rec.get("status") == "done" or (
+            bool(agents) and all(agent_map.get(a) == "done" for a in agents)
+        )
+        if hpc_only:
+            if not (hpc_submitted or hpc_complete or agents_done):
+                continue
+        else:
+            if rec.get("status") != "done" and any(
+                agent_map.get(a) != "done" for a in agents
+            ):
+                continue
+            if wd and not per_sim_post_hpc_artifacts_ready(wd) and not hpc_submitted:
+                continue
+
         idx = rec.get("index", 0)
         for i, sp in enumerate(sim_prompts):
             if sp.get("label") == label:
                 idx = i
                 break
-        tpr = Path(wd) / "hpc" / "md.tpr"
-        xtc = Path(wd) / "hpc" / "mdWrap.xtc"
-        if not xtc.is_file():
+        tpr = Path(wd) / "hpc" / "md.tpr" if wd else None
+        xtc = Path(wd) / "hpc" / "mdWrap.xtc" if wd else None
+        if xtc is not None and not xtc.is_file():
             xtc = Path(wd) / "hpc" / "md.xtc"
+        job_id = (job_info or {}).get("job_id")
+        job_status = (job_info or {}).get("status")
+        success = bool(hpc_complete or hpc_submitted or agents_done)
+        # Prefer disk truth over a stale failed snapshot.
+        existing = by_label.get(label)
+        if existing and existing.get("success") is False and success:
+            existing = None
+        if existing and not job_id:
+            continue
+        if label in by_label and existing is not None and by_label[label].get("success"):
+            # Keep success snapshot but refresh job metadata from disk.
+            snap = by_label[label]
+            if job_id:
+                snap["job_id"] = job_id
+                snap["continuation_job_id"] = job_id
+                snap["job_status"] = job_status
+                snap["success"] = True
+            continue
         by_label[label] = {
             "sim_index": idx,
             "label": label,
             "working_directory": wd,
-            "success": True,
+            "success": success,
             "skipped": False,
-            "topology": str(tpr) if tpr.is_file() else None,
-            "trajectory_path": str(xtc) if xtc.is_file() else None,
+            "job_id": job_id,
+            "continuation_job_id": job_id,
+            "job_status": job_status,
+            "continuation_manifest": (job_info or {}).get("manifest_path"),
+            "topology": str(tpr) if tpr is not None and tpr.is_file() else None,
+            "trajectory_path": str(xtc) if xtc is not None and xtc.is_file() else None,
             "errors": [],
             "warnings": [],
             "_source": "disk_progress",
@@ -643,13 +676,13 @@ def _next_pending_agent(progress: Dict[str, Any], sim_label: str) -> Optional[st
 def _next_incomplete_sim(progress: Dict[str, Any]) -> Optional[str]:
     for label in progress.get("sim_order") or []:
         rec = _sim_record(progress, label)
-        if rec and rec.get("status") != "done":
-            return label
-        if rec:
-            agents = progress.get("required_agents") or []
-            done = rec.get("agents") or {}
-            if any(done.get(a) != "done" for a in agents):
-                return label
+        if not rec:
+            continue
+        if rec.get("status") in ("failed", "skipped"):
+            continue
+        if _sim_all_agents_done(progress, label):
+            continue
+        return label
     return None
 
 
@@ -662,10 +695,8 @@ def _load_per_sim_checkpoint(working_dir: str) -> Optional[Dict[str, Any]]:
         entry = json.loads(state_path.read_text(encoding="utf-8"))
         return entry.get("state") or entry
     except RecursionError:
-        logger.warning(
-            "Per-sim state at %s is too deeply nested to parse; using disk artifacts only",
-            state_path,
-        )
+        # Can surface when the caller is already near the recursion limit;
+        # avoid logging here (logging itself may need stack for isinstance).
         return None
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("Could not read per-sim state at %s: %s", state_path, exc)
@@ -725,6 +756,23 @@ def _reconcile_sim_agents_from_per_sim_state(
     if per_sim.get("reporter_output") and "reporter" in agents:
         if wd and per_sim_reporter_done_on_disk(wd):
             rec["agents"]["reporter"] = "done"
+
+    # Only honor continuation/job metadata that lives under this sim's directory.
+    if "hpc" in agents and wd and rec["agents"].get("hpc") != "done":
+        manifest = per_sim.get("continuation_manifest")
+        job = per_sim.get("continuation_job_id") or per_sim.get("job_id")
+        local = False
+        if manifest:
+            try:
+                local = Path(manifest).resolve().is_relative_to(Path(wd).resolve())
+            except (OSError, ValueError):
+                local = False
+        if local and job:
+            evidence = _local_hpc_submission_evidence(Path(wd))
+            if evidence == "done":
+                rec["agents"]["hpc"] = "done"
+            elif evidence == "in_progress":
+                rec["agents"]["hpc"] = "in_progress"
 
     _merge_pipeline_from_per_sim(rec, per_sim)
 
@@ -793,6 +841,89 @@ def multisim_resume_entry_allowed(state: Dict[str, Any], multi_sim_phase: Option
     )
 
 
+def _local_hpc_submission_evidence(sim_dir: Path) -> Optional[str]:
+    """
+    Return ``done`` / ``in_progress`` when this sim dir has its own HPC evidence.
+
+    A non-empty ``hpc/`` from a prior 100 ns run is not enough — that used to
+    mark every continuation target ``hpc=in_progress`` and confuse multi-sim
+    progress with false completions.
+
+    A continuation manifest that already has a SLURM ``job_id`` counts as
+    ``done`` for multi-sim routing (do not re-prepare / re-submit).
+    """
+    info = load_local_continuation_job(sim_dir)
+    if info and info.get("complete"):
+        return "done"
+    if info and info.get("job_id"):
+        return "done"
+    if info and info.get("manifest_path"):
+        return "in_progress"
+    hpc_dir = Path(sim_dir) / "hpc"
+    if not hpc_dir.is_dir():
+        return None
+    label = Path(sim_dir).name
+    if label and list(hpc_dir.glob(f"{label}_*.out")):
+        return "in_progress"
+    return None
+
+
+def load_local_continuation_job(sim_dir: Optional[str] | Path) -> Optional[Dict[str, Any]]:
+    """Read this sim's ``hpc/continuation_200ns.json`` job metadata, if any."""
+    if not sim_dir:
+        return None
+    root = Path(sim_dir)
+    hpc_dir = root / "hpc" if (root / "hpc").is_dir() else root
+    manifest = hpc_dir / "continuation_200ns.json"
+    complete = hpc_dir / ".continuation_200ns.complete"
+    out: Dict[str, Any] = {
+        "simulation_dir": str(hpc_dir.resolve()) if hpc_dir.is_dir() else str(root),
+        "complete": complete.is_file(),
+    }
+    if not manifest.is_file():
+        return out if out["complete"] else None
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    job_id = data.get("job_id")
+    out.update(
+        {
+            "manifest_path": str(manifest.resolve()),
+            "job_id": str(job_id) if job_id not in (None, "") else None,
+            "status": data.get("status"),
+            "job_name": data.get("job_name"),
+            "job_script": data.get("job_script"),
+        }
+    )
+    return out
+
+
+def hydrate_continuation_job_into_state(state: Dict[str, Any]) -> bool:
+    """
+    Copy a *local* continuation job id from disk into ``state``.
+
+    Returns True when ``continuation_job_id`` / ``job_id`` now refer to this
+    sim's own manifest (so callers can mark HPC done).
+    """
+    wd = state.get("working_directory")
+    info = load_local_continuation_job(wd)
+    if not info or not info.get("job_id"):
+        return False
+    state["continuation_job_id"] = str(info["job_id"])
+    state["job_id"] = str(info["job_id"])
+    status = str(info.get("status") or "SUBMITTED")
+    state["continuation_status"] = status
+    state["job_status"] = status
+    if info.get("manifest_path"):
+        state["continuation_manifest"] = info["manifest_path"]
+    if info.get("job_script"):
+        state["job_script"] = info["job_script"]
+    return True
+
+
 def _reconcile_sim_agents_from_disk(rec: Dict[str, Any], agents: List[str]) -> None:
     """Update agent status from on-disk artifacts (resume / continue helper)."""
     if not rec:
@@ -810,7 +941,16 @@ def _reconcile_sim_agents_from_disk(rec: Dict[str, Any], agents: List[str]) -> N
             "reporter": "reporter",
         }.get(agent, agent)
         marker = sim_dir / sub
-        if agent == "analysis" and (marker / "analysis_summary.jsonl").is_file():
+        if agent == "hpc":
+            evidence = _local_hpc_submission_evidence(sim_dir)
+            if evidence == "done":
+                rec["agents"][agent] = "done"
+            elif evidence == "in_progress" and rec["agents"].get(agent) != "done":
+                rec["agents"][agent] = "in_progress"
+            elif rec["agents"].get(agent) not in ("done", "failed"):
+                # Prior production files alone do not mean this run's HPC started.
+                rec["agents"][agent] = "pending"
+        elif agent == "analysis" and (marker / "analysis_summary.jsonl").is_file():
             rec["agents"][agent] = "done"
         elif agent == "reporter" and per_sim_reporter_done_on_disk(str(sim_dir)):
             rec["agents"][agent] = "done"
@@ -975,6 +1115,8 @@ def _sim_all_agents_done(progress: Dict[str, Any], sim_label: str) -> bool:
     rec = _sim_record(progress, sim_label)
     if not rec:
         return False
+    if rec.get("status") == "failed":
+        return True
     agents = progress.get("required_agents") or []
     done = rec.get("agents") or {}
     if not agents:
@@ -1165,10 +1307,23 @@ def bind_workflow_to_sim(state: Dict[str, Any], sim_label: str) -> None:
             "execution_plan",
             "analysis_instructions",
             "reporter_instructions",
+            "job_id",
+            "job_status",
+            "job_script",
+            "continuation_job_id",
+            "continuation_status",
+            "continuation_manifest",
+            "continuation_simulation_dir",
+            "continuation_source_tpr",
+            "continuation_checkpoint",
+            "continuation_tpr",
+            "continuation_current_ns",
+            "continuation_target_total_ns",
         ):
             state[key] = None
         state["plan_executed"] = False
         state["input_validated"] = None
+        state["hpc_retry_count"] = 0
         paused = progress.get("hitl_paused_at")
         if isinstance(paused, dict) and paused.get("sim_label") != sim_label:
             progress["hitl_paused_at"] = None

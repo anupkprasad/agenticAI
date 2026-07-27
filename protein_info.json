@@ -1,10 +1,10 @@
-{ "dataInfo":{
-  "binding_type_JM": "this tells the binding type based on the Jams Murfy paper",
-  "binding_type_visAMP": "this tells the binding type based on visual AMP binding",
-  "binding_lig_mg": "this tells the binding type based on both ATP and mg binding status",
-  "description": "This JSON file contains detailed information about various proteins, including their names, aliases, binding types, descriptions, sequences, and simulation statuses. The data is structured in a way that allows for easy access to each protein's attributes using their unique identifiers (UIDs) as keys."
+{
+  "dataInfo": {
+    "binding_type_JM": "this tells the binding type based on the Jams Murfy paper",
+    "binding_type_visAMP": "this tells the binding type based on visual AMP binding",
+    "binding_lig_mg": "this tells the binding type based on both ATP and mg binding status",
+    "description": "This JSON file contains detailed information about various proteins, including their names, aliases, binding types, descriptions, sequences, and simulation statuses. The data is structured in a way that allows for easy access to each protein's attributes using their unique identifiers (UIDs) as keys."
   },
-
   "proteins": {
     "O14936KD2": {
       "name": "CSKPKD2",
@@ -885,7 +885,285 @@
     "created_date": "2025-09-18",
     "description": "Protein information database for pseudokinase RMSF analysis",
     "total_proteins": 62,
-    "notes": "UniProt IDs starting with 'NA_' are custom identifiers for proteins without standard UniProt entries",
-    "last_modified": "2025-11-27 12:52:22"
+    "notes": "UniProt IDs starting with 'NA_' are custom identifiers for proteins without standard UniProt entries | Added pseudokinase_stats summarizing binding_lig_mg groups, /pseudoKin completion, non-pseudokinase sims (*), and <200 ns runs.",
+    "last_modified": "2026-07-21 16:42:32"
+  },
+  "pseudokinase_stats": {
+    "description": "Summary of the \"pseudokinase\" study list versus simulations under /pseudoKin. UniProt IDs prefixed with * are present in /pseudoKin but are NOT members of the \"pseudokinase\" list (e.g. ground-truth active kinases). Simulation length is the last time_ns from ligand/pocket distance analysis CSVs.",
+    "n_pseudokinase_target": 45,
+    "n_done_in_pseudoKin": 33,
+    "n_not_yet_simulated": 12,
+    "by_binding_lig_mg": {
+      "Nucleotide-Cation-binding-Mg1-Mg2": {
+        "count": 23,
+        "uniprots": [
+          "O15197",
+          "O43187",
+          "P21860",
+          "P23458",
+          "P51841",
+          "Q05823",
+          "Q13308",
+          "Q58A45",
+          "Q5JZY3",
+          "Q6VAB6",
+          "Q7Z7A4",
+          "Q8IV63",
+          "Q8IVT5",
+          "Q8NB16",
+          "Q8NCB2",
+          "Q8TEA7",
+          "Q8WZ42",
+          "Q96QS6",
+          "Q96S38",
+          "Q9BXU1",
+          "Q9NSY0",
+          "Q9UHY1",
+          "Q9Y616"
+        ],
+        "done_in_pseudoKin": [
+          "O15197",
+          "O43187",
+          "P21860",
+          "P23458",
+          "P51841",
+          "Q05823",
+          "Q13308",
+          "Q58A45",
+          "Q5JZY3",
+          "Q6VAB6",
+          "Q7Z7A4",
+          "Q8IV63",
+          "Q8IVT5",
+          "Q8NB16",
+          "Q8NCB2",
+          "Q8TEA7",
+          "Q8WZ42",
+          "Q96QS6",
+          "Q96S38",
+          "Q9BXU1",
+          "Q9NSY0",
+          "Q9UHY1",
+          "Q9Y616"
+        ],
+        "not_yet_simulated": []
+      },
+      "No-binding-0": {
+        "count": 12,
+        "uniprots": [
+          "O14936KD2",
+          "P34925",
+          "Q6P3W7",
+          "Q6ZS72",
+          "Q86YV5",
+          "Q8IWB6",
+          "Q8IZE3",
+          "Q96KG9",
+          "Q96RU7",
+          "Q96RU8",
+          "Q9H792",
+          "Q9Y4A5"
+        ],
+        "done_in_pseudoKin": [],
+        "not_yet_simulated": [
+          "O14936KD2",
+          "P34925",
+          "Q6P3W7",
+          "Q6ZS72",
+          "Q86YV5",
+          "Q8IWB6",
+          "Q8IZE3",
+          "Q96KG9",
+          "Q96RU7",
+          "Q96RU8",
+          "Q9H792",
+          "Q9Y4A5"
+        ]
+      },
+      "Nucleotide-Cation-binding-Mg1": {
+        "count": 10,
+        "uniprots": [
+          "O60674",
+          "P25092",
+          "P29597",
+          "P52333",
+          "Q13418",
+          "Q7RTN6",
+          "Q8NE28",
+          "Q92519",
+          "Q96C45",
+          "Q9C0K7"
+        ],
+        "done_in_pseudoKin": [
+          "O60674",
+          "P25092",
+          "P29597",
+          "P52333",
+          "Q13418",
+          "Q7RTN6",
+          "Q8NE28",
+          "Q92519",
+          "Q96C45",
+          "Q9C0K7"
+        ],
+        "not_yet_simulated": []
+      }
+    },
+    "by_binding_lig_mg_uniprots": {
+      "Nucleotide-Cation-binding-Mg1-Mg2": [
+        "O15197",
+        "O43187",
+        "P21860",
+        "P23458",
+        "P51841",
+        "Q05823",
+        "Q13308",
+        "Q58A45",
+        "Q5JZY3",
+        "Q6VAB6",
+        "Q7Z7A4",
+        "Q8IV63",
+        "Q8IVT5",
+        "Q8NB16",
+        "Q8NCB2",
+        "Q8TEA7",
+        "Q8WZ42",
+        "Q96QS6",
+        "Q96S38",
+        "Q9BXU1",
+        "Q9NSY0",
+        "Q9UHY1",
+        "Q9Y616"
+      ],
+      "No-binding-0": [
+        "O14936KD2",
+        "P34925",
+        "Q6P3W7",
+        "Q6ZS72",
+        "Q86YV5",
+        "Q8IWB6",
+        "Q8IZE3",
+        "Q96KG9",
+        "Q96RU7",
+        "Q96RU8",
+        "Q9H792",
+        "Q9Y4A5"
+      ],
+      "Nucleotide-Cation-binding-Mg1": [
+        "O60674",
+        "P25092",
+        "P29597",
+        "P52333",
+        "Q13418",
+        "Q7RTN6",
+        "Q8NE28",
+        "Q92519",
+        "Q96C45",
+        "Q9C0K7"
+      ]
+    },
+    "pseudokinase_done_in_pseudoKin": [
+      "O15197",
+      "O43187",
+      "O60674",
+      "P21860",
+      "P23458",
+      "P25092",
+      "P29597",
+      "P51841",
+      "P52333",
+      "Q05823",
+      "Q13308",
+      "Q13418",
+      "Q58A45",
+      "Q5JZY3",
+      "Q6VAB6",
+      "Q7RTN6",
+      "Q7Z7A4",
+      "Q8IV63",
+      "Q8IVT5",
+      "Q8NB16",
+      "Q8NCB2",
+      "Q8NE28",
+      "Q8TEA7",
+      "Q8WZ42",
+      "Q92519",
+      "Q96C45",
+      "Q96QS6",
+      "Q96S38",
+      "Q9BXU1",
+      "Q9C0K7",
+      "Q9NSY0",
+      "Q9UHY1",
+      "Q9Y616"
+    ],
+    "pseudokinase_not_yet_simulated": [
+      "O14936KD2",
+      "P34925",
+      "Q6P3W7",
+      "Q6ZS72",
+      "Q86YV5",
+      "Q8IWB6",
+      "Q8IZE3",
+      "Q96KG9",
+      "Q96RU7",
+      "Q96RU8",
+      "Q9H792",
+      "Q9Y4A5"
+    ],
+    "non_pseudokinase_simulations_in_pseudoKin": [
+      "*P00533",
+      "*P17612",
+      "*P24941",
+      "*P28482",
+      "*Q9Y243"
+    ],
+    "simulations_less_than_200ns": [
+      {
+        "uniprot": "O60674",
+        "sim_dir": "o60674",
+        "duration_ns": 100.0,
+        "source": "/home/akp66103/workspace/agenticAI/pseudoKin/o60674/analysis/ligand_pocket_distance.csv"
+      },
+      {
+        "uniprot": "P25092",
+        "sim_dir": "p25092",
+        "duration_ns": 100.0,
+        "source": "/home/akp66103/workspace/agenticAI/pseudoKin/p25092/analysis/ligand_pocket_distance.csv"
+      },
+      {
+        "uniprot": "Q05823",
+        "sim_dir": "q05823",
+        "duration_ns": 100.0,
+        "source": "/home/akp66103/workspace/agenticAI/pseudoKin/q05823/analysis/ligand_pocket_distance.csv"
+      },
+      {
+        "uniprot": "Q8TEA7",
+        "sim_dir": "q8tea7",
+        "duration_ns": 100.0,
+        "source": "/home/akp66103/workspace/agenticAI/pseudoKin/q8tea7/analysis/ligand_pocket_distance.csv"
+      },
+      {
+        "uniprot": "Q92519",
+        "sim_dir": "q92519",
+        "duration_ns": 100.0,
+        "source": "/home/akp66103/workspace/agenticAI/pseudoKin/q92519/analysis/ligand_pocket_distance.csv"
+      },
+      {
+        "uniprot": "Q9NSY0",
+        "sim_dir": "q9nsy0",
+        "duration_ns": 100.0,
+        "source": "/home/akp66103/workspace/agenticAI/pseudoKin/q9nsy0/analysis/ligand_pocket_distance.csv"
+      }
+    ],
+    "named_protein_dirs_in_pseudoKin": [],
+    "generated": "2026-07-21 16:42:32",
+    "notes": [
+      "Matching is case-insensitive between UniProt IDs and /pseudoKin/{uid} directories.",
+      "Duration source preference: analysis/ligand_pocket_distance.csv, then consensus/reference pocket distance CSVs.",
+      "Entries marked *{uniprot} are simulations that are not members of the \"pseudokinase\" list.",
+      "Directories reporter/ and supervisor/ under /pseudoKin were ignored as non-simulation folders.",
+      "Removed RYK, ROP2, and ROP5Bi because they contained only md.tpr and no .xtc trajectory."
+    ]
   }
 }

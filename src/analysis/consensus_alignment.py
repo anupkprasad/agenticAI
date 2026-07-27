@@ -422,10 +422,17 @@ def build_consensus_sequence_alignment(
       * ``fasta_file`` (headers become labels; reference must appear in FASTA)
       * ``sim_dirs`` + ``labels`` (PDBs resolved from ``base_dir`` / sim folders)
 
+    Each non-reference sequence is pairwise-aligned to the reference (Biopython
+    PairwiseAligner, global, BLOSUM62, gap open/extend −10/−0.5); MSA columns
+    are indexed by reference residues. This star MSA is the basis for
+    reference-projected PCA **and** for transferring the reference ligand pocket
+    via ``define_reference_consensus_pocket`` / pocket metrics.
+
     The reference sequence is listed **first** in the output FASTA. Consensus
     columns are reference residues mapped in at least ``min_coverage`` fraction
     of sequences (default 0.85). Use ``consensus_residue_map.csv`` to verify
-    residue mappings before reference-projected PCA.
+    residue mappings before reference-projected PCA. Visualize with
+    ``plot_reference_msa_alignment``.
 
     Args:
         working_dir: Output directory (e.g. ``{base}/analysis``).

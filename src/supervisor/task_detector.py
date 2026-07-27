@@ -20,7 +20,7 @@ def detect_task_required_inputs(
 
     Args:
         subtask_type: Type of subtask (analysis_only, setup_only, preprocess_only,
-                      reporter_only, multi_agent, full_task)
+                      hpc_only, reporter_only, multi_agent, full_task)
         agent_list: Ordered list of agent names for multi_agent workflows
 
     Returns:
@@ -46,6 +46,14 @@ def detect_task_required_inputs(
             "pdb_analysis_required": False,
             "trajectory_path_required": False,
             "topology_required": False
+        })
+    elif subtask_type == "hpc_only":
+        # Existing HPC dirs / continuation: no fresh PDB analysis required.
+        inputs_needed.update({
+            "pdb_required": False,
+            "pdb_analysis_required": False,
+            "trajectory_path_required": False,
+            "topology_required": False,
         })
     elif subtask_type in ["setup_only", "preprocess_only"]:
         inputs_needed.update({

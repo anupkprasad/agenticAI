@@ -22,7 +22,10 @@ from ..utils import (
 )
 from .tools import (
     copy_simulation_files, estimate_simulation_time, create_slurm_script,
-    submit_job, check_job_status, download_results
+    submit_job, check_job_status, download_results,
+    inspect_gromacs_continuation, prepare_gromacs_continuation,
+    create_gromacs_continuation_script, submit_gromacs_continuation,
+    monitor_gromacs_continuation,
 )
 
 logger = logging.getLogger(__name__)
@@ -402,6 +405,13 @@ class MDHPCAgent:
 **CRITICAL INSTRUCTIONS:**
 - You MUST ONLY use the tools listed above
 - Every "tool_name" must match exactly one of the tool names listed
+- If the request extends/continues an existing simulation, set hpc_action="continue"
+  and use ONLY this order: inspect_gromacs_continuation →
+  prepare_gromacs_continuation → create_gromacs_continuation_script →
+  submit_gromacs_continuation → monitor_gromacs_continuation.
+- A continuation MUST use the existing simulation directory containing md.tpr
+  and md.cpt. Never copy setup files or rerun minimization/NVT/NPT.
+- Prefer target_total_ns over extend_ns so repeated plans are idempotent.
 - For copy_simulation_files: source_dir MUST be "{simsetup_dir}", dest_dir MUST be "{hpc_dir_path}"
 - For create_slurm_script: job_name MUST be "{job_name}", working_dir MUST be "{hpc_dir_path}"
 - For submit_job: remote_dir MUST be "{hpc_dir_path}"
@@ -500,6 +510,38 @@ Output as JSON with this structure:
     • remote_host (optional): No description
     • remote_user (optional): No description
     • ssh_key_path (optional): No description
+
+→ inspect_gromacs_continuation
+  Read-only readiness check for extending an existing checkpointed GROMACS run.
+  Parameters:
+    • simulation_dir (required): Existing directory containing md.tpr/md.cpt
+    • deffnm (optional): Existing output prefix, normally "md"
+
+→ prepare_gromacs_continuation
+  Create an idempotent target-specific continuation manifest.
+  Parameters:
+    • simulation_dir (required): Existing checkpointed simulation directory
+    • target_total_ns (optional): Preferred final total simulation time
+    • extend_ns (optional): Added time; use only when target total is unavailable
+    • deffnm (optional): Existing output prefix, normally "md"
+
+→ create_gromacs_continuation_script
+  Create a continuation-only SLURM script using convert-tpr and mdrun -cpi -append.
+  Parameters:
+    • manifest_path (required): Manifest from prepare_gromacs_continuation
+    • job_name, partition, cpus_per_task, memory, time_limit, gpu_count (optional)
+
+→ submit_gromacs_continuation
+  Submit the continuation exactly once and persist the numeric SLURM job ID.
+  Parameters:
+    • manifest_path (required)
+    • script_path (optional): Defaults to script recorded in manifest
+    • allow_resubmit_failed (optional): Must be explicit after a failed job
+
+→ monitor_gromacs_continuation
+  Check SLURM plus the target-specific completion marker and update the manifest.
+  Parameters:
+    • manifest_path (required)
 """
 
     def replan_with_guidance(self, human_recommendation: str, state: dict) -> Optional[dict]:
@@ -621,9 +663,111 @@ Output as JSON with this structure:
             pass
         
         return 50000
+
+    def _is_continuation_request(self, state: MDState) -> bool:
+        """Return True when state/goal asks to extend an existing MD run."""
+        if str(state.get("hpc_action") or "").lower() in {"continue", "extend"}:
+            return True
+        goal = " ".join(
+            str(state.get(key) or "")
+            for key in ("user_goal", "user_goal_original", "hpc_instructions")
+        ).lower()
+        return any(word in goal for word in ("extend simulation", "continue simulation",
+                                              "continuation", "extend md", "continue md",
+                                              "continue the existing", "gromacs_continuation",
+                                              "target_total_ns"))
+
+    def _continuation_simulation_dir(self, state: MDState) -> Optional[str]:
+        """Resolve the existing directory that owns md.tpr/md.cpt."""
+        explicit = state.get("continuation_simulation_dir")
+        if explicit:
+            return str(Path(explicit).expanduser().resolve())
+        trajectory = state.get("trajectory_path")
+        if trajectory:
+            return str(Path(trajectory).expanduser().resolve().parent)
+        paths = state.get("trajectory_paths") or {}
+        for key in ("trajectory", "topology", "energy"):
+            value = paths.get(key)
+            if value:
+                return str(Path(value).expanduser().resolve().parent)
+
+        # Multi-sim / --sim-dirs: per-sim working_directory usually owns hpc/md.*
+        candidates: List[Path] = []
+        wd = state.get("working_directory")
+        if wd:
+            root = Path(wd).expanduser()
+            candidates.extend([root / "hpc", root])
+        hpc_dir = state.get("hpc_dir") or state.get("hpc_directory")
+        if hpc_dir:
+            candidates.append(Path(hpc_dir).expanduser())
+        for cand in candidates:
+            try:
+                resolved = cand.resolve()
+            except OSError:
+                continue
+            if (resolved / "md.tpr").is_file() and (resolved / "md.cpt").is_file():
+                return str(resolved)
+        return None
     
     def _create_fallback_plan(self, state: MDState) -> Dict[str, Any]:
         """Create basic fallback plan when LLM planning fails"""
+        if self._is_continuation_request(state):
+            simulation_dir = self._continuation_simulation_dir(state)
+            if not simulation_dir:
+                return {
+                    "reasoning": "Continuation requires an existing simulation directory",
+                    "overview": "Cannot safely infer the md.tpr/md.cpt directory",
+                    "steps": [],
+                    "error": "Set continuation_simulation_dir in state",
+                }
+            target_total_ns = state.get("target_total_ns")
+            extension_ns = state.get("extension_ns")
+            prepare_params: Dict[str, Any] = {"simulation_dir": simulation_dir}
+            if target_total_ns is not None:
+                prepare_params["target_total_ns"] = target_total_ns
+            elif extension_ns is not None:
+                prepare_params["extend_ns"] = extension_ns
+            else:
+                prepare_params["target_total_ns"] = 200.0
+            return {
+                "reasoning": (
+                    "Fallback continuation: inspect checkpoint, prepare target, "
+                    "create script, submit once, and monitor"
+                ),
+                "overview": "Checkpoint continuation without setup/equilibration",
+                "steps": [
+                    {
+                        "name": "Inspect checkpointed run",
+                        "tool_name": "inspect_gromacs_continuation",
+                        "tool_params": {"simulation_dir": simulation_dir},
+                        "reason": "Validate md.tpr/md.cpt and current duration",
+                    },
+                    {
+                        "name": "Prepare continuation manifest",
+                        "tool_name": "prepare_gromacs_continuation",
+                        "tool_params": prepare_params,
+                        "reason": "Create an idempotent target-specific plan",
+                    },
+                    {
+                        "name": "Create continuation SLURM script",
+                        "tool_name": "create_gromacs_continuation_script",
+                        "tool_params": {},
+                        "reason": "Generate convert-tpr and checkpoint mdrun commands",
+                    },
+                    {
+                        "name": "Submit continuation",
+                        "tool_name": "submit_gromacs_continuation",
+                        "tool_params": {},
+                        "reason": "Submit exactly once and persist the SLURM job ID",
+                    },
+                    {
+                        "name": "Monitor continuation",
+                        "tool_name": "monitor_gromacs_continuation",
+                        "tool_params": {},
+                        "reason": "Check scheduler and target completion marker",
+                    },
+                ],
+            }
         simsetup_dir = str(Path(state.get("working_directory", "working_dir")) / "simsetup")
         hpc_dir = state.get("hpc_directory", "working_dir/hpc")
         
@@ -669,6 +813,11 @@ Output as JSON with this structure:
     def _execute_plan(self, state: MDState, plan: Dict[str, Any], hpc_dir: str) -> bool:
         """Execute the HPC plan steps"""
         steps = plan.get("steps", [])
+        if plan.get("error") or not steps:
+            err = plan.get("error") or "HPC plan has no executable steps"
+            logger.error("HPC plan not executable: %s", err)
+            state.setdefault("errors", []).append(err)
+            return False
         success = True
 
         # Resolve correct paths once so every step shares them
@@ -776,7 +925,15 @@ Output as JSON with this structure:
                 state["errors"].append(error_msg)
                 
                 # For critical steps, stop execution
-                if tool_name in ["copy_simulation_files", "create_slurm_script", "submit_job"]:
+                if tool_name in [
+                    "copy_simulation_files",
+                    "create_slurm_script",
+                    "submit_job",
+                    "inspect_gromacs_continuation",
+                    "prepare_gromacs_continuation",
+                    "create_gromacs_continuation_script",
+                    "submit_gromacs_continuation",
+                ]:
                     success = False
                     break
         
@@ -798,7 +955,12 @@ Output as JSON with this structure:
             "create_slurm_script": create_slurm_script,
             "submit_job": submit_job,
             "check_job_status": check_job_status,
-            "download_results": download_results
+            "download_results": download_results,
+            "inspect_gromacs_continuation": inspect_gromacs_continuation,
+            "prepare_gromacs_continuation": prepare_gromacs_continuation,
+            "create_gromacs_continuation_script": create_gromacs_continuation_script,
+            "submit_gromacs_continuation": submit_gromacs_continuation,
+            "monitor_gromacs_continuation": monitor_gromacs_continuation,
         }
         
         tool_func = tool_map.get(tool_name)
@@ -870,7 +1032,7 @@ Output as JSON with this structure:
                 enriched["ssh_key_path"] = ssh_config.get("key_path")
         
         # Add SLURM defaults for script creation
-        if tool_name == "create_slurm_script":
+        if tool_name in ("create_slurm_script", "create_gromacs_continuation_script"):
             defaults = self.config.get("slurm_defaults", {})
             for key, value in defaults.items():
                 if key not in enriched:
@@ -892,7 +1054,7 @@ Output as JSON with this structure:
             if "email" not in enriched and state.get("user_email"):
                 enriched["email"] = state["user_email"]
 
-            if "simulation_phases" not in enriched:
+            if tool_name == "create_slurm_script" and "simulation_phases" not in enriched:
                 simsetup_dir = state.get("simsetup_dir") or str(
                     Path(state.get("working_directory", ".")) / "simsetup"
                 )
@@ -904,6 +1066,20 @@ Output as JSON with this structure:
                 ):
                     phases = ["minim", "minim2", "nvt", "npt", "md"]
                 enriched["simulation_phases"] = phases
+
+        if tool_name in (
+            "create_gromacs_continuation_script",
+            "submit_gromacs_continuation",
+            "monitor_gromacs_continuation",
+        ):
+            if "manifest_path" not in enriched and state.get("continuation_manifest"):
+                enriched["manifest_path"] = state["continuation_manifest"]
+
+        if tool_name in ("inspect_gromacs_continuation", "prepare_gromacs_continuation"):
+            if "simulation_dir" not in enriched:
+                simulation_dir = self._continuation_simulation_dir(state)
+                if simulation_dir:
+                    enriched["simulation_dir"] = simulation_dir
         
         # Add state values for submit_job
         if tool_name == "submit_job":
@@ -979,10 +1155,54 @@ Output as JSON with this structure:
                 script_name = Path(script_path).name
                 state["job_script_name"] = script_name
             log_file_operation("hpc", "create", state["job_script"], True, "SLURM submission script")
+
+        elif tool_name == "inspect_gromacs_continuation":
+            state["hpc_action"] = "continue"
+            state["continuation_simulation_dir"] = result.get("simulation_dir")
+            state["continuation_source_tpr"] = result.get("source_tpr")
+            state["continuation_checkpoint"] = result.get("checkpoint")
+            state["continuation_current_ns"] = result.get("configured_total_ns")
+
+        elif tool_name == "prepare_gromacs_continuation":
+            state["hpc_action"] = "continue"
+            state["continuation_manifest"] = result.get("manifest_path")
+            state["continuation_tpr"] = result.get("extended_tpr")
+            state["continuation_target_total_ns"] = result.get("target_total_ns")
+            state["continuation_status"] = result.get("status", "PREPARED")
+
+        elif tool_name == "create_gromacs_continuation_script":
+            state["job_script"] = result.get("script_path")
+            state["continuation_manifest"] = result.get("manifest_path")
+            state["continuation_status"] = result.get("status", "SCRIPT_READY")
+            if state.get("job_script"):
+                log_file_operation(
+                    "hpc", "create", state["job_script"], True,
+                    "GROMACS continuation SLURM script",
+                )
+
+        elif tool_name == "submit_gromacs_continuation":
+            state["job_id"] = result.get("job_id")
+            state["job_status"] = result.get("status", "SUBMITTED")
+            state["continuation_job_id"] = result.get("job_id")
+            state["continuation_status"] = result.get("status", "SUBMITTED")
+            if result.get("manifest_path"):
+                state["continuation_manifest"] = result.get("manifest_path")
+            if result.get("job_id") and state.get("is_multi_simulation"):
+                from agentic.multi_sim_progress import record_agent_finished
+
+                record_agent_finished(state, "hpc")
+
+        elif tool_name == "monitor_gromacs_continuation":
+            state["job_status"] = result.get("status")
+            state["continuation_status"] = result.get("status")
         
         elif tool_name == "submit_job":
             state["job_id"] = result.get("job_id")
             state["job_status"] = result.get("status", "SUBMITTED")
+            if result.get("job_id") and state.get("is_multi_simulation"):
+                from agentic.multi_sim_progress import record_agent_finished
+
+                record_agent_finished(state, "hpc")
         
         elif tool_name == "check_job_status":
             state["job_status"] = result.get("status")

@@ -137,20 +137,25 @@ def collect_and_cluster(n_clusters: int = 4) -> None:
     print(f"Clustering with k={k} (n={n_sims})")
 
     archetype_names = None
+    highlight_names = None
     draft_rep = (
         REPO / "docs" / "ment" / "output_localFEL_poc" / "draft_representatives.py"
     )
-    if draft_rep.is_file() and k == 5:
+    if draft_rep.is_file():
         import importlib.util
 
         spec = importlib.util.spec_from_file_location("local_fel_draft_reps", draft_rep)
         mod = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
         spec.loader.exec_module(mod)
-        archetype_names = {
-            int(cid): str(name) for cid, name in mod.CLUSTER_SHORT.items()
-        }
-        print(f"Using draft archetype names: {archetype_names}")
+        if k == 5 and hasattr(mod, "CLUSTER_SHORT"):
+            archetype_names = {
+                int(cid): str(name) for cid, name in mod.CLUSTER_SHORT.items()
+            }
+            print(f"Using draft archetype names: {archetype_names}")
+        highlight_names = list(getattr(mod, "GROUND_TRUTH_DISPLAY_NAMES", ()) or ())
+        if highlight_names:
+            print(f"Highlighting ground-truth labels: {highlight_names}")
 
     cluster = cluster_classification_features.func(
         working_dir=str(OUT),
@@ -159,6 +164,8 @@ def collect_and_cluster(n_clusters: int = 4) -> None:
         n_clusters=k,
         label_name_map=name_map,
         cluster_archetype_names=archetype_names,
+        highlight_display_names=highlight_names,
+        legend_ncol=3 if k >= 5 else None,
         assignments_file=out["assignments_csv"],
         scatter_plot_file=out["pca_png"],
         dendrogram_file=out["dendrogram_png"],

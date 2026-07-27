@@ -1116,6 +1116,10 @@ class MDSupervisor:
                     )
                     state["plan_executed"] = False
                     self._sync_current_agent_idx_from_progress(state)
+                    if state.get("subtask_type") == "hpc_only" and not (
+                        state.get("job_id") or state.get("continuation_job_id")
+                    ):
+                        state["hpc_retry_count"] = 0
                     return self._route_active_sim_pipeline(state)
                 # combined_analysis finished in-field — start combined reporter.
                 if state.get("multi_sim_phase") == "combined_reporter":
@@ -1447,16 +1451,73 @@ class MDSupervisor:
         state["subtask_type"] = "multi_agent"
         state["agent_list"] = ["preprocess", "simsetup"]
 
+    def _hpc_submission_belongs_to_active_sim(self, state: MDState) -> bool:
+        """True when job/continuation metadata refers to the active simulation dir."""
+        wd = state.get("working_directory")
+        if not wd:
+            return False
+        hpc_res = str((Path(wd) / "hpc").resolve())
+
+        for key in (
+            "continuation_manifest",
+            "continuation_simulation_dir",
+            "continuation_tpr",
+            "continuation_source_tpr",
+            "continuation_checkpoint",
+            "job_script",
+        ):
+            val = state.get(key)
+            if val and _artifact_in_sim_dir(str(val), wd):
+                return True
+
+        if state.get("continuation_job_id") or state.get("job_id"):
+            for marker in (
+                Path(hpc_res) / "continuation_200ns.json",
+                Path(hpc_res) / ".continuation_200ns.complete",
+            ):
+                if marker.is_file():
+                    return True
+            label = (
+                (state.get("multi_sim_progress") or {}).get("active_sim_label")
+                or (state.get("sim_case") or {}).get("label")
+                or Path(wd).name
+            )
+            if label and any(Path(hpc_res).glob(f"{label}_*.out")):
+                return True
+            return False
+        return False
+
     def _clear_stale_cross_sim_artifacts(self, state: MDState) -> None:
         """Drop completion markers from another simulation directory."""
         wd = state.get("working_directory")
         for key in (
             "cleaned_pdb", "coordinates", "topology", "job_id", "job_script",
             "trajectory_path",
+            "continuation_manifest", "continuation_simulation_dir",
+            "continuation_source_tpr", "continuation_checkpoint",
+            "continuation_tpr",
         ):
             val = state.get(key)
             if val and not _artifact_in_sim_dir(str(val), wd):
                 state[key] = None
+
+        # Job IDs are not paths — drop unless they belong to this sim.
+        if not self._hpc_submission_belongs_to_active_sim(state):
+            for key in (
+                "job_id",
+                "job_status",
+                "continuation_job_id",
+                "continuation_status",
+                "continuation_manifest",
+                "continuation_simulation_dir",
+                "continuation_source_tpr",
+                "continuation_checkpoint",
+                "continuation_tpr",
+                "continuation_current_ns",
+                "continuation_target_total_ns",
+            ):
+                if key in state:
+                    state[key] = None
 
         # analysis_results is a dict (tool outputs), not a file path — validate via directory.
         if state.get("analysis_results"):
@@ -1615,19 +1676,22 @@ class MDSupervisor:
         if phase not in (None, "executing_sims"):
             return None
         from agentic.multi_sim_progress import (
-            _sim_all_agents_done,
-            reconcile_multisim_progress_from_disk,
             workflow_sim_label_for_hitl,
         )
 
-        reconcile_multisim_progress_from_disk(state)
+        # Do not call reconcile_multisim_progress_from_disk here — it rebinds
+        # active_sim_label to the *next* incomplete sim, which skips
+        # _save_sim_state / hpc_retry_count reset for the sim that just finished.
         progress = state.get("multi_sim_progress") or {}
-        label = workflow_sim_label_for_hitl(state) or progress.get("active_sim_label")
-        if not label or not _sim_all_agents_done(progress, label):
+        label = progress.get("active_sim_label") or workflow_sim_label_for_hitl(state)
+        if not label:
             return None
+        if not self._per_sim_cycle_complete(state, sim_label=label):
+            return None
+        progress = state.get("multi_sim_progress") or {}
         self._sync_sim_index_for_label(state, label)
         rec = (progress.get("sims") or {}).get(label)
-        if rec:
+        if rec and rec.get("status") != "failed":
             rec["status"] = "done"
         state["multi_sim_progress"] = progress
         state["plan_executed"] = True
@@ -1701,19 +1765,41 @@ class MDSupervisor:
             logger.warning("SUPERVISOR [resume]: Could not restore execution plan: %s", exc)
         return state
 
-    def _per_sim_cycle_complete(self, state: MDState) -> bool:
-        """True when the active simulation finished all required agents on disk."""
+    def _per_sim_cycle_complete(
+        self, state: MDState, *, sim_label: Optional[str] = None
+    ) -> bool:
+        """True when the given (or active) simulation finished all required agents.
+
+        Intentionally does **not** call ``reconcile_multisim_progress_from_disk``:
+        that helper rebinds ``active_sim_label`` to the next incomplete sim, which
+        made a completed sim look incomplete mid-advance and leaked its job ID.
+        """
         from agentic.multi_sim_progress import (
+            _load_per_sim_checkpoint,
+            _reconcile_sim_record,
+            _required_agents,
             _sim_all_agents_done,
-            reconcile_multisim_progress_from_disk,
+            _sim_record,
+            ensure_multi_sim_progress,
             workflow_sim_label_for_hitl,
         )
 
-        reconcile_multisim_progress_from_disk(state)
-        progress = state.get("multi_sim_progress") or {}
-        label = workflow_sim_label_for_hitl(state) or progress.get("active_sim_label")
+        progress = ensure_multi_sim_progress(state) or {}
+        label = (
+            sim_label
+            or progress.get("active_sim_label")
+            or workflow_sim_label_for_hitl(state)
+        )
         if not label:
             return False
+        rec = _sim_record(progress, label)
+        if not rec:
+            return False
+        agents = progress.get("required_agents") or _required_agents(state)
+        wd = rec.get("working_dir") or ""
+        per_sim = _load_per_sim_checkpoint(wd) if wd else None
+        _reconcile_sim_record(rec, agents, per_sim=per_sim)
+        state["multi_sim_progress"] = progress
         return _sim_all_agents_done(progress, label)
 
     def _sync_sim_index_for_label(self, state: MDState, label: str) -> int:
@@ -1725,18 +1811,100 @@ class MDSupervisor:
                 return i
         return int(state.get("current_sim_index", 0))
 
-    def _ensure_valid_next_node(self, state: MDState) -> MDState:
+    def _ensure_valid_next_node(self, state: MDState, *, _depth: int = 0) -> MDState:
         """Supervisor must never return ``next_node=supervisor`` to LangGraph routing."""
+        if _depth > 8:
+            logger.error(
+                "SUPERVISOR: next_node resolution exceeded recursion guard "
+                "(phase=%s plan_executed=%s) — forcing final_report",
+                state.get("multi_sim_phase"),
+                state.get("plan_executed"),
+            )
+            state["next_node"] = "final_report"
+            return state
         if state.get("next_node") == "supervisor" and state.get("plan_executed"):
             if state.get("multi_sim_phase") == "executing_sims":
-                return self._ensure_valid_next_node(self._advance_multi_sim(state))
+                # Submitted HPC/continuation jobs count as agent completion even
+                # when progress still says in_progress (avoids re-sync loops).
+                self._mark_hpc_done_if_job_submitted(state)
+                if self._per_sim_cycle_complete(state):
+                    return self._ensure_valid_next_node(
+                        self._advance_multi_sim(state), _depth=_depth + 1
+                    )
+                # Incomplete without a local job: retry HPC in-place (do not
+                # re-enter field assignment, and do not fake hpc=done).
+                if not self._hpc_submission_belongs_to_active_sim(state):
+                    max_attempts = (
+                        3
+                        if state.get("subtask_type") == "hpc_only"
+                        else 1
+                    )
+                    retry = int(state.get("hpc_retry_count") or 0)
+                    if retry < max_attempts:
+                        logger.warning(
+                            "SUPERVISOR: active sim incomplete with no local job — "
+                            "routing to HPC (attempt %s/%s)",
+                            retry + 1,
+                            max_attempts,
+                        )
+                        state["plan_executed"] = False
+                        state["hpc_retry_count"] = retry + 1
+                        state["current_agent_idx"] = 0
+                        state["next_node"] = "hpc"
+                        return state
+                    progress = state.get("multi_sim_progress") or {}
+                    label = progress.get("active_sim_label")
+                    if label:
+                        rec = (progress.get("sims") or {}).get(label) or {}
+                        rec["status"] = "failed"
+                        rec["error"] = rec.get("error") or (
+                            "HPC incomplete after retries; no local job submitted"
+                        )
+                        agents = rec.setdefault("agents", {})
+                        for agent in progress.get("required_agents") or ["hpc"]:
+                            agents[agent] = "done"
+                        (progress.setdefault("sims", {}))[label] = rec
+                        state["multi_sim_progress"] = progress
+                    logger.warning(
+                        "SUPERVISOR: marking %s failed and advancing (no local job)",
+                        label,
+                    )
+                    return self._ensure_valid_next_node(
+                        self._advance_multi_sim(state), _depth=_depth + 1
+                    )
+                return self._ensure_valid_next_node(
+                    self._advance_multi_sim(state), _depth=_depth + 1
+                )
             state["next_node"] = "final_report"
             return state
         if state.get("next_node") in (None, "supervisor"):
-            return self._route_active_sim_pipeline(state)
+            return self._route_active_sim_pipeline(state, _depth=_depth)
         return state
 
-    def _route_active_sim_pipeline(self, state: MDState) -> MDState:
+    def _mark_hpc_done_if_job_submitted(self, state: MDState) -> None:
+        """Align multi_sim_progress when a SLURM job id is already present."""
+        if not self._hpc_submission_belongs_to_active_sim(state):
+            return
+        if not (state.get("job_id") or state.get("continuation_job_id")):
+            return
+        from agentic.multi_sim_progress import mark_agent_status, workflow_sim_label_for_hitl
+
+        label = workflow_sim_label_for_hitl(state)
+        if not label:
+            label = (state.get("multi_sim_progress") or {}).get("active_sim_label")
+        if not label:
+            return
+        mark_agent_status(state, label, "hpc", "done")
+        progress = state.get("multi_sim_progress") or {}
+        rec = (progress.get("sims") or {}).get(label)
+        if rec and rec.get("status") != "failed":
+            agents = progress.get("required_agents") or ["hpc"]
+            done = rec.get("agents") or {}
+            if all(done.get(a) == "done" for a in agents):
+                rec["status"] = "done"
+            state["multi_sim_progress"] = progress
+
+    def _route_active_sim_pipeline(self, state: MDState, *, _depth: int = 0) -> MDState:
         """Set a valid LangGraph ``next_node`` for the active per-sim pipeline."""
         progress = state.get("multi_sim_progress") or {}
         label = progress.get("active_sim_label") or "?"
@@ -1765,7 +1933,10 @@ class MDSupervisor:
                     label,
                     active_agent,
                 )
-                return self._ensure_valid_next_node(self._assign_field_agent_tasks(state))
+                state = self._assign_field_agent_tasks(state)
+                if state.get("next_node") in (None, "supervisor"):
+                    return self._ensure_valid_next_node(state, _depth=_depth + 1)
+                return state
             state["next_node"] = "planner"
             log_supervisor_routing(state, "planner", f"Active sim {label} — reporter needs plan")
             return state
@@ -1775,7 +1946,12 @@ class MDSupervisor:
                 "SUPERVISOR [multi-sim]: %s already validated — field assignment",
                 label,
             )
-            return self._ensure_valid_next_node(self._assign_field_agent_tasks(state))
+            state = self._assign_field_agent_tasks(state)
+            # Concrete agent targets (hpc/analysis/...) must return to LangGraph.
+            # Only re-enter ensure when assignment asked the multi-sim loop to advance.
+            if state.get("next_node") in (None, "supervisor"):
+                return self._ensure_valid_next_node(state, _depth=_depth + 1)
+            return state
 
         state["next_node"] = "planner"
         log_supervisor_routing(state, "planner", f"Active sim {label} — execution plan")
@@ -1847,6 +2023,7 @@ class MDSupervisor:
                     state["multi_sim_progress"] = prog
                 state["current_sim_index"] = current_idx
                 state.pop("hitl_target_sim_label", None)
+                self._clear_stale_cross_sim_artifacts(state)
                 self._apply_post_hpc_resume_shortcuts(state)
                 if not self._per_sim_cycle_complete(state):
                     state["plan_executed"] = False
@@ -2231,14 +2408,31 @@ class MDSupervisor:
                 elif agent == "reporter" and wd and per_sim_reporter_done_on_disk(wd):
                     mark_agent_status(state, finished_label, agent, "done")
             rec = (progress.get("sims") or {}).get(finished_label)
-            if rec and _sim_all_agents_done(progress, finished_label):
-                rec["status"] = "done"
-            elif rec:
-                rec["status"] = "in_progress"
+            if rec and rec.get("status") != "failed":
+                if _sim_all_agents_done(progress, finished_label):
+                    rec["status"] = "done"
+                else:
+                    rec["status"] = "in_progress"
 
         current_idx += 1
         state["current_sim_index"] = current_idx
         state["plan_executed"] = False
+        state["hpc_retry_count"] = 0
+        for key in (
+            "job_id",
+            "job_status",
+            "job_script",
+            "continuation_job_id",
+            "continuation_status",
+            "continuation_manifest",
+            "continuation_simulation_dir",
+            "continuation_source_tpr",
+            "continuation_checkpoint",
+            "continuation_tpr",
+            "continuation_current_ns",
+            "continuation_target_total_ns",
+        ):
+            state.pop(key, None)
 
         logger.info(
             f"SUPERVISOR [multi-sim]: Sim {current_idx}/{len(sim_prompts)} saved"
@@ -2252,12 +2446,32 @@ class MDSupervisor:
                 return self._setup_combined_analysis(state)
             return self._finish_multi_sim_pipeline(state)
 
+        # Point progress at the next sim so _start_next_sim does not rebind
+        # to a just-finished / failed active_sim_label.
+        progress = state.get("multi_sim_progress") or {}
+        next_label = sim_prompts[current_idx].get("label")
+        if next_label:
+            progress["active_sim_label"] = next_label
+            agents = progress.get("required_agents") or []
+            progress["active_agent"] = agents[0] if agents else progress.get("active_agent")
+            state["multi_sim_progress"] = progress
+
         # Start next sim
         started = self._start_next_sim(state)
         return self._ensure_valid_next_node(started)
 
     def _finish_multi_sim_pipeline(self, state: MDState) -> MDState:
         """End multi-sim after per-simulation agents without combined analysis."""
+        from agentic.multi_sim_progress import (
+            merge_completed_states_from_progress,
+            reconcile_multisim_progress_from_disk,
+        )
+
+        reconcile_multisim_progress_from_disk(state)
+        merge_completed_states_from_progress(state)
+        progress = state.get("multi_sim_progress") or {}
+        progress["phase"] = "complete"
+        state["multi_sim_progress"] = progress
         logger.info(
             "SUPERVISOR [multi-sim]: All per-simulation agents complete — "
             "skipping combined analysis (not in --subtask)"
@@ -2550,6 +2764,11 @@ class MDSupervisor:
             "topology", "coordinates", "mdp_files", "setup_report",
             "hpc_action", "hpc_output_directory", "job_script", "job_id",
             "job_status", "trajectory_path", "energy_file", "hpc_report",
+            "continuation_job_id", "continuation_status", "continuation_manifest",
+            "continuation_simulation_dir", "continuation_source_tpr",
+            "continuation_checkpoint", "continuation_tpr",
+            "continuation_current_ns", "continuation_target_total_ns",
+            "hpc_directory",
             "analysis_action", "analysis_request", "analysis_results",
             "figures", "conclusions", "analysis_directory",
             "reporter_output", "reporter_plan", "reporter_instructions",
@@ -2614,6 +2833,11 @@ class MDSupervisor:
 
     def _save_sim_state(self, state: MDState, sim_index: int):
         """Save a snapshot of the current per-sim state before resetting."""
+        from agentic.multi_sim_progress import hydrate_continuation_job_into_state
+
+        # Disk is authoritative for continuation submits lost from in-memory state.
+        hydrate_continuation_job_into_state(state)
+
         completed = state.get("completed_sim_states") or []
 
         # Collect the important per-sim outputs
@@ -2623,12 +2847,20 @@ class MDSupervisor:
         # that were recovered) do NOT mark a sim as failed.
         _success = bool(
             state.get("job_id")
+            or state.get("continuation_job_id")
             or state.get("trajectory_path")
             or state.get("topology")
             or state.get("coordinates")
             or state.get("analysis_results")
             or state.get("reporter_output")
         )
+        # Drop stale "HPC not submitted" errors when a local job exists.
+        if _success:
+            _errors = [
+                e for e in _errors
+                if "no job_id/continuation_job_id" not in str(e)
+                and "not submitted due to failure" not in str(e).lower()
+            ]
         sim_case = state.get("sim_case") or {}
         snapshot = {
             "sim_index": sim_index,
@@ -2638,9 +2870,11 @@ class MDSupervisor:
             "user_goal": state.get("user_goal"),
             "success": _success,
             "skipped": False,
-            "job_id": state.get("job_id"),
+            "job_id": state.get("job_id") or state.get("continuation_job_id"),
             "job_script": state.get("job_script"),
-            "job_status": state.get("job_status"),
+            "job_status": state.get("job_status") or state.get("continuation_status"),
+            "continuation_job_id": state.get("continuation_job_id"),
+            "continuation_manifest": state.get("continuation_manifest"),
             "analysis_results": state.get("analysis_results", {}),
             "analysis_directory": state.get("analysis_directory") or state.get("analysis_dir"),
             "trajectory_path": state.get("trajectory_path"),
@@ -3552,23 +3786,116 @@ class MDSupervisor:
                 state["warnings"].append("HPC execution skipped per user request")
                 state["current_agent_idx"] = current_agent_idx + 1
                 return self._assign_field_agent_tasks(state)
+
+            # Prefer this sim's on-disk continuation job over leaked metadata.
+            from agentic.multi_sim_progress import hydrate_continuation_job_into_state
+
+            if hydrate_continuation_job_into_state(state):
+                logger.info(
+                    "FIELD_AGENT_ASSIGNMENT: Loaded local continuation job %s from disk",
+                    state.get("continuation_job_id") or state.get("job_id"),
+                )
             
-            if state.get("job_id"):
+            if self._hpc_submission_belongs_to_active_sim(state) and (
+                state.get("job_id") or state.get("continuation_job_id")
+            ):
                 logger.info("FIELD_AGENT_ASSIGNMENT: HPC already complete, moving to next agent")
+                # Keep multi_sim_progress in sync — otherwise plan_executed +
+                # hpc=in_progress creates an ensure↔assign recursion loop.
+                self._mark_hpc_done_if_job_submitted(state)
                 state["current_agent_idx"] = current_agent_idx + 1
                 return self._assign_field_agent_tasks(state)
+            if state.get("job_id") or state.get("continuation_job_id"):
+                logger.warning(
+                    "FIELD_AGENT_ASSIGNMENT: Ignoring foreign HPC job metadata "
+                    "(job_id=%s continuation_job_id=%s) for active sim",
+                    state.get("job_id"),
+                    state.get("continuation_job_id"),
+                )
+                self._clear_stale_cross_sim_artifacts(state)
             
-            # HPC gets only 1 attempt (no retries)
-            retry_count = state.get("hpc_retry_count", 0)
-            if retry_count >= 1:
-                state["errors"].append("HPC execution failed (no retries)")
-                state["warnings"].append("HPC simulation not submitted due to failure")
+            # Fresh HPC submission historically gets 1 attempt. Continuations /
+            # hpc_only can recover from a bad LLM plan via deterministic fallback,
+            # so allow a few attempts. Never silently "complete" HPC with no job.
+            goal = " ".join(
+                str(state.get(k) or "")
+                for k in ("user_goal", "user_goal_original", "hpc_instructions")
+            ).lower()
+            continuation = any(
+                w in goal
+                for w in (
+                    "continuation",
+                    "continue the existing",
+                    "gromacs_continuation",
+                    "target_total_ns",
+                    "extend simulation",
+                    "continue simulation",
+                )
+            )
+            max_attempts = 3 if (continuation or state.get("subtask_type") == "hpc_only") else 1
+            retry_count = int(state.get("hpc_retry_count") or 0)
+            if retry_count >= max_attempts:
+                # Last chance: fallback/concurrent submit may have written the
+                # local manifest even if state lost the job id.
+                if hydrate_continuation_job_into_state(state) and (
+                    self._hpc_submission_belongs_to_active_sim(state)
+                ):
+                    logger.info(
+                        "FIELD_AGENT_ASSIGNMENT: Local continuation job appeared "
+                        "after retries — treating HPC as complete"
+                    )
+                    self._mark_hpc_done_if_job_submitted(state)
+                    state["current_agent_idx"] = current_agent_idx + 1
+                    return self._assign_field_agent_tasks(state)
+                err = (
+                    f"HPC execution failed after {retry_count} attempt(s) "
+                    f"(no job_id/continuation_job_id)"
+                )
+                logger.error("FIELD_AGENT_ASSIGNMENT: %s", err)
+                state.setdefault("errors", []).append(err)
+                state.setdefault("warnings", []).append(
+                    "HPC simulation not submitted due to failure"
+                )
+                if (
+                    state.get("is_multi_simulation")
+                    and state.get("multi_sim_phase") == "executing_sims"
+                ):
+                    from agentic.multi_sim_progress import (
+                        mark_agent_status,
+                        workflow_sim_label_for_hitl,
+                    )
+
+                    label = workflow_sim_label_for_hitl(state)
+                    if not label:
+                        progress = state.get("multi_sim_progress") or {}
+                        label = progress.get("active_sim_label")
+                    if label:
+                        # Terminal for this sim so multi-sim advances once (fail-soft).
+                        mark_agent_status(state, label, "hpc", "done")
+                        progress = state.get("multi_sim_progress") or {}
+                        rec = (progress.get("sims") or {}).get(label) or {}
+                        rec["status"] = "failed"
+                        rec["error"] = err
+                        (progress.setdefault("sims", {}))[label] = rec
+                        state["multi_sim_progress"] = progress
+                    state["plan_executed"] = True
+                    state["next_node"] = "supervisor"
+                    log_supervisor_routing(
+                        state,
+                        "supervisor",
+                        f"HPC failed for {label or 'sim'}; advancing multi-sim loop",
+                    )
+                    return state
                 state["current_agent_idx"] = current_agent_idx + 1
                 return self._assign_field_agent_tasks(state)
             
             state["next_node"] = "hpc"
             state["hpc_retry_count"] = retry_count + 1
-            logger.info("FIELD_AGENT_ASSIGNMENT: Routing to HPC (attempt 1/1)")
+            logger.info(
+                "FIELD_AGENT_ASSIGNMENT: Routing to HPC (attempt %s/%s)",
+                retry_count + 1,
+                max_attempts,
+            )
             log_supervisor_routing(state, "hpc", "Executing HPC agent")
             return state
         

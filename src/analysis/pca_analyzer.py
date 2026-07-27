@@ -14,6 +14,7 @@ import csv
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -38,10 +39,12 @@ try:
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
 
     HAS_MATPLOTLIB = True
 except ImportError:
     HAS_MATPLOTLIB = False
+    LinearSegmentedColormap = None  # type: ignore[misc, assignment]
     logger.warning("matplotlib not available — PCA/FEL plotting disabled")
 
 # Boltzmann constant in kJ/(mol·K) for ΔG = kT ln P landscapes
@@ -697,7 +700,7 @@ def calculate_free_energy_landscape(
         iso = [lv for lv in FEL_ENERGY_CONTOUR_KJ if vmin < lv < vmax]
         if iso:
             ax.contour(X, Y, F_plot, levels=iso, colors="0.15", linewidths=0.45, alpha=0.55)
-        ax.set_facecolor("0.97")
+        ax.set_facecolor("white")
         fig.colorbar(cf, ax=ax, label="Relative free energy (kJ/mol)")
         ax.set_xlabel(f"PC{pc_x} (Å)")
         ax.set_ylabel(f"PC{pc_y} (Å)")
@@ -749,8 +752,27 @@ def calculate_free_energy_landscape(
 # ── FEL landscape feature extraction (classification metrics) ─────────────────
 
 DEFAULT_MIN_BASIN_POPULATION = 0.05
-FEL_BASIN_CMAP = "RdYlBu"  # blue = minima (low ΔF), red = high energy
-FEL_BASIN_MARKER_COLOR = "#2d1650"  # indigo — distinct from RdYlBu_r red/blue
+# Blue (low ΔF) → teal/amber → light coral (high ΔF).
+# Avoid dark crimson highs (wash out basin contrast); no white midtones (white = unsampled).
+if LinearSegmentedColormap is not None:
+    FEL_BASIN_CMAP = LinearSegmentedColormap.from_list(
+        "fel_blue_amber_coral",
+        [
+            "#0B3D91",  # deep blue — global/basin minima
+            "#1D6BB8",
+            "#3D9BD9",  # clear mid-basin blue
+            "#5BBFBF",  # teal hinge (still cool)
+            "#A8D08D",  # soft green
+            "#F4D35E",  # warm amber
+            "#F5A26B",  # peach
+            "#F08080",  # light coral — high free energy
+        ],
+        N=256,
+    )
+else:
+    FEL_BASIN_CMAP = "turbo"
+FEL_BASIN_MARKER_COLOR = "#111111"  # black — local basin minima
+FEL_GLOBAL_MIN_MARKER_COLOR = "#7B1FA2"  # purple — global free-energy minimum
 FEL_SURFACE_VMAX_PAD_KJ = 8.0
 FEL_SURFACE_VMAX_FLOOR_KJ = 18.0
 FEL_ENERGY_CONTOUR_KJ = (5.0, 10.0, 15.0, 20.0)
@@ -789,13 +811,17 @@ def plot_fel_basins_on_axes(
     title: Optional[str] = None,
     show_population_pct: bool = True,
     basin_marker_color: str = FEL_BASIN_MARKER_COLOR,
+    global_min_marker_color: str = FEL_GLOBAL_MIN_MARKER_COLOR,
+    global_min_basin_id: Optional[int] = None,
     annotation_fontsize: float = 9,
     marker_size: float = 16,
 ):
     """
-    Draw a masked FEL surface (blue minima → red high energy) with basin markers.
+    Draw a masked FEL surface (blue minima → light coral highs) with basin markers.
 
     Only basins supplied in ``basins`` are annotated (expected: already ≥ cutoff).
+    The global free-energy minimum basin is marked with a blue star; other basins
+    use ``basin_marker_color`` (default black).
     """
     F = free_energy.astype(float)
     P = probability
@@ -860,10 +886,25 @@ def plot_fel_basins_on_axes(
                 zorder=4,
             )
 
+    # Resolve global-min basin id (lowest free_energy_min among supplied basins).
+    gmin_id = global_min_basin_id
+    if gmin_id is None and basins:
+        energies = []
+        for b in basins:
+            try:
+                energies.append(float(b.get("free_energy_min_kJ_mol")))
+            except (TypeError, ValueError):
+                energies.append(float("inf"))
+        if any(np.isfinite(energies)):
+            gmin_id = int(basins[int(np.argmin(energies))]["basin_id"])
+
     for b in basins:
         bx = float(x_centers[int(b["min_x"])])
         by = float(y_centers[int(b["min_y"])])
         bid = int(b["basin_id"])
+        is_gmin = gmin_id is not None and bid == int(gmin_id)
+        marker_color = global_min_marker_color if is_gmin else basin_marker_color
+        msize = marker_size * (1.35 if is_gmin else 1.0)
         label = str(bid)
         if show_population_pct:
             label = f"{bid}, {100.0 * float(b.get('population', 0)):.0f}%"
@@ -871,11 +912,12 @@ def plot_fel_basins_on_axes(
             bx,
             by,
             marker="*",
-            color=basin_marker_color,
-            markersize=marker_size,
+            color=marker_color,
+            markersize=msize,
             markeredgecolor="white",
             markeredgewidth=0.8,
             zorder=5,
+            label="global min" if is_gmin else None,
         )
         # Stagger label offsets so annotations sit clear of the star/basin core.
         offsets = (
@@ -916,7 +958,7 @@ def plot_fel_basins_on_axes(
             zorder=6,
         )
 
-    ax.set_facecolor("0.97")
+    ax.set_facecolor("white")
     ax.set_xlabel(f"PC{pc_x} (Å)")
     ax.set_ylabel(f"PC{pc_y} (Å)")
     if title:
@@ -1134,6 +1176,8 @@ def analyze_fel_landscape_core(
       - basins: per-basin population, depth, area
       - barriers: inter-basin saddle heights (kJ/mol above lower minimum)
       - major_basin_population: largest basin occupancy fraction
+      - delta_F_major_minus_global_kJ_mol: F(major-population basin) − F(global
+        minimum among kept basins); 0 when they coincide
     """
     minima, F_smooth = _find_fel_minima(
         F,
@@ -1232,6 +1276,14 @@ def analyze_fel_landscape_core(
 
     major_idx = int(np.argmax(populations))
     major_basin = basins[major_idx]
+    global_idx = int(np.argmin([float(b["free_energy_min_kJ_mol"]) for b in basins]))
+    global_min_basin = basins[global_idx]
+    # ΔF ≥ 0: free-energy offset of the most-populated basin above the deepest
+    # kept basin (0 when major population basin is also the global minimum).
+    delta_f_major_minus_global = float(
+        float(major_basin["free_energy_min_kJ_mol"])
+        - float(global_min_basin["free_energy_min_kJ_mol"])
+    )
 
     barriers: List[Dict[str, Any]] = []
     kept_minima = [(b["min_y"], b["min_x"]) for b in basins]
@@ -1257,6 +1309,14 @@ def analyze_fel_landscape_core(
         "grid_entropy": grid_entropy,
         "major_basin_population": float(major_basin["population"]),
         "major_basin_id": int(major_basin["basin_id"]),
+        "global_min_basin_id": int(global_min_basin["basin_id"]),
+        "global_min_free_energy_kJ_mol": float(
+            global_min_basin["free_energy_min_kJ_mol"]
+        ),
+        "major_basin_free_energy_kJ_mol": float(
+            major_basin["free_energy_min_kJ_mol"]
+        ),
+        "delta_F_major_minus_global_kJ_mol": delta_f_major_minus_global,
         "max_barrier_height_kJ_mol": float(max_barrier),
         "mean_basin_depth_kJ_mol": mean_depth,
         "basins": basins,
@@ -1279,6 +1339,10 @@ def _write_fel_feature_tables(
             "grid_entropy",
             "major_basin_population",
             "major_basin_id",
+            "global_min_basin_id",
+            "global_min_free_energy_kJ_mol",
+            "major_basin_free_energy_kJ_mol",
+            "delta_F_major_minus_global_kJ_mol",
             "max_barrier_height_kJ_mol",
             "mean_basin_depth_kJ_mol",
         )
@@ -1298,6 +1362,8 @@ def _write_fel_feature_tables(
             "grid_entropy",
             "major_basin_population",
             "major_basin_id",
+            "global_min_basin_id",
+            "delta_F_major_minus_global_kJ_mol",
             "max_barrier_height_kJ_mol",
             "mean_basin_depth_kJ_mol",
         ])
@@ -1307,6 +1373,8 @@ def _write_fel_feature_tables(
             f"{summary.get('grid_entropy', 0):.6f}",
             f"{summary.get('major_basin_population', 0):.6f}",
             summary.get("major_basin_id"),
+            summary.get("global_min_basin_id"),
+            f"{summary.get('delta_F_major_minus_global_kJ_mol', 0):.6f}",
             f"{summary.get('max_barrier_height_kJ_mol', 0):.6f}",
             f"{summary.get('mean_basin_depth_kJ_mol', 0):.6f}",
         ])
@@ -1897,15 +1965,34 @@ def export_fel_basin_structures(
             )
             target_pc1 = float(grid["x_centers"][int(basin["min_x"])])
             target_pc2 = float(grid["y_centers"][int(basin["min_y"])])
+            dist_pc = float(
+                np.hypot(pc1_val - target_pc1, pc2_val - target_pc2)
+            )
+            is_gmin = int(basin["basin_id"]) == int(
+                fel_data.get("global_min_basin_id")
+                or min(
+                    basins,
+                    key=lambda b: float(b.get("free_energy_min_kJ_mol", float("inf"))),
+                )["basin_id"]
+            )
+
+            # Always write a dedicated global-min PDB (nearest frame to that basin min).
+            if is_gmin:
+                gmin_path = out_root / "basin_global_min.pdb"
+                shutil.copy2(pdb_path, gmin_path)
+                pdb_files.append(str(gmin_path.resolve()))
 
             manifest_rows.append({
                 "basin_id": bid,
+                "is_global_min": int(is_gmin),
                 "population": basin.get("population"),
                 "basin_depth_kJ_mol": basin.get("basin_depth_kJ_mol"),
+                "free_energy_min_kJ_mol": basin.get("free_energy_min_kJ_mol"),
                 "PC1_basin_min": target_pc1,
                 "PC2_basin_min": target_pc2,
                 "PC1_frame": pc1_val,
                 "PC2_frame": pc2_val,
+                "distance_to_basin_min_PC": dist_pc,
                 "trajectory_row_index": traj_idx,
                 "frame_index": frame_idx,
                 "time_ns": time_ns,

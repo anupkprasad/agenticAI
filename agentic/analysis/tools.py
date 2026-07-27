@@ -101,6 +101,7 @@ from src.analysis.consensus_pocket import (
     calculate_consensus_pocket_metrics,
     run_consensus_pocket_metrics_batch,
 )
+from src.analysis.msa_plotting import plot_reference_msa_alignment
 
 # Import dynamic tool loader for programmer-generated tools
 from agentic.utils import get_dynamic_tool_loader
@@ -165,6 +166,7 @@ __all__ = [
     "map_consensus_pocket_residues",
     "calculate_consensus_pocket_metrics",
     "run_consensus_pocket_metrics_batch",
+    "plot_reference_msa_alignment",
     "AnalysisToolExecutor",
     "get_analysis_tools",
     "get_tool_metadata",
@@ -210,6 +212,7 @@ COMBINED_ANALYSIS_TOOL_NAMES = frozenset({
     "map_consensus_pocket_residues",
     "calculate_consensus_pocket_metrics",
     "run_consensus_pocket_metrics_batch",
+    "plot_reference_msa_alignment",
 })
 
 _PER_SIM_ANALYSIS_TOOLS = [
@@ -274,6 +277,7 @@ _COMBINED_ANALYSIS_TOOLS = [
     map_consensus_pocket_residues,
     calculate_consensus_pocket_metrics,
     run_consensus_pocket_metrics_batch,
+    plot_reference_msa_alignment,
 ]
 
 
@@ -463,6 +467,7 @@ class AnalysisToolExecutor:
                 "map_consensus_pocket_residues": map_consensus_pocket_residues,
                 "calculate_consensus_pocket_metrics": calculate_consensus_pocket_metrics,
                 "run_consensus_pocket_metrics_batch": run_consensus_pocket_metrics_batch,
+                "plot_reference_msa_alignment": plot_reference_msa_alignment,
             })
         
         # Record built-in tool names BEFORE loading programmer tools

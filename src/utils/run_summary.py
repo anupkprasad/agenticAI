@@ -112,7 +112,10 @@ def _simulations_from_hpc_pool(final_state: Dict[str, Any]) -> List[Dict[str, An
 
 def _simulations_merged_from_state(final_state: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Merge session snapshots with disk-done sims from ``multi_sim_progress``."""
-    from agentic.multi_sim_progress import merge_completed_states_from_progress
+    from agentic.multi_sim_progress import (
+        load_local_continuation_job,
+        merge_completed_states_from_progress,
+    )
 
     merged_state = dict(final_state)
     merge_completed_states_from_progress(merged_state)
@@ -121,6 +124,67 @@ def _simulations_merged_from_state(final_state: Dict[str, Any]) -> List[Dict[str
     progress_sims = progress.get("sims") or {}
     sim_order = progress.get("sim_order") or []
     order_index = {label: i for i, label in enumerate(sim_order)}
+    terminal = {
+        "COMPLETED", "COMPLETE", "CANCELLED", "CANCELED", "FAILED",
+        "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED",
+    }
+
+    def _row_from_disk(label: str, rec: Dict[str, Any], sim: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        wd = (sim or {}).get("working_directory") or rec.get("working_dir") or ""
+        job_info = load_local_continuation_job(wd) if wd else None
+        job_id = (job_info or {}).get("job_id") or (sim or {}).get("job_id") or (sim or {}).get("continuation_job_id")
+        job_status = str(
+            (job_info or {}).get("status")
+            or (sim or {}).get("job_status")
+            or (sim or {}).get("continuation_status")
+            or ""
+        ).upper()
+        agents = rec.get("agents") or {}
+        disk_done = (
+            rec.get("status") == "done"
+            or (
+                agents.get("analysis") == "done"
+                and agents.get("reporter") == "done"
+            )
+            or bool(job_info and job_info.get("complete"))
+        )
+        success = bool((sim and _sim_succeeded(sim)) or disk_done or job_id)
+        if job_info and job_info.get("complete"):
+            status = "success"
+        elif job_id and job_status not in terminal:
+            status = "submitted"
+            success = True
+        elif success:
+            status = "success"
+        elif sim:
+            status = _sim_status(sim)
+            # Stale failed snapshot with a live job should not stay failed.
+            if status == "failed" and job_id:
+                status = "submitted"
+                success = True
+        elif agents.get("analysis") == "done" and agents.get("reporter") != "done":
+            status = "in_progress"
+            success = False
+        elif rec.get("status") == "failed":
+            status = "failed"
+            success = False
+        else:
+            status = "pending"
+            success = False
+        return {
+            "label": label,
+            "status": status,
+            "success": success,
+            "skipped": bool((sim or {}).get("skipped")),
+            "skip_reason": (sim or {}).get("skip_reason"),
+            "working_directory": wd,
+            "job_id": job_id,
+            "job_status": job_status or (sim or {}).get("job_status"),
+            "topology": (sim or {}).get("topology"),
+            "trajectory_path": (sim or {}).get("trajectory_path"),
+            "errors": [] if success else list((sim or {}).get("errors") or []),
+            "warnings": ((sim or {}).get("warnings") or [])[:5],
+        }
 
     rows: List[Dict[str, Any]] = []
     seen: set = set()
@@ -133,61 +197,14 @@ def _simulations_merged_from_state(final_state: Dict[str, Any]) -> List[Dict[str
             continue
         seen.add(label)
         rec = progress_sims.get(label) or {}
-        agents = rec.get("agents") or {}
-        disk_done = (
-            rec.get("status") == "done"
-            or (
-                agents.get("analysis") == "done"
-                and agents.get("reporter") == "done"
-            )
-        )
-        success = _sim_succeeded(sim) or disk_done
-        status = "success" if success else _sim_status(sim)
-        if (
-            not success
-            and agents.get("analysis") == "done"
-            and agents.get("reporter") != "done"
-        ):
-            status = "in_progress"
-        rows.append(
-            {
-                "label": label,
-                "status": status,
-                "success": success,
-                "skipped": bool(sim.get("skipped")),
-                "skip_reason": sim.get("skip_reason"),
-                "working_directory": sim.get("working_directory") or rec.get("working_dir"),
-                "job_id": sim.get("job_id"),
-                "job_status": sim.get("job_status"),
-                "topology": sim.get("topology"),
-                "trajectory_path": sim.get("trajectory_path"),
-                "errors": sim.get("errors") or [],
-                "warnings": (sim.get("warnings") or [])[:5],
-            }
-        )
+        rows.append(_row_from_disk(label, rec, sim))
 
     for label in sim_order:
         if label in seen:
             continue
         rec = progress_sims.get(label) or {}
-        agents = rec.get("agents") or {}
-        if agents.get("analysis") == "done" and agents.get("reporter") == "done":
-            status = "success"
-        elif agents.get("analysis") == "done":
-            status = "in_progress"
-        else:
-            status = "pending"
-        rows.append(
-            {
-                "label": label,
-                "status": status,
-                "success": status == "success",
-                "skipped": False,
-                "working_directory": rec.get("working_dir"),
-                "errors": [],
-                "warnings": [],
-            }
-        )
+        rows.append(_row_from_disk(label, rec, None))
+        seen.add(label)
     return rows
 
 
@@ -211,16 +228,9 @@ def build_run_summary(
     if is_multi:
         simulations = _simulations_merged_from_state(final_state)
 
-    n_success = sum(
-        1 for s in simulations if s.get("status") == "success" or s.get("success")
-    )
+    n_success = sum(1 for s in simulations if s.get("status") == "success")
     n_skipped = sum(1 for s in simulations if s.get("skipped") or s.get("status") == "skipped")
-    n_failed = sum(
-        1 for s in simulations
-        if s.get("status") in ("failed", "not_started")
-        or (s.get("status") not in ("success", "skipped", "submitted", "pending", "unknown")
-            and not s.get("success"))
-    )
+    n_failed = sum(1 for s in simulations if s.get("status") in ("failed", "not_started"))
     n_submitted = sum(1 for s in simulations if s.get("status") == "submitted")
     n_pending = sum(1 for s in simulations if s.get("status") == "pending")
     n_in_progress = sum(1 for s in simulations if s.get("status") == "in_progress")

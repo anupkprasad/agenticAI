@@ -36,7 +36,7 @@ class MDState(TypedDict):
     hitl_mode: Optional[str]  # None (off), "error", or "all"
     
     # Subtask-specific workflow
-    subtask_type: Optional[str]    # "analysis_only", "setup_only", "preprocess_only", "reporter_only", "multi_agent", None
+    subtask_type: Optional[str]    # "analysis_only", "setup_only", "preprocess_only", "hpc_only", "reporter_only", "multi_agent", None
     subtask_type_initialized: Optional[bool]  # Whether subtask type has been initialized
     agent_list: Optional[List[str]]           # Ordered list of agents for multi-agent workflow
     required_inputs: Optional[Dict[str, bool]]  # What inputs this task requires
@@ -104,6 +104,17 @@ class MDState(TypedDict):
     trajectory_path: Optional[str]
     energy_file: Optional[str]  # Path to energy file (.edr)
     hpc_report: Optional[str]
+    extension_ns: Optional[float]  # Requested additional duration for continuation
+    target_total_ns: Optional[float]  # Preferred final total duration for continuation
+    continuation_simulation_dir: Optional[str]  # Existing dir containing md.tpr/md.cpt
+    continuation_source_tpr: Optional[str]
+    continuation_checkpoint: Optional[str]
+    continuation_current_ns: Optional[float]
+    continuation_target_total_ns: Optional[float]
+    continuation_tpr: Optional[str]
+    continuation_manifest: Optional[str]
+    continuation_job_id: Optional[str]
+    continuation_status: Optional[str]
     
     # Analysis stage
     analysis_action: Optional[str]

@@ -240,12 +240,24 @@ tools:
     phase: combined_analysis
 
   build_consensus_sequence_alignment:
-    description: "Star MSA to a reference sequence from PDBs/FASTA/sim_dirs; exports consensus residue map for cross-sim PCA"
+    description: "Star MSA to a reference (pairwise vs reference, BLOSUM62); exports residue map for reference PCA and consensus pocket transfer"
     defaults:
       alignment_fasta: "reference_msa_alignment.fasta"
       residue_map_csv: "reference_msa_residue_map.csv"
       alignment_json: "reference_msa_alignment.json"
       min_coverage: 0.85
+    phase: combined_analysis
+
+  plot_reference_msa_alignment:
+    description: "Plot star-MSA as full alignment + focused panel; column selection via min_occupancy / min_conservation / target_n_columns (display only)"
+    defaults:
+      alignment_fasta: "reference_msa_alignment.fasta"
+      pocket_definition_json: "reference_pocket_definition.json"
+      full_plot_file: "reference_msa_full.png"
+      focused_plot_file: "reference_msa_high_consensus.png"
+      min_occupancy: 0.90
+      min_conservation: 0.40
+      target_n_columns: 40
     phase: combined_analysis
 
   fit_reference_pca_model:
@@ -294,7 +306,7 @@ tools:
     phase: combined_analysis
 
   define_reference_consensus_pocket:
-    description: "Define reference ATP pocket from consensus residues within cutoff of ligand at frame 0"
+    description: "Define reference ligand pocket = star-MSA consensus positions within cutoff of ligand at frame 0; basis for all pocket feature transfer"
     defaults:
       consensus_json: "reference_msa_alignment.json"
       ligand_selection: "resname ATP"

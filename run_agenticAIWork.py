@@ -1770,7 +1770,11 @@ def _is_likely_output_file_reference(filename: str, goal: str) -> bool:
     return bool(pattern.search(goal))
 
 
-def _goal_file_exists(candidate: str, working_dir: Path) -> bool:
+def _goal_file_exists(
+    candidate: str,
+    working_dir: Path,
+    sim_dirs: Optional[List[str]] = None,
+) -> bool:
     """Check whether a goal-referenced file exists in common search locations."""
     path = Path(candidate)
     if path.is_absolute():
@@ -1790,6 +1794,15 @@ def _goal_file_exists(candidate: str, working_dir: Path) -> bool:
     # If goal uses preprocess/foo.pdb, also try foo.pdb at working_dir root
     if len(rel_parts) >= 2 and rel_parts[0] in {"preprocess", "simsetup", "hpc"}:
         candidates.append(working_dir / Path(*rel_parts[1:]))
+
+    # Multi-sim continuation / analysis: bare names like md.tpr live under
+    # each --sim-dirs entry (usually {label}/hpc/md.tpr).
+    for raw in sim_dirs or []:
+        sim_root = Path(raw).expanduser().resolve()
+        candidates.append(sim_root / path)
+        candidates.append(sim_root / "hpc" / path)
+        if len(rel_parts) >= 2 and rel_parts[0] == "hpc":
+            candidates.append(sim_root / Path(*rel_parts[1:]))
 
     return any(p.exists() for p in candidates)
 
@@ -1940,15 +1953,19 @@ def main(argv=None):
         if args.working_dir not in (".", "working_dir")
         else Path.cwd()
     )
+    _sim_dirs_for_check = list(getattr(args, "sim_dirs", None) or [])
     for _cand in _path_candidates:
         if _cand.lower().endswith(".pdb") and _is_likely_output_file_reference(
             _cand, args.goal
         ):
             continue
-        if not _goal_file_exists(_cand, _wd_for_check):
+        if not _goal_file_exists(
+            _cand, _wd_for_check, sim_dirs=_sim_dirs_for_check
+        ):
             _validation_errors.append(
                 f"File referenced in --goal not found: '{_cand}' "
-                f"(checked cwd, '{_wd_for_check}', and agent subdirs)"
+                f"(checked cwd, '{_wd_for_check}', agent subdirs"
+                + (", and --sim-dirs/*/hpc)" if _sim_dirs_for_check else ")")
             )
 
     if _validation_errors:

@@ -293,6 +293,9 @@ def get_agent_execution_order(subtask_type: str, state: Dict[str, Any]) -> list:
     
     elif subtask_type == "preprocess_only":
         return ["preprocessing"]
+
+    elif subtask_type == "hpc_only":
+        return ["hpc"]
     
     elif subtask_type == "multi_agent":
         # Use agent_list from state, but enforce order.

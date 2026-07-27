@@ -307,6 +307,7 @@ Run at `{base}/analysis/` after all per-simulation runs complete.
 | `build_sequence_phylo_tree`             | **On request**: sequence-based phylogenetic tree from sequences extracted from each input PDB (pairwise % identity → UPGMA) |
 | `build_structure_phylo_tree`            | **On request**: structure-based phylogenetic tree from CA coordinates (sequence-guided superposition → CA-RMSD → UPGMA)     |
 | `build_consensus_sequence_alignment`    | Star MSA to a reference (PDB list / FASTA / sim_dirs) → `consensus_alignment.fasta` + `consensus_residue_map.csv` |
+| `plot_reference_msa_alignment`          | Plot full star-MSA + high-consensus/pocket column panels (after alignment; optional pocket JSON) |
 | `fit_reference_pca_model`               | Fit PCA on consensus Cα from a reference trajectory |
 | `project_simulations_reference_pca`     | Project all trajectories onto the reference PCA basis |
 | `build_shared_reference_fel_landscapes` | FEL in a **shared** PC1/PC2 grid from reference-projected PCA |
@@ -323,10 +324,11 @@ via ``consensus_alignment.json``.
 
 | Tool | Purpose |
 | --- | --- |
-| `define_reference_consensus_pocket` | Reference pocket = consensus positions whose reference resid is within ``pocket_cutoff_A`` (default 10 Å) of the ligand at frame 0 |
+| `define_reference_consensus_pocket` | Reference pocket = star-MSA consensus positions whose reference resid is within ``pocket_cutoff_A`` (default 15 Å) of the ligand at frame 0 |
 | `map_consensus_pocket_residues` | Per-simulation PDB resid lists + coverage audit |
 | `calculate_consensus_pocket_metrics` | One sim: COM distance, pocket SASA, pocket-restricted contacts, residence, pocket RMSF |
 | `run_consensus_pocket_metrics_batch` | End-to-end for all simulations |
+| `plot_reference_msa_alignment` | Visualize star MSA (full + filtered pocket/high-consensus columns) |
 
 **Outputs:** ``{base}/analysis/reference_pocket_definition.json``,
 ``reference_pocket_residue_map.csv``, and per-protein metrics under:

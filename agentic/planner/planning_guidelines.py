@@ -423,6 +423,7 @@ _REFERENCE_LANDSCAPE_PATTERNS: tuple[str, ...] = (
     r"reference\s+fel\s+cluster",
     r"run_reference_landscape_pipeline",
     r"build_consensus_sequence_alignment",
+    r"plot_reference_msa_alignment",
 )
 
 _CONSENSUS_POCKET_PATTERNS: tuple[str, ...] = (

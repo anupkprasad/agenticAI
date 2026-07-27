@@ -855,10 +855,15 @@ def define_reference_consensus_pocket(
     """
     Define a reference ATP pocket from consensus residues near the ligand.
 
-    On the reference simulation (e.g. MLKL ``q8nb16``), selects consensus
-    alignment positions whose reference Cα lies within ``pocket_cutoff_A`` Å of
-    the ligand at frame 0. Exports a pocket definition JSON and wide residue
-    map CSV for all labels in the consensus alignment.
+    Requires a prior star MSA from ``build_consensus_sequence_alignment``. On the
+    reference simulation (e.g. MLKL ``q8nb16``), selects consensus alignment
+    positions whose reference Cα lies within ``pocket_cutoff_A`` Å of the ligand
+    at frame 0, then maps those columns to every label via the residue map.
+    Downstream pocket features (COM, contacts, residence, orientation, RMSF)
+    use these MSA-transferred residues — not per-system local pockets.
+
+    Exports a pocket definition JSON and wide residue map CSV for all labels
+    in the consensus alignment.
 
     Args:
         working_dir: Combined analysis output directory.

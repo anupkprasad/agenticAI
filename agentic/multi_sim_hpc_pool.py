@@ -194,6 +194,38 @@ def should_use_hpc_pool(state: Dict[str, Any]) -> bool:
     return pre and "hpc" in agents and post
 
 
+def _goal_requests_continuation(state: Dict[str, Any]) -> bool:
+    """True when the multi-sim goal asks to extend existing production MD."""
+    if str(state.get("hpc_action") or "").lower() in {"continue", "extend"}:
+        return True
+    text = " ".join(
+        str(state.get(key) or "")
+        for key in ("user_goal", "user_goal_original", "enriched_prompt", "hpc_instructions")
+    ).lower()
+    for sp in state.get("sim_prompts") or []:
+        text += " " + str(sp.get("prompt") or "").lower()
+    return any(
+        word in text
+        for word in (
+            "extend simulation",
+            "continue simulation",
+            "continuation",
+            "extend md",
+            "continue md",
+            "inspect_gromacs_continuation",
+            "prepare_gromacs_continuation",
+            "target_total_ns",
+        )
+    )
+
+
+def _should_skip_existing_production(state: Dict[str, Any], sim_dir: str) -> bool:
+    """Skip HPC only for finished production runs that are not being continued."""
+    if not _sim_production_trajectory_ready(sim_dir):
+        return False
+    return not _goal_requests_continuation(state)
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -205,19 +237,31 @@ def _sim_setup_ready(sim_dir: str) -> bool:
     return any(simsetup.glob("*.gro")) or any(simsetup.glob("*.top"))
 
 
-def _revalidate_pool_sim(rec: Dict[str, Any]) -> None:
+def _revalidate_pool_sim(
+    rec: Dict[str, Any],
+    *,
+    skip_existing_production: bool = True,
+) -> None:
     """Fix spurious skip/complete flags when only equilibration trajectories exist."""
     wd = rec.get("working_dir") or ""
     prod_ready = _sim_production_trajectory_ready(wd)
     hpc = rec.get("hpc_status")
 
-    if prod_ready:
+    if prod_ready and skip_existing_production:
         rec["prep_status"] = "skipped"
         rec["hpc_status"] = "skipped"
         rec["skip_reason"] = "production trajectory on disk"
         rec.pop("job_id", None)
         rec.pop("job_script", None)
         rec.pop("last_slurm_state", None)
+        return
+
+    if prod_ready and not skip_existing_production:
+        # Continuation: keep setup skipped, but leave HPC pending unless already active.
+        rec["prep_status"] = "skipped"
+        if rec.get("hpc_status") not in ("submitted", "running", "completed", "failed"):
+            rec["hpc_status"] = "pending"
+        rec.pop("skip_reason", None)
         return
 
     if hpc in ("skipped", "completed"):
@@ -254,6 +298,7 @@ def init_hpc_pool(state: Dict[str, Any]) -> Dict[str, Any]:
     )
     existing = state.get("hpc_pool") or {}
     sims: Dict[str, Any] = dict(existing.get("sims") or {})
+    skip_existing_production = not _goal_requests_continuation(state)
 
     for idx, sp in enumerate(sim_prompts):
         label = sp.get("label") or f"sim_{idx}"
@@ -262,7 +307,7 @@ def init_hpc_pool(state: Dict[str, Any]) -> Dict[str, Any]:
         rec.setdefault("label", label)
         rec.setdefault("index", idx)
         rec["working_dir"] = wd
-        if _sim_production_trajectory_ready(wd):
+        if _should_skip_existing_production(state, wd):
             rec["prep_status"] = "skipped"
             rec["hpc_status"] = "skipped"
             rec["skip_reason"] = "production trajectory on disk"
@@ -294,7 +339,7 @@ def init_hpc_pool(state: Dict[str, Any]) -> Dict[str, Any]:
                 rec.pop("error", None)
             elif rec.get("hpc_status") not in ("submitted", "running", "completed", "skipped"):
                 rec["hpc_status"] = "pending"
-        _revalidate_pool_sim(rec)
+        _revalidate_pool_sim(rec, skip_existing_production=skip_existing_production)
         sims[label] = rec
 
     prep_cursor = existing.get("prep_cursor", 0)
@@ -524,7 +569,10 @@ def mark_prep_done(state: Dict[str, Any], sim_label: str) -> None:
             state["hpc_pool"] = pool
             return
         rec["prep_status"] = "done"
-        if rec.get("hpc_status") == "pending" and _sim_production_trajectory_ready(wd):
+        if (
+            rec.get("hpc_status") == "pending"
+            and _should_skip_existing_production(state, wd)
+        ):
             rec["hpc_status"] = "skipped"
             rec["skip_reason"] = "production trajectory on disk"
             rec.pop("job_id", None)
@@ -565,13 +613,35 @@ def reconcile_post_hpc_with_pool(state: Dict[str, Any]) -> bool:
     return True
 
 
-def start_post_hpc_phase(state: Dict[str, Any]) -> None:
-    """Transition to per-sim analysis/reporter after all HPC jobs complete."""
+def start_post_hpc_phase(state: Dict[str, Any]) -> bool:
+    """
+    Transition to per-sim analysis/reporter after all HPC jobs complete.
+
+    Returns True when post-HPC analysis/reporter should start; False when the
+    workflow should finish (no post-HPC agents in the subtask).
+    """
+    from src.supervisor.unified_enricher import get_agent_execution_order
+
+    agents = get_agent_execution_order(state.get("subtask_type") or "full_task", state)
+    post_agents = [a for a in ("analysis", "reporter") if a in agents]
+    if not post_agents:
+        state["multi_sim_phase"] = "complete"
+        state["hpc_pool_phase_complete"] = True
+        state["post_hpc_analysis_only"] = False
+        state["plan_executed"] = True
+        state.pop("hpc_pool_prep_only", None)
+        state.pop("hpc_pool_agent_filter", None)
+        pool = state.get("hpc_pool") or {}
+        pool["phase"] = "complete"
+        state["hpc_pool"] = pool
+        logger.info("HPC pool complete — no analysis/reporter agents requested; finishing")
+        return False
+
     state["multi_sim_phase"] = "executing_sims"
     state["hpc_pool_phase_complete"] = True
     state["post_hpc_analysis_only"] = True
     state["subtask_type"] = "multi_agent"
-    state["agent_list"] = ["analysis", "reporter"]
+    state["agent_list"] = list(post_agents)
     state["plan_executed"] = False
     state["execution_plan"] = None
     state["input_validated"] = False
@@ -585,6 +655,7 @@ def start_post_hpc_phase(state: Dict[str, Any]) -> None:
 
     reset_post_hpc_progress(state)
     logger.info("HPC pool complete — starting post-HPC analysis/reporter loop")
+    return True
 
 
 def hpc_pool_supervisor_tick(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -650,10 +721,17 @@ def hpc_pool_supervisor_tick(state: Dict[str, Any]) -> Dict[str, Any]:
     pool = state["hpc_pool"]
 
     if _all_hpc_done(pool):
-        log_pool_to_base(state, "All HPC pool jobs complete — starting post-HPC analysis", pool=pool)
-        start_post_hpc_phase(state)
-        state["hpc_pool_post_hpc_start"] = True
-        state["next_node"] = "supervisor"
+        if start_post_hpc_phase(state):
+            log_pool_to_base(
+                state, "All HPC pool jobs complete — starting post-HPC analysis", pool=pool
+            )
+            state["hpc_pool_post_hpc_start"] = True
+            state["next_node"] = "supervisor"
+        else:
+            log_pool_to_base(
+                state, "All HPC pool jobs complete — finishing without analysis", pool=pool
+            )
+            state["next_node"] = "final_report"
         return state
 
     running = _count_running(pool)

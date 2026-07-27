@@ -348,10 +348,10 @@ def build_pool_status_snapshot(state: Dict[str, Any]) -> Optional[Dict[str, Any]
 
     if phase in ("executing_sims", "combined_analysis", "combined_reporter", "complete"):
         try:
-            from agentic.multi_sim_progress import reconcile_progress_from_disk
+            from agentic.multi_sim_progress import reconcile_multisim_progress_from_disk
 
-            if state.get("multi_sim_progress"):
-                reconcile_progress_from_disk(state)
+            if state.get("multi_sim_progress") or state.get("sim_prompts"):
+                reconcile_multisim_progress_from_disk(state)
         except Exception as exc:
             logger.debug("pool_status disk reconcile skipped: %s", exc)
         return _snapshot_from_multi_sim_progress(state)
@@ -368,6 +368,8 @@ def build_pool_status_snapshot(state: Dict[str, Any]) -> Optional[Dict[str, Any]
 def _snapshot_from_multi_sim_progress(state: Dict[str, Any]) -> Dict[str, Any]:
     from datetime import datetime, timezone
 
+    from agentic.multi_sim_progress import load_local_continuation_job
+
     progress = state.get("multi_sim_progress") or {}
     sims = progress.get("sims") or {}
     by_status: Dict[str, List[str]] = {
@@ -375,13 +377,22 @@ def _snapshot_from_multi_sim_progress(state: Dict[str, Any]) -> Dict[str, Any]:
         "pending": [],
         "done": [],
         "failed": [],
+        "submitted": [],
     }
     sim_details: Dict[str, Any] = {}
     summary_lines: List[str] = []
+    terminal_job = {
+        "COMPLETED", "COMPLETE", "CANCELLED", "CANCELED", "FAILED",
+        "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED",
+    }
 
     for label in progress.get("sim_order") or sorted(sims.keys()):
         rec = sims.get(label) or {}
         agents = rec.get("agents") or {}
+        wd = rec.get("working_dir") or ""
+        job_info = load_local_continuation_job(wd) if wd else None
+        job_id = (job_info or {}).get("job_id")
+        job_status = str((job_info or {}).get("status") or "").upper()
         entry = {
             "status": rec.get("status"),
             "preprocessing": agents.get("preprocessing"),
@@ -390,21 +401,46 @@ def _snapshot_from_multi_sim_progress(state: Dict[str, Any]) -> Dict[str, Any]:
             "analysis": agents.get("analysis"),
             "reporter": agents.get("reporter"),
         }
+        if job_id:
+            entry["job_id"] = job_id
+            entry["job_status"] = job_status or None
         if rec.get("error"):
             entry["error"] = rec.get("error")
+
+        # Prefer live continuation job truth over a stale pending progress row.
+        st = rec.get("status") or "pending"
+        if rec.get("status") == "failed" and not job_id:
+            st = "failed"
+        elif job_info and job_info.get("complete"):
+            st = "done"
+            entry["hpc"] = entry.get("hpc") or "done"
+            entry["status"] = "done"
+        elif job_id and job_status not in terminal_job:
+            st = "submitted"
+            entry["hpc"] = "done"
+            if entry.get("status") in (None, "pending", "in_progress"):
+                entry["status"] = "submitted"
+        elif st == "in_progress":
+            st = "running"
+
         sim_details[label] = entry
 
-        parts = [f"status={rec.get('status') or 'pending'}"]
+        parts = [f"status={entry.get('status') or st}"]
         for agent_key in ("preprocessing", "simsetup", "hpc", "analysis", "reporter"):
-            if agents.get(agent_key):
-                parts.append(f"{agent_key}={agents[agent_key]}")
+            if entry.get(agent_key):
+                parts.append(f"{agent_key}={entry[agent_key]}")
+        if job_id:
+            parts.append(f"job={job_id}")
+            if job_status:
+                parts.append(f"slurm={job_status}")
         summary_lines.append(f"  {label}: {' '.join(parts)}")
 
-        st = rec.get("status") or "pending"
-        if st == "in_progress":
-            st = "running"
-        bucket = st if st in by_status else "pending"
-        by_status[bucket].append(label)
+        if st == "submitted":
+            by_status["submitted"].append(label)
+            by_status["running"].append(label)
+        else:
+            bucket = st if st in ("running", "pending", "done", "failed") else "pending"
+            by_status[bucket].append(label)
 
     workers = int(state.get("parallel_workers_resolved") or 0)
     pool_type = "parallel_analysis" if workers > 1 else "sequential"
@@ -419,13 +455,15 @@ def _snapshot_from_multi_sim_progress(state: Dict[str, Any]) -> Dict[str, Any]:
         "active_agent": progress.get("active_agent"),
         "simulations": sim_details,
         "summary_lines": summary_lines,
-        "running": sorted(by_status["running"]),
+        "running": sorted(set(by_status["running"])),
         "pending": sorted(by_status["pending"]),
         "done": sorted(by_status["done"]),
         "failed": sorted(by_status["failed"]),
+        "submitted": sorted(by_status["submitted"]),
         "pending_count": len(by_status["pending"]),
         "done_count": len(by_status["done"]),
         "failed_count": len(by_status["failed"]),
+        "submitted_count": len(by_status["submitted"]),
     }
     if progress.get("combined"):
         snap["combined"] = progress["combined"]

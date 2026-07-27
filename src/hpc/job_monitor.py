@@ -76,6 +76,35 @@ def check_job_status(
                     "elapsed_time": elapsed,
                     "message": f"Job {job_id} is {status}"
                 }
+
+            # ``squeue`` normally exits 0 with header-only output after a job
+            # leaves the queue. Query accounting instead of falling through
+            # and returning None.
+            sacct_result = subprocess.run(
+                ["sacct", "-j", job_id, "-o", "State", "-n", "-X"],
+                capture_output=True,
+                text=True,
+            )
+            if sacct_result.returncode == 0:
+                states = [
+                    line.strip().split()[0].split("+")[0]
+                    for line in sacct_result.stdout.splitlines()
+                    if line.strip()
+                ]
+                status = states[0] if states else "UNKNOWN"
+                return {
+                    "success": True,
+                    "job_id": job_id,
+                    "status": status,
+                    "message": f"Job {job_id} status: {status}",
+                    "source": "sacct",
+                }
+            return {
+                "success": False,
+                "job_id": job_id,
+                "status": "NOT_FOUND",
+                "error": "Job not found in queue or history",
+            }
         
         # Remote status check
         else:

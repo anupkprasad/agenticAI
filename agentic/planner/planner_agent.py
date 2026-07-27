@@ -1607,6 +1607,7 @@ class MDPlanner:
                 "analysis_only": ["analysis"],
                 "setup_only": ["simsetup"],
                 "preprocess_only": ["preprocess"],
+                "hpc_only": ["hpc"],
                 "reporter_only": ["reporter"],
             }
             agent_list = type_to_agent.get(subtask_type, [])

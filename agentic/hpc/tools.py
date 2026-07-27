@@ -25,6 +25,13 @@ from src.hpc.script_creator import create_slurm_script
 from src.hpc.job_submitter import submit_job
 from src.hpc.job_monitor import check_job_status, list_my_slurm_jobs
 from src.hpc.results_downloader import download_results
+from src.hpc.gromacs_continuation import (
+    inspect_gromacs_continuation,
+    prepare_gromacs_continuation,
+    create_gromacs_continuation_script,
+    submit_gromacs_continuation,
+    monitor_gromacs_continuation,
+)
 
 # Export all tools
 __all__ = [
@@ -35,6 +42,11 @@ __all__ = [
     "check_job_status",
     "list_my_slurm_jobs",
     "download_results",
+    "inspect_gromacs_continuation",
+    "prepare_gromacs_continuation",
+    "create_gromacs_continuation_script",
+    "submit_gromacs_continuation",
+    "monitor_gromacs_continuation",
     "HPCToolExecutor"
 ]
 
@@ -70,7 +82,12 @@ class HPCToolExecutor:
             "submit_job": submit_job,
             "check_job_status": check_job_status,
             "list_my_slurm_jobs": list_my_slurm_jobs,
-            "download_results": download_results
+            "download_results": download_results,
+            "inspect_gromacs_continuation": inspect_gromacs_continuation,
+            "prepare_gromacs_continuation": prepare_gromacs_continuation,
+            "create_gromacs_continuation_script": create_gromacs_continuation_script,
+            "submit_gromacs_continuation": submit_gromacs_continuation,
+            "monitor_gromacs_continuation": monitor_gromacs_continuation,
         }
         
         # Load programmer-generated tools
@@ -215,7 +232,7 @@ class HPCToolExecutor:
             enriched["local_dir"] = paths.get("local_download_dir", "working_dir/results")
         
         # Add SLURM defaults
-        if tool_name == "create_slurm_script":
+        if tool_name in ("create_slurm_script", "create_gromacs_continuation_script"):
             slurm_defaults = self.config.get("slurm_defaults", {})
             for key, value in slurm_defaults.items():
                 if key not in enriched:

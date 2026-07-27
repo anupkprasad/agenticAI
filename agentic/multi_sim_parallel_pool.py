@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from agentic.parallel_resources import (
     WorkerEstimate,
     estimate_workers,
-    should_use_parallel_pool,
+    should_use_parallel_pool as _resources_allow_parallel_pool,
 )
 from agentic.parallel_worker import (
     build_per_sim_job_spec,
@@ -25,6 +25,18 @@ from agentic.parallel_worker import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def should_use_parallel_pool(state: Dict[str, Any]) -> bool:
+    """True only for multi-sim scopes containing analysis or reporting."""
+    if not _resources_allow_parallel_pool(state):
+        return False
+    from src.supervisor.unified_enricher import get_agent_execution_order
+
+    agents = get_agent_execution_order(
+        state.get("subtask_type") or "full_task", state
+    )
+    return any(agent in agents for agent in ("analysis", "reporter"))
 
 # Active executors keyed by base working directory (survives graph node transitions).
 _RUNNERS: Dict[str, "_PoolRunner"] = {}
@@ -531,6 +543,11 @@ def _finish_parallel_phase(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def start_parallel_agent_phase(state: Dict[str, Any]) -> Dict[str, Any]:
     """Enter parallel pool for analysis+reporter across simulations."""
+    if not should_use_parallel_pool(state):
+        raise RuntimeError(
+            "Refusing to start analysis/reporter parallel pool: "
+            "the requested subtask contains no analysis or reporter agent"
+        )
     from agentic.multi_sim_progress import (
         init_multi_sim_progress,
         reconcile_multisim_progress_from_disk,
@@ -570,7 +587,7 @@ def start_parallel_prep_if_enabled(state: Dict[str, Any]) -> bool:
 
     Returns True when parallel prep pool was started.
     """
-    if not should_use_parallel_pool(state):
+    if not _resources_allow_parallel_pool(state):
         return False
     init_parallel_pool(state, phase="prep")
     state["multi_sim_phase"] = "parallel_pool"

@@ -626,6 +626,20 @@ def _plot_mds_cluster_map(
 
 def _short_feature_label(col: str) -> str:
     """Compact axis label for classification heatmaps."""
+    aliases = {
+        "delta_F_major_minus_global_kJ_mol": "ΔF major−global (kJ/mol)",
+        "landscape_entropy": "landscape entropy",
+        "major_basin_population": "major basin population",
+        "consensus_rmsf_mean_A": "consensus RMSF",
+        "consensus_rmsf_std_A": "consensus RMSF (std)",
+        "reference_pocket_ligand_distance_p95_A": "ATP–pocket COM (p95)",
+        "reference_pocket_ligand_distance_std_A": "ATP–pocket COM (std)",
+        "reference_pocket_fraction_bound": "Fraction bound (≤15 Å)",
+        "reference_pocket_ligand_axis_angle_p95_deg": "Axis angle (p95)",
+        "reference_pocket_std_ligand_axis_angle_deg": "Axis angle (std)",
+    }
+    if col in aliases:
+        return aliases[col]
     try:
         from src.reporter.combined_reporter import _METRIC_LABELS
 
@@ -723,6 +737,13 @@ def _align_subplot_heights(anchor_ax, *axes) -> None:
         ax.set_position([p.x0, pos.y0, p.width, pos.height])
 
 
+def _normalize_highlight_names(names: Optional[Sequence[str]]) -> set:
+    """Case-insensitive set of display names / labels to highlight."""
+    if not names:
+        return set()
+    return {str(n).strip().lower() for n in names if str(n).strip()}
+
+
 def _draw_simulation_label_bar(
     ax,
     names_ord: Sequence[str],
@@ -730,14 +751,22 @@ def _draw_simulation_label_bar(
     cluster_colors: Dict[int, str],
     *,
     fontsize: float = 8.5,
+    highlight_names: Optional[Sequence[str]] = None,
 ) -> None:
-    """Colored cluster strip with black protein names centered on each row."""
+    """Colored cluster strip with black protein names centered on each row.
+
+    Names in ``highlight_names`` (e.g. ground-truth kinases) are prefixed with
+    ``*`` on this label bar only (no border styling).
+    """
     from matplotlib.patches import Rectangle
 
+    hi = _normalize_highlight_names(highlight_names)
     n = len(names_ord)
     ax.set_xlim(0, 1)
     ax.set_ylim(n - 0.5, -0.5)
     for i, (name, cid) in enumerate(zip(names_ord, cids_ord)):
+        is_hi = str(name).strip().lower() in hi
+        label = f"*{name}" if is_hi else str(name)
         ax.add_patch(
             Rectangle(
                 (0.02, i - 0.46),
@@ -751,7 +780,7 @@ def _draw_simulation_label_bar(
         ax.text(
             0.5,
             i,
-            name,
+            label,
             ha="center",
             va="center",
             color="black",
@@ -772,14 +801,21 @@ def _plot_dendrogram_heatmap_panel(
     *,
     dendrogram_title: str = "Hierarchical clustering dendrogram",
     heatmap_title: str = "Classification features (z-score)",
+    colorbar_label: str = "z-score",
     archetype_names: Optional[Dict[int, str]] = None,
     legend_ncol: Optional[int] = None,
+    highlight_display_names: Optional[Sequence[str]] = None,
+    colorbar_symmetric: bool = True,
 ) -> Optional[List[int]]:
     """
     Single figure: dendrogram (branches right→left) + cluster label bar + feature heatmap.
 
     Rows share the same simulation order top→bottom. Protein names appear in black
     on the colored cluster bar; the heatmap has no y-axis labels.
+    Optional ``highlight_display_names`` (e.g. ground-truth kinases) are shown with
+    a leading ``*`` on the label bar only.
+    When ``colorbar_symmetric`` is False, the heatmap uses the data min/max (or
+    [0, 1] if values already lie in that range) instead of a ±vmax diverging scale.
     """
     if not HAS_MPL:
         return None
@@ -836,20 +872,50 @@ def _plot_dendrogram_heatmap_panel(
     cids_ord = [int(cluster_ids[i]) for i in order]
     feat_labels = [_short_feature_label(c) for c in feature_cols]
 
-    _draw_simulation_label_bar(ax_bar, names_ord, cids_ord, cluster_colors)
+    _draw_simulation_label_bar(
+        ax_bar,
+        names_ord,
+        cids_ord,
+        cluster_colors,
+        highlight_names=highlight_display_names,
+    )
 
-    vmax = float(np.nanmax(np.abs(X_ord))) if np.isfinite(X_ord).any() else 2.5
-    vmax = max(vmax, 1.0)
+    finite = X_ord[np.isfinite(X_ord)]
+    if colorbar_symmetric:
+        vmax = float(np.nanmax(np.abs(X_ord))) if finite.size else 2.5
+        vmax = max(vmax, 1.0)
+        vmin, vmax = -vmax, vmax
+        cmap = "RdBu_r"
+    else:
+        from matplotlib.colors import LinearSegmentedColormap
+
+        if finite.size and float(np.nanmin(finite)) >= -1e-9 and float(np.nanmax(finite)) <= 1.0 + 1e-9:
+            vmin, vmax = 0.0, 1.0
+        elif finite.size:
+            vmin = float(np.nanmin(finite))
+            vmax = float(np.nanmax(finite))
+            if abs(vmax - vmin) < 1e-12:
+                vmax = vmin + 1.0
+        else:
+            vmin, vmax = 0.0, 1.0
+        # Light blue → white → light red (midpoint at (vmin+vmax)/2).
+        cmap = LinearSegmentedColormap.from_list(
+            "light_blue_white_red",
+            ["#6BAED6", "#FFFFFF", "#FC9272"],
+        )
     im = ax_hm.imshow(
         X_ord,
         aspect="auto",
-        cmap="RdBu_r",
-        vmin=-vmax,
+        cmap=cmap,
+        vmin=vmin,
         vmax=vmax,
         interpolation="nearest",
     )
     ax_hm.set_xticks(np.arange(len(feature_cols)))
-    ax_hm.set_xticklabels(feat_labels, rotation=20, ha="center", fontsize=9)
+    ax_hm.set_xticklabels(
+        feat_labels, rotation=20, ha="right", rotation_mode="anchor", fontsize=9
+    )
+    ax_hm.tick_params(axis="x", pad=2)
     ax_hm.set_yticks([])
     ax_hm.set_ylabel("")
     ax_hm.set_title(heatmap_title, fontsize=11, pad=8)
@@ -858,7 +924,8 @@ def _plot_dendrogram_heatmap_panel(
         ScalarMappable(norm=im.norm, cmap=im.cmap),
         cax=ax_cbar,
     )
-    cbar.set_label("z-score", fontsize=9)
+    if colorbar_label:
+        cbar.set_label(colorbar_label, fontsize=9)
 
     counts: Dict[int, int] = {}
     for cid in cluster_ids:
@@ -873,10 +940,27 @@ def _plot_dendrogram_heatmap_panel(
         )
         for cid in clusters
     ]
+    hi = _normalize_highlight_names(highlight_display_names)
+    if hi:
+        from matplotlib.lines import Line2D
+
+        handles.append(
+            Line2D(
+                [0],
+                [0],
+                marker="$\\ast$",
+                color="black",
+                markerfacecolor="black",
+                markersize=10,
+                linestyle="None",
+                label="ground-truth kinase",
+            )
+        )
+    ncol = int(legend_ncol) if legend_ncol else min(len(handles), 2)
     fig.legend(
         handles=handles,
         loc="lower center",
-        ncol=int(legend_ncol) if legend_ncol else min(len(clusters), 2),
+        ncol=ncol,
         fontsize=9,
         framealpha=0.9,
         bbox_to_anchor=(0.5, 0.02),
@@ -958,6 +1042,7 @@ def _plot_cluster_feature_heatmap(
     leaf_order: Sequence[int],
     output_path: Path,
     title: str,
+    colorbar_label: str = "z-score",
 ) -> None:
     """Z-scored feature heatmap; rows top→bottom match dendrogram leaf order."""
     if not HAS_MPL or not len(leaf_order):
@@ -1000,7 +1085,10 @@ def _plot_cluster_feature_heatmap(
         interpolation="nearest",
     )
     ax_hm.set_xticks(np.arange(len(feature_cols)))
-    ax_hm.set_xticklabels(feat_labels, rotation=35, ha="right", fontsize=9)
+    ax_hm.set_xticklabels(
+        feat_labels, rotation=20, ha="right", rotation_mode="anchor", fontsize=9
+    )
+    ax_hm.tick_params(axis="x", pad=2)
     ax_hm.set_yticks([])
     ax_hm.set_title(title)
     cbar = fig.colorbar(
@@ -1009,7 +1097,8 @@ def _plot_cluster_feature_heatmap(
         fraction=0.046,
         pad=0.04,
     )
-    cbar.set_label("z-score", fontsize=9)
+    if colorbar_label:
+        cbar.set_label(colorbar_label, fontsize=9)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
@@ -1182,6 +1271,9 @@ def cluster_classification_features(
     feature_weights: Optional[Dict[str, float]] = None,
     cluster_archetype_names: Optional[Dict[int, str]] = None,
     legend_ncol: Optional[int] = None,
+    feature_scale_label: str = "z-score",
+    highlight_display_names: Optional[List[str]] = None,
+    colorbar_symmetric: bool = True,
 ) -> Dict[str, Any]:
     """
     Cluster simulations from a classification feature table (z-score CSV recommended).
@@ -1208,11 +1300,17 @@ def cluster_classification_features(
         phylo_tree_file: Unrooted circular similarity tree PNG (hierarchical only).
         heatmap_file: Z-score feature heatmap per simulation (hierarchical only).
         summary_file: JSON summary of clustering parameters and results.
+        feature_scale_label: Label describing the feature scale in generated plots.
+        highlight_display_names: Optional protein display names to outline on the
+            dendrogram–heatmap panel (e.g. ground-truth kinases).
+        colorbar_symmetric: If True (default), heatmap uses ±vmax diverging scale;
+            if False, uses data range (or [0, 1] for min–max features).
         feature_weights: Optional map of feature column → relative weight (default 1).
             Columns are multiplied by sqrt(weight) after z-scoring so Ward distance
             emphasizes selected features (e.g. 2.0 doubles COM/angle deviation influence).
         cluster_archetype_names: Optional {cluster_id: short name} for dendrogram/
             panel legends (overrides REFERENCE_CLUSTER_ARCHETYPE_NAMES when set).
+        legend_ncol: Optional legend column count.
     """
     original_dir = os.getcwd()
     try:
@@ -1293,13 +1391,16 @@ def cluster_classification_features(
 
         scatter_path = out_dir / scatter_plot_file
         method_title = "Hierarchical" if method_key == "hierarchical" else "K-means"
+        scale_phrase = (
+            f" — {feature_scale_label} features" if feature_scale_label else ""
+        )
         if HAS_MPL:
             _plot_cluster_scatter(
                 coords,
                 display_names,
                 cluster_ids,
                 scatter_path,
-                title=f"{method_title} clustering (k={k}) — z-score features",
+                title=f"{method_title} clustering (k={k}){scale_phrase}",
                 pc1_var=pc1_var,
                 pc2_var=pc2_var,
             )
@@ -1323,10 +1424,13 @@ def cluster_classification_features(
                     panel_path,
                     dendrogram_title=f"Hierarchical clustering dendrogram (k={k})",
                     heatmap_title=f"Classification features by simulation (k={k})",
+                    colorbar_label=feature_scale_label,
                     archetype_names=cluster_archetype_names,
                     legend_ncol=legend_ncol if legend_ncol is not None else (
                         3 if k >= 5 else None
                     ),
+                    highlight_display_names=highlight_display_names,
+                    colorbar_symmetric=colorbar_symmetric,
                 )
             else:
                 dendro_path = out_dir / dendrogram_file
@@ -1348,6 +1452,7 @@ def cluster_classification_features(
                         leaf_order,
                         heatmap_path,
                         title=f"Classification features by simulation (k={k})",
+                        colorbar_label=feature_scale_label,
                     )
             phylo_path = out_dir / phylo_tree_file
             _plot_unrooted_phylo_tree(
@@ -1355,7 +1460,7 @@ def cluster_classification_features(
                 display_names,
                 cluster_ids,
                 phylo_path,
-                title=f"Unrooted similarity tree (k={k}) — z-score features",
+                title=f"Unrooted similarity tree (k={k}){scale_phrase}",
             )
 
         cluster_representatives = _cluster_representatives(
