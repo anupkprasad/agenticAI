@@ -29,9 +29,9 @@ RESERVE_MEM_GB = 2.0
 # Do not allocate more than this fraction of total RAM.
 MEM_USABLE_FRACTION = 0.85
 # Upper bound when ``parallel_workers=auto`` (override via AGENTIC_PARALLEL_MAX_AUTO).
-MAX_AUTO_WORKERS = int(os.environ.get("AGENTIC_PARALLEL_MAX_AUTO", "8"))
+MAX_AUTO_WORKERS = int(os.environ.get("AGENTIC_PARALLEL_MAX_AUTO", "16"))
 # Default Ollama parallel slots when ``llm_concurrency=auto``.
-DEFAULT_LLM_CONCURRENCY = int(os.environ.get("AGENTIC_LLM_CONCURRENCY_DEFAULT", "4"))
+DEFAULT_LLM_CONCURRENCY = int(os.environ.get("AGENTIC_LLM_CONCURRENCY_DEFAULT", "8"))
 # Phases where each worker frequently calls the shared LLM server.
 LLM_HEAVY_PHASES = frozenset({"prep", "analysis"})
 

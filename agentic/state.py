@@ -39,6 +39,7 @@ class MDState(TypedDict):
     subtask_type: Optional[str]    # "analysis_only", "setup_only", "preprocess_only", "hpc_only", "reporter_only", "multi_agent", None
     subtask_type_initialized: Optional[bool]  # Whether subtask type has been initialized
     agent_list: Optional[List[str]]           # Ordered list of agents for multi-agent workflow
+    pipeline_agent_list: Optional[List[str]]  # Original CLI agents (survives prep-only filter)
     required_inputs: Optional[Dict[str, bool]]  # What inputs this task requires
     input_validated: Optional[bool]             # Whether unified input validation has completed
     analysis_directory: Optional[str]   # Path to analysis output directory

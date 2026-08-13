@@ -1,8 +1,12 @@
 """
-HPC Agent - Orchestrates job submission, monitoring, and result retrieval
+HPC Agent - Orchestrates job submission and optional monitoring
 
 Follows same sophisticated workflow pattern as preprocessing and setup agents:
-LLM planning → Tool execution → Status monitoring → Result download
+LLM planning → Tool execution → Submit (monitor only when not using HPC pool).
+
+Result download is opt-in (only when the user explicitly requests a transfer
+from a remote host). Shared-filesystem clusters do not need download_results;
+analysis reads trajectories directly from ``{sim}/hpc/``.
 """
 import logging
 import json
@@ -36,16 +40,34 @@ except Exception:
     paramiko = None
 
 
+def _goal_requests_download(text: str) -> bool:
+    """True when the user explicitly asks to download/copy results from HPC."""
+    t = (text or "").lower()
+    needles = (
+        "download results",
+        "download the results",
+        "download trajectory",
+        "download the trajectory",
+        "scp ",
+        "rsync ",
+        "copy results from",
+        "retrieve results from remote",
+        "fetch results from",
+        "transfer results",
+    )
+    return any(n in t for n in needles)
+
+
 class MDHPCAgent:
     """
-    LLM-powered HPC agent for job submission and monitoring.
+    LLM-powered HPC agent for job submission (and optional monitoring).
     
     Workflow:
     1. Copy files from simsetup to working_dir/hpc
     2. Estimate simulation time and create SLURM script
     3. Submit job (with max 2 retry attempts)
-    4. Monitor job status (hourly checks)
-    5. Download results when complete
+    4. Optionally poll job status when not using the cross-sim HPC pool
+    5. download_results only when the user explicitly requests a remote transfer
     """
     
     def __init__(self, llm_client: Optional[LLMClient] = None, config_path: Optional[str] = None):
@@ -336,13 +358,76 @@ class MDHPCAgent:
                 logger.warning("Received mock LLM response, skipping plan parsing")
                 return None
             
-            # Parse JSON response
-            plan = json.loads(response)
-            return plan
+            plan = self._parse_plan_json(response)
+            if not plan:
+                return None
+            return self._sanitize_execution_plan(plan, state)
             
         except Exception as e:
             logger.error(f"LLM planning failed: {e}")
             return None
+
+    def _parse_plan_json(self, response: str) -> Optional[Dict[str, Any]]:
+        """Parse an HPC plan JSON object from a raw LLM response."""
+        text = (response or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+        import re as _re
+
+        m = _re.search(r"\{[\s\S]*\}", text)
+        if not m:
+            return None
+        try:
+            parsed = json.loads(m.group())
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+    def _sanitize_execution_plan(
+        self, plan: Dict[str, Any], state: MDState
+    ) -> Dict[str, Any]:
+        """Drop default download/monitor steps; keep download only if requested."""
+        goal_text = " ".join(
+            str(state.get(k) or "")
+            for k in (
+                "user_goal",
+                "user_goal_original",
+                "hpc_instructions",
+                "enriched_prompt",
+            )
+        )
+        want_download = _goal_requests_download(goal_text)
+        # When the HPC pool owns wait-before-analysis, keep submit-only plans.
+        pool_owns_wait = bool(
+            state.get("multi_sim_phase") == "hpc_pool"
+            or state.get("hpc_pool")
+            or state.get("use_hpc_pool")
+        )
+        steps = list(plan.get("steps") or [])
+        kept = []
+        for step in steps:
+            tool = str(step.get("tool_name") or "")
+            if tool == "download_results" and not want_download:
+                logger.info("HPC plan: dropping download_results (not requested)")
+                continue
+            if pool_owns_wait and tool in (
+                "check_job_status",
+                "monitor_gromacs_continuation",
+                "download_results",
+            ):
+                logger.info(
+                    "HPC plan: dropping %s (HPC pool handles wait/completion)", tool
+                )
+                continue
+            kept.append(step)
+        plan["steps"] = kept
+        return plan
     
     def _build_planning_prompt(
         self,
@@ -416,18 +501,18 @@ class MDHPCAgent:
 - For create_slurm_script: job_name MUST be "{job_name}", working_dir MUST be "{hpc_dir_path}"
 - For submit_job: remote_dir MUST be "{hpc_dir_path}"
 - For submit_job: DO NOT set script_path — the system resolves the script created by create_slurm_script (e.g. {job_name}_run.sh)
-- Tool execution order matters: copy files → estimate time → create script → submit → monitor → download
+- Tool execution order: copy files → estimate time → create script → submit
+- Do NOT include download_results unless the user explicitly asked to download/copy results from a remote host
+- Shared filesystems: trajectories stay under {hpc_dir_path}; analysis reads them in place
 - Maximum 2 job submission attempts (if first fails, retry once)
-- Monitor job hourly until completion
-- Only download results after job completes successfully
+- Prefer submit-only plans; long-running wait/monitor is handled by the HPC pool when enabled
 
 **Your task:** Create a detailed execution plan that:
 1. Copies simulation files from {simsetup_dir} → {hpc_dir_path}
 2. Estimates simulation time based on system size and production length
 3. Creates SLURM submission script with appropriate time limit (working_dir = {hpc_dir_path})
 4. Submits job to HPC (with retry logic if needed)
-5. Monitors job status periodically
-6. Downloads results when job completes
+5. Includes download_results ONLY if the user explicitly requested a remote download
 
 Output as JSON with this structure:
 {{
@@ -502,7 +587,8 @@ Output as JSON with this structure:
     • ssh_key_path (optional): No description
 
 → download_results
-  Download simulation results from HPC system.
+  OPTIONAL remote transfer only. Do not use on shared filesystems unless the
+  user explicitly asked to download/copy results from a remote host.
   Parameters:
     • remote_dir (required): No description
     • local_dir (required): No description
@@ -1199,6 +1285,32 @@ Output as JSON with this structure:
         elif tool_name == "submit_job":
             state["job_id"] = result.get("job_id")
             state["job_status"] = result.get("status", "SUBMITTED")
+            script_path = result.get("job_script") or result.get("script_path")
+            if script_path:
+                state["job_script"] = script_path
+            elif not state.get("job_script"):
+                # Keep ownership evidence for supervisor belongs-to checks.
+                hpc_dir = (
+                    state.get("hpc_dir")
+                    or state.get("hpc_directory")
+                    or state.get("hpc_output_directory")
+                )
+                if hpc_dir:
+                    candidates = sorted(Path(hpc_dir).glob("*_run.sh"))
+                    if candidates:
+                        state["job_script"] = str(candidates[0])
+            hpc_dir = (
+                state.get("hpc_dir")
+                or state.get("hpc_directory")
+                or state.get("hpc_output_directory")
+            )
+            if state.get("job_id") and hpc_dir:
+                try:
+                    from agentic.hpc.job_markers import write_job_marker
+
+                    write_job_marker(hpc_dir, state["job_id"])
+                except Exception:
+                    logger.debug("Could not write job marker", exc_info=True)
             if result.get("job_id") and state.get("is_multi_simulation"):
                 from agentic.multi_sim_progress import record_agent_finished
 

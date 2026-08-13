@@ -138,11 +138,9 @@ def compute_com_distance_from_universe(
 
     frames, times, distances = [], [], []
     for ts in u.trajectory[::frame_interval]:
-        try:
-            group1.wrap(compound="residues")
-            group2.wrap(compound="residues")
-        except Exception:
-            pass
+        # Trust already-wrapped trajectories (e.g. mdWrap.xtc). Do not
+        # AtomGroup.wrap(compound="residues") before COM — that can scatter a
+        # multi-residue pocket across images and inflate COM–COM distances.
         dist = minimum_image_distance(
             group1.center_of_mass(), group2.center_of_mass(), getattr(ts, "dimensions", None)
         )
@@ -275,11 +273,8 @@ def compute_ligand_pocket_distance_from_universe(
 
     frames, times, distances = [], [], []
     for ts in u.trajectory[::frame_interval]:
-        try:
-            pocket_frozen.wrap(compound="residues")
-            ligand.wrap(compound="residues")
-        except Exception:
-            pass
+        # Trust already-wrapped trajectories; do not re-wrap pocket/ligand
+        # residue-by-residue before COM (breaks large pocket COMs).
         dist = minimum_image_distance(
             pocket_frozen.center_of_mass(), ligand.center_of_mass(), getattr(ts, "dimensions", None)
         )
@@ -513,11 +508,8 @@ def calculate_ligand_pocket_distance(
         frames, times, distances = [], [], []
 
         for ts in u.trajectory[::frame_interval]:
-            try:
-                pocket_frozen.wrap(compound="residues")
-                ligand.wrap(compound="residues")
-            except Exception:
-                pass
+            # Trust already-wrapped trajectories; do not re-wrap pocket/ligand
+            # residue-by-residue before COM (breaks large pocket COMs).
             com_pocket = pocket_frozen.center_of_mass()
             com_ligand = ligand.center_of_mass()
             dist = minimum_image_distance(

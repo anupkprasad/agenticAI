@@ -287,12 +287,227 @@ def compact_state_for_persistence(state: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+_AGENT_LADDER = ("preprocessing", "simsetup", "hpc", "analysis", "reporter")
+
+
+def _normalize_agent_status(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text in ("completed", "complete", "skipped", "skip"):
+        return "done"
+    if text in ("submitted", "running"):
+        return "in_progress"
+    return text
+
+
+def _sim_working_dir(state: Dict[str, Any], label: str, progress_rec: Optional[Dict[str, Any]]) -> str:
+    wd = (progress_rec or {}).get("working_dir") or ""
+    if wd:
+        return str(wd)
+    base = state.get("multi_sim_base_dir") or state.get("working_directory")
+    if base and label:
+        return str(Path(base) / label)
+    return ""
+
+
+def build_full_agent_ladder(
+    state: Dict[str, Any],
+    label: str,
+    *,
+    worker: Optional[str] = None,
+    progress_rec: Optional[Dict[str, Any]] = None,
+    hpc_rec: Optional[Dict[str, Any]] = None,
+    pool_phase: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Full per-sim agent ladder for ``pool_status.json``.
+
+    Always includes preprocessing → simsetup → hpc → analysis → reporter.
+    Upstream stages are marked ``done`` once later phases are active or disk
+    artifacts prove completion.
+    """
+    from agentic.multi_sim_progress import (
+        per_sim_analysis_done_on_disk,
+        per_sim_reporter_done_on_disk,
+    )
+
+    progress = state.get("multi_sim_progress") or {}
+    rec = progress_rec or ((progress.get("sims") or {}).get(label) or {})
+    agents = dict(rec.get("agents") or {})
+    wd = _sim_working_dir(state, label, rec)
+    phase = pool_phase or (state.get("parallel_pool") or {}).get("phase")
+    multi_phase = state.get("multi_sim_phase")
+
+    ladder = {key: _normalize_agent_status(agents.get(key)) for key in _AGENT_LADDER}
+
+    if hpc_rec:
+        prep = _normalize_agent_status(hpc_rec.get("prep_status"))
+        if prep == "done":
+            ladder["preprocessing"] = "done"
+            ladder["simsetup"] = "done"
+        elif prep == "failed":
+            if ladder["preprocessing"] != "done":
+                ladder["preprocessing"] = "failed"
+            ladder["simsetup"] = "failed"
+        elif prep == "in_progress":
+            if ladder["preprocessing"] not in ("done", "failed"):
+                ladder["preprocessing"] = "in_progress"
+            if ladder["simsetup"] not in ("done", "failed"):
+                ladder["simsetup"] = "in_progress"
+        elif prep == "pending":
+            if not ladder["preprocessing"]:
+                ladder["preprocessing"] = "pending"
+            if not ladder["simsetup"]:
+                ladder["simsetup"] = "pending"
+
+        hpc_st = _normalize_agent_status(hpc_rec.get("hpc_status"))
+        if hpc_st == "done":
+            ladder["hpc"] = "done"
+            ladder["preprocessing"] = "done"
+            ladder["simsetup"] = "done"
+        elif hpc_st == "failed":
+            ladder["hpc"] = "failed"
+        elif hpc_st == "in_progress":
+            ladder["hpc"] = "in_progress"
+            ladder["preprocessing"] = "done"
+            ladder["simsetup"] = "done"
+        elif hpc_st == "pending" and not ladder["hpc"]:
+            ladder["hpc"] = "pending"
+
+    if wd:
+        root = Path(wd)
+        preprocess_dir = root / "preprocess"
+        simsetup_dir = root / "simsetup"
+        hpc_dir = root / "hpc"
+        # Real simsetup products (not merely a seeded reuse-hpc trajectory).
+        simsetup_ready = simsetup_dir.is_dir() and (
+            (simsetup_dir / "topol.top").is_file()
+            or (simsetup_dir / "solvated.gro").is_file()
+            or (simsetup_dir / "system.gro").is_file()
+            or any(simsetup_dir.glob("*.top"))
+        )
+        preprocess_ready = preprocess_dir.is_dir() and (
+            (preprocess_dir / "protein_h.pdb").is_file()
+            or (preprocess_dir / "protein.pdb").is_file()
+            or (preprocess_dir / "raw.pdb").is_file()
+        )
+        traj_seeded = hpc_dir.is_dir() and (hpc_dir / "md.tpr").is_file() and (
+            (hpc_dir / "mdWrap.xtc").is_file() or (hpc_dir / "md.xtc").is_file()
+        )
+        # Authentic HPC-pool prep flag when available (do not infer from seed traj).
+        prep_from_pool = (
+            _normalize_agent_status((hpc_rec or {}).get("prep_status"))
+            if hpc_rec
+            else None
+        )
+        prep_complete = prep_from_pool == "done" or simsetup_ready
+
+        if simsetup_ready:
+            if ladder["preprocessing"] != "failed":
+                ladder["preprocessing"] = "done"
+            if ladder["simsetup"] != "failed":
+                ladder["simsetup"] = "done"
+        elif preprocess_ready:
+            if not ladder["preprocessing"] or ladder["preprocessing"] == "pending":
+                ladder["preprocessing"] = "done"
+
+        # Seeded reuse-hpc campaigns place md.tpr+mdWrap.xtc in every sim dir
+        # *before* preprocess/simsetup run. That must NOT mark prep/HPC done —
+        # summary_lines (prep_status/hpc_status) are the source of truth mid-prep.
+        if traj_seeded and prep_complete:
+            if ladder["hpc"] != "failed":
+                ladder["hpc"] = "done"
+            if ladder["preprocessing"] != "failed":
+                ladder["preprocessing"] = "done"
+            if ladder["simsetup"] != "failed":
+                ladder["simsetup"] = "done"
+        elif traj_seeded and prep_from_pool == "pending":
+            # Keep ladder honest while prep workers are still outstanding.
+            if ladder["hpc"] not in ("done", "failed", "in_progress"):
+                ladder["hpc"] = "pending"
+            if ladder["preprocessing"] not in ("done", "failed", "in_progress"):
+                ladder["preprocessing"] = "pending"
+            if ladder["simsetup"] not in ("done", "failed", "in_progress"):
+                ladder["simsetup"] = "pending"
+
+        if per_sim_analysis_done_on_disk(wd):
+            ladder["analysis"] = "done"
+        if per_sim_reporter_done_on_disk(wd):
+            ladder["analysis"] = "done"
+            ladder["reporter"] = "done"
+
+    # Reached analysis (or later) ⇒ upstream stages are complete unless failed.
+    # Only apply this promotion when *this* sim's prep is done (or we are past
+    # the HPC pool entirely). Global post_hpc flags used to mark every seeded
+    # sim as prep-done while parallel prep was still running.
+    past_hpc_globally = bool(
+        state.get("hpc_pool_phase_complete") and not hpc_rec
+    ) or (
+        state.get("hpc_pool_phase_complete")
+        and hpc_rec
+        and _normalize_agent_status(hpc_rec.get("prep_status")) == "done"
+    )
+    if phase == "analysis" or multi_phase in (
+        "combined_analysis",
+        "combined_reporter",
+        "complete",
+    ) or past_hpc_globally:
+        for key in ("preprocessing", "simsetup", "hpc"):
+            if ladder[key] != "failed":
+                ladder[key] = "done"
+    elif multi_phase == "executing_sims" and (
+        not hpc_rec
+        or _normalize_agent_status((hpc_rec or {}).get("prep_status")) == "done"
+    ):
+        for key in ("preprocessing", "simsetup", "hpc"):
+            if ladder[key] != "failed":
+                ladder[key] = "done"
+
+    # Prep parallel pool has not started analysis yet.
+    if phase == "prep":
+        if not ladder["analysis"]:
+            ladder["analysis"] = "pending"
+        if not ladder["reporter"]:
+            ladder["reporter"] = "pending"
+
+    for key in _AGENT_LADDER:
+        if not ladder[key]:
+            ladder[key] = "pending"
+
+    status = _normalize_agent_status(rec.get("status")) or _normalize_agent_status(worker) or "pending"
+    if status == "in_progress" and worker == "running":
+        status = "in_progress"
+    entry: Dict[str, Any] = {
+        "preprocessing": ladder["preprocessing"],
+        "simsetup": ladder["simsetup"],
+        "hpc": ladder["hpc"],
+        "analysis": ladder["analysis"],
+        "reporter": ladder["reporter"],
+        "status": status,
+    }
+    if worker is not None:
+        entry["worker"] = worker
+    if hpc_rec and hpc_rec.get("job_id"):
+        entry["job_id"] = hpc_rec.get("job_id")
+    if hpc_rec and hpc_rec.get("last_slurm_state"):
+        entry["slurm"] = hpc_rec.get("last_slurm_state")
+    if hpc_rec and hpc_rec.get("skip_reason"):
+        entry["note"] = hpc_rec.get("skip_reason")
+    if rec.get("error") or (hpc_rec or {}).get("error"):
+        entry["error"] = rec.get("error") or (hpc_rec or {}).get("error")
+    return entry
+
+
 def build_pool_status_snapshot(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Unified live status for ``pool_status.json`` across workflow stages.
 
     Covers parallel prep/analysis pools, HPC SLURM pool, sequential per-sim
-    execution, and combined analysis/reporter.
+    execution, and combined analysis/reporter. Every phase includes the full
+    agent ladder per simulation.
     """
     if not state.get("is_multi_simulation"):
         return None
@@ -311,7 +526,26 @@ def build_pool_status_snapshot(state: Dict[str, Any]) -> Optional[Dict[str, Any]
     if hpc_active:
         from agentic.multi_sim_hpc_pool import snapshot_hpc_pool_status
 
-        return snapshot_hpc_pool_status(state)
+        snap = snapshot_hpc_pool_status(state)
+        progress = state.get("multi_sim_progress") or {}
+        pool_sims = (hpc_pool.get("sims") or {})
+        labels = (
+            list(progress.get("sim_order") or [])
+            or list(snap.get("simulations") or {})
+            or sorted(pool_sims.keys())
+        )
+        enriched = {}
+        for label in labels:
+            enriched[label] = build_full_agent_ladder(
+                state,
+                label,
+                worker=((state.get("parallel_pool") or {}).get("sims") or {}).get(label, {}).get("status"),
+                progress_rec=(progress.get("sims") or {}).get(label),
+                hpc_rec=pool_sims.get(label),
+                pool_phase="prep" if (state.get("parallel_pool") or {}).get("phase") == "prep" else None,
+            )
+        snap["simulations"] = enriched
+        return snap
 
     parallel_pool = state.get("parallel_pool")
     if parallel_pool:
@@ -329,21 +563,22 @@ def build_pool_status_snapshot(state: Dict[str, Any]) -> Optional[Dict[str, Any]
             snap = snapshot_parallel_pool_status(pool)
             snap["workflow_phase"] = phase or "parallel_pool"
             progress = state.get("multi_sim_progress") or {}
-            if progress.get("sims"):
-                snap["simulations"] = {
-                    label: {
-                        "worker": (pool.get("sims") or {}).get(label, {}).get("status"),
-                        **{
-                            k: v
-                            for k, v in ((progress.get("sims") or {}).get(label) or {})
-                            .get("agents", {})
-                            .items()
-                            if k in ("analysis", "reporter", "preprocessing", "simsetup", "hpc")
-                        },
-                        "status": ((progress.get("sims") or {}).get(label) or {}).get("status"),
-                    }
-                    for label in progress.get("sim_order") or sorted((pool.get("sims") or {}).keys())
-                }
+            hpc_sims = (state.get("hpc_pool") or {}).get("sims") or {}
+            labels = (
+                list(progress.get("sim_order") or [])
+                or sorted((pool.get("sims") or {}).keys())
+            )
+            snap["simulations"] = {
+                label: build_full_agent_ladder(
+                    state,
+                    label,
+                    worker=(pool.get("sims") or {}).get(label, {}).get("status"),
+                    progress_rec=(progress.get("sims") or {}).get(label),
+                    hpc_rec=hpc_sims.get(label),
+                    pool_phase=pool.get("phase"),
+                )
+                for label in labels
+            }
             return snap
 
     if phase in ("executing_sims", "combined_analysis", "combined_reporter", "complete"):
@@ -372,6 +607,7 @@ def _snapshot_from_multi_sim_progress(state: Dict[str, Any]) -> Dict[str, Any]:
 
     progress = state.get("multi_sim_progress") or {}
     sims = progress.get("sims") or {}
+    hpc_sims = (state.get("hpc_pool") or {}).get("sims") or {}
     by_status: Dict[str, List[str]] = {
         "running": [],
         "pending": [],
@@ -388,45 +624,40 @@ def _snapshot_from_multi_sim_progress(state: Dict[str, Any]) -> Dict[str, Any]:
 
     for label in progress.get("sim_order") or sorted(sims.keys()):
         rec = sims.get(label) or {}
-        agents = rec.get("agents") or {}
         wd = rec.get("working_dir") or ""
         job_info = load_local_continuation_job(wd) if wd else None
         job_id = (job_info or {}).get("job_id")
         job_status = str((job_info or {}).get("status") or "").upper()
-        entry = {
-            "status": rec.get("status"),
-            "preprocessing": agents.get("preprocessing"),
-            "simsetup": agents.get("simsetup"),
-            "hpc": agents.get("hpc"),
-            "analysis": agents.get("analysis"),
-            "reporter": agents.get("reporter"),
-        }
+        entry = build_full_agent_ladder(
+            state,
+            label,
+            progress_rec=rec,
+            hpc_rec=hpc_sims.get(label),
+        )
         if job_id:
             entry["job_id"] = job_id
             entry["job_status"] = job_status or None
-        if rec.get("error"):
-            entry["error"] = rec.get("error")
 
         # Prefer live continuation job truth over a stale pending progress row.
-        st = rec.get("status") or "pending"
+        st = entry.get("status") or "pending"
         if rec.get("status") == "failed" and not job_id:
             st = "failed"
+            entry["status"] = "failed"
         elif job_info and job_info.get("complete"):
             st = "done"
-            entry["hpc"] = entry.get("hpc") or "done"
+            entry["hpc"] = "done"
             entry["status"] = "done"
         elif job_id and job_status not in terminal_job:
             st = "submitted"
             entry["hpc"] = "done"
-            if entry.get("status") in (None, "pending", "in_progress"):
-                entry["status"] = "submitted"
+            entry["status"] = "submitted"
         elif st == "in_progress":
             st = "running"
 
         sim_details[label] = entry
 
         parts = [f"status={entry.get('status') or st}"]
-        for agent_key in ("preprocessing", "simsetup", "hpc", "analysis", "reporter"):
+        for agent_key in _AGENT_LADDER:
             if entry.get(agent_key):
                 parts.append(f"{agent_key}={entry[agent_key]}")
         if job_id:

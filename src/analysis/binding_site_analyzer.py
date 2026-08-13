@@ -486,11 +486,8 @@ def compute_ligand_residence_from_universe(
 
     box = None
     for ts in u.trajectory[::step]:
-        try:
-            pocket.wrap(compound="residues")
-            ligand.wrap(compound="residues")
-        except Exception:
-            pass
+        # Trust already-wrapped trajectories; do not re-wrap pocket/ligand
+        # residue-by-residue before COM (breaks large pocket COMs).
         box = getattr(ts, "dimensions", None)
         pocket_com = pocket.center_of_mass()
         lig_com = ligand.center_of_mass()

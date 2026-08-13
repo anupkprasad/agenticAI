@@ -51,7 +51,20 @@ def build_per_sim_job_spec(state: Dict[str, Any], sim_info: Dict[str, Any], *, p
         "user_goal": user_goal,
         "raw_pdb": sim_pdb,
         "phase": phase,
+        # Active agents for this pool phase (execution).
         "agent_list": agent_list,
+        # Full CLI pipeline (logging / context); never drop analysis/reporter here.
+        "pipeline_agent_list": list(
+            state.get("pipeline_agent_list")
+            or state.get("requested_agent_list")
+            or [
+                "preprocess",
+                "simsetup",
+                "hpcjob",
+                "analysis",
+                "reporter",
+            ]
+        ),
         "force_field": state.get("force_field", "amber99sb-ildn"),
         "water_model": state.get("water_model", "tip3p"),
         "use_llm": bool(state.get("use_llm", True)),
@@ -60,6 +73,7 @@ def build_per_sim_job_spec(state: Dict[str, Any], sim_info: Dict[str, Any], *, p
         "production_ns": state.get("production_ns"),
         "extended_minimization": bool(state.get("extended_minimization", False)),
         "md_engine": state.get("md_engine", "gromacs"),
+        "reuse_hpc": bool(state.get("reuse_hpc", False)),
     }
 
 
@@ -69,17 +83,14 @@ def _agent_list_for_phase(state: Dict[str, Any], default: List[str]) -> List[str
 
 
 def _resolve_prep_goal(state: Dict[str, Any], sim_info: Dict[str, Any]) -> str:
+    """Return the master-plan per-sim goal unchanged (no phase rewrite).
+
+    Phase scope is enforced by ``agent_list`` / pool routing, not by mutating
+    the scientific user goal — that caused confusing log mismatches.
+    """
     master = (sim_info.get("prompt") or sim_info.get("setup_prompt") or "").strip()
     if master:
-        return (
-            "HPC pool — phase 1/3 (preprocess + simsetup only for this simulation). "
-            "Full pipeline continues with parallel HPC (phase 2) then per-sim "
-            "analysis/reporter (phase 3) and combined analysis.\n\n"
-            "Workflow scope for this phase: preprocessing and simulation setup only. "
-            "Do not run HPC submission, MD production, analysis, or reporting yet — "
-            "the cross-simulation pool handles HPC and post-production work.\n\n"
-            f"{master}"
-        )
+        return master
     label = sim_info.get("label") or "simulation"
     wdir = sim_info.get("working_dir") or ""
     return (
@@ -125,6 +136,13 @@ def run_per_sim_workflow(job: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     try:
+        try:
+            from src.simsetup.md_env import ensure_md_toolchain
+
+            ensure_md_toolchain()
+        except Exception:
+            pass
+
         _copy_pdb_if_needed(job)
         log_path = str(Path(working_dir) / "agent_conversation.log")
         Path(working_dir).mkdir(parents=True, exist_ok=True)
@@ -147,18 +165,40 @@ def run_per_sim_workflow(job: Dict[str, Any]) -> Dict[str, Any]:
 
         workflow = MDWorkflow(llm_client=llm)
         agents = job.get("agent_list") or ["analysis", "reporter"]
-        subtask_type = "reporter_only" if agents == ["reporter"] else "multi_agent"
+        pipeline = job.get("pipeline_agent_list") or agents
+        phase = job.get("phase") or ""
+        if agents == ["reporter"]:
+            subtask_type = "reporter_only"
+        elif phase == "analysis" or set(agents) <= {"analysis", "reporter"}:
+            # Force analysis-only semantics so workers never re-enter HPC wait
+            # (goal text still mentions full MD / HPC under --reuse-hpc).
+            subtask_type = "analysis_only"
+        else:
+            subtask_type = "multi_agent"
         config: Dict[str, Any] = {
             "working_directory": working_dir,
             "is_multi_simulation": False,
             "subtask_type": subtask_type,
+            # Execute only this phase's agents…
             "agent_list": agents,
+            "active_agent_list": agents,
+            # …but keep the full campaign pipeline visible in state/logs.
+            "pipeline_agent_list": pipeline,
+            "pool_phase": phase,
             "force_field": job.get("force_field"),
             "water_model": job.get("water_model"),
             "use_llm": job.get("use_llm", True),
             "human_in_loop": False,
             "md_engine": job.get("md_engine", "gromacs"),
+            "reuse_hpc": bool(job.get("reuse_hpc", False)),
         }
+        if phase == "analysis" or set(agents) <= {"analysis", "reporter"}:
+            # Hard-disable HPC pool in analysis/reporter workers. Leftover
+            # reuse-hpc workers were sleeping forever in hpc_pool_wait.
+            config["hpc_pool_disabled"] = True
+            config["use_hpc_pool"] = False
+            config["post_hpc_analysis_only"] = True
+            config["hpc_pool_phase_complete"] = True
         if job.get("raw_pdb"):
             config["raw_pdb"] = job["raw_pdb"]
         if job.get("production_ns") is not None:

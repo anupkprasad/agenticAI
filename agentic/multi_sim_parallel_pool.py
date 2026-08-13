@@ -8,6 +8,7 @@ from host CPU and memory via ``parallel_resources.estimate_workers``.
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,43 @@ from agentic.parallel_worker import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Per-sim attempt budget for parallel prep/analysis workers. After this many
+# unfinished attempts the label is marked failed and the pool continues.
+DEFAULT_SIM_MAX_ATTEMPTS = int(os.environ.get("AGENTIC_SIM_MAX_ATTEMPTS", "5"))
+
+
+def _max_sim_attempts(state: Optional[Dict[str, Any]] = None) -> int:
+    """Resolve per-sim max attempts from state / env (default 5)."""
+    if state is not None:
+        raw = state.get("sim_max_attempts")
+        if raw is not None:
+            try:
+                return max(1, int(raw))
+            except (TypeError, ValueError):
+                pass
+    return max(1, DEFAULT_SIM_MAX_ATTEMPTS)
+
+
+def _fail_sim_exhausted(
+    rec: Dict[str, Any],
+    *,
+    attempts: int,
+    max_attempts: int,
+    reason: str,
+) -> None:
+    rec["status"] = "failed"
+    rec["attempts"] = attempts
+    rec["completed_at"] = _utc_now()
+    rec["error"] = (
+        f"{reason} after {attempts}/{max_attempts} attempt(s); "
+        "skipping this simulation and continuing others"
+    )
+    logger.warning(
+        "Parallel pool: %s — %s",
+        rec.get("label") or "?",
+        rec["error"],
+    )
 
 
 def should_use_parallel_pool(state: Dict[str, Any]) -> bool:
@@ -227,7 +265,7 @@ def persist_parallel_pool_interrupt(state: Dict[str, Any]) -> None:
     log_pool_to_base(
         state,
         "Parallel pool interrupted — checkpoint saved for --resume",
-        log_to_conversation=True,
+        log_to_conversation=False,
     )
 
 
@@ -255,7 +293,7 @@ def resume_parallel_pool_if_needed(state: Dict[str, Any]) -> bool:
         state,
         f"Resuming parallel {phase} pool from checkpoint",
         pool=state.get("parallel_pool"),
-        log_to_conversation=True,
+        log_to_conversation=False,
     )
     return True
 
@@ -279,7 +317,18 @@ def init_parallel_pool(state: Dict[str, Any], *, phase: str) -> Dict[str, Any]:
     agent_list = (
         ["preprocess", "simsetup"] if phase == "prep" else _analysis_agent_list(state)
     )
-    sims: Dict[str, Any] = dict(existing.get("sims") or {})
+    # Prep→analysis (or any phase change) must not inherit terminal statuses from
+    # the previous phase — that made analysis pools look finished with 0 workers.
+    phase_changed = bool(existing.get("phase") and existing.get("phase") != phase)
+    sims: Dict[str, Any] = {} if phase_changed else dict(existing.get("sims") or {})
+    if phase_changed:
+        # Preserve working_dir / label metadata when rebuilding.
+        for label, old in (existing.get("sims") or {}).items():
+            sims[label] = {
+                "label": old.get("label") or label,
+                "index": old.get("index"),
+                "working_dir": old.get("working_dir") or "",
+            }
 
     for idx, sp in enumerate(sim_prompts):
         label = sp.get("label") or f"sim_{idx}"
@@ -287,7 +336,7 @@ def init_parallel_pool(state: Dict[str, Any], *, phase: str) -> Dict[str, Any]:
         rec = sims.get(label) or {}
         rec.setdefault("label", label)
         rec.setdefault("index", idx)
-        rec["working_dir"] = wd
+        rec["working_dir"] = wd or rec.get("working_dir") or ""
         rec["agent_list"] = agent_list
         if _is_actively_running(label, state):
             rec["status"] = "running"
@@ -305,13 +354,29 @@ def init_parallel_pool(state: Dict[str, Any], *, phase: str) -> Dict[str, Any]:
                 rec.pop("error", None)
                 rec.pop("completed_at", None)
                 logger.info("Parallel pool: re-queued failed sim %s for retry", label)
+            # else: keep terminal failed
         else:
             job = build_per_sim_job_spec(state, sp, phase=phase)
             if job_already_complete(job):
                 rec["status"] = "skipped"
                 rec["skip_reason"] = "artifacts on disk"
-            elif rec.get("status") not in ("done",):
-                rec["status"] = "pending"
+                rec.pop("error", None)
+            else:
+                attempts = int(rec.get("attempts") or 0)
+                max_attempts = _max_sim_attempts(state)
+                if attempts >= max_attempts:
+                    _fail_sim_exhausted(
+                        rec,
+                        attempts=attempts,
+                        max_attempts=max_attempts,
+                        reason="incomplete artifacts",
+                    )
+                else:
+                    # Always (re)queue when this phase's artifacts are missing —
+                    # never keep a prior-phase "done" without disk evidence.
+                    rec["status"] = "pending"
+                    rec.pop("skip_reason", None)
+                    rec.pop("completed_at", None)
         _reconcile_sim_from_disk(rec, phase, label=label, state=state)
         sims[label] = rec
 
@@ -337,6 +402,8 @@ def _analysis_agent_list(state: Dict[str, Any]) -> List[str]:
 def _collect_finished(runner: _PoolRunner, pool: Dict[str, Any], state: Dict[str, Any]) -> List[str]:
     """Reap completed futures and update pool + multi_sim_progress."""
     finished: List[str] = []
+    max_attempts = _max_sim_attempts(state)
+    phase = pool.get("phase") or "analysis"
     for label, fut in list(runner.futures.items()):
         if not fut.done():
             continue
@@ -347,17 +414,65 @@ def _collect_finished(runner: _PoolRunner, pool: Dict[str, Any], state: Dict[str
         except Exception as exc:
             result = {"success": False, "label": label, "error": str(exc)}
 
-        if result.get("success"):
-            rec["status"] = "done"
-            rec.pop("error", None)
-        else:
-            rec["status"] = "failed"
-            rec["error"] = result.get("error") or "worker failed"
-        rec["completed_at"] = _utc_now()
+        attempts = int(rec.get("attempts") or 0) + 1
+        rec["attempts"] = attempts
         rec["workflow_status"] = result.get("workflow_status")
+
+        sim_info = _sim_info_by_label(state, label) or {
+            "label": label,
+            "working_dir": rec.get("working_dir") or "",
+        }
+        job = build_per_sim_job_spec(state, sim_info, phase=phase)
+        disk_ok = job_already_complete(job)
+        worker_ok = bool(result.get("success"))
+
+        if worker_ok and disk_ok:
+            rec["status"] = "done"
+            rec["completed_at"] = _utc_now()
+            rec.pop("error", None)
+        elif attempts >= max_attempts:
+            reason = (
+                "worker reported success but artifacts incomplete"
+                if worker_ok and not disk_ok
+                else (result.get("error") or "worker failed")
+            )
+            _fail_sim_exhausted(
+                rec,
+                attempts=attempts,
+                max_attempts=max_attempts,
+                reason=str(reason),
+            )
+        else:
+            # Soft-fail / incomplete: re-queue until attempt budget is spent.
+            rec["status"] = "pending"
+            rec.pop("completed_at", None)
+            rec["error"] = (
+                result.get("error")
+                or (
+                    "worker success but required artifacts missing on disk"
+                    if worker_ok
+                    else "worker failed"
+                )
+            )
+            logger.warning(
+                "Parallel pool: %s attempt %s/%s incomplete (%s) — will retry",
+                label,
+                attempts,
+                max_attempts,
+                rec["error"],
+            )
+
         pool["sims"][label] = rec
         finished.append(label)
         _sync_progress_for_label(state, label, rec)
+        # Keep cross-sim HPC pool in sync so staging can overlap with remaining prep.
+        if phase == "prep" and rec.get("status") in ("done", "skipped"):
+            try:
+                from agentic.multi_sim_hpc_pool import mark_prep_done
+
+                mark_prep_done(state, label)
+            except Exception:
+                logger.debug("mark_prep_done failed for %s", label, exc_info=True)
 
     state["parallel_pool"] = pool
     return finished
@@ -458,6 +573,15 @@ def parallel_pool_supervisor_tick(state: Dict[str, Any]) -> Dict[str, Any]:
     _collect_finished(runner, pool, state)
     pool = state["parallel_pool"]
 
+    # Overlap: while prep workers run, stage HPC for sims whose prep is already done.
+    if phase == "prep" and state.get("hpc_pool"):
+        try:
+            from agentic.multi_sim_hpc_pool import _submit_ready_sims
+
+            _submit_ready_sims(state, state["hpc_pool"])
+        except Exception:
+            logger.debug("Parallel prep tick: HPC staging skipped", exc_info=True)
+
     failures = [
         label
         for label, rec in (pool.get("sims") or {}).items()
@@ -500,6 +624,25 @@ def _finish_parallel_phase(state: Dict[str, Any]) -> Dict[str, Any]:
         if rec.get("status") == "failed"
     ]
     log_pool_to_base(state, f"Parallel {phase} phase complete", pool=pool)
+    logger.info(
+        "Parallel %s phase complete (done=%s failed=%s pending=%s)",
+        phase,
+        sum(
+            1
+            for r in (pool.get("sims") or {}).values()
+            if (r or {}).get("status") in ("done", "skipped")
+        ),
+        sum(
+            1
+            for r in (pool.get("sims") or {}).values()
+            if (r or {}).get("status") == "failed"
+        ),
+        sum(
+            1
+            for r in (pool.get("sims") or {}).values()
+            if (r or {}).get("status") == "pending"
+        ),
+    )
     if failures:
         state["errors"] = list(state.get("errors") or [])
         state["errors"].append(
@@ -514,12 +657,19 @@ def _finish_parallel_phase(state: Dict[str, Any]) -> Dict[str, Any]:
     state.pop("parallel_pool", None)
 
     if phase == "prep":
-        from agentic.multi_sim_hpc_pool import mark_prep_done
+        from agentic.multi_sim_hpc_pool import mark_prep_done, mark_prep_failed
 
         for label, rec in (pool.get("sims") or {}).items():
             if _terminal_success(rec):
                 mark_prep_done(state, label)
+            elif rec.get("status") == "failed":
+                mark_prep_failed(
+                    state,
+                    label,
+                    error=rec.get("error") or "parallel prep worker failed",
+                )
         state.pop("hpc_pool_prep_parallel", None)
+        state["hpc_pool_prep_phase_done"] = True
         state["multi_sim_phase"] = "hpc_pool"
         state["next_node"] = "supervisor"
         return state
@@ -555,16 +705,37 @@ def start_parallel_agent_phase(state: Dict[str, Any]) -> Dict[str, Any]:
         sync_post_hpc_progress_from_disk,
     )
 
+    # Idempotent: if analysis pool already exists, just tick (no re-announce).
+    existing = state.get("parallel_pool") or {}
+    if existing.get("phase") == "analysis" and existing.get("sims"):
+        state["multi_sim_phase"] = "parallel_pool"
+        return parallel_pool_supervisor_tick(state)
+
     state["multi_sim_phase"] = "parallel_pool"
     reconcile_multisim_progress_from_disk(state)
     init_multi_sim_progress(state)
     sync_post_hpc_progress_from_disk(state)
     init_parallel_pool(state, phase="analysis")
     sync_parallel_pool_to_multi_sim_progress(state)
+    # Pool counts live in supervisor/pool_status.json — not conversation log.
     log_pool_to_base(
         state,
         "Starting parallel analysis/reporter pool",
         pool=state["parallel_pool"],
+        log_to_conversation=False,
+    )
+    logger.info(
+        "Parallel analysis/reporter pool started (active=%s/%s pending=%s done=%s)",
+        _count_running(state["parallel_pool"]),
+        (state["parallel_pool"] or {}).get("max_workers"),
+        _count_pending(state["parallel_pool"]),
+        len(
+            [
+                r
+                for r in ((state["parallel_pool"] or {}).get("sims") or {}).values()
+                if (r or {}).get("status") in ("done", "skipped")
+            ]
+        ),
     )
     return parallel_pool_supervisor_tick(state)
 
@@ -592,7 +763,14 @@ def start_parallel_prep_if_enabled(state: Dict[str, Any]) -> bool:
     init_parallel_pool(state, phase="prep")
     state["multi_sim_phase"] = "parallel_pool"
     state["hpc_pool_prep_parallel"] = True
-    log_pool_to_base(state, "Starting parallel prep pool", pool=state["parallel_pool"])
+    log_pool_to_base(
+        state, "Starting parallel prep pool", pool=state["parallel_pool"], log_to_conversation=False
+    )
+    logger.info(
+        "Parallel prep pool started (active=%s/%s)",
+        _count_running(state["parallel_pool"]),
+        (state["parallel_pool"] or {}).get("max_workers"),
+    )
     parallel_pool_supervisor_tick(state)
     return True
 
@@ -622,27 +800,36 @@ def log_pool_to_base(
     action: str,
     *,
     pool: Optional[Dict[str, Any]] = None,
-    log_to_conversation: bool = True,
+    log_to_conversation: bool = False,
 ) -> None:
-    """Log pool milestones to ``{base}/agent_conversation.log`` when enabled."""
+    """
+    Optionally log pool milestones to ``{base}/agent_conversation.log``.
+
+    Defaults to **off** — live counts belong in ``supervisor/pool_status.json``
+    only (avoid polluting the conversation log with pool status spam).
+    """
     if not log_to_conversation:
         return
     base = state.get("multi_sim_base_dir") or state.get("working_directory")
     if not base:
         return
-    from agentic.utils.conversation_logger import log_agent_action, set_log_file
+    from agentic.utils.conversation_logger import log_agent_action, temporary_log_file
 
     pool = pool or state.get("parallel_pool") or {}
-    set_log_file(str(Path(base) / "agent_conversation.log"))
-    log_agent_action(
-        "parallel_pool",
-        action,
-        {
-            "active": f"{_count_running(pool)}/{pool.get('max_workers', '?')}",
-            "phase": pool.get("phase"),
-            "summary": pool_summary(state),
-        },
-    )
+    snap = snapshot_parallel_pool_status(pool)
+    with temporary_log_file(str(Path(base) / "agent_conversation.log")):
+        log_agent_action(
+            "parallel_pool",
+            action,
+            {
+                "active": f"{_count_running(pool)}/{pool.get('max_workers', '?')}",
+                "phase": pool.get("phase"),
+                "pending": len(snap.get("pending") or []),
+                "done": len(snap.get("done") or []) + len(snap.get("skipped") or []),
+                "failed": len(snap.get("failed") or []),
+                "running": len(snap.get("running") or []),
+            },
+        )
 
 
 __all__ = [

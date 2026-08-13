@@ -283,7 +283,7 @@ Runs automatically after `analyze_fel_landscape_features` when FEL is requested.
 | `plot_md_data`        | Line plot from`.dat` / `.csv`        |
 | `plot_pca_projection` | PCx vs PCy scatter (time-coloured)       |
 | `plot_md_multipanel`  | Multi-panel figures                      |
-| `wrap_trajectory`     | PBC-correct trajectory (`gmx trjconv`) |
+| `wrap_trajectory`     | PBC-correct traj centering Protein+ATP (`gmx trjconv`); skip if `mdWrap.xtc` exists |
 
 ---
 

@@ -10,6 +10,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
+# Ensure acpype/antechamber/gmx are on PATH before any simsetup tool import.
+try:
+    from src.simsetup.md_env import ensure_md_toolchain
+
+    ensure_md_toolchain()
+except Exception:
+    pass
+
 from agentic.workflow import MDWorkflow
 from agentic.llm import LLMClient
 from agentic.utils import (
@@ -1876,6 +1884,16 @@ def main(argv=None):
                            "'auto' (default) matches OLLAMA_NUM_PARALLEL (4). "
                            "Caps local workers so fewer sims queue on the shared Ollama server."
                        ))
+    parser.add_argument(
+        "--sim-max-attempts",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Max attempts per simulation for parallel prep/analysis before marking "
+            "that sim failed and continuing (default: 5, or AGENTIC_SIM_MAX_ATTEMPTS)."
+        ),
+    )
     parser.add_argument("--hpc-check-interval", default="2h",
                        help=(
                            "SLURM poll interval during HPC pool wait "
@@ -1902,6 +1920,16 @@ def main(argv=None):
                            "regenerate combined overlays/DCCM/report without re-analysing each "
                            "simulation. Requires the same --working-dir as the original run."
                        ))
+    parser.add_argument(
+        "--reuse-hpc",
+        action="store_true",
+        help=(
+            "Full-pipeline demo on frozen trajectories: still run preprocess + simsetup "
+            "+ HPC staging (copy/SLURM script) + analysis + reporter, but never call "
+            "sbatch. Existing hpc/md.tpr and hpc/mdWrap.xtc are preserved (no md.log "
+            "required)."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -1994,6 +2022,7 @@ def main(argv=None):
         "requeue_failed_sims": getattr(args, "resume", False),
         "retry_labels": list(getattr(args, "retry_labels", None) or []),
         "combined_only": getattr(args, "combined_only", False),
+        "reuse_hpc": bool(getattr(args, "reuse_hpc", False)),
         "allowed_hpc_jobs": getattr(args, "allowed_hpc_jobs", None),
         "_allowed_hpc_jobs_explicit": getattr(args, "allowed_hpc_jobs", None) is not None,
         "max_concurrent": getattr(args, "max_concurrent", 4),
@@ -2002,7 +2031,19 @@ def main(argv=None):
         "parallel_mem_gb_per_job": getattr(args, "parallel_mem_gb", None),
         "parallel_cpus_per_job": getattr(args, "parallel_cpus", None),
         "llm_concurrency": getattr(args, "llm_concurrency", "auto"),
+        "sim_max_attempts": getattr(args, "sim_max_attempts", None),
     }
+
+    if config["reuse_hpc"]:
+        import os as _os_reuse
+
+        _os_reuse.environ["AGENTIC_REUSE_HPC"] = "1"
+        print(
+            "Note: --reuse-hpc active — full pipeline runs (preprocess/simsetup/HPC "
+            "staging/analysis/reporter); existing md.tpr+mdWrap.xtc are kept; sbatch "
+            "is blocked.",
+            flush=True,
+        )
     
     # Pass subtask type directly in config
     if args.subtask:
@@ -2020,6 +2061,7 @@ def main(argv=None):
             # Multiple agents: multi_agent mode with ordered agent list
             config["subtask_type"] = "multi_agent"
             config["agent_list"] = args.subtask
+            config["pipeline_agent_list"] = list(args.subtask)
     
     goal = args.goal
     production_ns = _extract_production_ns_from_goal(goal)

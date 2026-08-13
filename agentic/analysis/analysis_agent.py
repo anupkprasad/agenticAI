@@ -2012,9 +2012,12 @@ Output as JSON:
         iterations reuse the existing ``mdWrap.xtc`` instead of regenerating it.
         Set ``state["force_pbc_wrap"]=True`` to force a fresh wrap.
 
-        The ligand name is taken from ``state["ligand_resnames"]`` (first entry)
-        or falls back to ``"LIG"``.  The output dt (ps) can be overridden via
-        ``state["wrap_dt_ps"]`` (default 100 ps).
+        The ligand name is taken from ``state["wrap_ligand"]``, else the first
+        entry of ``state["ligand_resnames"]``, else ``"ATP"`` (kinase–ATP default).
+        Pass ``state["wrap_ligand"]="auto"`` to scan common ligand groups.
+        The output dt (ps) can be overridden via ``state["wrap_dt_ps"]``
+        (default 100 ps). Set ``state["force_pbc_wrap"]=True`` to rebuild an
+        existing ``mdWrap.xtc``.
         """
         if state.get("skip_pbc_wrap"):
             logger.info("_wrap_trajectory_pbc: skip_pbc_wrap=True — skipping")
@@ -2033,8 +2036,9 @@ Output as JSON:
         hpc_dir = state.get("hpc_dir") or str(
             Path(state.get("working_directory", "working_dir")) / "hpc"
         )
+        force = bool(state.get("force_pbc_wrap"))
 
-        if not state.get("force_pbc_wrap"):
+        if not force:
             # Case 1: current trajectory already points to the wrapped file.
             if Path(traj).name == wrapped_name and Path(traj).stat().st_size > 0:
                 logger.info(
@@ -2069,16 +2073,18 @@ Output as JSON:
             )
             return
 
-        # Ligand name
-        ligand_resnames = state.get("ligand_resnames") or []
-        ligand = ligand_resnames[0] if ligand_resnames else "LIG"
+        # Ligand: explicit wrap_ligand > ligand_resnames > ATP default
+        ligand = state.get("wrap_ligand")
+        if not ligand:
+            ligand_resnames = state.get("ligand_resnames") or []
+            ligand = ligand_resnames[0] if ligand_resnames else "ATP"
 
         # Output dt
         dt = int(state.get("wrap_dt_ps", 100))
 
         logger.info(
             f"_wrap_trajectory_pbc: wrapping {Path(traj).name} "
-            f"(ligand={ligand}, dt={dt} ps) …"
+            f"(ligand={ligand}, dt={dt} ps, force={force}) …"
         )
 
         from src.analysis.trajectory_wrapper import _wrap_trajectory_impl
@@ -2093,12 +2099,21 @@ Output as JSON:
             dt=dt,
             working_dir=hpc_dir,
             skip=False,
+            force=force,
         )
 
         if result.get("success"):
             wrapped = result["wrapped_trajectory"]
             state["trajectory_path"] = wrapped
-            logger.info(f"_wrap_trajectory_pbc: trajectory updated → {wrapped}")
+            if result.get("skipped"):
+                logger.info(
+                    f"_wrap_trajectory_pbc: reused existing wrap → {wrapped}"
+                )
+            else:
+                logger.info(
+                    f"_wrap_trajectory_pbc: trajectory updated → {wrapped} "
+                    f"(center={result.get('centering_group')})"
+                )
         else:
             logger.warning(
                 f"_wrap_trajectory_pbc: wrapping failed — continuing with "
@@ -2263,27 +2278,69 @@ Output as JSON:
         # Resolve topology path: prefer the hpc_dir copy over the simsetup
         # original so the analysis agent always sees files from the same
         # directory tree as the trajectory/energy outputs.
+        #
+        # Prefer md.tpr (MDA-compatible with mdWrap.xtc). Never fall back to
+        # topol.top (text topology) or ligand-only GRO files (ATP.gro / MG.gro),
+        # which cause atom-count mismatches with the full-system trajectory.
         topology_file = state.get("topology")
         hpc_dir = state.get("hpc_dir") or state.get("hpc_output_directory") or state.get("hpc_directory")
+        # Always prefer the active simulation's hpc/ tree over a stale cross-sim path.
+        wd = state.get("working_directory")
+
+        def _under_sim(path: Optional[str], sim_wd: Optional[str]) -> bool:
+            if not path or not sim_wd:
+                return False
+            try:
+                p = str(Path(path).resolve())
+                root = str(Path(sim_wd).resolve())
+            except OSError:
+                return False
+            return p == root or p.startswith(root + os.sep)
+
+        if wd:
+            local_hpc = Path(wd) / "hpc"
+            if local_hpc.is_dir():
+                if not hpc_dir or not _under_sim(hpc_dir, wd):
+                    hpc_dir = str(local_hpc)
+        _MDA_TOPO_NAMES = (
+            "md.tpr",
+            "md.gro",
+            "system.gro",
+            "solvated.gro",
+            "complex.gro",
+            "processed.gro",
+        )
+        _SKIP_TOPO_NAMES = {
+            "topol.top",
+            "topology.top",
+            "ATP.gro",
+            "MG.gro",
+            "ligand_GMX.gro",
+            "protein.gro",
+            "protein_processed.gro",
+        }
         if hpc_dir:
             hpc_dir_path = Path(hpc_dir)
-            # Check for topology files in hpc_dir by priority: .top > .tpr
-            for candidate_name in (
-                Path(topology_file).name if topology_file else None,
-                "topol.top",
-                "topology.top",
-            ):
-                if candidate_name:
-                    candidate = hpc_dir_path / candidate_name
-                    if candidate.exists():
-                        topology_file = str(candidate)
-                        logger.info(f"analysis: resolved topology to hpc copy: {topology_file}")
-                        break
+            preferred: list[str] = []
+            if topology_file:
+                name = Path(topology_file).name
+                # Ignore topology paths from another simulation directory.
+                if wd and not _under_sim(topology_file, wd):
+                    topology_file = None
+                elif name not in _SKIP_TOPO_NAMES:
+                    preferred.append(name)
+            preferred.extend(_MDA_TOPO_NAMES)
+            for candidate_name in preferred:
+                candidate = hpc_dir_path / candidate_name
+                if candidate.is_file():
+                    topology_file = str(candidate)
+                    logger.info(f"analysis: resolved topology to hpc copy: {topology_file}")
+                    break
             # Also check results sub-directory (download_results destination)
-            if not (topology_file and Path(topology_file).exists()):
-                for candidate_name in ("topol.top", "topology.top"):
+            if not (topology_file and Path(topology_file).is_file()):
+                for candidate_name in _MDA_TOPO_NAMES:
                     candidate = hpc_dir_path / "results" / candidate_name
-                    if candidate.exists():
+                    if candidate.is_file():
                         topology_file = str(candidate)
                         logger.info(f"analysis: resolved topology from hpc/results: {topology_file}")
                         break
@@ -4378,15 +4435,65 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     logger.debug(f"_resolve_input_files: {ftype} from state['{key}'] → {resolved[ftype]}")
                     break
 
-        # --- 2. Try files already in analysis_dir (copied earlier) -----------
-        analysis_dir = state.get("analysis_dir") or self.file_manager.agent_dir
+        # --- 2/3. Prefer MDA-compatible full-system topologies ----------------
+        # Alphabetical glob("*.gro") would pick ATP.gro (ligand-only, ~43 atoms)
+        # and break RMSD/RMSF against mdWrap.xtc. Prefer md.tpr first.
+        _TOPO_PREFERRED = (
+            "md.tpr",
+            "md.gro",
+            "system.gro",
+            "solvated.gro",
+            "complex.gro",
+            "processed.gro",
+        )
+        _TOPO_SKIP = {
+            "ATP.gro",
+            "MG.gro",
+            "ligand_GMX.gro",
+            "protein.gro",
+            "protein_processed.gro",
+            "topol.top",
+            "topology.top",
+        }
         _EXT_MAP = {
-            "topology":   [".gro", ".pdb", ".tpr", ".top"],
+            "topology":   [".tpr", ".gro", ".pdb"],
             "trajectory":  [".xtc", ".trr", ".dcd", ".nc"],
             "energy":      [".edr", ".ene"],
         }
+
+        def _pick_topology(search_dir: Path) -> Optional[str]:
+            if not search_dir.is_dir():
+                return None
+            for name in _TOPO_PREFERRED:
+                cand = search_dir / name
+                if cand.is_file():
+                    return str(cand.resolve())
+            for ext in (".tpr", ".gro", ".pdb"):
+                for cand in sorted(search_dir.glob(f"*{ext}")):
+                    if cand.name in _TOPO_SKIP:
+                        continue
+                    return str(cand.resolve())
+            return None
+
+        # Reject a state topology that is ligand-only / GROMACS text .top
+        if "topology" in resolved:
+            topo_name = Path(resolved["topology"]).name
+            if topo_name in _TOPO_SKIP or Path(resolved["topology"]).suffix.lower() == ".top":
+                logger.warning(
+                    "_resolve_input_files: rejecting unsuitable topology %s",
+                    resolved["topology"],
+                )
+                del resolved["topology"]
+
+        analysis_dir = state.get("analysis_dir") or self.file_manager.agent_dir
         for ftype, exts in _EXT_MAP.items():
             if ftype in resolved:
+                continue
+            if ftype == "topology":
+                picked = _pick_topology(Path(analysis_dir))
+                if picked:
+                    resolved[ftype] = picked
+                    logger.debug(f"_resolve_input_files: {ftype} from analysis_dir → {picked}")
                 continue
             for ext in exts:
                 candidates = sorted(Path(analysis_dir).glob(f"*{ext}"))
@@ -4398,6 +4505,12 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         # --- 3. Scan the hardcoded input directory (hpc/) --------------------
         for ftype, exts in _EXT_MAP.items():
             if ftype in resolved:
+                continue
+            if ftype == "topology":
+                picked = _pick_topology(Path(input_dir))
+                if picked:
+                    resolved[ftype] = picked
+                    logger.debug(f"_resolve_input_files: {ftype} from input_dir({input_dir}) → {picked}")
                 continue
             for ext in exts:
                 candidates = sorted(Path(input_dir).glob(f"*{ext}"))

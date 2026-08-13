@@ -815,6 +815,8 @@ def plot_fel_basins_on_axes(
     global_min_basin_id: Optional[int] = None,
     annotation_fontsize: float = 9,
     marker_size: float = 16,
+    cmap=None,
+    label_placement: str = "auto",
 ):
     """
     Draw a masked FEL surface (blue minima → light coral highs) with basin markers.
@@ -822,6 +824,11 @@ def plot_fel_basins_on_axes(
     Only basins supplied in ``basins`` are annotated (expected: already ≥ cutoff).
     The global free-energy minimum basin is marked with a blue star; other basins
     use ``basin_marker_color`` (default black).
+
+    ``label_placement`` controls annotation offsets:
+      - ``"auto"``: staggered around the star (default)
+      - ``"below"``: all labels under the star
+      - ``"right"``: all labels to the right of the star
     """
     F = free_energy.astype(float)
     P = probability
@@ -838,7 +845,7 @@ def plot_fel_basins_on_axes(
         Y,
         F_plot,
         levels=levels,
-        cmap=FEL_BASIN_CMAP,
+        cmap=cmap if cmap is not None else FEL_BASIN_CMAP,
         vmin=vmin,
         vmax=vmax,
         extend="max",
@@ -898,6 +905,43 @@ def plot_fel_basins_on_axes(
         if any(np.isfinite(energies)):
             gmin_id = int(basins[int(np.argmin(energies))]["basin_id"])
 
+    placement = (label_placement or "auto").strip().lower()
+    if placement == "below":
+        # All labels under the star (mild x-stagger to reduce collisions).
+        below_offsets = (
+            (0, -18),
+            (-12, -18),
+            (12, -18),
+            (-18, -22),
+            (18, -22),
+            (0, -26),
+            (-8, -26),
+            (8, -26),
+        )
+    elif placement == "right":
+        # All labels to the right of the star (mild y-stagger only).
+        right_offsets = (
+            (16, 0),
+            (16, 8),
+            (16, -8),
+            (18, 14),
+            (18, -14),
+            (20, 4),
+            (20, -4),
+            (16, 18),
+        )
+    else:
+        auto_offsets = (
+            (14, 12),
+            (-18, 12),
+            (14, -16),
+            (-18, -16),
+            (0, 18),
+            (20, 0),
+            (-22, 0),
+            (10, 20),
+        )
+
     for b in basins:
         bx = float(x_centers[int(b["min_x"])])
         by = float(y_centers[int(b["min_y"])])
@@ -919,18 +963,15 @@ def plot_fel_basins_on_axes(
             zorder=5,
             label="global min" if is_gmin else None,
         )
-        # Stagger label offsets so annotations sit clear of the star/basin core.
-        offsets = (
-            (14, 12),
-            (-18, 12),
-            (14, -16),
-            (-18, -16),
-            (0, 18),
-            (20, 0),
-            (-22, 0),
-            (10, 20),
-        )
-        dx, dy = offsets[(bid - 1) % len(offsets)]
+        if placement == "below":
+            dx, dy = below_offsets[(bid - 1) % len(below_offsets)]
+            ha, va = "center", "top"
+        elif placement == "right":
+            dx, dy = right_offsets[(bid - 1) % len(right_offsets)]
+            ha, va = "left", "center"
+        else:
+            dx, dy = auto_offsets[(bid - 1) % len(auto_offsets)]
+            ha, va = "center", "center"
         ax.annotate(
             label,
             (bx, by),
@@ -939,8 +980,8 @@ def plot_fel_basins_on_axes(
             fontsize=annotation_fontsize,
             fontweight="bold",
             color="0.15",
-            ha="center",
-            va="center",
+            ha=ha,
+            va=va,
             bbox=dict(
                 boxstyle="round,pad=0.28",
                 facecolor="0.92",

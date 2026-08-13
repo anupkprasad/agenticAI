@@ -1,8 +1,13 @@
 # Cross-Sim HPC Pool
 
-When a multi-simulation workflow requests **preprocess + simsetup + HPC + analysis + reporter**
-together, the supervisor uses a cross-simulation HPC pool instead of blocking on one simulation
-at a time.
+When a workflow requests **preprocess + simsetup + HPC + analysis + reporter**
+together, the supervisor uses an HPC pool that **waits for SLURM completion**
+before starting analysis/reporter. This applies to **multi-sim and singlesim**.
+
+For multi-sim, prep runs across simulations and jobs are submitted up to N at a
+time. For singlesim, the same pool machinery runs with one synthetic
+`sim_prompts` entry so analysis never starts before `md.xtc` (or equivalent)
+exists.
 
 ## Behavior
 
@@ -30,9 +35,14 @@ python run_agenticAIWork.py \
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--allowed-hpc-jobs` | 5 | Max concurrent SLURM jobs in the pool |
-| `--hpc-check-interval` | `2h` | Poll interval (`2h`, `120m`, `7200`) |
+| `--hpc-check-interval` | `2h` | Poll interval (`2h`, `120m`, `7200`); use a shorter value while debugging |
 | `--resume` | off | Restore `{base}/supervisor/state.jsonl` and re-enter pool monitoring |
 | `--HITL error` | — | Pause on submit/SLURM failures at the HPC pool checkpoint |
+
+Set `hpc_pool_disabled=True` in state (or omit analysis/reporter from `--subtask`) to
+skip the pool and use the legacy per-agent HPC path. `download_results` is **not**
+part of the default pool or HPC agent plan; analysis reads trajectories from
+`{sim}/hpc/` on the shared filesystem unless the user explicitly asks to download.
 
 ## Hybrid execution / resume
 

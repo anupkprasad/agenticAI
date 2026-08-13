@@ -662,7 +662,14 @@ def _validate_multi_agent_inputs(
     from agentic.utils import log_agent_action
 
     agent_list = state.get("agent_list") or []
-    logger.info(f"INPUT_VALIDATION: Multi-agent validation for agents: {agent_list}")
+    pipeline = state.get("pipeline_agent_list") or agent_list
+    logger.info(
+        "INPUT_VALIDATION: Multi-agent validation for agents: %s "
+        "(pipeline_agent_list=%s, pool_phase=%s)",
+        agent_list,
+        pipeline,
+        state.get("pool_phase"),
+    )
 
     if not agent_list:
         state["errors"].append("No agents specified in agent_list for multi-agent workflow")
@@ -711,6 +718,9 @@ def _validate_multi_agent_inputs(
 
     multi_details = {
         "agent_list": agent_list,
+        "pipeline_agent_list": pipeline,
+        "active_agent_list": state.get("active_agent_list") or agent_list,
+        "pool_phase": state.get("pool_phase"),
         "validated_for": first_agent,
     }
     sys_info = state.get("system_info")

@@ -171,18 +171,47 @@ class MDWorkflow:
         """
         LangGraph step budget for one ``invoke()`` call.
 
-        Scale with *remaining* per-sim work (not total queue size) so resume
-        runs are not capped after re-processing already-finished simulations.
+        This counts **graph node transitions** (supervisor → agent → wait → …),
+        **not** the number of LLM chat calls. Each pool poll / routing hop costs
+        one step toward this limit.
+
+        Scale with remaining per-sim work and keep a floor large enough for
+        family-scale campaigns (≥50 simulations).
         """
+        reuse = bool(state.get("reuse_hpc"))
+        if not reuse:
+            try:
+                from agentic.multi_sim_hpc_pool import reuse_hpc_enabled
+
+                reuse = reuse_hpc_enabled(state)
+            except Exception:
+                reuse = False
+
+        n_campaign = max(
+            len(state.get("sim_prompts") or []),
+            len(state.get("pdb_list") or []),
+            len((state.get("multi_sim_progress") or {}).get("sim_order") or []),
+            1,
+        )
+        # Always size floors for at least 50-sim family tasks.
+        n_scale = max(n_campaign, 50)
+
         if state.get("multi_sim_phase") == "hpc_pool":
             pool = state.get("hpc_pool") or {}
-            interval = int(pool.get("check_interval_sec") or state.get("hpc_check_interval_sec") or 3600)
-            # supervisor + hpc_pool_wait per poll; allow ~7 days of hourly checks.
+            interval = int(
+                pool.get("check_interval_sec")
+                or state.get("hpc_check_interval_sec")
+                or 3600
+            )
+            # supervisor + hpc_pool_wait per poll; allow ~7 days of checks.
             polls = max(48, int(7 * 86400 / max(interval, 60)))
-            return min(max(polls * 2 + 40, 120), 2000)
+            # --reuse-hpc uses short waits (≈15s); keep a high family-scale floor.
+            floor = 20 * n_scale + 200 if reuse else 120
+            return min(max(polls * 2 + 40, floor), 8000)
 
         if not state.get("is_multi_simulation"):
             return 40
+
         progress = state.get("multi_sim_progress") or {}
         sim_order = progress.get("sim_order") or []
         sims = progress.get("sims") or {}
@@ -198,17 +227,26 @@ class MDWorkflow:
             elif rec.get("status") != "done":
                 remaining += 1
         if not sim_order:
-            remaining = len(state.get("sim_prompts") or [])
+            remaining = n_campaign
+
         steps_per_sim = 12
         combined_headroom = 50 if state.get("run_combined_analysis") else 0
-        # Parallel prep/analysis: parent only ticks the pool — still need headroom
-        # when many sims finish with failures and keep cycling supervisor ticks.
+        # Parallel prep/analysis: parent only ticks the pool while workers run
+        # for many minutes — each wait cycle burns steps, so budget generously.
         if state.get("multi_sim_phase") == "parallel_pool":
-            steps_per_sim = 4
-            combined_headroom = max(combined_headroom, 80)
+            steps_per_sim = 30
+            combined_headroom = max(combined_headroom, 150)
+
         budget = steps_per_sim * max(remaining, 1) + combined_headroom
-        # 38-sim campaigns exceed 800 steps if counting retry churn; keep a higher cap.
-        return min(max(budget, 120), 4000)
+        # Family-scale floor: enough for ≥50 sims even if "remaining" is undercounted
+        # on resume (missing progress / dropped reuse_hpc flag).
+        # Example: 50 sims → 30*50+300 = 1800; enforce ≥2000 for long pool polls.
+        family_floor = 30 * n_scale + 300
+        if reuse or n_campaign >= 10 or state.get("multi_sim_phase") == "parallel_pool":
+            floor = max(family_floor, 2000)
+        else:
+            floor = max(120, 12 * n_campaign + 50)
+        return min(max(budget, floor), 8000)
     
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph workflow with proper agent hierarchy."""
@@ -438,13 +476,19 @@ class MDWorkflow:
         """Sleep until the next SLURM poll while cross-sim HPC jobs run."""
         import time
         from agentic.multi_sim_hpc_pool import (
+            _count_running,
             init_hpc_pool,
             persist_hpc_pool_checkpoint,
             pool_summary,
+            reuse_hpc_enabled,
         )
 
         pool = init_hpc_pool(state)
         interval = int(pool.get("check_interval_sec") or state.get("hpc_check_interval_sec") or 7200)
+        # --reuse-hpc: no real SLURM jobs to wait on. A multi-hour sleep here
+        # stalled campaigns when one prep sim stayed pending. Use a short yield.
+        if reuse_hpc_enabled(state) and _count_running(pool) == 0:
+            interval = min(interval, 15)
         summary = state.get("hpc_pool_status_summary") or pool_summary(state)
         from agentic.multi_sim_hpc_pool import log_pool_to_base
 
@@ -453,6 +497,7 @@ class MDWorkflow:
             state,
             f"Pool sleep — next SLURM check in {interval}s",
             pool=pool,
+            log_to_conversation=False,
             extra={"summary": summary},
         )
         logger.info(
@@ -461,8 +506,8 @@ class MDWorkflow:
             summary,
         )
         print(
-            f"\n--- HPC pool status (next check in {interval // 60} min) ---\n"
-            f"{summary}\n",
+            f"\n--- HPC pool status (next check in {max(1, interval // 60)} min "
+            f"/ {interval}s) ---\n{summary}\n",
             flush=True,
         )
         time.sleep(interval)
@@ -968,6 +1013,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "setup_retry_count": 0,
             "hpc_retry_count": 0,
             "analysis_retry_count": 0,
+            "post_hpc_analysis_retry_count": 0,
             "reporter_retry_count": 0,
             # Intermediate validation artifacts
             "pdb_summary": None,
@@ -999,6 +1045,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "sim_working_dirs": None,
             "multi_sim_base_dir": None,
             "combined_only": False,
+            "reuse_hpc": False,
             "resume_failed_only": None,
             "requeue_failed_sims": None,
             "multisim_resume_applied": False,
@@ -1018,12 +1065,22 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "parallel_cpus_per_job": None,
             "parallel_workers_resolved": None,
             "llm_concurrency": "auto",
+            "sim_max_attempts": None,
             "parallel_pool_poll_sec": 30,
             "_allowed_hpc_jobs_explicit": False,
         }
 
         if config:
             state.update(config)
+
+        # Preserve the CLI agent list across HPC-pool prep filtering.
+        if state.get("agent_list") and not state.get("pipeline_agent_list"):
+            state["pipeline_agent_list"] = list(state["agent_list"])
+
+        if state.get("reuse_hpc"):
+            import os as _os_reuse_hpc
+
+            _os_reuse_hpc.environ["AGENTIC_REUSE_HPC"] = "1"
 
         if state.get("pdb_list") is None:
             state["pdb_list"] = []
@@ -1235,6 +1292,35 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 if key in saved_state and saved_state[key] is not None:
                     state[key] = saved_state[key]
 
+            # Analysis/reporter pool workers must never resume into a stale HPC wait.
+            # Stuck mini-campaign workers reloaded per-sim state.jsonl with
+            # multi_sim_phase=hpc_pool and slept forever under --reuse-hpc.
+            if (
+                state.get("pool_phase") == "analysis"
+                or state.get("post_hpc_analysis_only")
+                or state.get("hpc_pool_disabled")
+                or state.get("subtask_type") in ("analysis_only", "reporter_only")
+            ):
+                if state.get("hpc_pool") or state.get("multi_sim_phase") == "hpc_pool":
+                    logger.info(
+                        "Clearing stale hpc_pool checkpoint for analysis-phase worker "
+                        "(pool_phase=%s subtask=%s saved_status=%s)",
+                        state.get("pool_phase"),
+                        state.get("subtask_type"),
+                        saved_status,
+                    )
+                state.pop("hpc_pool", None)
+                state["hpc_pool_disabled"] = True
+                state["use_hpc_pool"] = False
+                state["hpc_pool_phase_complete"] = True
+                state["post_hpc_analysis_only"] = True
+                if state.get("multi_sim_phase") == "hpc_pool":
+                    state["multi_sim_phase"] = None
+                if state.get("pool_phase") == "analysis":
+                    # Per-sim analysis workers are singlesim for routing purposes.
+                    state["is_multi_simulation"] = False
+                    state.pop("_singlesim_hpc_pool", None)
+
             if state.get("is_multi_simulation"):
                 from agentic.multi_sim_progress import (
                     reconcile_multisim_progress_from_disk,
@@ -1361,7 +1447,15 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
 
             from agentic.multi_sim_hpc_pool import resume_hpc_pool_if_needed, reconcile_post_hpc_with_pool
 
-            if reconcile_post_hpc_with_pool(state):
+            if (
+                state.get("pool_phase") == "analysis"
+                or state.get("post_hpc_analysis_only")
+                or state.get("hpc_pool_disabled")
+            ):
+                logger.info(
+                    "[resume] Skipping HPC pool re-entry for analysis-phase worker"
+                )
+            elif reconcile_post_hpc_with_pool(state):
                 logger.info(
                     "[resume] Cleared premature post-HPC state — HPC pool still active"
                 )

@@ -648,7 +648,7 @@
       "simulation_status": ""
     },
     "P17612": {
-      "name": "KAPCA",
+      "name": "PKA",
       "binding_type_JM": "Unknown",
       "binding_type_visAMP": "Unknown",
       "binding_lig_mg": "ground_truth",

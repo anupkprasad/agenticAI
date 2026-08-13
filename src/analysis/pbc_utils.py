@@ -7,6 +7,12 @@ side of the box, or when the trajectory wrapping splits a molecule across a
 boundary. These artifacts inflate the mean/variance of metrics such as the
 ligand–pocket COM distance and produce ugly, misleading overlay plots.
 
+Do **not** call ``AtomGroup.wrap(compound="residues")`` on pocket/ligand
+selections before COM: that can move residues of a large mapped pocket into
+different images and corrupt the pocket COM even on an already Protein|ATP
+wrapped trajectory (``mdWrap.xtc``). Prefer coordinates as loaded plus
+``minimum_image_distance``.
+
 Two complementary tools are provided:
 
 - ``minimum_image_distance`` — compute the PBC-correct (minimum-image) distance

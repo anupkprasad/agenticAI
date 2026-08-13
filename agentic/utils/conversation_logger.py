@@ -6,9 +6,15 @@ agent actions, and LLM conversations throughout the MD workflow.
 import logging
 import json
 import os
+import threading
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Iterator, Optional, List
 from pathlib import Path
+
+# Serialize set_log_file + write so parallel pool threads cannot interleave
+# into the wrong per-sim agent_conversation.log.
+_log_redirect_lock = threading.RLock()
 
 
 def _compact_analysis_result(name: str, result: Any) -> str:
@@ -445,6 +451,34 @@ def set_log_file(log_file: str, continue_session: Optional[bool] = None):
     _continue_session_override = continue_session
     global _conversation_logger
     _conversation_logger = None
+
+
+def get_log_file() -> Optional[str]:
+    """Return the current conversation log path override (if any)."""
+    return _log_file_override
+
+
+@contextmanager
+def temporary_log_file(
+    log_file: str,
+    continue_session: Optional[bool] = None,
+) -> Iterator[None]:
+    """Redirect conversation logging to *log_file* for a critical section.
+
+    Thread-safe: holds a lock for the whole set→write→restore window so parallel
+    HPC/analysis workers cannot leak lines into another simulation's log.
+    """
+    global _log_file_override, _continue_session_override, _conversation_logger
+    with _log_redirect_lock:
+        prev = _log_file_override
+        prev_continue = _continue_session_override
+        set_log_file(log_file, continue_session=continue_session)
+        try:
+            yield
+        finally:
+            _log_file_override = prev
+            _continue_session_override = prev_continue
+            _conversation_logger = None
 
 def log_user_prompt(goal: str, config: Dict[str, Any]):
     """Convenience function to log user prompt."""

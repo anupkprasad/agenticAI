@@ -1,6 +1,7 @@
 """
 HPC Job Submitter - Submit SLURM jobs to HPC systems
 """
+import os
 import subprocess
 import logging
 from pathlib import Path
@@ -8,6 +9,16 @@ from typing import Dict, Any, Optional
 from langchain.tools import tool
 
 logger = logging.getLogger(__name__)
+
+
+def reuse_hpc_blocks_sbatch() -> bool:
+    """True when ``--reuse-hpc`` / ``AGENTIC_REUSE_HPC`` forbids calling sbatch."""
+    return os.environ.get("AGENTIC_REUSE_HPC", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 @tool
@@ -34,7 +45,18 @@ def submit_job(
     Note:
         If remote_host is not provided, assumes local submission via sbatch.
         For remote submission, uses SSH to transfer script and submit.
+        When AGENTIC_REUSE_HPC is set (--reuse-hpc), sbatch is never invoked.
     """
+    if reuse_hpc_blocks_sbatch():
+        logger.error(
+            "submit_job blocked: --reuse-hpc / AGENTIC_REUSE_HPC is active (no sbatch)"
+        )
+        return {
+            "success": False,
+            "error": "sbatch blocked: --reuse-hpc is active (reuse existing md.tpr/mdWrap.xtc)",
+            "status": "SKIPPED_REUSE_HPC",
+        }
+
     try:
         script_file = Path(script_path)
         if not script_file.exists():
@@ -57,13 +79,20 @@ def submit_job(
                 import re
                 match = re.search(r"Submitted batch job (\d+)", result.stdout)
                 job_id = match.group(1) if match else "UNKNOWN"
-                
+                try:
+                    from agentic.hpc.job_markers import write_job_marker
+
+                    write_job_marker(script_file.parent, job_id)
+                except Exception:
+                    logger.debug("Could not write .agentic_job_id marker", exc_info=True)
+
                 return {
                     "success": True,
                     "job_id": job_id,
                     "status": "SUBMITTED",
                     "message": f"Job submitted successfully: {job_id}",
-                    "stdout": result.stdout
+                    "stdout": result.stdout,
+                    "job_script": str(script_file.resolve()),
                 }
             else:
                 return {

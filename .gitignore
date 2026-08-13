@@ -37,6 +37,10 @@ multi_run/
 tmp/
 ment/
 garbage/
+benchmarks/
+robustness/
+dclk3_psma4/
+scripts/
 
 # Project-specific local data (not source)
 pseudoKin*/

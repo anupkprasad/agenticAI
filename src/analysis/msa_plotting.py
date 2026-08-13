@@ -131,16 +131,28 @@ def _draw_msa(
     mark_preferred: Optional[Sequence[int]] = None,
     show_property_legend: bool = True,
     label_colors: Optional[Sequence[str]] = None,
+    aa_colors: Optional[Dict[str, str]] = None,
+    property_legend_items: Optional[Sequence[Tuple[str, str]]] = None,
+    xtick_labels: Optional[Sequence[str]] = None,
+    xlabel: Optional[str] = None,
+    cons_label_fs: float = 6.0,
+    legend_fs: float = 6.4,
+    footer_fs: float = 6.6,
 ):
     """Draw an MSA heatmap that spans the full axes width.
 
     Legend (line 1) and footer (line 2+) are placed in axes-fraction space below
     the grid so they never compete with column width or overlap each other.
     Optional ``label_colors`` colors y-tick labels in row order.
+    Optional ``aa_colors`` / ``property_legend_items`` override the default scheme.
+    Optional ``xtick_labels`` replaces MSA-column indices on the x-axis (same
+    length as ``col_indices``); ``xlabel`` sets the axis label.
     """
     import textwrap
 
     from matplotlib.patches import Rectangle
+
+    color_map = aa_colors if aa_colors is not None else AA_COLORS
 
     if col_indices is None:
         col_indices = np.arange(mat.shape[1])
@@ -159,7 +171,7 @@ def _draw_msa(
     rgb = np.ones((n_rows, n_cols, 3))
     for i in range(n_rows):
         for j in range(n_cols):
-            rgb[i, j] = _hex_rgb(AA_COLORS.get(sub[i, j], "#eeeeee"))
+            rgb[i, j] = _hex_rgb(color_map.get(sub[i, j], "#eeeeee"))
 
     ax.imshow(
         rgb, aspect="auto", interpolation="nearest",
@@ -180,28 +192,94 @@ def _draw_msa(
                     family="DejaVu Sans Mono", zorder=5,
                 )
 
-    # Conservation track (above grid)
-    for j in range(n_cols):
-        cval = cons[int(col_indices[j])]
-        ax.add_patch(
-            Rectangle(
-                (j - 0.5, -2.6), 1.0, max(0.05, 1.15 * cval),
-                facecolor=C_FOCUS, edgecolor="none", alpha=0.85, clip_on=False, zorder=7,
-            )
-        )
-    ax.text(-0.6, -2.0, "cons.", ha="right", va="center", fontsize=6.0, color=C_MUTED, clip_on=False)
+    # Conservation as a normal upward bar chart in a slim axes above the MSA.
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+    divider = make_axes_locatable(ax)
+    ax_cons = divider.append_axes("top", size="9%", pad=0.06, sharex=ax)
+    cons_vals = [float(cons[int(c)]) for c in col_indices]
+    ax_cons.bar(
+        np.arange(n_cols, dtype=float),
+        cons_vals,
+        width=0.92,
+        color=C_FOCUS,
+        edgecolor="none",
+        align="center",
+        zorder=2,
+    )
+    ax_cons.set_ylim(0.0, 1.02)
+    ax_cons.set_yticks([])
+    ax_cons.set_ylabel(
+        "cons.",
+        fontsize=cons_label_fs,
+        color=C_MUTED,
+        rotation=0,
+        ha="right",
+        va="center",
+        labelpad=10,
+    )
+    ax_cons.tick_params(bottom=False, labelbottom=False, left=False)
+    for spine in ("top", "right", "bottom"):
+        ax_cons.spines[spine].set_visible(False)
+    ax_cons.spines["left"].set_color(C_LINE)
+    ax_cons.set_facecolor(C_BG)
+    ax_cons.set_xlim(-0.5, n_cols - 0.5)
+    # Selection track intentionally omitted unless mark_preferred is set below
+    # on the main axes (legacy); pocket MSA passes mark_preferred=None.
 
     preferred_set = set(int(c) for c in (mark_preferred or []))
     if preferred_set:
+        ax_sel = divider.append_axes("top", size="3.5%", pad=0.02, sharex=ax)
         for j, c in enumerate(col_indices):
             if int(c) in preferred_set:
-                ax.add_patch(
-                    Rectangle(
-                        (j - 0.5, -1.35), 1.0, 0.85,
-                        facecolor=C_POCKET, edgecolor="none", clip_on=False, zorder=8,
-                    )
+                ax_sel.axvspan(j - 0.5, j + 0.5, color=C_POCKET, lw=0)
+        ax_sel.set_yticks([])
+        ax_sel.set_ylabel(
+            "sel.",
+            fontsize=6.0,
+            color=C_POCKET,
+            rotation=0,
+            ha="right",
+            va="center",
+            labelpad=10,
+        )
+        ax_sel.tick_params(bottom=False, labelbottom=False, left=False)
+        for spine in ("top", "right", "bottom", "left"):
+            ax_sel.spines[spine].set_visible(False)
+        ax_sel.set_xlim(-0.5, n_cols - 0.5)
+        ax_sel.set_facecolor(C_BG)
+
+    # Thin boundaries between (and around) cluster blocks.
+    if label_colors is not None and len(label_colors) == n_rows:
+        boundaries = [0]
+        for i in range(1, n_rows):
+            if label_colors[i] != label_colors[i - 1]:
+                boundaries.append(i)
+        boundaries.append(n_rows)
+        for b in boundaries:
+            y = b - 0.5
+            ax.plot(
+                [-0.5, n_cols - 0.5],
+                [y, y],
+                color="0.12",
+                lw=0.85,
+                solid_capstyle="butt",
+                zorder=6,
+                clip_on=False,
+            )
+        for a, b in zip(boundaries[:-1], boundaries[1:]):
+            ax.add_patch(
+                Rectangle(
+                    (-0.5, a - 0.5),
+                    0.12,
+                    float(b - a),
+                    facecolor=label_colors[a],
+                    edgecolor="none",
+                    alpha=0.95,
+                    clip_on=False,
+                    zorder=6,
                 )
-        ax.text(-0.6, -0.95, "sel.", ha="right", va="center", fontsize=6.0, color=C_POCKET, clip_on=False)
+            )
 
     if highlight_rows:
         name_to_i = {n.lstrip("*"): i for i, n in enumerate(names)}
@@ -224,41 +302,87 @@ def _draw_msa(
     if xt[-1] != n_cols - 1:
         xt.append(n_cols - 1)
     ax.set_xticks(xt)
-    ax.set_xticklabels([str(int(col_indices[j])) for j in xt], fontsize=max(5.5, label_fs - 0.8))
+    if xtick_labels is not None:
+        if len(xtick_labels) != len(col_indices):
+            raise ValueError("xtick_labels must match col_indices length")
+        xlabels = [str(xtick_labels[j]) for j in xt]
+    else:
+        xlabels = [str(int(col_indices[j])) for j in xt]
+    ax.set_xticklabels(xlabels, fontsize=max(5.5, label_fs - 0.8))
+    if xlabel:
+        ax.set_xlabel(xlabel, fontsize=max(7.0, label_fs - 0.5), color=C_INK, labelpad=3)
     ax.set_xlim(-0.5, n_cols - 0.5)
-    top = -2.9 if preferred_set else -2.75
-    ax.set_ylim(n_rows - 0.5, top)
-    ax.set_title(title, fontsize=max(9.0, label_fs + 2.5), fontweight="bold", color=C_INK, loc="left", pad=6)
+    ax.set_ylim(n_rows - 0.5, -0.5)
     ax.tick_params(axis="x", pad=1, length=2)
+    ax.tick_params(axis="y", length=0)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.spines["bottom"].set_color(C_LINE)
+    # Title on the uppermost track so it sits above cons / sel.
+    title_ax = ax_sel if preferred_set else ax_cons
+    title_ax.set_title(
+        title,
+        fontsize=max(9.0, label_fs + 2.5),
+        fontweight="bold",
+        color=C_INK,
+        loc="left",
+        pad=6,
+    )
 
     # Legend + footer packed tightly under the axes (axes-fraction coords)
-    y_leg = -0.038
+    y_leg = -0.042
     if show_property_legend:
-        items = [
-            ("hydrophobic", "#f5f0c8"), ("aromatic", "#f4a6a6"), ("polar", "#a8d8a8"),
-            ("acidic", "#f08080"), ("basic", "#8eb4e0"), ("G/P/C", "#e8e070"), ("gap", "#f2f2f2"),
-        ]
-        x0 = 0.0
-        dx = 0.088  # keep swatches/labels close together
-        for k, (lab, col) in enumerate(items):
+        items = list(
+            property_legend_items
+            if property_legend_items is not None
+            else (
+                ("hydrophobic", "#f5f0c8"),
+                ("aromatic", "#f4a6a6"),
+                ("polar", "#a8d8a8"),
+                ("acidic", "#f08080"),
+                ("basic", "#8eb4e0"),
+                ("G/P/C", "#e8e070"),
+                ("gap", "#f2f2f2"),
+            )
+        )
+        x = 0.0
+        swatch_w = 0.014
+        gap_after_swatch = 0.020
+        gap_between = 0.045
+        for lab, col in items:
             ax.add_patch(
                 Rectangle(
-                    (x0 + k * dx, y_leg - 0.010), 0.012, 0.020,
-                    facecolor=col, edgecolor=C_LINE, lw=0.5, clip_on=False,
-                    transform=ax.transAxes, zorder=10,
+                    (x, y_leg - 0.011),
+                    swatch_w,
+                    0.022,
+                    facecolor=col,
+                    edgecolor=C_LINE,
+                    lw=0.5,
+                    clip_on=False,
+                    transform=ax.transAxes,
+                    zorder=10,
                 )
             )
             ax.text(
-                x0 + k * dx + 0.016, y_leg, lab,
-                fontsize=6.4, color=C_INK, va="center", ha="left",
-                transform=ax.transAxes, clip_on=False,
+                x + swatch_w + gap_after_swatch,
+                y_leg,
+                lab,
+                fontsize=legend_fs,
+                color=C_INK,
+                va="center",
+                ha="left",
+                transform=ax.transAxes,
+                clip_on=False,
             )
+            # Advance by swatch + estimated label width (axes fraction).
+            x += swatch_w + gap_after_swatch + 0.0105 * max(len(lab), 1) + gap_between
 
-    y_foot = -0.062 if show_property_legend else -0.038
+    y_foot = -0.072 if show_property_legend else -0.038
     footer_wrapped = "\n".join(textwrap.wrap(footer, width=110))
     ax.text(
         0.0, y_foot, footer_wrapped,
-        fontsize=6.6, color=C_INK, va="top", ha="left",
+        fontsize=footer_fs, color=C_INK, va="top", ha="left",
         transform=ax.transAxes, clip_on=False, linespacing=1.1,
     )
 

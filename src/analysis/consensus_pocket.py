@@ -368,12 +368,12 @@ def compute_consensus_pocket_ligand_geometry(
     frames, times, distances, angles = [], [], [], []
     step = max(1, int(frame_interval))
     for ts in u.trajectory[::step]:
-        try:
-            pocket.wrap(compound="residues")
-            ligand.wrap(compound="residues")
-        except Exception:
-            pass
-
+        # Do NOT wrap pocket/ligand groups independently before COM.
+        # ``AtomGroup.wrap(compound="residues")`` on a large MSA-mapped pocket
+        # can move residues into different images so the pocket COM jumps far
+        # from the ligand even when ATP is stably bound (and even on an already
+        # Protein|ATP-wrapped trajectory). Use coordinates as loaded and apply
+        # the minimum-image convention to the two COMs instead.
         com_pocket = pocket.center_of_mass()
         com_ligand = ligand.center_of_mass()
         dist = minimum_image_distance(

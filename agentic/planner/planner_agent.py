@@ -157,20 +157,81 @@ def _llm_sim_prompts_collapsed_per_pdb(
     return hits >= max(1, len(sim_prompts_list) // 2)
 
 
-    """Parse booleans from strict JSON booleans or common string variants."""
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"true", "yes", "y", "1"}:
-            return True
-        if normalized in {"false", "no", "n", "0", ""}:
-            return False
-    return default
+def _normalize_prompt_template(text: str) -> str:
+    """Strip per-sim identity tokens so copy-paste LLM templates compare equal."""
+    s = re.sub(r"\s+", " ", (_coerce_plan_text(text) or "").strip().lower())
+    # Paths and UniProt-like accession labels / pdb stems
+    s = re.sub(r"/home/\S+", "<path>", s)
+    s = re.sub(r"(?:^|[\s/])[a-z][0-9][a-z0-9]{4,}(?:\.pdb)?\b", " <id>", s)
+    s = re.sub(r"\blabel\s*[:=]?\s*\S+", "label=<id>", s)
+    s = re.sub(r"\b[pqo]\d{4,}\b", "<id>", s)
+    return s.strip()
+
+
+def _llm_sim_prompts_are_template_duplicates(sim_prompts_list: List[str]) -> bool:
+    """True when prompts differ only by label/path (human-looking copy-paste)."""
+    if len(sim_prompts_list) < 2:
+        return False
+    norms = [_normalize_prompt_template(t) for t in sim_prompts_list]
+    norms = [n for n in norms if n]
+    if len(norms) < 2:
+        return False
+    # Majority share one template skeleton
+    from collections import Counter
+
+    counts = Counter(norms)
+    top_n = counts.most_common(1)[0][1]
+    return top_n >= max(2, (len(norms) + 1) // 2)
+
+
+def _build_shared_per_sim_intent(
+    *,
+    original_goal: str,
+    enriched_prompt: str,
+    agents_desc: str,
+    post_sim_subtask: bool,
+) -> str:
+    """One shared scientific intent applied to every simulation entry."""
+    per_sim_metrics = detect_requested_metrics(original_goal or enriched_prompt or "")
+    if per_sim_metrics:
+        metrics_text = ", ".join(
+            _METRIC_PHRASES.get(m, m) for m in sorted(per_sim_metrics)
+        )
+        analyses_clause = f"Run these analyses: {metrics_text}."
+    else:
+        analyses_clause = (
+            "Run the per-simulation analyses named in the project goal for this system."
+        )
+    stage = (
+        "Trajectory and topology are already staged under {working_dir}/hpc/ "
+        "(md.tpr, mdWrap.xtc). Do not re-run preprocessing, setup, or HPC submission."
+        if post_sim_subtask
+        else f"Workflow steps: {agents_desc}."
+    )
+    return (
+        f"Shared per-simulation workflow intent: {analyses_clause} {stage} "
+        "Write outputs under {working_dir}/analysis/ using standard basenames "
+        "(no label prefix). After analysis, prepare a concise HTML report for this "
+        "simulation under {working_dir}/reporter/."
+    )
+
+
+def _build_compact_per_sim_prompt(
+    entry: Dict[str, Any],
+    *,
+    shared_intent: str,
+) -> str:
+    """Identity stanza + shared intent (avoids N near-duplicate essay prompts)."""
+    protein = entry.get("protein_name") or entry.get("label", "system")
+    label = entry.get("label", "simulation")
+    case = entry.get("case_description", "default system")
+    wdir = entry.get("working_dir", "")
+    pdb_name = Path(entry.get("pdb", "")).name or f"{label}.pdb"
+    intent = shared_intent.replace("{working_dir}", wdir)
+    return (
+        f"Simulation {label} ({protein}; {case}; source {pdb_name}; "
+        f"working directory {wdir}). {intent}"
+    )
 
 
 _METRIC_PHRASES: Dict[str, str] = {
@@ -249,33 +310,13 @@ def _build_per_sim_analysis_prompt(
     agents_desc: str,
 ) -> str:
     """Deterministic per-simulation prompt for post-simulation analysis/reporter runs."""
-    protein = entry.get("protein_name") or entry.get("label", "system")
-    label = entry.get("label", "simulation")
-    case = entry.get("case_description", "default system")
-    wdir = entry.get("working_dir", "")
-    pdb_name = Path(entry.get("pdb", "")).name or f"{label}.pdb"
-
-    per_sim_metrics = detect_requested_metrics(original_goal or enriched_prompt or "")
-    if per_sim_metrics:
-        metrics_text = ", ".join(
-            _METRIC_PHRASES.get(m, m) for m in sorted(per_sim_metrics)
-        )
-        analyses_clause = f"Run these analyses: {metrics_text}."
-    else:
-        analyses_clause = (
-            "Run the per-simulation analyses named in the project goal for this system."
-        )
-
-    return (
-        f"For the {protein} protein (label {label}), analyze the completed trajectory "
-        f"in {wdir} ({case} from {pdb_name}). "
-        f"Trajectory and topology are in {wdir}/hpc/ (md.tpr, mdWrap.xtc). "
-        f"Workflow steps: {agents_desc}. "
-        f"{analyses_clause} "
-        f"Write outputs under {wdir}/analysis/ using standard basenames "
-        f"(e.g. rmsf.dat, ligand_pocket_distance.csv) — no label prefix on filenames. "
-        f"After analysis, prepare a concise scientific report for this simulation."
+    shared = _build_shared_per_sim_intent(
+        original_goal=original_goal,
+        enriched_prompt=enriched_prompt,
+        agents_desc=agents_desc,
+        post_sim_subtask=True,
     )
+    return _build_compact_per_sim_prompt(entry, shared_intent=shared)
 
 
 def _is_mock_or_error_llm_response(text: str) -> bool:
@@ -687,14 +728,14 @@ class MDPlanner:
             "3) combined_analysis_plan: natural-language plan when run_combined_analysis is true; otherwise an empty string.\n\n"
             "CRITICAL prompt requirements for sim_prompts:\n"
             "- Each prompt must target exactly ONE simulation entry (one label, one case). Never merge apo and holo (or multiple component cases) into a single sim_prompt.\n"
-            "- Each prompt must be a natural-language goal for one simulation, not a metadata record. Mention the label, source system, working directory, and relevant case in prose so agents have context.\n"
+            "- Prefer a short identity stanza (label, protein, source, working directory, case) plus the shared scientific intent — do NOT write eight near-identical essay prompts that only swap the accession/path.\n"
             "- Preserve user intent exactly. If the user names specific analyses such as RMSF only, request only those analyses plus directly required plots/tables. Do not add RMSD, Rg, COM distance, DCCM, DSSP, SASA, or literature unless requested.\n"
             "- If the user asks broadly for protein dynamics without naming metrics, choose a small justified set of dynamics analyses supported by the tools, such as RMSD/RMSF/Rg/DCCM or interaction distances when relevant to the biological question.\n"
             "- For post-simulation workflows, do not mention preprocessing, system setup, force-field choice, box size, HPC submission, or simulation length because those stages are finished.\n"
             "- Avoid comma-separated key=value prompt strings because downstream agents treat them as metadata stubs; write complete sentences with enough context for analysis and reporting.\n"
-            "- Do not copy and paste the same prompt for every entry. Vary the wording naturally and adapt details to protein name, label, case, source, residues, ligands, and requested metrics.\n"
+            "- Do not copy and paste the same prompt for every entry. If the protocol is shared, keep the science wording identical and only change identity fields (label/path/protein).\n"
             f"- Mention only these workflow steps: {agents_desc}.\n"
-            "- Keep each sim_prompt concise (under ~120 words) so all entries and combined fields fit in one JSON response.\n\n"
+            "- Keep each sim_prompt concise (under ~80 words) so all entries and combined fields fit in one JSON response.\n\n"
             "For run_combined_analysis, use the user goal as the source of truth. "
             f"The conservative heuristic before this LLM call is {default_combined}; override it only if the goal text clearly supports a different choice.\n"
             "Return only valid JSON."
@@ -706,16 +747,18 @@ class MDPlanner:
         run_combined_analysis = default_combined
         decomposition_complete = False
         parsed = None
-        # Large campaigns: skip LLM JSON dump of N prompts (often truncated /
-        # duplicated). Deterministic per-entry prompts keep the master plan
-        # compact and faithful to shared intent.
-        _use_llm_decomp = len(expanded_entries) <= 24
+        # Prefer compact deterministic prompts whenever several systems share one
+        # scientific protocol (robustness / family campaigns). LLM JSON dumps of
+        # N near-copy prompts look human-authored and often truncate combined plan.
+        _homogeneous_campaign = len(expanded_entries) >= 4 and len(component_cases) <= 1
+        _use_llm_decomp = len(expanded_entries) <= 24 and not _homogeneous_campaign
         try:
             if not _use_llm_decomp:
                 logger.info(
-                    "PLANNER [multi-sim]: %d entries — using deterministic prompts "
-                    "(skip LLM per-sim prompt JSON)",
+                    "PLANNER [multi-sim]: %d entries (homogeneous=%s) — using "
+                    "compact deterministic per-sim prompts (skip LLM sim_prompts JSON)",
                     len(expanded_entries),
+                    _homogeneous_campaign,
                 )
                 raise RuntimeError("skip_llm_decomp_large_campaign")
             response = self.llm.prompt_raw(
@@ -750,17 +793,17 @@ class MDPlanner:
                 )
 
                 if len(sim_prompts_list) > 1:
-                    # Only reject when prompts are effectively identical after light
-                    # whitespace normalization. Earlier aggressive token replacement
-                    # caused valid label-specific prompts to be incorrectly discarded.
                     normalized = [
                         re.sub(r"\s+", " ", (_coerce_plan_text(text) or "").strip().lower())
                         for text in sim_prompts_list
                     ]
-                    if len(set(normalized)) == 1:
+                    if len(set(normalized)) == 1 or _llm_sim_prompts_are_template_duplicates(
+                        sim_prompts_list
+                    ):
                         logger.warning(
-                            "PLANNER [multi-sim]: LLM sim_prompts are identical; "
-                            "switching to deterministic per-entry prompts"
+                            "PLANNER [multi-sim]: LLM sim_prompts are copy-paste "
+                            "templates (identical or label/path-only variants); "
+                            "switching to compact deterministic prompts"
                         )
                         sim_prompts_list = None
                         prompt_source = "deterministic_fallback"
@@ -813,26 +856,27 @@ class MDPlanner:
 
         if not sim_prompts_list or len(sim_prompts_list) != len(expanded_entries):
             logger.info(
-                "PLANNER [multi-sim]: Using deterministic prompt decomposition "
-                f"(post_sim_subtask={post_sim_subtask})"
+                "PLANNER [multi-sim]: Using compact deterministic prompt decomposition "
+                f"(post_sim_subtask={post_sim_subtask}, n={len(expanded_entries)})"
+            )
+            shared_intent = _build_shared_per_sim_intent(
+                original_goal=original_goal,
+                enriched_prompt=enriched_prompt,
+                agents_desc=agents_desc,
+                post_sim_subtask=post_sim_subtask,
             )
             sim_prompts_list = []
             prompt_source = "deterministic_fallback"
             if post_sim_subtask:
                 for entry in expanded_entries:
                     sim_prompts_list.append(
-                        _build_per_sim_analysis_prompt(
-                            entry,
-                            original_goal=original_goal,
-                            enriched_prompt=enriched_prompt,
-                            agents_desc=agents_desc,
+                        _build_compact_per_sim_prompt(
+                            entry, shared_intent=shared_intent
                         )
                     )
             else:
-                styles = ["Prepare", "Process", "Set up", "Generate setup for"]
-                for i, entry in enumerate(expanded_entries):
+                for entry in expanded_entries:
                     pdb_name = Path(entry["pdb"]).name
-                    lead = styles[i % len(styles)]
                     uniprot_hint = ""
                     structure_requests = state.get("structure_requests") or {}
                     uid_key = Path(entry["pdb"]).stem.lower()
@@ -845,11 +889,11 @@ class MDPlanner:
                         )
                     sim_prompts_list.append(
                         (
-                            f"{lead} simulation for {entry['protein_name']} using source structure {pdb_name}. "
-                            f"Use simulation label {entry['label']} under {entry['working_dir']}. "
-                            f"The case requirement is {entry['case_description']}: {entry['case_directive']}"
-                            f"{uniprot_hint} "
-                            f"Run workflow steps: {agents_desc}."
+                            f"Simulation {entry['label']} ({entry['protein_name']}; "
+                            f"{entry['case_description']}; source {pdb_name}; "
+                            f"working directory {entry['working_dir']}). "
+                            f"{entry['case_directive']}{uniprot_hint} "
+                            f"{shared_intent.replace('{working_dir}', entry['working_dir'])}"
                         ).strip()
                     )
 
@@ -901,17 +945,16 @@ class MDPlanner:
                 "num_combined_prompts": 1 if run_combined_analysis else 0,
                 "labels": [s["label"] for s in sim_prompts],
                 "prompt_source": prompt_source,
-                "per_sim_prompts": [
-                    {
-                        "label": s.get("label"),
-                        "prompt": _coerce_plan_text(s.get("prompt"), default=""),
-                    }
-                    for s in sim_prompts
-                ],
+                # Full per-sim goals live in planner/master_plan.json and each
+                # sim's own agent_conversation.log — do not dump them here.
+                "master_plan_path": str(
+                    Path(base_working_dir) / "planner" / "master_plan.json"
+                ),
                 "component_cases": [c.get("description") for c in component_cases],
                 "agents": agents_desc,
                 "run_combined_analysis": run_combined_analysis,
-                "combined_plan_preview": (combined_plan or "")[:300],
+                "combined_plan_chars": len(combined_plan or ""),
+                "combined_plan_preview": (combined_plan or "")[:500],
             },
         )
         self._save_multi_sim_master_plan(
@@ -946,6 +989,23 @@ class MDPlanner:
                 else "full_pipeline"
             ),
             "enriched_prompt": enriched_prompt,
+            # Compact identity + shared intent (not N copy-paste essays).
+            "shared_per_sim_intent": (
+                (sim_prompts[0].get("prompt") or "").split("Shared per-simulation", 1)[-1]
+                if sim_prompts and "Shared per-simulation" in (sim_prompts[0].get("prompt") or "")
+                else None
+            ),
+            "sim_entries": [
+                {
+                    "label": s.get("label"),
+                    "protein_name": s.get("protein_name"),
+                    "pdb": s.get("pdb"),
+                    "working_dir": s.get("working_dir"),
+                    "case_description": s.get("case_description"),
+                    "prompt_preview": ((s.get("prompt") or "")[:160]),
+                }
+                for s in sim_prompts
+            ],
             "sim_prompts": sim_prompts,
             "run_combined_analysis": run_combined_analysis,
             "num_combined_prompts": 1 if run_combined_analysis else 0,
@@ -2768,7 +2828,8 @@ the execution plan is finalized.
                     "hpc_agent",
                     f"**HPC Agent Responsibilities:**\n\n"
                     f"Submit prepared simulation files to the HPC cluster via SLURM. "
-                    f"Monitor jobs, retrieve trajectory and energy outputs."
+                    f"Do not download results unless the user explicitly requests a "
+                    f"remote transfer; analysis reads trajectories from {working_dir}/hpc/."
                 ),
                 "analysis": (
                     "analysis_agent",
@@ -2846,13 +2907,16 @@ the execution plan is finalized.
                     agents_involved.append("hpc_agent")
                     execution_prose.append(
                         f"\n\n**HPC Agent Responsibilities:**\n\n"
-                        f"The HPC Agent will submit the simulation to a compute cluster using SLURM job scheduler. "
+                        f"The HPC Agent will submit the simulation to a compute cluster using SLURM. "
                         f"The agent will:\n\n"
                         f"1. Generate appropriate SLURM job scripts with resource requests\n"
-                        f"2. Submit energy minimization, NVT equilibration, NPT equilibration, and production MD jobs\n"
-                        f"3. Monitor job status and handle failures\n"
-                        f"4. Retrieve trajectory and output files upon completion\n\n"
-                        f"Expected outputs: job_id, trajectory files (.xtc), energy files (.edr), coordinate files (.gro)"
+                        f"2. Submit minimization, equilibration, and production MD as one job script\n"
+                        f"3. Record the SLURM job id (waiting for completion is handled by the HPC pool "
+                        f"when preprocess/setup/HPC/analysis run together)\n\n"
+                        f"Do NOT download results unless the user explicitly requests a remote transfer; "
+                        f"analysis reads trajectories in place from the hpc directory.\n\n"
+                        f"Expected outputs: job_id, job script under working_dir/hpc/, and later "
+                        f"trajectory (.xtc) / energy (.edr) files written by the running job"
                     )
                 elif hpc_excluded:
                     execution_prose.append(

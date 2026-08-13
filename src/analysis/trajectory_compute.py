@@ -349,6 +349,7 @@ def run_fused_raw_streaming_batch(
     try:
         import numpy as np
         from MDAnalysis.analysis import distances as mda_distances
+        from src.analysis.pbc_utils import minimum_image_distance
     except ImportError:
         for idx, tool_name, params in fused_steps:
             results[idx] = compute_metric_from_session(
@@ -374,6 +375,7 @@ def run_fused_raw_streaming_batch(
             collectors.append(col)
 
     for ts in u.trajectory:
+        box = getattr(ts, "dimensions", None)
         for col in collectors:
             if ts.frame % col["interval"] != 0:
                 continue
@@ -382,26 +384,32 @@ def run_fused_raw_streaming_batch(
                 col["frames"].append(int(ts.frame))
                 col["times"].append(float(ts.time))
             elif col["type"] == "com":
-                d = float(np.linalg.norm(
-                    col["group1"].center_of_mass() - col["group2"].center_of_mass()
-                ))
+                # Trust wrapped traj; MI only (no per-group residue wrap).
+                d = minimum_image_distance(
+                    col["group1"].center_of_mass(),
+                    col["group2"].center_of_mass(),
+                    box,
+                )
                 col["values"].append(d)
                 col["frames"].append(int(ts.frame))
                 col["times"].append(float(ts.time))
             elif col["type"] == "pocket":
-                d = float(np.linalg.norm(
-                    col["pocket"].center_of_mass() - col["ligand"].center_of_mass()
-                ))
+                d = minimum_image_distance(
+                    col["pocket"].center_of_mass(),
+                    col["ligand"].center_of_mass(),
+                    box,
+                )
                 col["values"].append(d)
                 col["frames"].append(int(ts.frame))
                 col["times"].append(float(ts.time))
             elif col["type"] == "residence":
                 pocket_com = col["pocket"].center_of_mass()
                 lig_com = col["ligand"].center_of_mass()
-                com_dist = float(np.linalg.norm(lig_com - pocket_com))
+                com_dist = minimum_image_distance(pocket_com, lig_com, box)
                 dist_arr = mda_distances.distance_array(
                     col["protein_heavy"].positions,
                     col["ligand_heavy"].positions,
+                    box=box,
                 )
                 n_contacts = int(np.sum(dist_arr <= col["bound_distance_A"]))
                 min_d = float(np.min(dist_arr)) if dist_arr.size else com_dist

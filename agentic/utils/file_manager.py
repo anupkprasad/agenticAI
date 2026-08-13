@@ -230,14 +230,31 @@ class SecureFileManager:
             if not Path(source_path).exists():
                 logger.error(f"{self.agent_name}: Source file doesn't exist: {source_path}")
                 return None
-            
-            # Copy file
-            shutil.copy2(source_path, dest_path)
-            
+
+            # Prefer hardlinks for large MD trajectories/topologies to avoid
+            # duplicating multi-GB files under analysis/ (same filesystem only).
+            src = Path(source_path)
+            dest = Path(dest_path)
+            linked = False
+            if src.suffix.lower() in {".xtc", ".trr", ".tpr"} and src.stat().st_size >= (64 * 1024 * 1024):
+                try:
+                    if dest.exists() or dest.is_symlink():
+                        dest.unlink()
+                    os.link(src, dest)
+                    linked = True
+                    logger.info(
+                        f"{self.agent_name}: Hardlinked {source_path} -> {dest_path}"
+                    )
+                except OSError:
+                    linked = False
+
+            if not linked:
+                shutil.copy2(source_path, dest_path)
+                logger.info(f"{self.agent_name}: Copied {source_path} -> {dest_path}")
+
             # Register in file_registry
             self._register_file(dest_path, file_type, description)
-            
-            logger.info(f"{self.agent_name}: Copied {source_path} -> {dest_path}")
+
             return dest_path
             
         except Exception as e:

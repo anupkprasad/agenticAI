@@ -13,11 +13,26 @@ class LigandTopologyGenerator:
     """Generate ligand topology using acpype/antechamber."""
     
     def __init__(self):
+        try:
+            from src.simsetup.md_env import ensure_md_toolchain
+
+            ensure_md_toolchain()
+        except Exception:
+            pass
         self.acpype_available = shutil.which("acpype") is not None
         self.antechamber_available = shutil.which("antechamber") is not None
         
     def check_dependencies(self) -> Dict[str, bool]:
         """Check which parameterization tools are available."""
+        # Re-check after possible late PATH bootstrap.
+        try:
+            from src.simsetup.md_env import ensure_md_toolchain
+
+            ensure_md_toolchain()
+        except Exception:
+            pass
+        self.acpype_available = shutil.which("acpype") is not None
+        self.antechamber_available = shutil.which("antechamber") is not None
         return {
             "acpype": self.acpype_available,
             "antechamber": self.antechamber_available
@@ -436,9 +451,19 @@ class LigandTopologyGenerator:
         if not deps["acpype"] and not deps["antechamber"]:
             return {
                 "success": False,
-                "error": "Neither acpype nor antechamber available",
+                "error": (
+                    "Neither acpype nor antechamber available on PATH. "
+                    "Activate conda env ollama_env (has acpype) or "
+                    "`module load AmberTools`, then retry."
+                ),
                 "dependencies": deps
             }
+
+        # Prefer requested tool when present; otherwise use whatever is available.
+        if preferred_tool == "acpype" and not deps["acpype"] and deps["antechamber"]:
+            preferred_tool = "antechamber"
+        elif preferred_tool == "antechamber" and not deps["antechamber"] and deps["acpype"]:
+            preferred_tool = "acpype"
         
         # Try preferred tool first
         if preferred_tool == "acpype" and deps["acpype"]:

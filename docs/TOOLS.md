@@ -96,7 +96,7 @@ Primary library: **MDAnalysis v2.10.0**
 | `plot_md_data` | Single-trace time-series plot |
 | `plot_md_multipanel` | Multi-panel figure |
 | `plot_combined_data` | Overlay plot for multiple datasets |
-| `wrap_trajectory` | PBC wrapping with `gmx trjconv` |
+| `wrap_trajectory` | PBC wrap centering Protein+ligand (default ATP); skips if `mdWrap.xtc` exists |
 | `extract_trajectory_metrics` | Bulk metric extraction to CSV |
 
 ### Combined (multi-simulation) tools

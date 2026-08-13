@@ -634,7 +634,7 @@ def _short_feature_label(col: str) -> str:
         "consensus_rmsf_std_A": "consensus RMSF (std)",
         "reference_pocket_ligand_distance_p95_A": "ATP–pocket COM (p95)",
         "reference_pocket_ligand_distance_std_A": "ATP–pocket COM (std)",
-        "reference_pocket_fraction_bound": "Fraction bound (≤15 Å)",
+        "reference_pocket_fraction_bound": "Fraction bound",
         "reference_pocket_ligand_axis_angle_p95_deg": "Axis angle (p95)",
         "reference_pocket_std_ligand_axis_angle_deg": "Axis angle (std)",
     }
@@ -750,7 +750,7 @@ def _draw_simulation_label_bar(
     cids_ord: Sequence[int],
     cluster_colors: Dict[int, str],
     *,
-    fontsize: float = 8.5,
+    fontsize: float = 11.0,
     highlight_names: Optional[Sequence[str]] = None,
 ) -> None:
     """Colored cluster strip with black protein names centered on each row.
@@ -806,6 +806,9 @@ def _plot_dendrogram_heatmap_panel(
     legend_ncol: Optional[int] = None,
     highlight_display_names: Optional[Sequence[str]] = None,
     colorbar_symmetric: bool = True,
+    highlight_dominant_features: bool = True,
+    dominant_top_k: int = 3,
+    dominant_min_abs: float = 0.65,
 ) -> Optional[List[int]]:
     """
     Single figure: dendrogram (branches right→left) + cluster label bar + feature heatmap.
@@ -816,12 +819,13 @@ def _plot_dendrogram_heatmap_panel(
     a leading ``*`` on the label bar only.
     When ``colorbar_symmetric`` is False, the heatmap uses the data min/max (or
     [0, 1] if values already lie in that range) instead of a ±vmax diverging scale.
+    When ``highlight_dominant_features`` is True, thin rectangles outline the
+    strongest-magnitude feature blocks within each cluster's row span.
     """
     if not HAS_MPL:
         return None
     from matplotlib.cm import ScalarMappable
-    from matplotlib.colors import Normalize
-    from matplotlib.patches import Patch
+    from matplotlib.patches import Patch, Rectangle
 
     n = len(display_names)
     clusters, cluster_colors = _cluster_color_map(cluster_ids)
@@ -829,17 +833,19 @@ def _plot_dendrogram_heatmap_panel(
         linkage_matrix, cluster_ids, cluster_colors
     )
 
-    fig_h = max(7.0, n * 0.38)
-    fig = plt.figure(figsize=(16.5, fig_h))
+    # Slightly taller landscape panel for readability.
+    fig_w = 16.0
+    fig_h = max(10.8, min(13.8, n * 0.34))
+    fig = plt.figure(figsize=(fig_w, fig_h))
     gs = fig.add_gridspec(
         1,
         4,
-        width_ratios=[1.05, 0.30, 1.25, 0.04],
-        wspace=0.05,
-        left=0.05,
-        right=0.96,
-        top=0.90,
-        bottom=0.12,
+        width_ratios=[1.15, 0.32, 1.55, 0.05],
+        wspace=0.06,
+        left=0.03,
+        right=0.97,
+        top=0.91,
+        bottom=0.16,
     )
     ax_dend = fig.add_subplot(gs[0, 0])
     ax_bar = fig.add_subplot(gs[0, 1])
@@ -850,7 +856,7 @@ def _plot_dendrogram_heatmap_panel(
         linkage_matrix,
         labels=[""] * n,
         orientation="left",
-        leaf_font_size=9,
+        leaf_font_size=11,
         ax=ax_dend,
         link_color_func=link_colors,
         above_threshold_color="#B0B0B0",
@@ -859,9 +865,10 @@ def _plot_dendrogram_heatmap_panel(
     ax_dend.invert_yaxis()
     leaf_order_tb = [int(i) for i in ddata["leaves"]]
 
-    ax_dend.set_title(dendrogram_title, fontsize=11, pad=8)
-    ax_dend.set_xlabel("Distance")
+    ax_dend.set_title(dendrogram_title, fontsize=13, pad=8, loc="left", fontweight="bold")
+    ax_dend.set_xlabel("Distance", fontsize=12)
     ax_dend.set_ylabel("")
+    ax_dend.tick_params(axis="x", labelsize=11)
     ax_dend.tick_params(axis="y", left=False, labelleft=False)
 
     _align_subplot_heights(ax_dend, ax_bar, ax_hm, ax_cbar)
@@ -877,15 +884,22 @@ def _plot_dendrogram_heatmap_panel(
         names_ord,
         cids_ord,
         cluster_colors,
+        fontsize=9.5,
         highlight_names=highlight_display_names,
     )
 
     finite = X_ord[np.isfinite(X_ord)]
     if colorbar_symmetric:
+        from matplotlib.colors import LinearSegmentedColormap
+
         vmax = float(np.nanmax(np.abs(X_ord))) if finite.size else 2.5
         vmax = max(vmax, 1.0)
         vmin, vmax = -vmax, vmax
-        cmap = "RdBu_r"
+        # Softened diverging scale with moderately dark ends.
+        cmap = LinearSegmentedColormap.from_list(
+            "soft_blue_white_red",
+            ["#4292C6", "#9ECAE1", "#FFFFFF", "#FCBBA1", "#EF6548"],
+        )
     else:
         from matplotlib.colors import LinearSegmentedColormap
 
@@ -913,19 +927,73 @@ def _plot_dendrogram_heatmap_panel(
     )
     ax_hm.set_xticks(np.arange(len(feature_cols)))
     ax_hm.set_xticklabels(
-        feat_labels, rotation=20, ha="right", rotation_mode="anchor", fontsize=9
+        feat_labels, rotation=20, ha="right", rotation_mode="anchor", fontsize=11
     )
-    ax_hm.tick_params(axis="x", pad=2)
+    ax_hm.tick_params(axis="x", pad=6, labelsize=11)
     ax_hm.set_yticks([])
     ax_hm.set_ylabel("")
-    ax_hm.set_title(heatmap_title, fontsize=11, pad=8)
+    ax_hm.set_title(heatmap_title, fontsize=13, pad=8, loc="left", fontweight="bold")
+
+    if highlight_dominant_features and X_ord.size:
+        # Contiguous row blocks already follow dendrogram leaf order.
+        for cid in clusters:
+            rows = [i for i, c in enumerate(cids_ord) if c == cid]
+            if not rows:
+                continue
+            r0, r1 = min(rows), max(rows)
+            block = X_ord[r0 : r1 + 1, :]
+            # Cluster-mean score per feature; large |mean| = dominant for this cluster.
+            mean_z = np.nanmean(block, axis=0)
+            score = np.abs(mean_z)
+            order_f = np.argsort(-score)
+            selected: List[int] = []
+            for j in order_f:
+                if float(score[j]) < float(dominant_min_abs) and selected:
+                    break
+                if float(score[j]) < 0.40:
+                    break
+                selected.append(int(j))
+                if len(selected) >= max(1, int(dominant_top_k)):
+                    break
+            if not selected:
+                selected = [int(order_f[0])]
+            selected = sorted(set(selected))
+            # Thin boxes around contiguous dominant-feature runs (keeps neighbors together).
+            start = selected[0]
+            prev = selected[0]
+            ranges: List[Tuple[int, int]] = []
+            for j in selected[1:]:
+                if j == prev + 1:
+                    prev = j
+                else:
+                    ranges.append((start, prev))
+                    start = prev = j
+            ranges.append((start, prev))
+            edge = cluster_colors.get(cid, "#222222")
+            for c0, c1 in ranges:
+                ax_hm.add_patch(
+                    Rectangle(
+                        (c0 - 0.5, r0 - 0.5),
+                        (c1 - c0 + 1),
+                        (r1 - r0 + 1),
+                        fill=False,
+                        edgecolor=edge,
+                        linewidth=1.5,
+                        zorder=6,
+                    )
+                )
 
     cbar = fig.colorbar(
         ScalarMappable(norm=im.norm, cmap=im.cmap),
         cax=ax_cbar,
     )
     if colorbar_label:
-        cbar.set_label(colorbar_label, fontsize=9)
+        # Strip incidental "(k=…)" suffixes if a caller passes them.
+        cbar_lab = str(colorbar_label)
+        for tok in (" (k=5)", " (k = 5)", f" (k={len(clusters)})"):
+            cbar_lab = cbar_lab.replace(tok, "")
+        cbar.set_label(cbar_lab, fontsize=11)
+    cbar.ax.tick_params(labelsize=10)
 
     counts: Dict[int, int] = {}
     for cid in cluster_ids:
@@ -951,7 +1019,7 @@ def _plot_dendrogram_heatmap_panel(
                 marker="$\\ast$",
                 color="black",
                 markerfacecolor="black",
-                markersize=10,
+                markersize=11,
                 linestyle="None",
                 label="ground-truth kinase",
             )
@@ -961,12 +1029,13 @@ def _plot_dendrogram_heatmap_panel(
         handles=handles,
         loc="lower center",
         ncol=ncol,
-        fontsize=9,
+        fontsize=11,
         framealpha=0.9,
         bbox_to_anchor=(0.5, 0.02),
+        borderaxespad=0.0,
     )
 
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     return leaf_order_tb
 
@@ -1422,8 +1491,8 @@ def cluster_classification_features(
                     display_names,
                     cluster_ids,
                     panel_path,
-                    dendrogram_title=f"Hierarchical clustering dendrogram (k={k})",
-                    heatmap_title=f"Classification features by simulation (k={k})",
+                    dendrogram_title="A. Hierarchical clustering dendrogram",
+                    heatmap_title="B. Classification features by simulation",
                     colorbar_label=feature_scale_label,
                     archetype_names=cluster_archetype_names,
                     legend_ncol=legend_ncol if legend_ncol is not None else (

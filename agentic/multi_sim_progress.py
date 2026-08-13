@@ -205,8 +205,11 @@ def _apply_progress_indices(state: Dict[str, Any], *, rebind: bool) -> None:
     elif rec:
         state["plan_executed"] = False
     phase = progress.get("phase")
-    if phase and state.get("multi_sim_phase") != "hpc_pool":
-        state["multi_sim_phase"] = phase
+    # Do not clobber an active parallel_pool / hpc_pool phase from a stale
+    # progress.phase (that previously dropped mid-campaign into sequential mode).
+    if phase and state.get("multi_sim_phase") not in ("hpc_pool", "parallel_pool"):
+        if not state.get("parallel_pool"):
+            state["multi_sim_phase"] = phase
     apply_sim_pipeline_to_state(state)
     if label and state.get("multi_sim_phase") == "executing_sims":
         ensure_per_sim_working_directory(state)
@@ -287,17 +290,46 @@ def all_per_sim_agents_done(state: Dict[str, Any]) -> bool:
 
 
 def per_sim_post_hpc_artifacts_ready(working_dir: str) -> bool:
-    """True when per-sim analysis summary and HTML report exist on disk."""
+    """True when per-sim analysis metrics and HTML report exist on disk."""
     wd = Path(working_dir)
-    analysis_ok = (wd / "analysis" / "analysis_summary.jsonl").is_file()
+    if not per_sim_analysis_done_on_disk(str(wd)):
+        return False
     reporter_dir = wd / "reporter"
-    reporter_ok = reporter_dir.is_dir() and any(reporter_dir.glob("*.html"))
-    return analysis_ok and reporter_ok
+    return reporter_dir.is_dir() and any(reporter_dir.glob("*.html"))
 
 
 def per_sim_analysis_done_on_disk(working_dir: str) -> bool:
-    """True when per-sim ``analysis_summary.jsonl`` exists."""
-    return (Path(working_dir) / "analysis" / "analysis_summary.jsonl").is_file()
+    """True when per-sim analysis produced real metric artifacts (not stub-only).
+
+    ``analysis_summary.jsonl`` alone is insufficient: a failed/retry loop can
+    write PDB validation entries while RMSD/RMSF never succeed (e.g. wrong
+    topology such as ATP.gro). Require at least one common science output.
+
+    A lone ``ligand_pocket_distance.*`` file is also insufficient: sequential
+    retry loops often inject only that mandatory metric and then mark analysis
+    "done", skipping PCA/FEL/contacts/residence and blocking combined analysis.
+    """
+    analysis_dir = Path(working_dir) / "analysis"
+    if not (analysis_dir / "analysis_summary.jsonl").is_file():
+        return False
+    strong_markers = (
+        "rmsd.dat",
+        "rmsd.png",
+        "rmsf.dat",
+        "pca_projections.dat",
+        "fel_pc1_pc2.png",
+        "fel_features.json",
+        "protein_ligand_contacts.csv",
+        "ligand_residence.csv",
+        "pocket_sasa.csv",
+    )
+    if any((analysis_dir / name).is_file() for name in strong_markers):
+        return True
+    for pattern in ("rmsd*", "rmsf*", "pca_*", "fel_*", "*contacts*", "*residence*"):
+        if any(analysis_dir.glob(pattern)):
+            return True
+    # Pocket COM alone is a mandatory inject, not a complete analysis.
+    return False
 
 
 def per_sim_reporter_done_on_disk(working_dir: str) -> bool:
@@ -451,12 +483,24 @@ def sync_parallel_pool_to_multi_sim_progress(state: Dict[str, Any]) -> None:
         reporter_done = per_sim_reporter_done_on_disk(wd) if wd else False
 
         if pool_status in ("done", "skipped"):
-            if "analysis" in agent_map or "analysis" in agents_req:
-                agent_map["analysis"] = "done"
-            if "reporter" in agent_map or "reporter" in agents_req:
-                agent_map["reporter"] = "done"
-            sim_rec["status"] = "done"
-            sim_rec.pop("error", None)
+            # Trust disk for analysis/reporter — pool may inherit false "done"
+            # from a prior phase when artifacts are absent.
+            if analysis_done:
+                if "analysis" in agent_map or "analysis" in agents_req:
+                    agent_map["analysis"] = "done"
+            elif "analysis" in agent_map or "analysis" in agents_req:
+                agent_map["analysis"] = "pending"
+            if reporter_done:
+                if "reporter" in agent_map or "reporter" in agents_req:
+                    agent_map["reporter"] = "done"
+            elif "reporter" in agent_map or "reporter" in agents_req:
+                agent_map["reporter"] = "pending"
+            need_reporter = "reporter" in agents_req or "reporter" in agent_map
+            if analysis_done and (reporter_done or not need_reporter):
+                sim_rec["status"] = "done"
+                sim_rec.pop("error", None)
+            else:
+                sim_rec["status"] = "pending"
         elif pool_status == "failed":
             sim_rec["status"] = "failed"
             sim_rec["error"] = pool_rec.get("error")
