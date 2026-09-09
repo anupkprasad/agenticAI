@@ -12,7 +12,7 @@ Built-in tools exposed to the LLM via the >>CALL: protocol:
   - write_file   — create/overwrite a file under working_dir
   - grep_file    — regex search across one or all files under working_dir
 
-Public API used by run_agenticAIWork.py:
+Public API used by SimAgent.py:
   BUILTIN_TOOL_NAMES  — frozenset of built-in tool names
   TOOL_CALL_PATTERN   — compiled re for >>CALL: lines
   TOOL_INTENT_PATTERNS — list of fallback re patterns

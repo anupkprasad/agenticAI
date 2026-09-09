@@ -4,7 +4,7 @@ Component Parser and Feasibility Validator for Supervisor
 Analyzes user goals and PDB structures to determine component selection and feasibility.
 """
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 def _normalize_goal_text(text: str) -> str:
@@ -17,6 +17,82 @@ def _normalize_goal_text(text: str) -> str:
         .replace("\u2014", "-")
         .replace("\u2212", "-")
     )
+
+
+def _label_ligand_suffix(label: str) -> Optional[str]:
+    """Return decisive ligand/ion suffix from a sim label, if present.
+
+    Examples:
+      jak2_atp_2mg_ATP_MG → ATP_MG
+      jak2_atp_2mg_ATP    → ATP
+      jak2_atp_2mg        → None  (bare stem; '2mg' is part of the PDB name)
+    """
+    name = (label or "").strip()
+    if not name:
+        return None
+    upper = name.upper()
+    if upper.endswith("_ATP_MG"):
+        return "ATP_MG"
+    if upper.endswith("_ATP"):
+        return "ATP"
+    return None
+
+
+def _excludes_crystallographic_ions(text: str) -> bool:
+    """True when the case text explicitly excludes MG / crystallographic ions."""
+    t = _normalize_goal_text(text)
+    if re.search(
+        r"\b(?:no|without|exclude|excluding|remove|drop|omit)\s+"
+        r"(?:mg(?:2\+?|\u00b2\+?)?|magnesium|ions?|cofactors?)\b",
+        t,
+    ):
+        return True
+    # "ATP only" / "ligand only" implies no crystallographic ions unless Mg is
+    # also requested positively elsewhere.
+    if re.search(r"\b(?:atp|ligand)\s+only\b", t) and not re.search(
+        r"\b(?:with|plus|\+|and)\s+mg(?:2\+?|\u00b2\+?)?\b", t
+    ):
+        return True
+    return False
+
+
+def _wants_crystallographic_ions(sim_case: Optional[Dict[str, Any]], text: str) -> bool:
+    """Decide whether a protein_with_ligand case should keep crystallographic ions.
+
+    Label suffix is authoritative when present (``*_ATP`` vs ``*_ATP_MG``).
+    Otherwise use positive/negative phrasing — never treat ``no Mg`` as wanting MG,
+    and never treat ``2mg`` inside a PDB stem as an ion request.
+    """
+    label = str((sim_case or {}).get("label") or "")
+    suffix = _label_ligand_suffix(label)
+    if suffix == "ATP_MG":
+        return True
+    if suffix == "ATP":
+        return False
+
+    t = _normalize_goal_text(text)
+    if _excludes_crystallographic_ions(t):
+        return False
+
+    # Positive ion / Mg signals only (word boundaries; avoid matching '2mg' stems).
+    if re.search(r"(?:_atp_mg\b|\batp_mg\b)", t):
+        return True
+    if re.search(
+        r"\b(?:with|plus|include|keep|retain|and)\s+mg(?:2\+?|\u00b2\+?)?\b"
+        r"|\bmg(?:2\+?|\u00b2\+?)?\s+(?:ions?|and)\b"
+        r"|\batp\s*\+\s*mg\b"
+        r"|\bprotein\s*\+\s*atp\s*\+\s*mg\b",
+        t,
+    ):
+        return True
+    if re.search(
+        r"\b(?:with|include|keep|retain)\s+(?:crystallographic\s+)?ions?\b"
+        r"|\bcofactors?\b",
+        t,
+    ):
+        return True
+    # Default for bare protein_with_ligand: ligand yes, crystallographic ions no.
+    return False
 
 
 def detect_component_cases(
@@ -136,9 +212,27 @@ def parse_component_selection(user_goal: str, analysis: Dict[str, Any]) -> Dict[
         explicit["water"] = False
     if any(p in goal_lower for p in [
         "without ion", "without ions", "remove ion", "remove ions", "no ion", "no ions",
-        "remove mg", "without mg", "exclude mg", "drop mg"
+        "remove mg", "without mg", "exclude mg", "drop mg", "no mg", "no magnesium",
     ]):
         explicit["ions"] = False
+    # Broader phrasing: "exclude crystallographic Mg/ions", "remove all Mg ions"
+    if re.search(
+        r"(?:exclude|excluding|remove|drop|omit|strip).{0,48}\b(?:mg(?:2\+?|\u00b2\+?)?|magnesium|ions?)\b"
+        r"|\b(?:mg(?:2\+?|\u00b2\+?)?|ions?).{0,24}(?:excluded|removed|omitted)\b",
+        goal_lower,
+    ):
+        explicit["ions"] = False
+    # Label / case_id embedded in per-sim goals (parallel workers).
+    if re.search(r"case_id\s*=\s*protein_only\b", goal_lower):
+        explicit.update({"protein": True, "ligand": False, "ions": False, "water": False})
+    elif re.search(r"_atp(?!_mg)\b", goal_lower) and re.search(
+        r"case_id\s*=\s*protein_with_ligand\b", goal_lower
+    ):
+        # *_ATP (not *_ATP_MG) with protein_with_ligand → ligand yes, crystal ions no
+        if not re.search(r"_atp_mg\b", goal_lower):
+            explicit["ligand"] = True
+            if _excludes_crystallographic_ions(goal_lower) or "atp only" in goal_lower:
+                explicit["ions"] = False
     
     # ── Check specific chains ────────────────────────────────────────────────
     chain_match = re.search(r"chain\s+([A-Z](?:\s+and\s+[A-Z]|,\s*[A-Z])*)", user_goal, re.IGNORECASE)
@@ -156,25 +250,125 @@ def parse_component_selection(user_goal: str, analysis: Dict[str, Any]) -> Dict[
     }
 
 
+def apply_sim_case_to_component_selection(
+    selection: Dict[str, Any],
+    sim_case: Optional[Dict[str, Any]],
+    analysis: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Override component selection using multi-sim case metadata.
+
+    PDB analysis alone cannot distinguish apo vs holo when both share one source
+    structure that contains ligand/ions. ``case_id`` from the master plan is the
+    authoritative signal for which PDB components to keep.
+    """
+    if not sim_case:
+        return selection
+
+    updated = dict(selection or {})
+    case_id = str(sim_case.get("case_id") or "").strip()
+    text = _normalize_goal_text(
+        " ".join(
+            str(sim_case.get(k) or "")
+            for k in ("label", "case_description", "case_directive")
+        )
+    )
+
+    if case_id == "protein_only":
+        updated.update(
+            {
+                "protein": True,
+                "ligand": False,
+                "ions": False,
+                "water": False,
+            }
+        )
+        return updated
+
+    if case_id == "protein_with_ligand":
+        updated["protein"] = True
+        updated["ligand"] = True
+        # Keep crystallographic ions only when the case/label asks for them
+        # (e.g. *_ATP_MG). "ATP only (no Mg)" and *_ATP must exclude MG even
+        # when the shared source PDB contains ions.
+        updated["ions"] = _wants_crystallographic_ions(sim_case, text)
+        return updated
+
+    return updated
+
+
+def append_sim_case_requirement(prompt: str, sim_info: Optional[Dict[str, Any]]) -> str:
+    """Ensure case_id / case_directive appear in a per-sim goal or prompt string."""
+    text = (prompt or "").strip()
+    if not sim_info:
+        return text
+    case_id = str(sim_info.get("case_id") or "").strip()
+    directive = str(sim_info.get("case_directive") or "").strip()
+    description = str(sim_info.get("case_description") or "").strip()
+    if not case_id and not directive:
+        return text
+
+    lower = text.lower()
+    parts = []
+    if case_id and f"case_id={case_id}".lower() not in lower and f"case_id: {case_id}".lower() not in lower:
+        parts.append(f"case_id={case_id}")
+    if description and description.lower() not in lower:
+        parts.append(description)
+    if directive and directive.lower() not in lower:
+        parts.append(directive)
+    if case_id == "protein_only" and "exclude ligand" not in lower and "protein only" not in lower:
+        parts.append(
+            "Use protein only: exclude ligand and crystallographic ions from the source PDB."
+        )
+    if case_id == "protein_with_ligand":
+        case_blob = {
+            "label": sim_info.get("label"),
+            "case_description": description,
+            "case_directive": directive,
+            "case_id": case_id,
+        }
+        case_text = _normalize_goal_text(
+            " ".join(str(sim_info.get(k) or "") for k in ("label", "case_description", "case_directive"))
+        )
+        if _wants_crystallographic_ions(case_blob, case_text):
+            if "include" not in lower or "mg" not in lower:
+                parts.append(
+                    "Include the ligand and crystallographic Mg/ions from the source PDB."
+                )
+        else:
+            if "exclude" not in lower and "no mg" not in lower:
+                parts.append(
+                    "Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions "
+                    "from the source PDB."
+                )
+    if not parts:
+        return text
+    return f"{text} Case requirement: {' '.join(parts)}".strip()
+
+
 def parse_sim_case_requirements(
     label: str = "",
     case_description: str = "",
     case_directive: str = "",
     user_goal: str = "",
+    case_id: str = "",
 ) -> Dict[str, Any]:
     """
     Infer required structural components for a multi-simulation case.
 
     Example: label p21860_ATP_MG requires protein + ATP ligand + MG ion.
+    Prefer explicit ``case_id`` from the master plan when present.
     """
-    text = f"{label} {case_description} {case_directive} {user_goal}".lower()
-    text = (
-        text.replace("\u2011", "-")
-        .replace("\u2012", "-")
-        .replace("\u2013", "-")
-        .replace("\u2014", "-")
-        .replace("\u2212", "-")
+    case_id = str(case_id or "").strip()
+    text = _normalize_goal_text(
+        f"{label} {case_description} {case_directive} {user_goal}"
     )
+    sim_case = {
+        "label": label,
+        "case_id": case_id,
+        "case_description": case_description,
+        "case_directive": case_directive,
+    }
 
     requirements = {
         "protein": True,
@@ -185,7 +379,7 @@ def parse_sim_case_requirements(
         "case_type": "default",
     }
 
-    if any(
+    if case_id == "protein_only" or any(
         token in text
         for token in (
             "protein only",
@@ -195,40 +389,35 @@ def parse_sim_case_requirements(
             "apo protein",
         )
     ):
-        requirements["case_type"] = "protein_only"
-        return requirements
+        # Do not treat "protein only" inside a longer holo description as apo when
+        # case_id explicitly says protein_with_ligand.
+        if case_id != "protein_with_ligand":
+            requirements["case_type"] = "protein_only"
+            return requirements
+
+    suffix = _label_ligand_suffix(label)
+    wants_ions = _wants_crystallographic_ions(sim_case, text)
 
     if (
-        "_atp_mg" in text
-        or "protein + atp + mg" in text
-        or "protein+atp+mg" in text
-        or "protein, atp, mg" in text
-        or ("atp" in text and "mg" in text and "protein" in text)
-    ):
-        requirements.update(
-            {
-                "ligand": True,
-                "ions": True,
-                "ligand_resnames": ["ATP"],
-                "ion_resnames": ["MG"],
-                "case_type": "holo_atp_mg",
-            }
-        )
-        return requirements
-
-    if (
-        "_atp" in text
-        or "protein + atp" in text
-        or "protein+atp" in text
-        or ("atp" in text and "protein" in text and "only" not in text)
+        case_id == "protein_with_ligand"
+        or suffix in ("ATP", "ATP_MG")
+        or re.search(r"\bprotein\s*\+\s*atp\b", text)
+        or ("atp" in text and "protein" in text and case_id != "protein_only")
     ):
         requirements.update(
             {
                 "ligand": True,
                 "ligand_resnames": ["ATP"],
-                "case_type": "holo_atp",
+                "case_type": "holo_atp_mg" if wants_ions else "holo_ligand",
             }
         )
+        if wants_ions:
+            requirements["ions"] = True
+            requirements["ion_resnames"] = ["MG"]
+        else:
+            requirements["ions"] = False
+            requirements["ion_resnames"] = []
+        return requirements
 
     return requirements
 

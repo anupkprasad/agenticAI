@@ -92,6 +92,7 @@ class MDState(TypedDict):
     # Setup stage
     topology: Optional[str]
     coordinates: Optional[str]
+    chain_residue_map: Optional[str]  # PDB chain+resid → trajectory resindex JSON
     mdp_files: Dict[str, str]      # {"minim": "minim.mdp", "nvt": "nvt.mdp", ...}
     setup_report: Optional[str]
     setup_issues: List[str]

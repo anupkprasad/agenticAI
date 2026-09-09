@@ -253,7 +253,7 @@ def parse_hpc_check_interval(value: Any, default_sec: int = 7200) -> int:
 def should_use_hpc_pool(state: Dict[str, Any]) -> bool:
     """True when a full pipeline should wait on SLURM before analysis/reporter.
 
-    Applies to **multi-sim and singlesim** whenever preprocess/simsetup + HPC +
+    Applies whenever preprocess/simsetup + HPC +
     post-simulation agents are requested together. Disable with
     ``hpc_pool_disabled`` / analysis-only subtasks.
     """
@@ -275,33 +275,42 @@ def should_use_hpc_pool(state: Dict[str, Any]) -> bool:
 
 
 def ensure_hpc_pool_sim_prompts(state: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Ensure ``sim_prompts`` exists for HPC pool (synthesize one entry for singlesim)."""
+    """Ensure ``sim_prompts`` exists for HPC pool (last-resort N=1 fallback).
+
+    Prefer the master planner's ``sim_prompts``. When missing (legacy resume),
+    synthesize one entry from the source PDB stem under ``{base}/{label}/`` —
+    never from the working-dir basename.
+    """
     existing = state.get("sim_prompts") or []
     if existing:
         return existing
 
-    wd = state.get("working_directory") or state.get("multi_sim_base_dir") or "."
-    wd_path = Path(wd).expanduser().resolve()
-    label = wd_path.name or "sim_0"
+    base = state.get("multi_sim_base_dir") or state.get("working_directory") or "."
+    base_path = Path(base).expanduser().resolve()
+
+    pdb = state.get("raw_pdb")
+    if not pdb:
+        plist = state.get("pdb_list") or []
+        pdb = plist[0] if plist else None
+    label = Path(pdb).stem if pdb else "sim_0"
+    sim_wd = base_path / label
     entry = {
         "label": label,
-        "working_dir": str(wd_path),
+        "working_dir": str(sim_wd),
         "prompt": state.get("user_goal")
         or state.get("enriched_prompt")
         or state.get("user_goal_original")
         or "",
-        "pdb_file": state.get("raw_pdb"),
+        "pdb_file": pdb,
     }
     state["sim_prompts"] = [entry]
-    state.setdefault("multi_sim_base_dir", str(wd_path))
-    # Singlesim pool must not invent a cross-sim combined stage.
-    if not state.get("is_multi_simulation"):
-        state["run_combined_analysis"] = False
-        state["use_hpc_pool"] = True
+    state.setdefault("multi_sim_base_dir", str(base_path))
+    state["run_combined_analysis"] = False
+    state["is_multi_simulation"] = True
     logger.info(
-        "HPC pool: synthesized singlesim sim_prompts label=%s wd=%s",
+        "HPC pool: synthesized sim_prompts label=%s wd=%s (pdb stem fallback)",
         label,
-        wd_path,
+        sim_wd,
     )
     return state["sim_prompts"]
 
@@ -1036,12 +1045,12 @@ def start_post_hpc_phase(state: Dict[str, Any]) -> bool:
         logger.info("HPC pool complete — no analysis/reporter agents requested; finishing")
         return False
 
-    # Promote singlesim pool runs into the same post-HPC loop as multi-sim.
+    # Ensure post-HPC loop sees multi-sim orchestration state.
     if not state.get("is_multi_simulation"):
         state["is_multi_simulation"] = True
-        state["_singlesim_hpc_pool"] = True
-        state["run_combined_analysis"] = False
         ensure_hpc_pool_sim_prompts(state)
+    if len(state.get("sim_prompts") or []) <= 1:
+        state["run_combined_analysis"] = False
 
     state["multi_sim_phase"] = "executing_sims"
     state["hpc_pool_phase_complete"] = True

@@ -27,7 +27,7 @@ system can:
   CHARMM36 (SP2/THP/TP2), not parameterized as separate ligands
 - **Supervisor → Planner → Agents** — validated routing, planner-owned master plans, and tool-based execution
 - **Resume / retry** — re-run failed multi-sim jobs without redoing successes
-- **Cross-sim HPC pool** — prep in parallel (auto-sized), submit up to N SLURM jobs in parallel, then post-HPC analysis ([docs/HPC_POOL.md](docs/HPC_POOL.md), [docs/PARALLEL_POOL.md](docs/PARALLEL_POOL.md))
+- **Cross-sim HPC pool** — prep in parallel (auto-sized), submit up to N SLURM jobs in parallel, then post-HPC analysis ([docs/POOLS.md](docs/POOLS.md))
 
 ---
 
@@ -56,7 +56,7 @@ CHARMM36, install `charmm36-jul2022.ff` (see [Force fields](#force-fields)).
 ### Single simulation from a local PDB
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Preprocess and setup MD for my_protein.pdb for 50 ns, then submit to HPC" \
   --working-dir /work/run1 \
   --subtask preprocess simsetup hpcjob
@@ -65,31 +65,29 @@ python run_agenticAIWork.py \
 ### UniProt accession (download + domain extraction)
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Study ATP binding of UniProt P21860 (ERBB3). Download AlphaFold PDB,
           extract kinase domain, run 1 ns MD for protein-only and protein+ATP+MG.
           Submit to HPC." \
   --working-dir /work/erbb3 \
-  --subtask preprocess simsetup hpcjob \
-  --simtype multisim
+  --subtask preprocess simsetup hpcjob
 ```
 
 ### Multi-protein comparative study
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Run 100 ns MD for each pseudokinase and submit to HPC.
           Names: p21860=ERBB3, q8iv63=VRK3, q8nb16=MLKL, q8wz42=TITIN." \
   --pdb-list p21860.pdb q8iv63.pdb q8nb16.pdb q8wz42.pdb \
   --working-dir /work/pseudo \
-  --subtask preprocess simsetup hpcjob \
-  --simtype multisim
+  --subtask preprocess simsetup hpcjob
 ```
 
 ### Analysis-only on completed trajectories
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Compute RMSD, RMSF, Rg, DCCM, DSSP and generate the report." \
   --working-dir /work/run1 \
   --subtask analysis reporter
@@ -186,12 +184,12 @@ re-run those stages with new instructions (full pipeline rerun, not just a singl
 
 | Situation                                                       | Recommended command                                                                                                |
 | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| First run, pause after each sim’s analysis                     | `--simtype multisim --HITL all`                                                                                  |
+| First run, pause after each sim’s analysis                     | `--HITL all`                                                                                                   |
 | Automatic run; pause only if something fails                    | `--HITL error`                                                                                                   |
 | Per-sim work already done; review combined report interactively | Re-run with`--HITL all` — framework auto-detects existing `analysis/` folders and enters combined-only review |
 | Retry only failed sims                                          | Add`--resume` (optionally `--retry-labels p23458`)                                                             |
-| Re-run combined overlay + report only                           | `--combined-only`                                                                                                |
-| Full multi-sim pipeline with parallel HPC                       | `--simtype multisim --allowed-hpc-jobs 4 --hpc-check-interval 3m` (see [HPC pool](docs/HPC_POOL.md))              |
+| Re-run combined overlay + report only                           | `--combined-only` (requires N>1)                                                                               |
+| Full campaign with parallel HPC                                 | `--allowed-hpc-jobs 4 --hpc-check-interval 3m` (see [pools](docs/POOLS.md))                                    |
 
 State is saved to `{working_dir}/supervisor/state.jsonl` (and per-sim copies under
 `{label}/supervisor/`). See [docs/CONVENTIONS.md](docs/CONVENTIONS.md) for resume semantics.
@@ -199,11 +197,10 @@ State is saved to `{working_dir}/supervisor/state.jsonl` (and per-sim copies und
 Example (interactive analysis + report on completed trajectories):
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Analysis only for p23458, p29597, q7rtn6, q96c45 …" \
   --working-dir ./agenticB5R1 \
   --subtask analysis reporter \
-  --simtype multisim \
   --HITL all
 ```
 
@@ -212,16 +209,15 @@ python run_agenticAIWork.py \
 ## CLI Reference
 
 ```bash
-python run_agenticAIWork.py --goal "..." [options]
+python SimAgent.py --goal "..." [options]
 ```
 
 | Flag                     | Default                    | Description                                                                                                    |
 | ------------------------ | -------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `--goal`               | *(required)*             | Natural-language simulation goal                                                                               |
-| `--working-dir`        | `.`                      | Base output directory                                                                                          |
-| `--simtype`            | `singlesim`              | `singlesim` or `multisim`. Full pipelines use the HPC pool so analysis waits for SLURM in both modes       |
-| `--pdb-list`           | —                         | Explicit PDB list for multi-sim                                                                                |
-| `--sim-dirs`           | —                         | Existing sim directories for analysis-only multi-sim                                                           |
+| `--working-dir`        | `.`                      | Campaign base; each sim under `{dir}/{label}/`                                                             |
+| `--pdb-list`           | —                         | Explicit PDB list                                                                                          |
+| `--sim-dirs`           | —                         | Existing sim directories for analysis-only                                                                  |
 | `--subtask`            | all agents                 | `preprocess simsetup hpcjob analysis reporter`                                                               |
 | `--no-llm`             | off                        | Disable LLM planning (deterministic fallback)                                                                  |
 | `--llm-model`          | `gpt-oss:20b`            | Model name                                                                                                     |
@@ -229,16 +225,16 @@ python run_agenticAIWork.py --goal "..." [options]
 | `--HITL`               | off                        | `error` or `all` — enable human-in-the-loop (default: off)                                                |
 | `--force-field`        | `amber99sb-ildn`         | GROMACS force field (e.g.`charmm36-jul2022`)                                                                 |
 | `--water-model`        | `tip3p`                  | Water model                                                                                                    |
-| `--max-concurrent`     | `4`                      | Max concurrent sims in multi-sim mode (legacy)                                                                 |
+| `--max-concurrent`     | `4`                      | Max concurrent sims (legacy)                                                                                   |
 | `--parallel-workers`   | `auto`                   | Max parallel local workers for prep / analysis+reporter (`auto` or integer; `1`=sequential)                |
 | `--parallel-mem-gb`    | phase default              | Estimated GiB RAM per parallel worker                                                                          |
 | `--parallel-cpus`      | phase default              | Estimated CPU cores per parallel worker                                                                        |
 | `--llm-concurrency`    | `auto` (4)               | Cap parallel workers to match Ollama`OLLAMA_NUM_PARALLEL` slots                                              |
 | `--allowed-hpc-jobs`   | auto                       | Max concurrent SLURM jobs in cross-sim HPC pool                                                                |
-| `--hpc-check-interval` | `2h`                     | SLURM poll interval during HPC pool wait for singlesim and multisim (`2h`, `30m`, `7200`)                |
+| `--hpc-check-interval` | `2h`                     | SLURM poll interval during HPC pool wait (`2h`, `30m`, `7200`)                                              |
 | `--resume`             | off                        | Re-run only failed/incomplete multi-sim jobs                                                                   |
 | `--retry-labels`       | —                         | Force-retry specific simulation labels                                                                         |
-| `--combined-only`      | off                        | Multi-sim: only combined analysis + report at`{base}/analysis/` and `{base}/reporter/combined_report.html` |
+| `--combined-only`      | off                        | Only when N>1: combined analysis + report at`{base}/analysis/` and `{base}/reporter/combined_report.html` |
 
 ---
 
@@ -257,7 +253,7 @@ Install CHARMM36 for GROMACS from the [MacKerell lab](https://mackerell.umarylan
 into your GROMACS `share/gromacs/top/` directory, then:
 
 ```bash
-python run_agenticAIWork.py ... --force-field charmm36-jul2022
+python SimAgent.py ... --force-field charmm36-jul2022
 ```
 
 ---
@@ -300,7 +296,7 @@ already complete.
 ## Repository Layout
 
 ```
-run_agenticAIWork.py       # CLI entry point
+SimAgent.py       # CLI entry point
 environment.yml            # Conda environment (ollama_env)
 agentic/
   workflow.py              # LangGraph StateGraph orchestration
@@ -318,23 +314,29 @@ src/
   reporter/                # Report generation
 TUTORIAL.md                # End-to-end usage guide
 docs/
-  ARCHITECTURE.md          # System design
-  PROJECT.md               # Extended project overview
-  HPC_POOL.md               # Cross-sim HPC pool
+  PROJECT.md               # Product overview, layout, CLI, run outputs
+  PIPELINE_WORKFLOW.md     # Agent order, directories, files, flag examples
+  ARCHITECTURE.md          # LangGraph, state, agents
+  CONVENTIONS.md           # Contributor coding and documentation rules
+  TOOLS.md                 # Dependencies + multi-chain / phospho mechanisms
+  ANALYSIS_TOOLS.md        # Per-tool observables, theory, output names
+  POOLS.md                 # Local parallel workers + SLURM HPC pool
 ```
 
 ---
 
 ## Documentation
 
-| Document                                        | Description                                              |
-| ----------------------------------------------- | -------------------------------------------------------- |
-| [TUTORIAL.md](TUTORIAL.md)                       | Step-by-step workflows and troubleshooting               |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)     | LangGraph pipeline and multi-sim design                  |
-| [docs/PROJECT.md](docs/PROJECT.md)               | Extended overview and conventions                        |
-| [docs/TOOLS.md](docs/TOOLS.md)                   | External dependencies and tool index                     |
-| [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md) | Analysis tool calculations, theory, and standard outputs |
-| [docs/HPC_POOL.md](docs/HPC_POOL.md)             | Cross-sim HPC pool, polling, resume                      |
+| Document                                              | Description                                              |
+| ----------------------------------------------------- | -------------------------------------------------------- |
+| [TUTORIAL.md](TUTORIAL.md)                             | Step-by-step workflows and troubleshooting               |
+| [docs/PROJECT.md](docs/PROJECT.md)                     | Product overview, repository layout, quick start, CLI    |
+| [docs/PIPELINE_WORKFLOW.md](docs/PIPELINE_WORKFLOW.md) | Agent order, directories, files, and flag examples       |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)           | LangGraph pipeline, state, and per-agent design          |
+| [docs/CONVENTIONS.md](docs/CONVENTIONS.md)             | Contributor coding and documentation rules               |
+| [docs/TOOLS.md](docs/TOOLS.md)                         | External dependencies and GROMACS/analysis mechanisms    |
+| [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md)       | Analysis tool calculations, theory, and standard outputs |
+| [docs/POOLS.md](docs/POOLS.md)                         | Local parallel workers and SLURM HPC pool                |
 
 ---
 
@@ -344,21 +346,19 @@ Use when trajectories already exist (~200 ns each) and you want a **feature matr
 for clustering — **without** manual labels.
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Simulations are complete for 35 protein–ATP holo systems (~200 ns each) under ./agenticB5R1/<label>/. For each trajectory run: ligand pocket distance, protein–ATP contacts, pocket SASA, ligand residence/unbinding analysis, pocket RMSF, ligand RMSF, PCA on Cα, free-energy landscape at 310 K, and FEL basin features. After all per-simulation analyses, build an unsupervised classification feature table (raw CSV + z-score CSV) across all systems. In combined analysis, overlay ligand pocket distance and protein RMSF across simulations. Generate a combined HTML report. No manual class labels." \
   --working-dir ./agenticB5R1 \
-  --subtask analysis reporter \
-  --simtype multisim
+  --subtask analysis reporter
 ```
 
 **Subset of features only** (framework runs and featurizes only what you name):
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Trajectories exist for all systems in ./agenticB5R1/. Per simulation compute RMSF and ligand pocket distance only. Then run unsupervised classification using those two features across all simulations (feature matrix + z-score normalization). Combined analysis: RMSF overlay only." \
   --working-dir ./agenticB5R1 \
-  --subtask analysis reporter \
-  --simtype multisim
+  --subtask analysis reporter
 ```
 
 The classification table is created **only** when the goal mentions classification,
@@ -372,13 +372,13 @@ See [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md) for metrics, normalization,
 
 ```bash
 # Deterministic routing (no LLM)
-python run_agenticAIWork.py --goal "..." --no-llm
+python SimAgent.py --goal "..." --no-llm
 
 # Custom Ollama endpoint (LLM is on by default)
-python run_agenticAIWork.py --goal "..." --llm-base-url http://127.0.0.1:11434
+python SimAgent.py --goal "..." --llm-base-url http://127.0.0.1:11434
 
 # Interactive checkpoints
-python run_agenticAIWork.py --goal "..." --HITL all
+python SimAgent.py --goal "..." --HITL all
 ```
 
 Tests: `pytest` (see `environment.yml` for dependencies).
@@ -429,7 +429,7 @@ Replicate a typical published MLKL MD protocol:
 Place `chain_a_modelled.pdb` and `chain_a_modelled_phos.pdb` under `horse_MLKL/`, then:
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Replicate published MLKL validation MD: CHARMM36-jul2022 and TIP3P water.
 Use a dodecahedron simulation box with 1.0 nm clearance from the protein on all sides.
 Neutralize the system with sodium and chloride only (no additional salt concentration).
@@ -441,7 +441,6 @@ chain_a_modelled_phos.pdb (phosphorylated) in horse_MLKL/, then submit HPC jobs.
 Production: 1739 ns for dephosphorylated MLKL and 2882 ns for phosphorylated MLKL. Use 7 days waltime of HPC resources" \
   --working-dir horse_MLKL \
   --subtask preprocess simsetup hpcjob \
-  --simtype multisim \
   --force-field charmm36-jul2022
 ```
 
@@ -471,7 +470,7 @@ If minim/minim2 finished but NVT failed (e.g. OpenMP thread mismatch), use the u
 
 ```bash
 # --- 8-sim ATP binding study (apo + holo) ---
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "I want to study the effect of ATP binding in protein dynamics of these
           four PDBs p21860.pdb, q8iv63.pdb, q8nb16.pdb, q8wz42.pdb which are
           available in /pseudo1/ directory. Each pdb file has protein + ATP + MG.
@@ -500,11 +499,10 @@ python run_agenticAIWork.py \
           simulation with literature in the final report." \
   --working-dir pseudo1 \
   --subtask preprocess simsetup hpcjob analysis reporter \
-  --simtype multisim \
   --resume
 
 # --- DCLK3–PSMA chain-B N-terminal segment ---
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "I want to study the dynamics of the N-terminal segment of chain B in the
           two PDBs, dclk3_psma3_in.pdb and dclk3_psma3_less_out.pdb, which are
           available in the /dclk_PSMA/ directory. Please preprocess and set up
@@ -527,31 +525,22 @@ python run_agenticAIWork.py \
           1 to 34, whether this segment remains close to chain A, and whether nearby
           chain A residues become more or less flexible during the simulations." \
   --working-dir dclk_PSMA \
-  --subtask analysis reporter \
-  --simtype multisim
+  --subtask analysis reporter
 
-# --- DCLK3–PSMA4 single complex (singlesim) ---
-nohup python run_agenticAIWork.py \
-  --goal "Protein complex is formed by chain A (DCLK3 kinase) and chain B (PSMA4),
-          which is provided in dclk3_psma4.pdb in the directory ./dclk3_psma4/.
-          Please preprocess and set up and run a 200 ns MD simulation for the protein complex.
-          In the analysis the main focus should be on chain B from residues 1 to 34
-          and how this segment interacts with nearby residues in chain A. Compute backbone
-          RMSD over time for the whole complex and for
-          chain B residues 1 to 34. Compute per residue RMSF for chain B residues
-          1 to 34. At frame 0, identify all chain A residues within 10 Å of chain B
-          residues 1 to 34, then compute RMSF for only those chain A residues
-          throughout the trajectory. Also track the center of mass distance and
-          minimum heavy atom distance between chain B residues 1 to 34 and those
-          nearby chain A residues over time to determine whether the N terminal
-          segment remains associated with chain A or moves away.
-          In the final report, summarize movement of chain B residues 1 to 34,
-          whether this segment remains close to chain A, and whether nearby
-          chain A residues become more or less flexible during the simulation." \
-  --working-dir dclk3_psma4 > ./dclk3_psma4/output.log 2>&1 &
+# --- DCLK3–PSMA4 single complex ---
+nohup python SimAgent.py \
+  --goal "Protein complex is formed by chain A (DCLK3 kinase, resid 525-782), chain B (PSMA4, resid 1-261) and chain C (DCX domain of DCLK3, resid 95-175), provided as dclk3_dcx_PSMA4_domains_frame75.pdb in ./dclk3_dcx_psma4/. Preprocess, set up, and run a 25 ns MD simulation of the protein complex.
+
+The main structural focus is chain B residues 1 to 34 and how this segment interacts with nearby residues in chain A. Compute backbone RMSD over time for the whole complex and for chain B residues 1 to 34. Compute per-residue RMSF for chain B residues 1 to 34. At frame 0, identify all chain A residues within 10 Å of chain B residues 1 to 34, then compute RMSF for only those chain A residues throughout the trajectory. Also track the center of mass distance and the minimum heavy-atom distance between chain B residues 1 to 34 and those nearby chain A residues over time, to determine whether the N-terminal segment remains associated with chain A or moves away.
+
+Also identify important residues and their interaction partners between the three proteins. For the B 1-34 vs chain A interface, and separately for the A-C and B-C interfaces, compute hydrogen-bond occupancy and salt-bridge distances over the trajectory. Report the persistent residue pairs (occupancy and partner identity), not only a neighbor list.
+
+In the final report, summarize movement of chain B residues 1 to 34, whether this segment remains close to chain A, whether nearby chain A residues become more or less flexible, and which residue-residue H-bonds and salt bridges are the main interaction partners at the A-B, A-C, and B-C interfaces." \
+  --working-dir dclk3_dcx_psma4 \
+  > ./dclk3_dcx_psma4/output.log 2>&1 &
 
 # --- Analysis-only: four completed systems ---
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Simulation are already done for these uniprot ids: p23458.pdb, p29597.pdb,
           q7rtn6.pdb, q96c45.pdb. So please do not preprocess or simsetup or hpc.
           Directly do the analysis of these data. I want specifically RMSF of protein
@@ -567,11 +556,10 @@ python run_agenticAIWork.py \
           In report preparation, please focus on relevant pseudokinase literature of
           these simulated proteins." \
   --working-dir ./agenticB5R1 \
-  --subtask analysis reporter \
-  --simtype multisim
+  --subtask analysis reporter
 
 # --- 38 holo: analysis + combined + phylogenetic comparison ---
-nohup python run_agenticAIWork.py \
+nohup python SimAgent.py \
   --goal "Simulations are already complete (~200 ns each) for thirty-eight
           protein–ATP holo systems in ./pseudoKin: o15197, o43187, o60674, p00533,
           p17612, p21860, p23458, p24941, p25092, p28482, p29597, p51841, p52333,
@@ -604,7 +592,6 @@ nohup python run_agenticAIWork.py \
           dynamics-based phylogenetic tree." \
   --working-dir ./pseudoKin \
   --subtask analysis reporter \
-  --simtype multisim \
   --combined-only > output.log 2>&1 &
 
 # Combined-only: reference-based FEL + reference-mapped pocket classification (38 holo pseudoKin)
@@ -624,7 +611,7 @@ nohup python run_agenticAIWork.py \
 #   pseudoKin/analysis/reference_pocket_*_by_cluster.png — pocket validation plots
 #   pseudoKin/analysis/reference_fel_*                — supplementary FEL-only landscape clustering
 
-nohup python run_agenticAIWork.py \
+nohup python SimAgent.py \
   --goal "Simulations are complete for thirty-eight protein–ATP holo systems in
           ./pseudoKin: o15197, o43187, o60674, p00533, p17612, p21860, p23458,
           p24941, p25092, p28482, p29597, p51841, p52333, q05823, q13308, q13418,
@@ -666,14 +653,13 @@ nohup python run_agenticAIWork.py \
           Generate the combined HTML report with literature context." \
   --working-dir ./pseudoKin \
   --subtask analysis reporter \
-  --simtype multisim \
   --combined-only > ./pseudoKin/output.log 2>&1 &
 
 # Full pipeline (per-sim + combined): use --resume, NOT --combined-only.
 # Per sim (×38): ligand pocket COM, contacts, SASA, residence, pocket/ligand RMSF, PCA, FEL, basin PDBs.
 # Combined (after all per-sim): same reference steps as combined-only block above.
 
-nohup python run_agenticAIWork.py \
+nohup python SimAgent.py \
   --goal "Simulations are already complete (~200 ns each) for thirty-eight
           protein–ATP holo systems in ./pseudoKin: o15197, o43187, o60674, p00533,
           p17612, p21860, p23458, p24941, p25092, p28482, p29597, p51841, p52333,
@@ -693,11 +679,10 @@ nohup python run_agenticAIWork.py \
           HTML reports and a combined HTML report with literature context." \
   --working-dir ./pseudoKin \
   --subtask analysis reporter \
-  --simtype multisim \
   --resume > ./pseudoKin/output.log 2>&1 &
 
 # --- 12 apo pseudokinases: full MD workflow ---
-nohup python run_agenticAIWork.py \
+nohup python SimAgent.py \
   --goal "Run the full MD workflow (preprocess, simsetup, HPC submission, analysis,
           and reporting) for twelve human apo pseudokinase systems in
           ./pseudoKin_apo. Each PDB is protein-only with no ATP or cofactors. Set up
@@ -728,13 +713,12 @@ nohup python run_agenticAIWork.py \
           compare it with a dynamics-based phylogenetic tree derived from the
           simulation analyses." \
   --working-dir ./pseudoKin_apo \
-  --simtype multisim \
   --allowed-hpc-jobs 4 \
   --hpc-check-interval 60m \
   --resume > ./pseudoKin_apo/output.log 2>&1 &
 
 # --- 8 holo agenticB5R1: analysis + combined classification ---
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Simulations are already complete (~200 ns each) for eight protein–ATP holo
           systems in ./agenticB5R1: o15197, o43187, p21860, p23458, p29597, q7rtn6,
           q8nb16, q9bxu1. Skip preprocess, simsetup, and HPC — run analysis and
@@ -756,11 +740,10 @@ python run_agenticAIWork.py \
           context for each kinase/pseudokinase." \
   --working-dir ./agenticB5R1 \
   --subtask analysis reporter \
-  --simtype multisim \
   --combined-only
 
 # --- Continue existing production MD 100 ns → 200 ns ---
-nohup python run_agenticAIWork.py \
+nohup python SimAgent.py \
   --goal "Use only the HPC Agent to continue the six existing GROMACS production runs
           from 100 ns to a target total of 200 ns. For each --sim-dirs system,
           continue deffnm=md from its checkpoint and append to the original md
@@ -775,7 +758,6 @@ nohup python run_agenticAIWork.py \
              ./pseudoKin_extend/q05823 ./pseudoKin_extend/q8tea7 \
              ./pseudoKin_extend/q92519 ./pseudoKin_extend/q9nsy0 \
   --subtask hpcjob \
-  --simtype multisim \
   --allowed-hpc-jobs 4 \
   --hpc-check-interval 60m \
   > ./pseudoKin_extend/output.log 2>&1 &

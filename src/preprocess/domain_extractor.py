@@ -2,9 +2,91 @@
 Domain extraction tool — trim a PDB to a residue range using Bio.PDB and MDAnalysis.
 """
 import os
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 from langchain.tools import tool
+
+
+def _atom_record_count(pdb_file: str) -> int:
+    """Count ATOM/HETATM records without loading a topology library."""
+    if not pdb_file or not os.path.isfile(pdb_file):
+        return 0
+    count = 0
+    try:
+        with open(pdb_file) as handle:
+            for line in handle:
+                if line.startswith(("ATOM", "HETATM")):
+                    count += 1
+    except OSError:
+        return 0
+    return count
+
+
+def pdb_protein_residue_span(pdb_file: str) -> Optional[Tuple[int, int, int]]:
+    """
+    Return (min_resid, max_resid, atom_count) from ATOM records.
+
+    None if the file is missing or has no protein ATOM rows.
+    """
+    if not pdb_file or not os.path.isfile(pdb_file):
+        return None
+    resids = []
+    atom_count = 0
+    try:
+        with open(pdb_file) as handle:
+            for line in handle:
+                if not line.startswith("ATOM"):
+                    continue
+                atom_count += 1
+                try:
+                    resids.append(int(line[22:26]))
+                except (ValueError, IndexError):
+                    continue
+    except OSError:
+        return None
+    if not resids or atom_count == 0:
+        return None
+    return min(resids), max(resids), atom_count
+
+
+def classify_domain_extract(
+    pdb_file: str,
+    start_resid: int,
+    end_resid: int,
+) -> str:
+    """
+    Decide whether a residue-range crop should run on this PDB.
+
+    ``already_present``: the file is already the requested domain (local
+    numbering matches, or the whole construct sits inside the range).
+    ``numbering_mismatch``: UniProt-style range (e.g. 875-1153) is not in a
+    locally numbered domain PDB (e.g. 1-273) — do not crop.
+    ``extract``: the file is larger than the requested window.
+    ``empty_input``: no protein atoms to crop.
+    """
+    if start_resid > end_resid:
+        start_resid, end_resid = end_resid, start_resid
+    span = pdb_protein_residue_span(pdb_file)
+    if span is None:
+        return "empty_input"
+    min_res, max_res, _n_atoms = span
+    if end_resid < min_res or start_resid > max_res:
+        return "numbering_mismatch"
+    if min_res >= start_resid and max_res <= end_resid:
+        return "already_present"
+    return "extract"
+
+
+def _remove_empty_extract(output_file: str, input_file: str) -> None:
+    if not output_file or not os.path.isfile(output_file):
+        return
+    if os.path.abspath(output_file) == os.path.abspath(input_file):
+        return
+    if _atom_record_count(output_file) == 0:
+        try:
+            os.remove(output_file)
+        except OSError:
+            pass
 
 
 def _extract_with_biopython(
@@ -110,6 +192,40 @@ def extract_domain(
     if start_resid > end_resid:
         start_resid, end_resid = end_resid, start_resid
 
+    decision = classify_domain_extract(pdb_file, start_resid, end_resid)
+    if decision in ("already_present", "numbering_mismatch"):
+        span = pdb_protein_residue_span(pdb_file)
+        span_txt = f"{span[0]}-{span[1]}" if span else "unknown"
+        reason = (
+            f"PDB already covers residues {span_txt}; requested "
+            f"{start_resid}-{end_resid} needs no crop"
+            if decision == "already_present"
+            else (
+                f"Requested residues {start_resid}-{end_resid} are not in this PDB "
+                f"(span {span_txt}). Keeping the local file; it is already a "
+                "domain-sized construct with different numbering."
+            )
+        )
+        return {
+            "success": True,
+            "skipped": True,
+            "skip_reason": decision,
+            "output_file": pdb_file,
+            "pdb_file": pdb_file,
+            "start_resid": start_resid,
+            "end_resid": end_resid,
+            "statistics": {
+                "atom_count": span[2] if span else 0,
+                "residue_range": span_txt,
+            },
+            "message": reason,
+        }
+    if decision == "empty_input":
+        return {
+            "success": False,
+            "error": f"No protein ATOM records in {pdb_file}",
+        }
+
     if not output_file:
         base = protein_name or os.path.splitext(os.path.basename(pdb_file))[0]
         suffix = domain_name or "domain"
@@ -124,6 +240,10 @@ def extract_domain(
         details = _extract_with_biopython(
             pdb_file, output_file, start_resid, end_resid, chain_id
         )
+        if _atom_record_count(output_file) == 0:
+            errors.append("Bio.PDB wrote no ATOM records for the requested range")
+            _remove_empty_extract(output_file, pdb_file)
+            details = None
     except ImportError:
         errors.append("Bio.PDB not available (install biopython)")
     except Exception as exc:
@@ -141,11 +261,23 @@ def extract_domain(
                 "details": errors,
             }
         except Exception as exc:
+            _remove_empty_extract(output_file, pdb_file)
             return {
                 "success": False,
                 "error": f"Domain extraction failed: {exc}",
                 "details": errors,
             }
+
+    if _atom_record_count(output_file) == 0:
+        _remove_empty_extract(output_file, pdb_file)
+        return {
+            "success": False,
+            "error": (
+                f"Domain extract of residues {start_resid}-{end_resid} produced "
+                f"an empty PDB from {os.path.basename(pdb_file)}"
+            ),
+            "details": errors,
+        }
 
     # Gather quick stats with MDAnalysis when possible
     stats = {}
@@ -160,7 +292,7 @@ def extract_domain(
             if len(u.residues) else "empty",
         }
     except Exception:
-        pass
+        stats = {"atom_count": _atom_record_count(output_file)}
 
     return {
         "success": True,

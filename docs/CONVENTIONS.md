@@ -1,6 +1,18 @@
 # Coding Conventions
 
-Ground rules for developing and extending AgenticAI.
+**This file is the contributor rulebook.** Follow it when you add agents,
+state fields, tools, or documentation. It is *how we write code in this
+repo*, not a description of the running system.
+
+**In this file:** `MDState` rules, agent layout, pluggable registries, LLM
+calls, graph edges, multi-sim / HITL / resume conventions, MD and HPC
+defaults, path handling, how to document a mechanism, testing.
+
+**Not in this file:** LangGraph topology ([ARCHITECTURE.md](ARCHITECTURE.md)),
+product overview ([PROJECT.md](PROJECT.md)), run walkthrough
+([PIPELINE_WORKFLOW.md](PIPELINE_WORKFLOW.md)), dependency versions
+([TOOLS.md](TOOLS.md)), analysis theory ([ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md)),
+pool sizing ([POOLS.md](POOLS.md)).
 
 ---
 
@@ -22,7 +34,7 @@ Ground rules for developing and extending AgenticAI.
 |-------|--------|-----------|
 | Input | `raw_pdb`, `user_goal`, `structured_prompt` | Supervisor / CLI |
 | Structure | `cleaned_pdb`, `structure_request`, `domain_context`, `sim_case` | Preprocessing |
-| Setup | `topology`, `coordinates`, `mdp_files` | SimSetup |
+| Setup | `topology`, `coordinates`, `mdp_files`, `chain_residue_map` | SimSetup |
 | HPC | `job_id`, `job_status`, `trajectory_path` | HPC |
 | Analysis | `analysis_results` | Analysis |
 | Report | `reporter_output` | Reporter |
@@ -127,8 +139,10 @@ uses the registry automatically.
 - `sim_prompts` is the authoritative count of simulations (not `pdb_list`).
   `len(sim_prompts)` = total cases including all component variants.
 - Each simulation gets an isolated `working_dir/{label}/` directory.
-- The Supervisor loops sequentially through `sim_prompts`, resetting per-sim
-  state fields (raw_pdb, cleaned_pdb, topology, etc.) between iterations.
+- Per-sim `MDState` fields (`raw_pdb`, `cleaned_pdb`, `topology`, …) are
+  reset between simulations. Prep and post-HPC analysis/reporter may run as
+  a local worker pool; production MD uses the SLURM HPC pool
+  ([POOLS.md](POOLS.md)). Combined analysis and `--HITL` stay sequential.
 - Skipped simulations are recorded in `completed_sim_states` with `skipped=True`
   and a `skip_reason` string — they are not silent failures.
 - After all sims, `multi_sim_phase` advances to `combined_analysis` then
@@ -188,11 +202,24 @@ progress summary).
 
 | Log file | Scope |
 |----------|--------|
-| `{base}/agent_conversation.log` | User goal, base-level supervisor routing, prompt enrichment, **master plan** (planner), combined analysis/reporter |
-| `{base}/{label}/agent_conversation.log` | Per-simulation input validation, execution plan, analysis, reporter |
+| `{base}/agent_conversation.log` | Campaign only: user goal, enrichment, **master plan** summary, pool milestones, combined analysis/reporter (N>1) including real `analysis.combined_planning` / `reporter.combined_planning` LLM calls (tools + metadata) and subsequent tool steps |
+| `{base}/{label}/agent_conversation.log` | Per-simulation validation, execution plan, preprocess → reporter |
+| `{base}/planner/master_plan.md` | Short campaign summary |
+| `{base}/{label}/analysis/execution_plan.json` | Per-sim analysis LLM plan |
+| `{base}/analysis/execution_plan.json` | Combined analysis LLM plan (when N>1) |
+| `{base}/reporter/execution_plan.json` | Combined reporter LLM plan (when N>1) |
+| `{base}/{label}/planner/execution_plan.md` | Per-sim execution plan |
 
 The framework switches the active log with `set_log_file()` when entering or
-leaving the per-sim loop. Do not write per-sim agent output to the base log.
+leaving the per-sim loop. Combined analysis/reporter always re-bind the base
+log before planning and execution. Do not write per-sim agent output to the base log.
+
+**Combined analysis/reporter** use the same agent classes as per-sim, but with
+`include_combined_tools=True` and LLM planning prompts that list combined tool
+metadata. Deterministic pipelines remain as fallbacks if LLM planning fails.
+
+Classification/clustering runs in the combined phase **only** when the user
+explicitly asks for it. Mentions of “HPC cluster” do not count.
 
 ---
 
@@ -203,7 +230,7 @@ leaving the per-sim loop. Do not write per-sim agent output to the base log.
 - `write_run_summary(working_dir, summary)` → writes `run_summary.json` + `run_summary.md`
 - `format_run_summary_terminal(summary)` → terminal-printable string
 
-Call at workflow exit in `run_agenticAIWork.py`. Do **not** use `len(pdb_list)` for
+Call at workflow exit in `SimAgent.py`. Do **not** use `len(pdb_list)` for
 the total simulation count — use `build_run_summary` which reads from `sim_prompts`.
 
 ---
@@ -242,6 +269,30 @@ are solvated by default. Only use vacuum if the user explicitly says so.
 - Track all generated files in `file_registry` and `generated_files` state fields.
 - `pdb_summary` in state may be `None` (initialised that way in `workflow.py`).
   Always use `state.get("pdb_summary") or ""` before string concatenation.
+
+---
+
+## Documenting mechanisms
+
+When you add or change an important **simulation/analysis mechanism** (a
+workaround for a GROMACS/format limitation, a mapping layer, a pool, a
+selection translator), write it up under `docs/` — not only in chat or
+inline comments.
+
+1. Put it in an **existing descriptive file** with related material. Do not
+   add a new page per feature. Examples:
+   - GROMACS / analysis / selection mechanisms → [TOOLS.md](TOOLS.md)
+   - Local workers and SLURM concurrency → [POOLS.md](POOLS.md)
+   - Per-tool observables and output names → [ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md)
+   - Agent order, directories, files, flag examples → [PIPELINE_WORKFLOW.md](PIPELINE_WORKFLOW.md)
+2. Every `docs/*.md` file starts with a **purpose paragraph**: what the file
+   is for, what it contains, and which sibling pages to use instead.
+3. Explain the problem, the design, pipeline insertion points, on-disk
+   artifacts, and what *not* to do.
+4. Add a one-paragraph pointer from [ARCHITECTURE.md](ARCHITECTURE.md)
+   (the relevant agent) if the change is not already obvious from the file
+   you edited.
+5. Keep the code comment short; the doc is the source of truth for “why”.
 
 ---
 

@@ -1187,6 +1187,162 @@ def _inter_basin_barrier(
     return max(0.0, saddle - base)
 
 
+def _watershed_ridge_barrier(
+    F: np.ndarray,
+    labels: np.ndarray,
+    id_a: int,
+    id_b: int,
+    f_min_a: float,
+    f_min_b: float,
+) -> Optional[float]:
+    """
+    Barrier from the lowest shared watershed ridge between two labeled basins.
+
+    For every 8-neighbour contact between cells of ``id_a`` and ``id_b``, take
+    max(F_a, F_b); the saddle is the minimum of those values. Barrier height is
+    saddle − min(F_min_a, F_min_b). Returns None if the basins do not touch.
+    """
+    h, w = F.shape
+    saddle = None
+    for y in range(h):
+        for x in range(w):
+            if int(labels[y, x]) != int(id_a):
+                continue
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if dy == 0 and dx == 0:
+                        continue
+                    ny, nx = y + dy, x + dx
+                    if not (0 <= ny < h and 0 <= nx < w):
+                        continue
+                    if int(labels[ny, nx]) != int(id_b):
+                        continue
+                    cross = float(max(F[y, x], F[ny, nx]))
+                    if saddle is None or cross < saddle:
+                        saddle = cross
+    if saddle is None:
+        return None
+    base = float(min(f_min_a, f_min_b))
+    return max(0.0, float(saddle) - base)
+
+
+def _basin_pair_barrier(
+    F: np.ndarray,
+    labels: np.ndarray,
+    basin_a: Dict[str, Any],
+    basin_b: Dict[str, Any],
+) -> Tuple[float, str]:
+    """Prefer watershed-ridge barrier; fall back to straight-line path."""
+    ridge = _watershed_ridge_barrier(
+        F,
+        labels,
+        int(basin_a["basin_id"]),
+        int(basin_b["basin_id"]),
+        float(basin_a["free_energy_min_kJ_mol"]),
+        float(basin_b["free_energy_min_kJ_mol"]),
+    )
+    if ridge is not None:
+        return float(ridge), "watershed_ridge"
+    line = _inter_basin_barrier(
+        F,
+        (int(basin_a["min_y"]), int(basin_a["min_x"])),
+        (int(basin_b["min_y"]), int(basin_b["min_x"])),
+    )
+    return float(line), "straight_line"
+
+
+def _merge_basins_barrier_aware(
+    F: np.ndarray,
+    P: np.ndarray,
+    basins: List[Dict[str, Any]],
+    *,
+    merge_barrier_kJ_mol: float,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], np.ndarray]:
+    """
+    Iteratively merge basin pairs whose barrier is below ``merge_barrier_kJ_mol``.
+
+    After merges, re-assign the grid from surviving minima and refresh populations
+    so plotted watersheds match the reported basin list.
+    """
+    if len(basins) <= 1 or merge_barrier_kJ_mol is None:
+        minima = [(int(b["min_y"]), int(b["min_x"])) for b in basins]
+        labels = _assign_fel_basins(F, minima) if minima else np.zeros(F.shape, dtype=int)
+        return basins, [], labels
+
+    threshold = float(merge_barrier_kJ_mol)
+    current = [dict(b) for b in basins]
+    merge_log: List[Dict[str, Any]] = []
+    total_p = float(P.sum()) or 1.0
+
+    # Working labels from current minima (ids match basin_id)
+    def _relabel(bas: List[Dict[str, Any]]) -> np.ndarray:
+        for i, b in enumerate(bas, start=1):
+            b["basin_id"] = i
+        mins = [(int(b["min_y"]), int(b["min_x"])) for b in bas]
+        return _assign_fel_basins(F, mins)
+
+    labels = _relabel(current)
+
+    while len(current) > 1:
+        best = None  # (barrier, method, i, j)
+        for i in range(len(current)):
+            for j in range(i + 1, len(current)):
+                barrier, method = _basin_pair_barrier(
+                    F, labels, current[i], current[j]
+                )
+                if best is None or barrier < best[0]:
+                    best = (barrier, method, i, j)
+        if best is None or best[0] >= threshold:
+            break
+
+        barrier, method, i, j = best
+        # Keep the deeper minimum as representative; absorb the other.
+        if float(current[i]["free_energy_min_kJ_mol"]) <= float(
+            current[j]["free_energy_min_kJ_mol"]
+        ):
+            keep, drop = i, j
+        else:
+            keep, drop = j, i
+
+        kept = current[keep]
+        dropped = current[drop]
+        merge_log.append({
+            "kept_basin_min_yx": [int(kept["min_y"]), int(kept["min_x"])],
+            "dropped_basin_min_yx": [int(dropped["min_y"]), int(dropped["min_x"])],
+            "barrier_kJ_mol": float(barrier),
+            "barrier_method": method,
+            "threshold_kJ_mol": threshold,
+            "kept_F_min": float(kept["free_energy_min_kJ_mol"]),
+            "dropped_F_min": float(dropped["free_energy_min_kJ_mol"]),
+            "population_before_kept": float(kept["population"]),
+            "population_before_dropped": float(dropped["population"]),
+        })
+        current.pop(drop)
+        labels = _relabel(current)
+
+        # Refresh populations / depths from reassigned labels
+        refreshed: List[Dict[str, Any]] = []
+        for b in current:
+            bid = int(b["basin_id"])
+            mask = labels == bid
+            my, mx = int(b["min_y"]), int(b["min_x"])
+            f_min = float(F[my, mx])
+            f_max_in = float(np.max(F[mask])) if mask.any() else f_min
+            refreshed.append({
+                "basin_id": bid,
+                "min_y": my,
+                "min_x": mx,
+                "free_energy_min_kJ_mol": f_min,
+                "population": float(P[mask].sum() / total_p),
+                "basin_depth_kJ_mol": f_max_in - f_min,
+                "area_fraction": float(mask.sum()) / float(F.size),
+                "n_grid_cells": int(mask.sum()),
+            })
+        current = refreshed
+
+    return current, merge_log, labels
+
+
 def analyze_fel_landscape_core(
     F: np.ndarray,
     P: np.ndarray,
@@ -1194,6 +1350,7 @@ def analyze_fel_landscape_core(
     smooth_sigma: float = 1.0,
     min_basin_population: float = DEFAULT_MIN_BASIN_POPULATION,
     min_prominence_kj_mol: float = 0.5,
+    merge_barrier_kJ_mol: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Extract classification features from a 2D FEL grid.
@@ -1208,7 +1365,10 @@ def analyze_fel_landscape_core(
     4. **Filter & merge:** drop basins with population < ``min_basin_population``
        (default 5%); iteratively merge the smallest basin into the largest until at most
        **8 basins** remain (or all meet the population threshold).
-    5. **Label basins:** assign ``basin_id`` 1…n by **population** (highest = 1).
+    5. **Optional barrier-aware merge:** if ``merge_barrier_kJ_mol`` is set, merge
+       pairs whose watershed-ridge barrier is below that threshold (continuous
+       low-energy valleys → one basin). Re-assign labels from surviving minima.
+    6. **Label basins:** assign ``basin_id`` 1…n by **population** (highest = 1).
 
     Only these final merged basins appear in ``fel_basins.png`` and in
     ``n_basins`` / ``landscape_entropy`` (S = −Σ pᵢ ln pᵢ).
@@ -1299,12 +1459,65 @@ def analyze_fel_landscape_core(
         for new_id, b in enumerate(basins, start=1):
             b["basin_id"] = new_id
 
-    # Rank basins by population (highest occupancy = basin 1).
-    basins.sort(
-        key=lambda b: (-float(b["population"]), float(b["free_energy_min_kJ_mol"])),
-    )
-    for new_id, b in enumerate(basins, start=1):
-        b["basin_id"] = new_id
+    n_basins_before_barrier_merge = len(basins)
+    barrier_merge_log: List[Dict[str, Any]] = []
+    if merge_barrier_kJ_mol is not None and len(basins) > 1:
+        basins, barrier_merge_log, _labels_merged = _merge_basins_barrier_aware(
+            F_smooth,
+            P,
+            basins,
+            merge_barrier_kJ_mol=float(merge_barrier_kJ_mol),
+        )
+        # Re-rank and refresh populations from surviving minima only.
+        basins.sort(
+            key=lambda b: (
+                -float(b["population"]),
+                float(b["free_energy_min_kJ_mol"]),
+            ),
+        )
+        for new_id, b in enumerate(basins, start=1):
+            b["basin_id"] = new_id
+        final_minima = [(int(b["min_y"]), int(b["min_x"])) for b in basins]
+        final_labels = _assign_fel_basins(F_smooth, final_minima)
+        total_p = float(P.sum()) or 1.0
+        for b in basins:
+            mask = final_labels == int(b["basin_id"])
+            my, mx = int(b["min_y"]), int(b["min_x"])
+            f_min = float(F_smooth[my, mx])
+            b["free_energy_min_kJ_mol"] = f_min
+            b["population"] = float(P[mask].sum() / total_p)
+            b["n_grid_cells"] = int(mask.sum())
+            b["area_fraction"] = float(mask.sum()) / float(F.size)
+            b["basin_depth_kJ_mol"] = (
+                float(np.max(F_smooth[mask]) - f_min) if mask.any() else 0.0
+            )
+        basins.sort(
+            key=lambda b: (
+                -float(b["population"]),
+                float(b["free_energy_min_kJ_mol"]),
+            ),
+        )
+        for new_id, b in enumerate(basins, start=1):
+            b["basin_id"] = new_id
+        final_minima = [(int(b["min_y"]), int(b["min_x"])) for b in basins]
+        final_labels = _assign_fel_basins(F_smooth, final_minima)
+        for b in basins:
+            mask = final_labels == int(b["basin_id"])
+            b["population"] = float(P[mask].sum() / total_p)
+            b["n_grid_cells"] = int(mask.sum())
+            b["area_fraction"] = float(mask.sum()) / float(F.size)
+    else:
+        # Legacy path: rank by population; do not re-watershed.
+        basins.sort(
+            key=lambda b: (
+                -float(b["population"]),
+                float(b["free_energy_min_kJ_mol"]),
+            ),
+        )
+        for new_id, b in enumerate(basins, start=1):
+            b["basin_id"] = new_id
+        final_minima = [(int(b["min_y"]), int(b["min_x"])) for b in basins]
+        final_labels = _assign_fel_basins(F_smooth, final_minima)
 
     populations = np.asarray([b["population"] for b in basins], dtype=float)
     populations = populations / max(populations.sum(), 1e-12)
@@ -1327,15 +1540,16 @@ def analyze_fel_landscape_core(
     )
 
     barriers: List[Dict[str, Any]] = []
-    kept_minima = [(b["min_y"], b["min_x"]) for b in basins]
-    kept_ids = [b["basin_id"] for b in basins]
-    for i in range(len(kept_minima)):
-        for j in range(i + 1, len(kept_minima)):
-            h_ij = _inter_basin_barrier(F_smooth, kept_minima[i], kept_minima[j])
+    for i in range(len(basins)):
+        for j in range(i + 1, len(basins)):
+            h_ij, method = _basin_pair_barrier(
+                F_smooth, final_labels, basins[i], basins[j]
+            )
             barriers.append({
-                "basin_a": kept_ids[i],
-                "basin_b": kept_ids[j],
+                "basin_a": int(basins[i]["basin_id"]),
+                "basin_b": int(basins[j]["basin_id"]),
                 "barrier_height_kJ_mol": h_ij,
+                "barrier_method": method,
             })
 
     max_barrier = max((b["barrier_height_kJ_mol"] for b in barriers), default=0.0)
@@ -1346,6 +1560,11 @@ def analyze_fel_landscape_core(
         "n_basins": len(basins),
         "n_minima": len(basins),  # backward-compatible alias
         "n_minima_detected": n_minima_detected,
+        "n_basins_before_barrier_merge": n_basins_before_barrier_merge,
+        "merge_barrier_kJ_mol": (
+            float(merge_barrier_kJ_mol) if merge_barrier_kJ_mol is not None else None
+        ),
+        "barrier_merge_log": barrier_merge_log,
         "landscape_entropy": landscape_entropy,
         "grid_entropy": grid_entropy,
         "major_basin_population": float(major_basin["population"]),

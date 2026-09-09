@@ -12,6 +12,8 @@ from typing import Dict, FrozenSet, Optional, Set, Any, List, Sequence
 
 # Canonical per-simulation output basenames (no label prefix).
 # Combined analysis collects these from {base}/{label}/analysis/.
+# Subset / chain / residue-range analyses use a qualifier: {stem}_{qualifier}.ext
+# (see is_metric_output_filename and get_standard_output_filenames_block).
 STANDARD_OUTPUT_FILES: Dict[str, Dict[str, str]] = {
     "rmsd": {"data": "rmsd.dat", "plot": "rmsd.png"},
     "rmsf": {"data": "rmsf.dat", "plot": "rmsf.png"},
@@ -29,6 +31,18 @@ STANDARD_OUTPUT_FILES: Dict[str, Dict[str, str]] = {
     "ligand_rmsf": {"data": "ligand_rmsf.dat", "plot": "ligand_rmsf.png"},
     "pca": {"data": "pca_projections.dat", "plot": "pca_pc1_pc2.png"},
     "fel": {"data": "fel_pc1_pc2_grid.csv", "plot": "fel_pc1_pc2.png", "features": "fel_features.json"},
+    "nearby": {"data": "nearby_residues.json", "table": "nearby_residues.csv"},
+    "min_distance": {"data": "min_distance.csv", "plot": "min_distance.png"},
+    "hbond_occupancy": {"data": "hbond_occupancy.csv", "plot": "hbond_occupancy.png"},
+    "salt_bridge": {"data": "saltbridge_occupancy.csv", "plot": "saltbridge_occupancy.png"},
+}
+
+# Extra overall names that also satisfy a metric (e.g. generic two-group COM).
+STANDARD_OUTPUT_ALTERNATES: Dict[str, Dict[str, tuple[str, ...]]] = {
+    "com": {
+        "data": ("com_distance.csv",),
+        "plot": ("com_distance.png",),
+    },
 }
 
 # Canonical built-in analysis tools that satisfy each metric group.
@@ -53,6 +67,10 @@ METRIC_TO_CANONICAL_TOOLS: Dict[str, tuple[str, ...]] = {
     "energy": ("analyze_energy",),
     "dccm": ("calculate_dccm",),
     "dssp": ("analyze_secondary_structure",),
+    "nearby": ("identify_nearby_residues",),
+    "min_distance": ("calculate_min_heavy_atom_distance",),
+    "hbond_occupancy": ("calculate_hbond_occupancy",),
+    "salt_bridge": ("calculate_salt_bridge_distances",),
 }
 
 
@@ -78,6 +96,73 @@ def partition_metrics_by_registry(
         elif metric in METRIC_TO_CANONICAL_TOOLS:
             missing.add(metric)
     return frozenset(covered), frozenset(missing)
+
+
+def metric_output_stems(metric: str) -> Set[str]:
+    """Canonical and alternate filename stems that belong to *metric*."""
+    stems: Set[str] = {metric.lower()}
+    spec = STANDARD_OUTPUT_FILES.get(metric) or {}
+    for key in ("data", "plot", "table"):
+        value = spec.get(key)
+        if value:
+            stems.add(Path(str(value)).stem.lower())
+    prefix = spec.get("data_prefix")
+    if prefix:
+        stems.add(str(prefix).lower())
+    alts = STANDARD_OUTPUT_ALTERNATES.get(metric) or {}
+    for values in alts.values():
+        for value in values:
+            stems.add(Path(str(value)).stem.lower())
+    if metric == "rg":
+        stems.add("gyration")
+    if metric == "com":
+        stems.update({"com_distance", "ligand_pocket_distance"})
+    if metric == "min_distance":
+        stems.update({"min_distance", "min_heavy_atom_distance"})
+    if metric == "nearby":
+        stems.add("nearby_residues")
+    if metric == "hbond_occupancy":
+        stems.update({"hbond_occupancy", "hbond_occupancy_count", "hbond_count"})
+    if metric == "salt_bridge":
+        stems.update({"saltbridge_occupancy", "saltbridge_distances", "salt_bridge"})
+    return stems
+
+
+def is_metric_output_filename(filename: str, requested: FrozenSet[str] | Set[str]) -> bool:
+    """
+    True when *filename* is an overall or qualified output for a requested metric.
+
+    Overall: ``rmsf.dat``, ``rmsd.png``.
+    Qualified: ``rmsf_1to34.dat``, ``rmsd_B_1to34.png``, ``com_distance_B1to34_vs_nearbyA.csv``.
+    """
+    if not filename:
+        return False
+    stem = Path(str(filename)).stem.lower()
+    for metric in requested:
+        for canon in metric_output_stems(metric):
+            if stem == canon or stem.startswith(canon + "_"):
+                return True
+    return False
+
+
+def allowed_output_files_for_metrics(
+    requested: FrozenSet[str] | Set[str],
+) -> tuple[Set[str], Set[str]]:
+    """Overall data/plot basenames (plus alternates) for *requested* metrics."""
+    data: Set[str] = set()
+    plots: Set[str] = {"combined_metrics.png"}
+    for metric in requested:
+        spec = STANDARD_OUTPUT_FILES.get(metric) or {}
+        if "data" in spec:
+            data.add(spec["data"])
+        if "table" in spec:
+            data.add(spec["table"])
+        if "plot" in spec:
+            plots.add(spec["plot"])
+        alts = STANDARD_OUTPUT_ALTERNATES.get(metric) or {}
+        data.update(alts.get("data", ()))
+        plots.update(alts.get("plot", ()))
+    return data, plots
 
 
 def get_planner_metric_tool_reference(
@@ -120,10 +205,25 @@ _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
         r"atp[-\s]?(?:to[-\s]?)?(?:protein[-\s]?)?(?:pocket[-\s]?)?distance",
     ),
     "contacts": (
-        r"\bcontacts?\b",
-        r"h[-\s]?bonds?",
-        r"hydrogen[-\s]?bonds?",
         r"protein[-\s]?ligand[-\s]?contact",
+        r"ligand[-\s]?(?:protein[-\s]?)?contacts?",
+        r"(?:atp|adp|gtp)[-\s]?contacts?",
+        r"protein[–—-]atp\s+contacts?",
+    ),
+    "hbond_occupancy": (
+        r"h[-\s]?bond\s+occupancy",
+        r"hydrogen[-\s]?bond\s+occupancy",
+        r"interface\s+h[-\s]?bonds?",
+        r"protein[-\s]?protein\s+h[-\s]?bonds?",
+        r"h[-\s]?bonds?\s+between\s+chain",
+        r"hydrogen[-\s]?bonds?\s+between",
+        r"interaction\s+partners?",
+        r"important\s+residues?\s+and\s+interaction",
+    ),
+    "salt_bridge": (
+        r"salt[-\s]?bridges?",
+        r"charged[-\s]?pair",
+        r"electrostatic\s+(?:pair|interaction)",
     ),
     "pocket_sasa": (
         r"pocket\s+sasa",
@@ -152,6 +252,20 @@ _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
         r"ligand\s+flexibility",
         r"ligand\b[^.\n]{0,40}\brmsf\b",
         r"rmsf\b[^.\n]{0,40}\bligand\b",
+    ),
+    "nearby": (
+        r"residues?\s+within",
+        r"within\s+\d+(?:\.\d+)?\s*(?:Å|a|angstrom)(?!\s+of\s+(?:the\s+)?(?:ligand|atp|adp|inhibitor))",
+        r"nearby\s+resid",
+        r"neighbouring\s+resid",
+        r"neighboring\s+resid",
+        r"identify\s+all\s+chain",
+    ),
+    "min_distance": (
+        r"min(?:imum)?\s+(?:heavy[-\s]?atom\s+)?distance",
+        r"minimum\s+heavy[-\s]?atom",
+        r"closest[-\s]?approach",
+        r"min(?:imum)?\s+distance\s+between",
     ),
     "energy": (r"\benergy\b", r"\bedr\b"),
     "pca": (
@@ -253,6 +367,7 @@ def _normalize_metric_false_positives(text: str, found: Set[str]) -> None:
     Examples:
     - "pocket SASA" must not also enable whole-protein ``sasa``.
     - "free-energy landscape" must not also enable potential ``energy``.
+    - "energy minimize" / equilibration wording must not enable energy analysis.
     """
     lower = (text or "").lower()
     if "sasa" in found and (
@@ -267,6 +382,17 @@ def _normalize_metric_false_positives(text: str, found: Set[str]) -> None:
             lower,
         ):
             found.discard("energy")
+    if "energy" in found and re.search(
+        r"energy\s+minim|minimisation|minimization|minimiz(?:e|ed|ing)|"
+        r"equilibrat",
+        lower,
+    ):
+        if not re.search(
+            r"potential\s+energy|analyze_energy|\bedr\b|energy\.dat|"
+            r"mean\s+potential|energy\s+analysis|energy\s+overlay",
+            lower,
+        ):
+            found.discard("energy")
 
 
 def _normalize_binding_rmsf_metrics(text: str, found: Set[str]) -> None:
@@ -275,14 +401,31 @@ def _normalize_binding_rmsf_metrics(text: str, found: Set[str]) -> None:
 
     When binding-site RMSF is requested, drop generic whole-protein ``rmsf``
     unless the user explicitly asks for global/per-residue protein RMSF.
+
+    Do NOT treat incidental "ATP"/"ligand" mentions (e.g. setup/holo description)
+    as a request for ligand RMSF unless those words appear near "rmsf".
     """
     lower = (text or "").lower()
     if not re.search(r"\brmsf\b", lower) and "rmsf" not in found:
         return
 
-    if re.search(r"\bpocket\b", lower):
+    if re.search(
+        r"pocket\s+(?:and\s+ligand\s+)?rmsf|"
+        r"binding[-\s]?site\s+rmsf|"
+        r"\bpocket\b[^.\n]{0,40}\brmsf\b|"
+        r"\brmsf\b[^.\n]{0,40}\bpocket\b",
+        lower,
+    ):
         found.add("pocket_rmsf")
-    if re.search(r"\bligand\b", lower) or re.search(r"\batp\b", lower):
+    if re.search(
+        r"ligand\s+(?:and\s+pocket\s+)?rmsf|"
+        r"atp\s+rmsf|"
+        r"\b(?:ligand|atp)\b[^.\n]{0,40}\brmsf\b|"
+        r"\brmsf\b[^.\n]{0,40}\b(?:ligand|atp)\b|"
+        r"pocket\s+and\s+ligand\s+rmsf|"
+        r"ligand\s+and\s+pocket\s+rmsf",
+        lower,
+    ):
         found.add("ligand_rmsf")
 
     binding_rmsf = found & {"pocket_rmsf", "ligand_rmsf"}
@@ -292,7 +435,9 @@ def _normalize_binding_rmsf_metrics(text: str, found: Set[str]) -> None:
     whole_protein_rmsf = re.search(
         r"(?:whole[-\s]?protein|global|backbone|cα|ca)\s+rmsf|"
         r"rmsf\s+(?:for\s+)?(?:the\s+)?(?:whole\s+)?protein|"
-        r"per[-\s]?residue\s+rmsf(?!\s+(?:for|of)\s+(?:pocket|ligand|atp))",
+        r"per[-\s]?residue\s+rmsf(?!\s+(?:for|of)\s+(?:pocket|ligand|atp))|"
+        r"rmsf\s+between\s+apo|"
+        r"rmsf\s+(?:of|for)\s+(?:the\s+)?(?:apo|holo|protein)",
         lower,
     )
     if not whole_protein_rmsf:
@@ -551,6 +696,16 @@ def detect_reference_landscape_requested(*goal_texts: str) -> Dict[str, Any]:
     }
 
 
+def _strip_compute_cluster_mentions(text: str) -> str:
+    """Remove HPC/compute 'cluster' wording so it does not trigger classification."""
+    return re.sub(
+        r"\b(?:hpc|compute|computer|slurm|batch|gpu|cpu|job)\s+clusters?\b",
+        " ",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+
+
 def detect_classification_requested(*goal_texts: str) -> bool:
     """True when the user explicitly asks for classification / clustering / feature matrix."""
     for text in goal_texts:
@@ -563,6 +718,7 @@ def detect_classification_requested(*goal_texts: str) -> bool:
             .replace("\u2013", "-")
             .replace("\u2014", "-")
         )
+        normalized = _strip_compute_cluster_mentions(normalized)
         if any(re.search(p, normalized) for p in _CLASSIFICATION_REQUEST_PATTERNS):
             return True
     return False
@@ -854,7 +1010,39 @@ def get_standard_output_filenames_block() -> str:
             )
     lines.append(
         "\nWhen the same metric is requested for every simulation, every sim must use "
-        "these exact basenames."
+        "these exact overall basenames so combined overlay can collect them."
+    )
+    lines.append("")
+    lines.append("**OVERALL vs SPECIFIC filenames:**")
+    lines.append(
+        "- Overall / whole-system metrics use the exact names above "
+        "(`rmsd.dat`/`rmsd.png`, `rmsf.dat`/`rmsf.png`)."
+    )
+    lines.append(
+        "- A subset, chain, residue range, or proximity group MUST use a qualifier "
+        "and matching plot stem: `{metric}_{qualifier}.dat` and `{metric}_{qualifier}.png`."
+    )
+    lines.append(
+        "- Examples: `rmsd_B_1to34.dat` + `rmsd_B_1to34.png`; "
+        "`rmsf_1to34.dat` + `rmsf_1to34.png`; "
+        "`rmsf_A_near_B1to34.dat` + `rmsf_A_near_B1to34.png`; "
+        "`com_distance_B1to34_vs_nearbyA.csv` + `.png`; "
+        "`min_distance_B1to34_vs_nearbyA.csv` + `.png`; "
+        "`nearby_residues_A_near_B1to34.json`; "
+        "`hbond_occupancy_B1to34_vs_A.csv`; "
+        "`saltbridge_occupancy_B1to34_vs_A.csv`."
+    )
+    lines.append(
+        "- Never overwrite an overall file with a subset (do not write chain-B RMSD "
+        "to `rmsd.dat` if you also compute complex RMSD)."
+    )
+    lines.append(
+        "- Combined/multi-sim overlay only collects the overall standard names; "
+        "qualified files stay per-simulation."
+    )
+    lines.append(
+        "- Every `.dat`/`.csv` time-series or RMSF profile gets a `plot_md_data` step "
+        "whose `output_file` uses the SAME stem (`.png`)."
     )
     return "\n".join(lines)
 
@@ -958,7 +1146,46 @@ Rules:
 - For holo kinase goals like "COM distance of ATP from protein" without further detail, prefer **`calculate_ligand_pocket_distance`** (biologically meaningful pocket tracking).
 - `calculate_com_distance` requires `selection1` and `selection2` (NOT `ligand_selection`).
 - Example pocket: `ligand_selection="resname ATP"`, `cutoff=5.0`, `output_file="ligand_pocket_distance.csv"`.
-- Example protein COM: `selection1="protein"`, `selection2="resname ATP"`, `output_file="com_distance.csv"`."""
+- Example protein COM: `selection1="protein"`, `selection2="resname ATP"`, `output_file="com_distance.csv"`.
+- For a residue-range or chain subset, use a qualified name such as
+  `com_distance_B1to34_vs_nearbyA.csv` (do not overwrite another COM series)."""
+
+
+def get_proximity_tool_guide() -> str:
+    """Prompt block: frame-0 neighbor identification and min heavy-atom distance."""
+    return """**PROXIMITY / INTERFACE TOOLS (protein–protein or any two groups):**
+
+These ARE built-in. Do NOT request programmer creation for them.
+
+| User intent | Tool | Output | Notes |
+|-------------|------|--------|-------|
+| List residues of group B within *X* Å of group A at a given frame (usually frame 0) | `identify_nearby_residues` | `nearby_residues.json` + `.csv` | Freezes the neighbor set. Writes `mda_selection` / `mda_selection_ca` / `mda_selection_heavy`. |
+| RMSF of those frozen neighbors | `calculate_rmsf` | `rmsf_{qualifier}.dat` | Set `selection_from_file` to the JSON (`selection_key="mda_selection_ca"`). |
+| COM of query vs frozen neighbors | `calculate_com_distance` | `com_distance_{qualifier}.csv` | `selection1` = query; `selection2_from_file` = JSON (`selection_key="mda_selection_heavy"`). |
+| Minimum heavy-atom distance vs time | `calculate_min_heavy_atom_distance` | `min_distance_{qualifier}.csv` | Same selection pattern as COM. |
+
+Rules:
+- Neighbor identity is taken **once** at `frame` (default 0), then held fixed for RMSF / COM / min-distance. Do not re-evaluate `around` every frame.
+- You may also pass an MDAnalysis `around` selection directly, e.g.
+  `chainID A and name CA and around 10 (chainID B and resid 1:34)` — still write a qualified filename.
+- Example: query `chainID B and resid 1:34`, neighbors `chainID A`, cutoff 10 Å →
+  `nearby_residues_A_near_B1to34.json`, `rmsf_A_near_B1to34.dat`; query RMSF → `rmsf_1to34.dat`.
+- `calculate_protein_ligand_contacts` is for protein–ligand only, not protein–protein min-distance.
+
+**PROTEIN–PROTEIN INTERACTION PARTNERS (built-in; do NOT request programmer tools):**
+
+| User intent | Tool | Output | Notes |
+|-------------|------|--------|-------|
+| H-bond occupancy / important H-bond pairs between two protein groups | `calculate_hbond_occupancy` | `hbond_occupancy.csv` + `.png` | Residue-pair occupancy (% frames). Use `selection1`/`selection2` and qualified names. |
+| Salt-bridge distances / charged interaction partners | `calculate_salt_bridge_distances` | `saltbridge_occupancy.csv` + `.png` | Arg/Lys/His/N-ter vs Asp/Glu; occupancy at 4 Å. |
+
+Rules:
+- These tools ARE the way to name **important residues and their interaction partners** at a protein–protein interface. Do not invent a new contact tool.
+- Typical trio for an interface: `identify_nearby_residues` (who is nearby) → `calculate_hbond_occupancy` + `calculate_salt_bridge_distances` (which pairs persist).
+- Example B 1–34 vs A: `selection1="chainID B and resid 1:34"`, `selection2="chainID A"`,
+  `output_file="hbond_occupancy_B1to34_vs_A.csv"` / `saltbridge_occupancy_B1to34_vs_A.csv`.
+- For a three-chain complex, run one H-bond + one salt-bridge job **per interface the user asked about** (A–B, A–C, B–C), each with its own qualifier.
+- Never use `calculate_protein_ligand_contacts` for chain–chain H-bonds."""
 
 
 def _metric_clause_pattern(metric: str) -> str:

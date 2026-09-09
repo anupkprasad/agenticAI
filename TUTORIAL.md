@@ -41,16 +41,16 @@ Your --goal  →  Supervisor  →  Planner  →  Field agents  →  Summary + re
 | **Report** | Reporter | HTML report + literature |
 
 Use `--subtask` to run only the stages you need (e.g. `analysis reporter` on
-finished trajectories). In **multi-simulation** mode (`--simtype multisim`),
-the supervisor loops over each simulation directory, then runs **combined
-analysis** and a **combined HTML report** at the base `--working-dir`.
+finished trajectories). Every campaign uses `{base}/{label}/` directories.
+When `len(sim_prompts) > 1`, the supervisor also runs **combined analysis**
+and a **combined HTML report** at the base `--working-dir`.
 
-When the full pipeline runs in multi-sim mode (preprocess through reporter),
-the **cross-sim HPC pool** uses three explicit stages:
+When the full pipeline runs (preprocess through reporter), the **HPC pool**
+uses three explicit stages:
 
-1. **Prep all** — preprocess + simsetup for every PDB (sequential).
+1. **Prep all** — preprocess + simsetup for every case (local workers).
 2. **HPC pool** — submit and monitor up to `--allowed-hpc-jobs` SLURM jobs in parallel.
-3. **Post-HPC all** — per-sim analysis + reporter, then combined outputs at `{base}/`.
+3. **Post-HPC all** — per-sim analysis + reporter, then combined outputs at `{base}/` when N>1.
 
 **Human checkpoints** are optional. By default the workflow is fully automatic.
 Use `--HITL error` to pause only on failures, or `--HITL all` for every checkpoint.
@@ -80,17 +80,16 @@ CHARMM36, install `charmm36-jul2022.ff` separately (see README **Force Fields**)
 ## 3. Core CLI flags
 
 ```bash
-python run_agenticAIWork.py --goal "..." [options]
+python SimAgent.py --goal "..." [options]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--goal` | Natural-language task (**required**) |
-| `--working-dir` | Base directory for all outputs |
+| `--working-dir` | Campaign base; each sim under `{dir}/{label}/` |
 | `--subtask` | Agents to run: `preprocess simsetup hpcjob analysis reporter` |
-| `--simtype` | `singlesim` (default) or `multisim` |
-| `--pdb-list` | Explicit PDB list for multi-sim |
-| `--sim-dirs` | Existing per-sim directories (analysis-only multi-sim) |
+| `--pdb-list` | Explicit PDB list |
+| `--sim-dirs` | Existing per-sim directories (analysis-only) |
 | `--no-llm` | Disable LLM planning (deterministic fallback) |
 | `--llm-model` | Model name (default `gpt-oss:20b`) |
 | `--llm-base-url` | Endpoint URL (default `http://localhost:11434`) |
@@ -114,11 +113,10 @@ Choose the path that matches your starting point.
 Full pipeline through HPC submission:
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Preprocess and setup MD for my_protein.pdb for 50 ns, then submit to HPC" \
   --working-dir /work/s1 \
-  --subtask preprocess simsetup hpcjob \
-  --simtype singlesim
+  --subtask preprocess simsetup hpcjob
 ```
 
 ### 4.2 UniProt accession (no local PDB)
@@ -127,14 +125,13 @@ The framework can download from AlphaFold (default) or RCSB and extract a domain
 via UniProt:
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Study ATP binding dynamics of UniProt P21860 (ERBB3).
           Download the AlphaFold PDB, extract the kinase domain,
           and run 1 ns MD for two cases: 1. Protein only, 2. Protein + ATP + MG.
           Submit both jobs to HPC." \
   --working-dir /work/erbb3 \
-  --subtask preprocess simsetup hpcjob \
-  --simtype multisim
+  --subtask preprocess simsetup hpcjob
 ```
 
 **Domain by name or residue range:**
@@ -154,13 +151,12 @@ The skip reason appears in `run_summary.md`.
 ### 4.3 Multi-protein study (several PDBs)
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Run 100 ns MD for each pseudokinase and submit to HPC.
           Names: p21860=ERBB3, q8iv63=VRK3, q8nb16=MLKL, q8wz42=TITIN." \
   --pdb-list p21860.pdb q8iv63.pdb q8nb16.pdb q8wz42.pdb \
   --working-dir /work/pseudo \
-  --subtask preprocess simsetup hpcjob \
-  --simtype multisim
+  --subtask preprocess simsetup hpcjob
 ```
 
 ### 4.4 Component-case expansion (apo vs holo from same PDB)
@@ -169,13 +165,12 @@ Use explicit phrasing — *"two different cases"*, *"1. Protein only"*,
 *"2. Protein + ATP + MG"*:
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Study ATP binding for p21860.pdb, q8iv63.pdb, q8nb16.pdb.
           For each PDB run two cases: 1. Protein only, 2. Protein + ATP + MG.
           Total 6 simulations. Preprocess, setup, and submit to HPC." \
   --working-dir /work/pseudo \
-  --subtask preprocess simsetup hpcjob \
-  --simtype multisim
+  --subtask preprocess simsetup hpcjob
 ```
 
 Expected layout: `p21860/`, `p21860_ATP_MG/`, `q8iv63/`, `q8iv63_ATP_MG/`, …
@@ -185,7 +180,7 @@ Expected layout: `p21860/`, `p21860_ATP_MG/`, `q8iv63/`, `q8iv63_ATP_MG/`, …
 **Single simulation:**
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Simulation is complete in /work/s1/hpc. Compute RMSD, RMSF, Rg,
           DCCM, DSSP, and generate the report." \
   --working-dir /work/s1 \
@@ -195,25 +190,23 @@ python run_agenticAIWork.py \
 **Multi-simulation** (full per-sim loop, then combined report):
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Analyse all completed pseudokinase simulations. Compute RMSD, RMSF, Rg,
           DCCM apo vs holo difference, RMSF for activation loop residues 150-200,
           ATP pocket COM distance, and DSSP for the activation loop.
           Generate combined comparison report with literature." \
   --working-dir /work/pseudo \
-  --subtask analysis reporter \
-  --simtype multisim
+  --subtask analysis reporter
 ```
 
 **Analysis from existing directories** (`--sim-dirs`):
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Compare structural dynamics across completed simulations." \
   --sim-dirs /work/pseudo/p21860 /work/pseudo/p21860_ATP_MG \
   --working-dir /work/pseudo \
-  --subtask analysis reporter \
-  --simtype multisim
+  --subtask analysis reporter
 ```
 
 ### 4.6 Combined analysis + report only (`--combined-only`)
@@ -222,12 +215,11 @@ When **every simulation already has** `analysis/analysis_summary.jsonl`, skip
 the per-sim loop and jump straight to cross-simulation overlays and the HTML report:
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Generate combined comparison plots and multi-simulation report
           for completed pseudokinase runs (ERBB3, VRK3, MLKL, TITIN)." \
   --working-dir /work/pseudo \
   --subtask analysis reporter \
-  --simtype multisim \
   --combined-only
 ```
 
@@ -249,25 +241,26 @@ files and writes combined outputs under `{working-dir}/analysis/` and
 When you omit `--subtask`, the supervisor runs preprocess → simsetup → HPC →
 analysis → reporter for every simulation, using the **cross-sim HPC pool**:
 
-1. **Prep (sequential)** — each sim runs preprocess and simsetup one at a time.
+1. **Prep (local workers)** — preprocess + simsetup in parallel when HITL is off.
 2. **HPC pool (parallel)** — up to `--allowed-hpc-jobs` SLURM jobs run at once.
 3. **Poll** — the workflow sleeps and re-checks SLURM every `--hpc-check-interval`.
-4. **Post-HPC (sequential)** — per-sim analysis and reporter, then combined analysis + report.
+4. **Post-HPC (local workers)** — per-sim analysis and reporter, then combined analysis + report.
+
+Directory trees and more flag examples: [docs/PIPELINE_WORKFLOW.md](docs/PIPELINE_WORKFLOW.md).
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Run 1 ns MD for p23458 (JAK1), p29597 (TYK2), q7rtn6 (STRAA).
           Compare RMSF and ligand pocket distance across simulations.
           DCCM for JAK1 and TYK2 only." \
   --working-dir ./my_study \
-  --simtype multisim \
   --allowed-hpc-jobs 4 \
   --hpc-check-interval 3m
 ```
 
 If the process is interrupted during HPC, restart with the same `--working-dir`
 and `--resume`. Pool state in `supervisor/state.jsonl` restores job IDs and prep
-status. See [docs/HPC_POOL.md](docs/HPC_POOL.md).
+status. See [docs/POOLS.md](docs/POOLS.md).
 
 Use `--HITL error` to pause on SLURM submit failures or terminal job states;
 use `--HITL all` to review after every stage.
@@ -360,7 +353,7 @@ The setup agent maps this to `nsteps` in `md.mdp`.
 ### Force field and water model
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Setup MD for kinase.pdb for 20 ns" \
   --working-dir work_ff \
   --subtask preprocess simsetup \
@@ -385,7 +378,7 @@ at your Ollama-compatible endpoint.
 ### Local Ollama
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Setup MD for protein.pdb" \
   --working-dir working_dir \
   --llm-base-url http://127.0.0.1:11434 \
@@ -409,7 +402,7 @@ Use `--no-llm` for deterministic heuristic routing (offline testing or when no
 endpoint is available):
 
 ```bash
-python run_agenticAIWork.py --goal "..." --no-llm
+python SimAgent.py --goal "..." --no-llm
 ```
 
 ---
@@ -432,22 +425,20 @@ redoing successes.
 **Example — one simulation failed:**
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "... (same goal as original) ..." \
   --working-dir pseudo \
   --subtask preprocess simsetup hpcjob \
-  --simtype multisim \
   --resume
 ```
 
 **Example — wrong HPC walltime; force retry:**
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "... (same goal) ..." \
   --working-dir pseudo \
   --subtask preprocess simsetup hpcjob \
-  --simtype multisim \
   --resume \
   --retry-labels p21860_ATP_MG q8nb16_ATP_MG
 ```
@@ -471,21 +462,19 @@ create this file.
 **Full feature set example:**
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "All trajectories under ./agenticB5R1/<label>/ are complete (~200 ns). Per simulation: ligand pocket distance, protein–ATP contacts, pocket SASA, residence/unbinding, pocket RMSF, ligand RMSF, PCA, FEL, and FEL basin features. Then unsupervised classification across all systems (feature table + z-score CSV). Combined: overlay pocket distance and RMSF." \
   --working-dir ./agenticB5R1 \
-  --subtask analysis reporter \
-  --simtype multisim
+  --subtask analysis reporter
 ```
 
 **Subset example** (only RMSF + pocket distance are analyzed and featurized):
 
 ```bash
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "Per simulation compute RMSF and ligand pocket distance only. Unsupervised classification using those features across all systems." \
   --working-dir ./agenticB5R1 \
-  --subtask analysis reporter \
-  --simtype multisim
+  --subtask analysis reporter
 ```
 
 **Outputs** (when classification is requested):
@@ -558,7 +547,7 @@ Include explicit `NN ns` in the goal. Verify `nsteps` in `simsetup/md.mdp` after
 
 ### Multi-case run did not expand into separate directories
 
-Use explicit case phrasing and `--simtype multisim`.
+Use explicit case phrasing for apo/holo expansion.
 
 ### `--combined-only` starts per-sim analysis instead
 
@@ -595,7 +584,7 @@ Add the label to `--retry-labels` with `--resume`.
 
 1. **One study, one `--working-dir`** — keeps artifacts and checkpoints together.
 2. **Be explicit in the goal** — duration, case split (apo/holo), residue windows, protein names for literature.
-3. **Use `--simtype multisim`** for any multi-protein or multi-case project.
+3. **Use one campaign `--working-dir`** for any multi-protein or multi-case project; each system lands in `{label}/`.
 4. **Name proteins in the goal** — e.g. `p21860: ERBB3` — for literature and report labels.
 5. **Stage incrementally** — `--subtask preprocess simsetup` before adding `hpcjob`.
 6. **Check artifacts before re-running** — read `run_summary.md` and key files under `analysis/`.

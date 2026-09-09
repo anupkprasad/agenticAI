@@ -89,4 +89,4 @@ if [[ "$CLEAN_PER_SIM_MIRROR" == "1" ]]; then
   echo "Per-sim mirror cleanup done."
 fi
 
-echo "Ready for: python run_agenticAIWork.py ... --combined-only"
+echo "Ready for: python SimAgent.py ... --combined-only"

@@ -138,6 +138,16 @@ def _draw_msa(
     cons_label_fs: float = 6.0,
     legend_fs: float = 6.4,
     footer_fs: float = 6.6,
+    top_bar_values: Optional[Sequence[float]] = None,
+    top_bar_label: str = "cons.",
+    top_bar_vmax: Optional[float] = None,
+    show_conservation_under_top_bar: bool = True,
+    column_groups: Optional[Sequence[Tuple[str, str]]] = None,
+    xlabel_pad: float = 6.0,
+    xtick_pad: float = 1.0,
+    legend_y: float = -0.055,
+    footer_y: Optional[float] = None,
+    show_footer: bool = True,
 ):
     """Draw an MSA heatmap that spans the full axes width.
 
@@ -147,6 +157,11 @@ def _draw_msa(
     Optional ``aa_colors`` / ``property_legend_items`` override the default scheme.
     Optional ``xtick_labels`` replaces MSA-column indices on the x-axis (same
     length as ``col_indices``); ``xlabel`` sets the axis label.
+    Optional ``top_bar_values`` replaces the default conservation-only bar (e.g. mean
+    RMSF). When ``top_bar_values`` is set, a modal-conservation track is still drawn
+    immediately underneath that bar unless ``show_conservation_under_top_bar`` is False.
+    Optional ``column_groups`` is a (label, color) pair per displayed column and
+    draws a motif strip between the bars and the MSA.
     """
     import textwrap
 
@@ -192,38 +207,114 @@ def _draw_msa(
                     family="DejaVu Sans Mono", zorder=5,
                 )
 
-    # Conservation as a normal upward bar chart in a slim axes above the MSA.
+    # Tracks above the MSA (appended bottom→top): motif → conservation → RMSF/cons.
     from mpl_toolkits.axes_grid1 import make_axes_locatable
 
     divider = make_axes_locatable(ax)
-    ax_cons = divider.append_axes("top", size="9%", pad=0.06, sharex=ax)
+    ax_grp = None
+    if column_groups is not None:
+        if len(column_groups) != n_cols:
+            raise ValueError("column_groups must match the number of displayed columns")
+        ax_grp = divider.append_axes("top", size="3.25%", pad=0.02, sharex=ax)
+        ax_grp.set_ylim(0.0, 1.0)
+        ax_grp.set_yticks([])
+        ax_grp.tick_params(bottom=False, labelbottom=False, left=False)
+        for spine in ("top", "right", "bottom", "left"):
+            ax_grp.spines[spine].set_visible(False)
+        ax_grp.set_xlim(-0.5, n_cols - 0.5)
+        ax_grp.set_facecolor(C_BG)
+        j = 0
+        while j < n_cols:
+            lab, gcol = column_groups[j]
+            k = j
+            while k + 1 < n_cols and column_groups[k + 1][0] == lab:
+                k += 1
+            ax_grp.axvspan(j - 0.5, k + 0.5, color=gcol, alpha=0.92, lw=0, zorder=1)
+            rgb_g = _hex_rgb(gcol)
+            tc = "#ffffff" if _luminance(rgb_g) < 0.55 else "#1c2429"
+            ax_grp.text(
+                0.5 * (j + k),
+                0.5,
+                lab,
+                ha="center",
+                va="center",
+                fontsize=max(4.6, cons_label_fs - 1.4),
+                fontweight="bold",
+                color=tc,
+                clip_on=True,
+                zorder=2,
+            )
+            j = k + 1
+        ax_grp.set_ylabel(
+            "motif",
+            fontsize=cons_label_fs,
+            color=C_MUTED,
+            rotation=0,
+            ha="right",
+            va="center",
+            labelpad=10,
+        )
+
+    def _style_bar_ax(ax_bar, *, ylab: str, vmax: float) -> None:
+        ax_bar.set_ylim(0.0, vmax)
+        ax_bar.set_yticks([])
+        ax_bar.set_ylabel(
+            ylab,
+            fontsize=cons_label_fs,
+            color=C_MUTED,
+            rotation=0,
+            ha="right",
+            va="center",
+            labelpad=10,
+        )
+        ax_bar.tick_params(bottom=False, labelbottom=False, left=False)
+        for spine in ("top", "right", "bottom"):
+            ax_bar.spines[spine].set_visible(False)
+        ax_bar.spines["left"].set_color(C_LINE)
+        ax_bar.set_facecolor(C_BG)
+        ax_bar.set_xlim(-0.5, n_cols - 0.5)
+
     cons_vals = [float(cons[int(c)]) for c in col_indices]
+
+    # Conservation under the custom top bar (e.g. RMSF), or as the only top track.
+    if top_bar_values is not None and show_conservation_under_top_bar:
+        ax_cons_under = divider.append_axes("top", size="7.5%", pad=0.04, sharex=ax)
+        ax_cons_under.bar(
+            np.arange(n_cols, dtype=float),
+            cons_vals,
+            width=0.92,
+            color="#6b8f71",
+            edgecolor="none",
+            align="center",
+            zorder=2,
+        )
+        _style_bar_ax(ax_cons_under, ylab="cons.", vmax=1.02)
+
+    ax_cons = divider.append_axes("top", size="9%", pad=0.05, sharex=ax)
+    if top_bar_values is not None:
+        if len(top_bar_values) != n_cols:
+            raise ValueError("top_bar_values must match the number of displayed columns")
+        bar_vals = [float(v) if np.isfinite(v) else 0.0 for v in top_bar_values]
+        vmax = float(top_bar_vmax) if top_bar_vmax is not None else max(bar_vals + [1e-6])
+        ylab = top_bar_label
+        bar_color = C_FOCUS
+        ylim = vmax * 1.05
+    else:
+        bar_vals = cons_vals
+        vmax = 1.02
+        ylab = "cons."
+        bar_color = C_FOCUS
+        ylim = vmax
     ax_cons.bar(
         np.arange(n_cols, dtype=float),
-        cons_vals,
+        bar_vals,
         width=0.92,
-        color=C_FOCUS,
+        color=bar_color,
         edgecolor="none",
         align="center",
         zorder=2,
     )
-    ax_cons.set_ylim(0.0, 1.02)
-    ax_cons.set_yticks([])
-    ax_cons.set_ylabel(
-        "cons.",
-        fontsize=cons_label_fs,
-        color=C_MUTED,
-        rotation=0,
-        ha="right",
-        va="center",
-        labelpad=10,
-    )
-    ax_cons.tick_params(bottom=False, labelbottom=False, left=False)
-    for spine in ("top", "right", "bottom"):
-        ax_cons.spines[spine].set_visible(False)
-    ax_cons.spines["left"].set_color(C_LINE)
-    ax_cons.set_facecolor(C_BG)
-    ax_cons.set_xlim(-0.5, n_cols - 0.5)
+    _style_bar_ax(ax_cons, ylab=ylab, vmax=ylim)
     # Selection track intentionally omitted unless mark_preferred is set below
     # on the main axes (legacy); pocket MSA passes mark_preferred=None.
 
@@ -310,10 +401,16 @@ def _draw_msa(
         xlabels = [str(int(col_indices[j])) for j in xt]
     ax.set_xticklabels(xlabels, fontsize=max(5.5, label_fs - 0.8))
     if xlabel:
-        ax.set_xlabel(xlabel, fontsize=max(7.0, label_fs - 0.5), color=C_INK, labelpad=3)
+        ax.set_xlabel(
+            xlabel,
+            fontsize=max(7.0, label_fs - 0.5),
+            color=C_INK,
+            labelpad=xlabel_pad,
+            wrap=False,
+        )
     ax.set_xlim(-0.5, n_cols - 0.5)
     ax.set_ylim(n_rows - 0.5, -0.5)
-    ax.tick_params(axis="x", pad=1, length=2)
+    ax.tick_params(axis="x", pad=xtick_pad, length=2)
     ax.tick_params(axis="y", length=0)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
@@ -330,8 +427,8 @@ def _draw_msa(
         pad=6,
     )
 
-    # Legend + footer packed tightly under the axes (axes-fraction coords)
-    y_leg = -0.042
+    # Legend + footer sit below x-tick labels and the x-axis title.
+    y_leg = float(legend_y)
     if show_property_legend:
         items = list(
             property_legend_items
@@ -378,13 +475,16 @@ def _draw_msa(
             # Advance by swatch + estimated label width (axes fraction).
             x += swatch_w + gap_after_swatch + 0.0105 * max(len(lab), 1) + gap_between
 
-    y_foot = -0.072 if show_property_legend else -0.038
-    footer_wrapped = "\n".join(textwrap.wrap(footer, width=110))
-    ax.text(
-        0.0, y_foot, footer_wrapped,
-        fontsize=footer_fs, color=C_INK, va="top", ha="left",
-        transform=ax.transAxes, clip_on=False, linespacing=1.1,
-    )
+    if show_footer and footer:
+        y_foot = float(footer_y) if footer_y is not None else (
+            y_leg - 0.045 if show_property_legend else -0.040
+        )
+        footer_wrapped = "\n".join(textwrap.wrap(footer, width=160, break_long_words=False, break_on_hyphens=False))
+        ax.text(
+            0.0, y_foot, footer_wrapped,
+            fontsize=footer_fs, color=C_INK, va="top", ha="left",
+            transform=ax.transAxes, clip_on=False, linespacing=1.1,
+        )
 
 
 def _msa_letter_fs(n_cols: int) -> float:

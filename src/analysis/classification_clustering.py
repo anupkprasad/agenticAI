@@ -630,13 +630,29 @@ def _short_feature_label(col: str) -> str:
         "delta_F_major_minus_global_kJ_mol": "ΔF major−global (kJ/mol)",
         "landscape_entropy": "landscape entropy",
         "major_basin_population": "major basin population",
-        "consensus_rmsf_mean_A": "consensus RMSF",
+        "consensus_rmsf_mean_A": "consensus RMSF (mean)",
         "consensus_rmsf_std_A": "consensus RMSF (std)",
-        "reference_pocket_ligand_distance_p95_A": "ATP–pocket COM (p95)",
-        "reference_pocket_ligand_distance_std_A": "ATP–pocket COM (std)",
+        "reference_pocket_ligand_distance_p95_A": "Pocket–ATP COM (p95)",
+        "reference_pocket_ligand_distance_std_A": "Pocket–ATP COM (std)",
         "reference_pocket_fraction_bound": "Fraction bound",
-        "reference_pocket_ligand_axis_angle_p95_deg": "Axis angle (p95)",
-        "reference_pocket_std_ligand_axis_angle_deg": "Axis angle (std)",
+        "reference_pocket_ligand_axis_angle_p95_deg": "ATP–Pocket angle (p95)",
+        "reference_pocket_std_ligand_axis_angle_deg": "ATP–Pocket angle (std)",
+        "mean_abs_corr_offdiag": r"DCCM $\langle|C|\rangle$",
+        "dccm_mean_abs_corr_offdiag": r"DCCM $\langle|C|\rangle$",
+        "dccm_top_eigenvalue": r"$\lambda_1$",
+        "N_C_mean_corr": r"DCCM N$\leftrightarrow$C",
+        "dccm_N_C_mean_corr": r"DCCM N$\leftrightarrow$C",
+        "pocket_C_mean_corr": r"pocket$\leftrightarrow$C",
+        "C_C_mean_corr": r"C$\leftrightarrow$C",
+        "timescale_ic1_ns": r"$\tau_1$ (ns)",
+        "timescale_ic2_ns": r"$\tau_2$ (ns)",
+        "tica_timescale_ic1_ns": r"TICA $\tau_1$ (ns)",
+        "tica_timescale_ic2_ns": r"TICA $\tau_2$ (ns)",
+        "grid_entropy": "grid entropy",
+        "tica_grid_entropy": "TICA grid entropy",
+        "tica_major_basin_population": "TICA major basin pop.",
+        "pca_grid_entropy": "PCA grid entropy",
+        "frac_frames_within_3kBT_of_minF": r"frac $\leq$ 3 kBT",
     }
     if col in aliases:
         return aliases[col]
@@ -809,6 +825,8 @@ def _plot_dendrogram_heatmap_panel(
     highlight_dominant_features: bool = True,
     dominant_top_k: int = 3,
     dominant_min_abs: float = 0.65,
+    legend_row_major: bool = False,
+    layout_tight: bool = False,
 ) -> Optional[List[int]]:
     """
     Single figure: dendrogram (branches right→left) + cluster label bar + feature heatmap.
@@ -821,6 +839,9 @@ def _plot_dendrogram_heatmap_panel(
     [0, 1] if values already lie in that range) instead of a ±vmax diverging scale.
     When ``highlight_dominant_features`` is True, thin rectangles outline the
     strongest-magnitude feature blocks within each cluster's row span.
+    When ``legend_row_major`` is True, legend entries fill left→right then top→bottom
+    (matplotlib's default is column-major).
+    When ``layout_tight`` is True, reduce figure margins / whitespace around the legend.
     """
     if not HAS_MPL:
         return None
@@ -834,6 +855,7 @@ def _plot_dendrogram_heatmap_panel(
     )
 
     # Slightly taller landscape panel for readability.
+    # Match original Fig. 3 panel footprint (≈15.75"×11.64" at 300 dpi after tight bbox).
     fig_w = 16.0
     fig_h = max(10.8, min(13.8, n * 0.34))
     fig = plt.figure(figsize=(fig_w, fig_h))
@@ -841,10 +863,10 @@ def _plot_dendrogram_heatmap_panel(
         1,
         4,
         width_ratios=[1.15, 0.32, 1.55, 0.05],
-        wspace=0.06,
+        wspace=0.05 if layout_tight else 0.06,
         left=0.03,
         right=0.97,
-        top=0.91,
+        top=0.92 if layout_tight else 0.91,
         bottom=0.16,
     )
     ax_dend = fig.add_subplot(gs[0, 0])
@@ -927,12 +949,20 @@ def _plot_dendrogram_heatmap_panel(
     )
     ax_hm.set_xticks(np.arange(len(feature_cols)))
     ax_hm.set_xticklabels(
-        feat_labels, rotation=20, ha="right", rotation_mode="anchor", fontsize=11
+        feat_labels,
+        rotation=25,
+        ha="right",
+        rotation_mode="anchor",
+        fontsize=9.5 if layout_tight else 11,
     )
-    ax_hm.tick_params(axis="x", pad=6, labelsize=11)
+    for tick in ax_hm.get_xticklabels():
+        tick.set_rotation(25)
+        tick.set_ha("right")
+        tick.set_rotation_mode("anchor")
+    ax_hm.tick_params(axis="x", pad=6 if layout_tight else 6, labelsize=9.5 if layout_tight else 11)
     ax_hm.set_yticks([])
     ax_hm.set_ylabel("")
-    ax_hm.set_title(heatmap_title, fontsize=13, pad=8, loc="left", fontweight="bold")
+    ax_hm.set_title(heatmap_title, fontsize=13, pad=6 if layout_tight else 8, loc="left", fontweight="bold")
 
     if highlight_dominant_features and X_ord.size:
         # Contiguous row blocks already follow dendrogram leaf order.
@@ -1025,14 +1055,33 @@ def _plot_dendrogram_heatmap_panel(
             )
         )
     ncol = int(legend_ncol) if legend_ncol else min(len(handles), 2)
+    if legend_row_major and ncol > 1 and len(handles) > 1:
+        # Matplotlib fills legends column-major; permute so display is row-major
+        # (left→right, then next row): e.g. C1 C2 C3 / C4 *
+        n_h = len(handles)
+        nrow = (n_h + ncol - 1) // ncol
+        padded: List[Optional[object]] = list(handles) + [None] * (nrow * ncol - n_h)
+        grid = [padded[r * ncol : (r + 1) * ncol] for r in range(nrow)]
+        reordered = []
+        for c in range(ncol):
+            for r in range(nrow):
+                h = grid[r][c]
+                if h is not None:
+                    reordered.append(h)
+        handles = reordered
     fig.legend(
         handles=handles,
         loc="lower center",
         ncol=ncol,
-        fontsize=11,
-        framealpha=0.9,
+        fontsize=9.5 if layout_tight else 11,
+        framealpha=0.95,
         bbox_to_anchor=(0.5, 0.02),
         borderaxespad=0.0,
+        columnspacing=2.4 if layout_tight else 1.5,
+        handletextpad=0.7,
+        labelspacing=0.7 if layout_tight else 0.5,
+        borderpad=0.6,
+        markerscale=1.05,
     )
 
     fig.savefig(output_path, dpi=300, bbox_inches="tight")

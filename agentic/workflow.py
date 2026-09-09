@@ -6,7 +6,7 @@ for dynamic routing and agent coordination.
 """
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable
 from langgraph.graph import StateGraph, END
@@ -402,7 +402,9 @@ class MDWorkflow:
             lambda state: state.get("next_node", "supervisor"),
             {
                 "supervisor": "supervisor",
-                "human_analysis_check": "human_analysis_check"
+                "human_analysis_check": "human_analysis_check",
+                # Combined analysis may advance straight to reporter.
+                "reporter": "reporter",
             }
         )
         
@@ -493,21 +495,25 @@ class MDWorkflow:
         from agentic.multi_sim_hpc_pool import log_pool_to_base
 
         persist_hpc_pool_checkpoint(state)
+        mins = max(1, interval // 60)
+        next_at = datetime.now() + timedelta(seconds=interval)
+        next_at_str = next_at.strftime("%H:%M")
         log_pool_to_base(
             state,
-            f"Pool sleep — next SLURM check in {interval}s",
+            f"Pool sleep — next SLURM check in {interval}s at {next_at_str}",
             pool=pool,
             log_to_conversation=False,
-            extra={"summary": summary},
+            extra={"summary": summary, "next_check_at": next_at.isoformat(timespec="seconds")},
         )
         logger.info(
-            "HPC pool: sleeping %ss before next SLURM check\n%s",
+            "HPC pool: sleeping %ss (next check at %s)\n%s",
             interval,
+            next_at.strftime("%Y-%m-%d %H:%M:%S"),
             summary,
         )
         print(
-            f"\n--- HPC pool status (next check in {max(1, interval // 60)} min "
-            f"/ {interval}s) ---\n{summary}\n",
+            f"\n--- HPC pool status (next check in {mins} min at {next_at_str}) ---\n"
+            f"{summary}\n",
             flush=True,
         )
         time.sleep(interval)
@@ -990,6 +996,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "preprocessing_report": None,
             "topology": None,
             "coordinates": None,
+            "chain_residue_map": None,
             "setup_report": None,
             "hpc_action": None,
             "job_script": None,
@@ -1192,7 +1199,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 "pdb_analysis", "component_selection", "file_registry", "generated_files",
                 "ligand_files", "ligand_resnames", "ion_files", "ion_resnames",
                 # Setup outputs
-                "topology", "coordinates", "mdp_files", "setup_report",
+                "topology", "coordinates", "chain_residue_map", "mdp_files", "setup_report",
                 # HPC outputs
                 "job_script", "job_id", "job_status", "trajectory_path", "energy_file",
                 "hpc_report", "hpc_output_directory",
@@ -1504,6 +1511,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 ("trajectory_path", None),
                 ("topology", None),
                 ("coordinates", None),
+                ("chain_residue_map", None),
                 ("job_id", None),
                 ("analysis_instructions", None),
                 ("reporter_instructions", None),

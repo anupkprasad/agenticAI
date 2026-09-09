@@ -772,11 +772,14 @@ class SimulationSetupAgent:
                 analysis["ligand_resnames"] = []
                 analysis["ligand_params_available"] = {}
                 analysis["ligand_params_missing"] = []
-            if component_selection.get("ions") is False and analysis["has_ions"]:
+            if component_selection.get("ions") is False and (
+                analysis["has_ions"] or analysis.get("ion_files")
+            ):
                 logger.info(f"Component selection excludes ions — overriding has_ions to False "
                            f"(detected: {analysis['ion_resnames']})")
                 analysis["has_ions"] = False
                 analysis["ion_resnames"] = []
+                analysis["ion_files"] = []
             
             # Recalculate system_type after overrides
             if analysis["has_ligand"] and analysis["has_ions"]:
@@ -1652,6 +1655,16 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                                 tpr_path = tpr
                             generated_files[tpr_path] = "GROMACS binary run input file (TPR)"
                             log_file_operation("setup", "create", tpr_path, True)
+                        if "chain_residue_map" in files_dict:
+                            cmap = files_dict["chain_residue_map"]
+                            if not Path(cmap).is_absolute():
+                                cmap_path = str(Path(simsetup_dir) / cmap)
+                            else:
+                                cmap_path = cmap
+                            generated_files[cmap_path] = (
+                                "PDB chain + resid → trajectory resindex map"
+                            )
+                            log_file_operation("setup", "create", cmap_path, True)
                         if "mdp_files" in files_dict and isinstance(files_dict["mdp_files"], dict):
                             mdp_files.update(files_dict["mdp_files"])
                         
@@ -1760,6 +1773,9 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 file_type = "mdp"
             elif ".itp" in file_path:
                 file_type = "topology_include"
+            elif file_path.endswith("chain_residue_map.json"):
+                file_type = "chain_residue_map"
+                state["chain_residue_map"] = file_path
             
             state["file_registry"][file_path] = {
                 "type": file_type,

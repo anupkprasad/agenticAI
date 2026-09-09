@@ -314,6 +314,9 @@ def calculate_com_distance(
     output_file: Optional[str] = None,
     working_dir: Optional[str] = None,
     frame_interval: int = 1,
+    selection1_from_file: Optional[str] = None,
+    selection2_from_file: Optional[str] = None,
+    selection_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Calculate per-frame center-of-mass (COM) distance between two explicit atom selections.
@@ -333,9 +336,12 @@ def calculate_com_distance(
         selection2: Second MDAnalysis selection (e.g. ``"resname ATP"``)
         label1: Plot label for selection 1 (default: ``"group1"``)
         label2: Plot label for selection 2 (default: ``"group2"``)
-        output_file: CSV filename (default: ``"com_distance.csv"``)
+        output_file: CSV filename (default: ``"com_distance.csv"``; subset: ``com_distance_{qualifier}.csv``)
         working_dir: Directory for output files
         frame_interval: Process every Nth frame (default: 1)
+        selection1_from_file: Optional nearby_residues JSON/CSV for selection1
+        selection2_from_file: Optional nearby_residues JSON/CSV for selection2
+        selection_key: JSON key to read (default mda_selection_heavy)
 
     Returns:
         Dict with COM distance statistics and output path.
@@ -366,6 +372,21 @@ def calculate_com_distance(
         logger.info(
             f"Calculating COM distance: '{selection1}' ({label1}) vs '{selection2}' ({label2})"
         )
+
+        from .proximity_analyzer import apply_selection_from_files
+
+        resolved = apply_selection_from_files(
+            {
+                "selection1": selection1,
+                "selection2": selection2,
+                "selection1_from_file": selection1_from_file,
+                "selection2_from_file": selection2_from_file,
+                "selection_key": selection_key,
+            },
+            working_dir=working_dir,
+        )
+        selection1 = resolved.get("selection1", selection1)
+        selection2 = resolved.get("selection2", selection2)
 
         u = mda.Universe(topology_file, trajectory_file)
         result = compute_com_distance_from_universe(

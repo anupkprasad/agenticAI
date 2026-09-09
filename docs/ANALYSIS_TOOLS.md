@@ -1,12 +1,35 @@
 # Analysis Tools Reference
 
-This document describes every trajectory-analysis tool available to the Analysis
-Agent: what it computes, the theory behind it, standard output filenames, and
-typical use in multi-simulation protein–ligand studies (e.g. 35 kinase–ATP systems).
+**This file is the analysis-tool handbook.** For each trajectory tool it
+states the observable, the theory, standard output filenames, and how tools
+are combined in multi-simulation / classification studies. Implementation
+lives in `src/analysis/*.py` and is registered in `agentic/analysis/tools.py`.
 
-Implementation: `src/analysis/*.py`, registered in `agentic/analysis/tools.py`.
+**In this file:** multi-chain selection reminder, tool index, global and
+binding-site metrics, collective motion, plotting, combined/multi-sim
+tools, classification workflow, output names, reporter HTML, source map.
 
-For external dependencies (GROMACS, MDAnalysis, etc.) see [TOOLS.md](TOOLS.md).
+**Not in this file:** GROMACS/MDAnalysis versions and the full chain-map
+mechanism ([TOOLS.md](TOOLS.md#multi-chain-residue-map)), agent routing
+([ARCHITECTURE.md](ARCHITECTURE.md)), worker/SLURM pools ([POOLS.md](POOLS.md)).
+
+---
+
+## Multi-chain selections (PDB vocabulary → trajectory `resindex`)
+
+GROMACS `.tpr` / `.gro` / `.xtc` files do not store PDB chain IDs. Setup writes
+`simsetup/chain_residue_map.json`; analysis translates `chainID B and resid 50:75`
+to `resindex …` before `select_atoms`. Full mechanism (build, JSON schema,
+phospho/TER cleanup vs this map, what not to do):
+[TOOLS.md](TOOLS.md#multi-chain-residue-map).
+
+| User / LLM selection | Trajectory selection |
+| --- | --- |
+| `chainID B and resid 50:75` | `resindex 389:414` (example) |
+| `chainID A and resid 1:10 and name CA` | `name CA and resindex 0:9` |
+| `protein` / `resname ATP` | unchanged |
+
+Always include `chainID` when residue numbers overlap across chains.
 
 ---
 
@@ -15,6 +38,7 @@ For external dependencies (GROMACS, MDAnalysis, etc.) see [TOOLS.md](TOOLS.md).
 | Category          | Tools                                                                          |
 | ----------------- | ------------------------------------------------------------------------------ |
 | Global structure  | RMSD, RMSF, Rg, SASA, DSSP, energy                                             |
+| Interface / proximity | nearby residues (frame 0), min heavy-atom distance, generic COM            |
 | Binding site      | ligand-pocket distance, contacts, pocket SASA, residence, pocket RMSF          |
 | Collective motion | DCCM, PCA, FEL, FEL features                                                   |
 | Plotting          | plot_md_data, plot_pca_projection, combined overlays                           |
@@ -33,7 +57,7 @@ For external dependencies (GROMACS, MDAnalysis, etc.) see [TOOLS.md](TOOLS.md).
 \]
 
 **Default selection:** `protein and name CA`
-**Output:** `rmsd.dat`, `rmsd.png`
+**Output:** `rmsd.dat`, `rmsd.png` (overall); subset e.g. `rmsd_B_1to34.dat`, `rmsd_B_1to34.png`
 **Interpretation:** Low, stable RMSD → folded, equilibrated structure. Large drift → unfolding or domain motion.
 
 ---
@@ -46,8 +70,57 @@ For external dependencies (GROMACS, MDAnalysis, etc.) see [TOOLS.md](TOOLS.md).
 \mathrm{RMSF}_i = \sqrt{\left\langle\left|\mathbf{r}_i(t)-\langle\mathbf{r}_i\rangle\right|^2\right\rangle}
 \]
 
-**Output:** `rmsf.dat`, `rmsf.png`
+**Output:** `rmsf.dat`, `rmsf.png` (overall); subset e.g. `rmsf_1to34.dat`, `rmsf_1to34.png`
 **Interpretation:** High RMSF → flexible loops; low RMSF → rigid core or secondary structure.
+
+For a residue range, chain, or proximity subset, **do not overwrite** `rmsf.dat`. Use a qualifier: `rmsf_1to34.dat` / `rmsf_1to34.png`. Overall protein RMSF still uses `rmsf.dat` / `rmsf.png`.
+
+---
+
+### `identify_nearby_residues`
+
+**Observable:** Residues of group *N* that lie within cutoff *d* of query group *Q* at one frame (default frame 0). The neighbor set is **frozen** for later RMSF / COM / min-distance.
+
+**Parameters:** `query_selection`, `neighbor_selection`, `cutoff` (Å), `frame`
+**Output:** `nearby_residues.json` + `nearby_residues.csv` (overall); subset e.g. `nearby_residues_A_near_B1to34.json`
+**JSON fields:** `mda_selection`, `mda_selection_ca`, `mda_selection_heavy`, residue table
+**Downstream:** `calculate_rmsf(..., selection_from_file=...)`, `calculate_com_distance(..., selection2_from_file=...)`, `calculate_min_heavy_atom_distance(...)`.
+
+This is the protein–protein analogue of the ligand-pocket freeze at frame 0. Do **not** re-evaluate `around` every frame if the user asked for “those residues” identified at frame 0.
+
+---
+
+### `calculate_min_heavy_atom_distance`
+
+**Observable:** Per-frame minimum distance between heavy atoms of two selections.
+
+**Output:** `min_distance.csv`, `min_distance.png` (overall); subset e.g. `min_distance_B1to34_vs_nearbyA.csv`
+**Interpretation:** Rising min-distance → groups separating; stable low values → interface remains packed.
+
+Use this for protein–protein (or any two groups). Protein–ligand contact counts stay on `calculate_protein_ligand_contacts`.
+
+---
+
+### `calculate_hbond_occupancy`
+
+**Observable:** Hydrogen-bond occupancy between two protein selections (D–A ≤ 3.5 Å, angle ≥ 150°).
+
+**Parameters:** `selection1`, `selection2`, `label1`, `label2`, `d_a_cutoff`, `angle_cutoff`
+**Output:** `hbond_occupancy.csv` + `.png` (overall); subset e.g. `hbond_occupancy_B1to34_vs_A.csv`
+**Also writes:** `{stem}_atoms.csv`, `{stem}_count.csv` / `{stem}_count.png`
+**Interpretation:** High occupancy residue pairs are the persistent H-bond interaction partners.
+
+Do **not** use `calculate_protein_ligand_contacts` for chain–chain H-bonds.
+
+---
+
+### `calculate_salt_bridge_distances`
+
+**Observable:** Minimum charged-atom distance for complementary pairs (Arg/Lys/His/N-terminus vs Asp/Glu). Occupancy = fraction of frames below 4 Å.
+
+**Output:** `saltbridge_occupancy.csv` + `.png`; subset e.g. `saltbridge_occupancy_B1to34_vs_A.csv`
+**Also writes:** `{stem}_distances.csv` / `{stem}_distances.png`
+**Interpretation:** Occupancy ≥ ~50% and a flat short distance → a stability-determining salt bridge.
 
 ---
 
@@ -688,14 +761,22 @@ n_basins, landscape_entropy, major_basin_population, max_barrier_height_kJ_mol
 
 ## Standard output filenames (multi-sim)
 
-Use **identical basenames** in every `{label}/analysis/` directory so combined tools can collect them. See `agentic/planner/planning_guidelines.py` → `STANDARD_OUTPUT_FILES`.
+Use **identical overall basenames** in every `{label}/analysis/` directory so combined tools can collect them. Subset analyses (one chain, a residue range, residues within X Å) use a **qualifier** and must not overwrite the overall file.
 
-| Metric                | Data file                                       |
-| --------------------- | ----------------------------------------------- |
-| Analysis summary      | `analysis_summary.jsonl`                        |
-| RMSF                  | `rmsf.dat`                                    |
-| Rg                    | `gyration.dat`                                |
-| Ligand pocket         | `ligand_pocket_distance.csv`                  |
+See `agentic/planner/planning_guidelines.py` → `STANDARD_OUTPUT_FILES`.
+
+| Metric                | Overall data file                               | Subset example                         |
+| --------------------- | ----------------------------------------------- | -------------------------------------- |
+| Analysis summary      | `analysis_summary.jsonl`                        | —                                      |
+| RMSD                  | `rmsd.dat`                                      | `rmsd_B_1to34.dat`                     |
+| RMSF                  | `rmsf.dat`                                      | `rmsf_1to34.dat`, `rmsf_A_near_B1to34.dat` |
+| Rg                    | `gyration.dat`                                | `gyration_chainB.dat`                  |
+| Nearby residues       | `nearby_residues.json` (+ `.csv`)             | `nearby_residues_A_near_B1to34.json`   |
+| Min heavy-atom dist.  | `min_distance.csv`                            | `min_distance_B1to34_vs_nearbyA.csv`   |
+| H-bond occupancy      | `hbond_occupancy.csv`                         | `hbond_occupancy_B1to34_vs_A.csv`      |
+| Salt-bridge occupancy | `saltbridge_occupancy.csv`                    | `saltbridge_occupancy_B1to34_vs_A.csv` |
+| Generic COM           | `com_distance.csv`                            | `com_distance_B1to34_vs_nearbyA.csv`   |
+| Ligand pocket         | `ligand_pocket_distance.csv`                  | —                                      |
 | Contacts              | `protein_ligand_contacts.csv`                 |
 | Pocket SASA           | `pocket_sasa.csv`                             |
 | Residence             | `ligand_residence.csv`                        |
@@ -767,6 +848,7 @@ calculate_pocket_rmsf.func(
 | `gyration_calculator.py`       | Rg                                                   |
 | `sasa_calculator.py`           | SASA (whole protein)                                 |
 | `com_distance_calculator.py`   | COM distance, ligand-pocket distance                 |
+| `proximity_analyzer.py`        | Nearby residues (frame 0), min heavy-atom distance   |
 | `binding_site_analyzer.py`     | Contacts, pocket SASA, residence, pocket/ligand RMSF |
 | `classification_collector.py`  | `collect_classification_features_table`            |
 | `classification_clustering.py` | `cluster_classification_features`                  |

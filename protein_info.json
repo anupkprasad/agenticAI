@@ -3,7 +3,10 @@
     "binding_type_JM": "this tells the binding type based on the Jams Murfy paper",
     "binding_type_visAMP": "this tells the binding type based on visual AMP binding",
     "binding_lig_mg": "this tells the binding type based on both ATP and mg binding status",
-    "description": "This JSON file contains detailed information about various proteins, including their names, aliases, binding types, descriptions, sequences, and simulation statuses. The data is structured in a way that allows for easy access to each protein's attributes using their unique identifiers (UIDs) as keys."
+    "description": "This JSON file contains detailed information about various proteins, including their names, aliases, binding types, descriptions, sequences, and simulation statuses. The data is structured in a way that allows for easy access to each protein's attributes using their unique identifiers (UIDs) as keys.",
+    "uniprot_domain_start": "N-terminal UniProt residue number of the simulated domain construct (inclusive). Present for reference/representative systems with verified length match to sequence.",
+    "uniprot_domain_end": "C-terminal UniProt residue number of the simulated domain construct (inclusive).",
+    "uniprot_numbering_note": "How to convert local simulation residue indices to UniProt numbering."
   },
   "proteins": {
     "O14936KD2": {
@@ -52,7 +55,10 @@
       "Mg_in_pocket": "Mg1",
       "remark": "only Mg2 is out of pocket, but other looks perfect",
       "sequence": "LIFNESLGQGTFTKIFKGVRREVGDYGQLHETEVLLKVLDKAHRNYSESFFEAASMMSKLSHKHLVLNYGVCVCGDENILVQEFVKFGSLDTYLKKNKNCINILWKLEVAKQLAWAMHFLEENTLIHGNVCAKNILLIREEDRKTGNPPFIKLSDPGISITVLPKDILQERIPWVPPECIENPKNLNLATDKWSFGTTLWEICSGGDKPLSALDSQRKLQFYEDRHQLPAPKWAELANLINNCMDYEPDFRPSFRAIIRDLNSLF",
-      "simulation_status": ""
+      "simulation_status": "",
+      "uniprot_domain_start": 545,
+      "uniprot_domain_end": 809,
+      "uniprot_numbering_note": "Simulated construct equals UniProt O60674 residues 545\u2013809 (inclusive). Local MD/MSA resid i (1\u2026265) maps to UniProt resid 545+i\u22121."
     },
     "P21860": {
       "name": "ERBB3",
@@ -76,7 +82,10 @@
       "Mg_in_pocket": "Mg1",
       "remark": "only Mg2 is out of pocket, but other looks perfect",
       "sequence": "LVQGEHLGRGTRTHIYSGTLMDYKDDEGTSEEKKIKVILKVLDPSHRDISLAFFEAASMMRQVSHKHIVYLYGVCVRDVENIMVEEFVEGGPLDLFMHRKSDVLTTPWKFKVAKQLASALSYLEDKDLVHGNVCTKNLLLAREGIDSECGPFIKLSDPGIPITVLSRQECIERIPWIAPECVEDSKNLSVAADKWSFGTTLWEICYNGEIPLKDKTLIEKERFYESRCRPVTPSCKELADLMTRCMNYDPNQRPFFRAIMRDINKLEEQNPDI",
-      "simulation_status": ""
+      "simulation_status": "",
+      "uniprot_domain_start": 583,
+      "uniprot_domain_end": 855,
+      "uniprot_numbering_note": "Simulated construct equals UniProt P23458 residues 583\u2013855 (inclusive). Local MD/MSA resid i (1\u2026273) maps to UniProt resid 583+i\u22121."
     },
     "P29597": {
       "name": "TYK2",
@@ -136,7 +145,10 @@
       "Mg_in_pocket": "Mg1,Mg2",
       "remark": "both Mg and ligand are in pocket but highly flexible",
       "sequence": "KEIKKEQLSGSPWILLRENEVSTLYKGEYHRAPVAIKVFKKLQAGSIAIVRQTFNKEIKTMKKFESPNILRIFGICIDETVTPPQFSIVMEYCELGTLRELLDREKDLTLGKRMVLVLGAARGLYRLHHSEAPELHGKIRSSNFLVTQGYQVKLAGFELRKTQTSMSLGTTREKTDRVKSTAYLSPQELEDVFYQYDVKSEIYSFGIVLWEIATGDIPFQGCNSEKIRKLVAVKRQQEPLGEDCPSELREIIDECRAHDPSVRPSVDEILKKLSTF",
-      "simulation_status": ""
+      "simulation_status": "",
+      "uniprot_domain_start": 194,
+      "uniprot_domain_end": 469,
+      "uniprot_numbering_note": "Simulated construct equals UniProt Q8NB16 residues 194\u2013469 (inclusive). Local MD/MSA resid i (1\u2026276) maps to UniProt resid 194+i\u22121."
     },
     "Q8NE28": {
       "name": "STKL1",
@@ -381,7 +393,10 @@
       "Mg_in_pocket": "Mg1,Mg2",
       "remark": "perfect structure, both mg and ligand are in pocket",
       "sequence": "YDIKALIGTGSFSRVVRVEQKTTKKPFAIKVMETREREGREACVSELSVLRRVSHRYIVQLMEIFETEDQVYMVMELATGGELFDRLIAQGSFTERDAVRILQMVADGIRYLHALQITHRNLKPENLLYYHPGEESKILITDFGLAYSGKKSGDWTMKTLCGTPEYIAPEVLLRKPYTSAVDMWALGVITYALLSGFLPFDDESQTRLYRKILKGKYNYTGEPWPSISHLAKDFIDKLLILEAGHRMSAGQALDHPWV",
-      "simulation_status": ""
+      "simulation_status": "",
+      "uniprot_domain_start": 63,
+      "uniprot_domain_end": 320,
+      "uniprot_numbering_note": "Simulated construct equals UniProt Q96QS6 residues 63\u2013320 (inclusive). Local MD/MSA resid i (1\u2026258) maps to UniProt resid 63+i\u22121."
     },
     "Q96RU8": {
       "name": "TRIB1",
@@ -480,7 +495,10 @@
       "Mg_in_pocket": "Mg1,Mg2",
       "remark": "perfect structure, both mg and ligand are in pocket",
       "sequence": "LQPITTLGKSEFGEVFLAKAQGLEEGVAETLVLVKSLQSKDEQQQLDFRRELEMFGKLNHANVVRLLGLCREAEPHYMVLEYVDLGDLKQFLRISKSKDEKLKSQPLSTKQKVALCTQVALGMEHLSNNRFVHKDLAARNCLVSAQRQVKVSALGLSKDVYNSEYYHFRQAWVPLRWMSPEAILEGDFSTKSDVWAFGVLMWEVFTHGEMPHGGQADDEVLADLQAGKARLPQPEGCPSKLYRLMQRCWALSPKDRPSFSEIASALGDSTV",
-      "simulation_status": ""
+      "simulation_status": "",
+      "uniprot_domain_start": 796,
+      "uniprot_domain_end": 1066,
+      "uniprot_numbering_note": "Simulated construct equals UniProt Q13308 residues 796\u20131066 (inclusive). Local MD/MSA resid i (1\u2026271) maps to UniProt resid 796+i\u22121."
     },
     "P16066": {
       "name": "ANPRA",
@@ -656,7 +674,10 @@
       "Mg_in_pocket": "0",
       "remark": "",
       "sequence": "FERIKTLGTGSFGRVMLVKHKETGNHYAMKILDKQKVVKLKQIEHTLNEKRILQAVNFPFLVKLEFSFKDNSNLYMVMEYVPGGEMFSHLRRIGRFSEPHARFYAAQIVLTFEYLHSLDLIYRDLKPENLLIDQQGYIQVTDFGFAKRVKGRTWTLCGTPEYLAPEIILSKGYNKAVDWWALGVLIYEMAAGYPPFFADQPIQIYEKIVSGKVRFPSHFSSDLKDLLRNLLQVDLTKRFGNLKNGVNDIKNHKWF",
-      "simulation_status": ""
+      "simulation_status": "",
+      "uniprot_domain_start": 44,
+      "uniprot_domain_end": 298,
+      "uniprot_numbering_note": "Simulated construct equals UniProt P17612 residues 44\u2013298 (inclusive). Local MD/MSA resid i (1\u2026255) maps to UniProt resid 44+i\u22121."
     },
     "P24941": {
       "name": "CDK2",

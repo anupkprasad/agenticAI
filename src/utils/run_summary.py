@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from agentic.llm_usage import load_usage_summary, format_usage_terminal
+
 
 def _sim_status(sim: Dict[str, Any]) -> str:
     if sim.get("skipped"):
@@ -237,6 +239,9 @@ def build_run_summary(
 
     combined_dir = str(Path(working_dir) / "combinedAnalysis")
     analysis_dir = final_state.get("analysis_directory") or str(Path(working_dir) / "analysis")
+    llm_usage = load_usage_summary(working_dir)
+    if llm_usage:
+        llm_usage["_path"] = str(Path(working_dir) / "llm_usage.json")
 
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -277,6 +282,7 @@ def build_run_summary(
         "warnings": list(final_state.get("warnings") or [])[:20],
         "log_file": str(Path(working_dir) / "agent_conversation.log"),
         "execution_report": str(Path(working_dir) / "supervisor" / "execution_report.md"),
+        "llm_usage": llm_usage,
     }
 
 
@@ -349,6 +355,10 @@ def format_run_summary_terminal(summary: Dict[str, Any]) -> str:
         lines.append(f"  Combined analysis: {summary['combined_analysis_dir']}")
     if summary.get("reporter_output"):
         lines.append(f"  Report: {summary['reporter_output']}")
+
+    usage_block = format_usage_terminal(summary.get("llm_usage"))
+    if usage_block:
+        lines.append(usage_block)
 
     lines.append("")
     lines.append(f"  Summary file: {Path(summary['working_directory']) / 'run_summary.md'}")
@@ -431,6 +441,34 @@ def format_run_summary_markdown(summary: Dict[str, Any]) -> str:
         lines.append(f"- Combined analysis: `{summary['combined_analysis_dir']}`")
     if summary.get("reporter_output"):
         lines.append(f"- Reporter output: `{summary['reporter_output']}`")
+
+    llm_usage = summary.get("llm_usage") or {}
+    if llm_usage.get("billing_enabled") or llm_usage.get("total_tokens"):
+        lines.extend(["", "## LLM token usage", ""])
+        lines.append(f"| Metric | Value |")
+        lines.append(f"|--------|-------|")
+        lines.append(f"| Calls | {llm_usage.get('calls', 0)} |")
+        lines.append(f"| Prompt tokens | {int(llm_usage.get('prompt_tokens') or 0):,} |")
+        lines.append(f"| Completion tokens | {int(llm_usage.get('completion_tokens') or 0):,} |")
+        lines.append(f"| Total tokens | {int(llm_usage.get('total_tokens') or 0):,} |")
+        if llm_usage.get("limit"):
+            lines.append(
+                f"| Budget | {int(llm_usage.get('total_tokens') or 0):,} / "
+                f"{int(llm_usage['limit']):,} |"
+            )
+        by_agent = llm_usage.get("by_agent") or {}
+        if by_agent:
+            lines.append("")
+            lines.append("### By agent")
+            lines.append("")
+            for agent, vals in sorted(by_agent.items()):
+                lines.append(
+                    f"- **{agent}:** {int(vals.get('total_tokens', 0)):,} tokens "
+                    f"({int(vals.get('calls', 0))} calls)"
+                )
+        usage_path = llm_usage.get("_path") or str(Path(summary.get("working_directory", "")) / "llm_usage.json")
+        lines.append("")
+        lines.append(f"Full usage log: `{usage_path}`")
 
     return "\n".join(lines)
 

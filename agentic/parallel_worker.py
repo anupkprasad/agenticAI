@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# CLI agent names → internal subtask mapping handled by run_agenticAIWork.
+# CLI agent names → internal subtask mapping handled by SimAgent.
 _CLI_AGENTS = frozenset({"preprocess", "simsetup", "hpcjob", "analysis", "reporter"})
 
 
@@ -70,10 +70,21 @@ def build_per_sim_job_spec(state: Dict[str, Any], sim_info: Dict[str, Any], *, p
         "use_llm": bool(state.get("use_llm", True)),
         "llm_model": state.get("llm_model", "gpt-oss:20b"),
         "llm_base_url": state.get("llm_base_url", "http://localhost:11434"),
+        "llm_token_budget": state.get("llm_token_budget"),
+        "llm_provider": state.get("llm_provider", "auto"),
+        "multi_sim_base_dir": state.get("multi_sim_base_dir") or state.get("working_directory"),
         "production_ns": state.get("production_ns"),
         "extended_minimization": bool(state.get("extended_minimization", False)),
         "md_engine": state.get("md_engine", "gromacs"),
         "reuse_hpc": bool(state.get("reuse_hpc", False)),
+        # Component-case metadata — without this, workers treat source-PDB MG/ATP
+        # as always-on and ATP-only cases incorrectly keep crystallographic ions.
+        "sim_case": {
+            "label": label,
+            "case_id": sim_info.get("case_id"),
+            "case_description": sim_info.get("case_description"),
+            "case_directive": sim_info.get("case_directive"),
+        },
     }
 
 
@@ -158,9 +169,13 @@ def run_per_sim_workflow(job: Dict[str, Any]) -> Dict[str, Any]:
 
         llm = None
         if job.get("use_llm"):
+            usage_dir = job.get("multi_sim_base_dir") or working_dir
             llm = LLMClient(
                 model=job.get("llm_model", "gpt-oss:20b"),
                 base_url=job.get("llm_base_url"),
+                token_budget=job.get("llm_token_budget"),
+                working_dir=usage_dir,
+                provider=job.get("llm_provider", "auto"),
             )
 
         workflow = MDWorkflow(llm_client=llm)
@@ -205,6 +220,8 @@ def run_per_sim_workflow(job: Dict[str, Any]) -> Dict[str, Any]:
             config["production_ns"] = job["production_ns"]
         if job.get("extended_minimization"):
             config["extended_minimization"] = True
+        if job.get("sim_case"):
+            config["sim_case"] = job["sim_case"]
 
         final = workflow.run(job.get("user_goal", ""), config)
         status = final.get("workflow_status") or ""

@@ -29,7 +29,11 @@ from src.preprocess.structure_request_parser import (
     resolve_domain_residue_range,
 )
 from src.preprocess.structure_acquisition import acquire_structure_from_request
-from src.preprocess.domain_extractor import extract_domain
+from src.preprocess.domain_extractor import (
+    extract_domain,
+    classify_domain_extract,
+    _atom_record_count,
+)
 from .tools import PreprocessingToolExecutor, get_tool_metadata
 
 logger = logging.getLogger(__name__)
@@ -414,7 +418,19 @@ class PreprocessingAgent:
         if Path(domain_pdb).resolve() == Path(pdb_path).resolve():
             return agent_input
 
-        if os.path.isfile(domain_pdb):
+        decision = classify_domain_extract(pdb_path, req.start_resid, req.end_resid)
+        if decision in ("already_present", "numbering_mismatch", "empty_input"):
+            logger.info(
+                "Skipping domain extract (%s) on %s for requested residues %s-%s; "
+                "keeping the local PDB",
+                decision,
+                Path(pdb_path).name,
+                req.start_resid,
+                req.end_resid,
+            )
+            return agent_input
+
+        if os.path.isfile(domain_pdb) and _atom_record_count(domain_pdb) > 0:
             agent_input.pdb_path = domain_pdb
             state["raw_pdb"] = domain_pdb
             return agent_input
@@ -433,6 +449,9 @@ class PreprocessingAgent:
             protein_name=req.protein_name,
             domain_name=req.domain_label or "domain",
         )
+        if result.get("skipped"):
+            logger.info("Domain extract skipped: %s", result.get("message"))
+            return agent_input
         if not result.get("success"):
             state.setdefault("errors", []).append(
                 f"Domain extraction failed: {result.get('error')}"

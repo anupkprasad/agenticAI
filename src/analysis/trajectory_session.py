@@ -29,6 +29,56 @@ except ImportError:
     align = None  # type: ignore
 
 
+def _clip_truncated_trajectory(universe: Any) -> Any:
+    """Cap n_frames when the XTC is truncated (mdrun XTC error / disk full).
+
+    MDAnalysis estimates ``n_frames`` from file size after ``seek failed``.
+    A 77 ns / 100 ps production then looks like ~15k frames and AlignTraj
+    ``in_memory=True`` tries to allocate tens of GB.
+    """
+    reader = universe.trajectory
+    claimed = len(reader)
+    if claimed <= 0:
+        return universe
+    try:
+        reader[claimed - 1]
+        return universe
+    except Exception:
+        logger.info(
+            "TrajectorySession: last-frame seek failed (claimed n_frames=%d) "
+            "— counting readable frames",
+            claimed,
+        )
+
+    readable = 0
+    last_time = None
+    try:
+        for ts in reader:
+            readable += 1
+            last_time = getattr(ts, "time", None)
+    except Exception as exc:
+        logger.warning(
+            "TrajectorySession: stopped counting frames at %d (%s: %s)",
+            readable,
+            type(exc).__name__,
+            exc,
+        )
+    if readable <= 0:
+        raise RuntimeError(
+            f"Trajectory has no readable frames: {getattr(universe, 'filename', '')}"
+        )
+    if readable < claimed:
+        logger.warning(
+            "TrajectorySession: truncated XTC — using %d readable frames "
+            "(MDA claimed %d, last time %.1f ps). Loading those frames into memory.",
+            readable,
+            claimed,
+            float(last_time) if last_time is not None else -1.0,
+        )
+        universe.transfer_to_memory(start=0, stop=readable)
+    return universe
+
+
 class TrajectorySession:
     """Lazy-loaded trajectory context with separate RAW and ALIGNED passes."""
 
@@ -49,11 +99,38 @@ class TrajectorySession:
 
         self._raw_universe: Any = None
         self._aligned_cache: Dict[str, Any] = {}
+        self._chain_map: Any = False  # False = not loaded yet; None = missing
         self._stats: Dict[str, Any] = {
             "universe_loads": 0,
             "align_runs": 0,
             "passes": [],
         }
+
+    @property
+    def chain_map(self) -> Any:
+        """PDB chain → trajectory resindex map, loaded once per session."""
+        if self._chain_map is False:
+            from .chain_residue_map import ensure_chain_residue_map
+
+            self._chain_map = ensure_chain_residue_map(
+                working_dir=self.working_dir,
+                topology_file=self.topology_file,
+            )
+        return self._chain_map
+
+    def translate_selection(self, selection: Optional[str]) -> Optional[str]:
+        if not selection or not isinstance(selection, str):
+            return selection
+        from .chain_residue_map import translate_selection
+
+        return translate_selection(selection, self.chain_map)
+
+    def translate_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        from .chain_residue_map import params_need_chain_map, translate_selection_params
+
+        if not params_need_chain_map(params):
+            return dict(params)
+        return translate_selection_params(params, self.chain_map)
 
     @property
     def stats(self) -> Dict[str, Any]:
@@ -69,7 +146,7 @@ class TrajectorySession:
         )
         u = mda.Universe(self.topology_file, self.trajectory_file)
         self._stats["universe_loads"] += 1
-        return u
+        return _clip_truncated_trajectory(u)
 
     @property
     def raw_universe(self) -> Any:
@@ -98,6 +175,7 @@ class TrajectorySession:
     def aligned_universe(self, *, align_selection: Optional[str] = None) -> Any:
         """Return an in-memory aligned copy; computed once per selection string."""
         sel = (align_selection or self.default_align_selection).strip()
+        sel = self.translate_selection(sel) or sel
         if sel in self._aligned_cache:
             return self._aligned_cache[sel]
 
@@ -127,6 +205,7 @@ class TrajectorySession:
         """Release references (Universe holds file handles until GC)."""
         self._raw_universe = None
         self._aligned_cache.clear()
+        self._chain_map = False
 
 
 def create_session(

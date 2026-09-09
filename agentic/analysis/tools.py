@@ -34,6 +34,8 @@ from src.analysis.summary_logger import initialize_summary_file, generate_summar
 from src.analysis.dssp_analyzer import analyze_secondary_structure
 from src.analysis.sasa_calculator import calculate_sasa, plot_sasa
 from src.analysis.com_distance_calculator import calculate_com_distance, calculate_ligand_pocket_distance
+from src.analysis.proximity_analyzer import identify_nearby_residues, calculate_min_heavy_atom_distance
+from src.analysis.interface_analyzer import calculate_hbond_occupancy, calculate_salt_bridge_distances
 from src.analysis.dccm_calculator import (
     calculate_dccm,
     plot_dccm_comparison,
@@ -124,6 +126,10 @@ __all__ = [
     "plot_md_multipanel",
     "calculate_com_distance",
     "calculate_ligand_pocket_distance",
+    "identify_nearby_residues",
+    "calculate_min_heavy_atom_distance",
+    "calculate_hbond_occupancy",
+    "calculate_salt_bridge_distances",
     "calculate_dccm",
     "plot_dccm_comparison",
     "plot_dccm_difference",
@@ -229,6 +235,10 @@ _PER_SIM_ANALYSIS_TOOLS = [
     plot_combined_data,
     calculate_com_distance,
     calculate_ligand_pocket_distance,
+    identify_nearby_residues,
+    calculate_min_heavy_atom_distance,
+    calculate_hbond_occupancy,
+    calculate_salt_bridge_distances,
     calculate_dccm,
     plot_dccm_comparison,
     plot_dccm_difference,
@@ -419,6 +429,10 @@ class AnalysisToolExecutor:
             "plot_md_multipanel": plot_md_multipanel,
             "calculate_com_distance": calculate_com_distance,
             "calculate_ligand_pocket_distance": calculate_ligand_pocket_distance,
+            "identify_nearby_residues": identify_nearby_residues,
+            "calculate_min_heavy_atom_distance": calculate_min_heavy_atom_distance,
+            "calculate_hbond_occupancy": calculate_hbond_occupancy,
+            "calculate_salt_bridge_distances": calculate_salt_bridge_distances,
             "calculate_dccm": calculate_dccm,
             "plot_dccm_comparison": plot_dccm_comparison,
             "plot_dccm_difference": plot_dccm_difference,
@@ -647,6 +661,12 @@ class AnalysisToolExecutor:
                     if canonical not in kwargs:
                         kwargs[canonical] = [val] if isinstance(val, str) else val
                     aliases_applied[alias] = canonical
+            try:
+                from src.analysis.proximity_analyzer import apply_selection_from_files
+
+                kwargs = apply_selection_from_files(kwargs, working_dir=self.working_dir)
+            except Exception as exc:
+                logger.warning("selection_from_file resolution skipped: %s", exc)
             # Also strip completely unknown kwargs so they don't cause TypeErrors
             unknown = [k for k in kwargs if k not in valid_params]
             for k in unknown:
@@ -654,6 +674,25 @@ class AnalysisToolExecutor:
                 kwargs.pop(k)
             if aliases_applied:
                 logger.info(f"Aliased parameters for {tool_name}: {aliases_applied}")
+
+        try:
+            from src.analysis.chain_residue_map import (
+                ChainSelectionError,
+                ensure_chain_residue_map,
+                params_need_chain_map,
+                translate_selection_params,
+            )
+
+            if tool_name not in {"calculate_sasa", "calculate_pocket_sasa", "wrap_trajectory"} and params_need_chain_map(kwargs):
+                chain_map = ensure_chain_residue_map(
+                    working_dir=self.working_dir,
+                    topology_file=kwargs.get("topology_file") or kwargs.get("topology"),
+                )
+                kwargs = translate_selection_params(kwargs, chain_map)
+        except ChainSelectionError as exc:
+            return {"success": False, "error": str(exc)}
+        except Exception as exc:
+            logger.debug("Chain-map translation skipped for %s: %s", tool_name, exc)
 
         if tool_name in PCA_TOOL_DEFAULTS:
             user_goal = self.config.get("user_goal") or ""

@@ -10,10 +10,22 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
+from .chain_residue_map import ChainSelectionError
 from .metric_registry import TrajectoryPassKind
 from .trajectory_session import TrajectorySession
 
 logger = logging.getLogger(__name__)
+
+
+def _params_for_session(session: TrajectorySession, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate PDB chain/resid selections onto trajectory resindex."""
+    try:
+        return session.translate_params(params)
+    except ChainSelectionError:
+        raise
+    except Exception as exc:
+        logger.warning("Chain-map selection translation failed: %s", exc)
+        return dict(params)
 
 
 def _resolve_align_selection(params: Dict[str, Any], default: str = "protein and name CA") -> str:
@@ -35,6 +47,18 @@ def compute_metric_from_session(
     params: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Run one metric using the appropriate Universe from *session*."""
+    try:
+        from .proximity_analyzer import apply_selection_from_files
+
+        params = apply_selection_from_files(dict(params), working_dir=working_dir)
+    except Exception as exc:
+        logger.warning("selection_from_file resolution failed: %s", exc)
+        params = dict(params)
+
+    try:
+        params = _params_for_session(session, params)
+    except ChainSelectionError as exc:
+        return {"success": False, "error": str(exc)}
     align_sel = _resolve_align_selection(params)
     skip_align = pass_kind == TrajectoryPassKind.ALIGNED
 
@@ -110,6 +134,64 @@ def compute_metric_from_session(
             selection2=params.get("selection2", "resname LIG"),
             label1=params.get("label1", "group1"),
             label2=params.get("label2", "group2"),
+            output_file=params.get("output_file"),
+            frame_interval=int(params.get("frame_interval", 1) or 1),
+            **common,
+        )
+
+    if tool_name == "identify_nearby_residues":
+        from .proximity_analyzer import compute_nearby_residues_from_universe
+
+        return compute_nearby_residues_from_universe(
+            universe,
+            query_selection=params.get("query_selection", "protein"),
+            neighbor_selection=params.get("neighbor_selection", "protein"),
+            cutoff=float(params.get("cutoff", params.get("proximity_cutoff", 10.0))),
+            frame=int(params.get("frame", 0) or 0),
+            output_file=params.get("output_file"),
+            **common,
+        )
+
+    if tool_name == "calculate_min_heavy_atom_distance":
+        from .proximity_analyzer import compute_min_heavy_atom_distance_from_universe
+
+        return compute_min_heavy_atom_distance_from_universe(
+            universe,
+            selection1=params.get("selection1", "protein"),
+            selection2=params.get("selection2", "protein"),
+            label1=params.get("label1", "group1"),
+            label2=params.get("label2", "group2"),
+            output_file=params.get("output_file"),
+            frame_interval=int(params.get("frame_interval", 1) or 1),
+            **common,
+        )
+
+    if tool_name == "calculate_hbond_occupancy":
+        from .interface_analyzer import compute_hbond_occupancy_from_universe
+
+        return compute_hbond_occupancy_from_universe(
+            universe,
+            selection1=params.get("selection1", "protein"),
+            selection2=params.get("selection2", "protein"),
+            label1=params.get("label1", "group1"),
+            label2=params.get("label2", "group2"),
+            d_a_cutoff=float(params.get("d_a_cutoff", params.get("hbond_distance", 3.5))),
+            angle_cutoff=float(params.get("angle_cutoff", params.get("hbond_angle", 150.0))),
+            output_file=params.get("output_file"),
+            frame_interval=int(params.get("frame_interval", 1) or 1),
+            **common,
+        )
+
+    if tool_name == "calculate_salt_bridge_distances":
+        from .interface_analyzer import compute_salt_bridge_distances_from_universe
+
+        return compute_salt_bridge_distances_from_universe(
+            universe,
+            selection1=params.get("selection1", "protein"),
+            selection2=params.get("selection2", "protein"),
+            label1=params.get("label1", "group1"),
+            label2=params.get("label2", "group2"),
+            cutoff=float(params.get("cutoff", 4.0)),
             output_file=params.get("output_file"),
             frame_interval=int(params.get("frame_interval", 1) or 1),
             **common,
@@ -214,6 +296,7 @@ FUSED_RAW_STREAMING_TOOLS = frozenset({
     "calculate_com_distance",
     "calculate_ligand_pocket_distance",
     "analyze_ligand_residence",
+    "calculate_min_heavy_atom_distance",
 })
 
 
@@ -294,6 +377,19 @@ def _build_fused_collector(u, tool_name: str, params: Dict[str, Any], step_idx: 
             "min_dists": [],
         }
 
+    if tool_name == "calculate_min_heavy_atom_distance":
+        sel1 = params.get("selection1", "protein")
+        sel2 = params.get("selection2", "protein")
+        return {
+            **base,
+            "type": "min_dist",
+            "group1": u.select_atoms(f"({sel1}) and not name H*"),
+            "group2": u.select_atoms(f"({sel2}) and not name H*"),
+            "frames": [],
+            "times": [],
+            "values": [],
+        }
+
     return None
 
 
@@ -364,6 +460,14 @@ def run_fused_raw_streaming_batch(
 
     collectors: list = []
     for step_idx, tool_name, params in fused_steps:
+        try:
+            from .proximity_analyzer import apply_selection_from_files
+
+            params = apply_selection_from_files(dict(params), working_dir=working_dir)
+            params = _params_for_session(session, params)
+        except ChainSelectionError as exc:
+            results[step_idx] = {"success": False, "error": str(exc)}
+            continue
         col = _build_fused_collector(u, tool_name, params, step_idx)
         if col is None:
             results[step_idx] = compute_metric_from_session(
@@ -420,6 +524,16 @@ def run_fused_raw_streaming_batch(
                 col["times"].append(float(ts.time) / 1000.0)
                 col["bound_mask"].append(is_bound)
                 col["min_dists"].append(min_d)
+            elif col["type"] == "min_dist":
+                dist_arr = mda_distances.distance_array(
+                    col["group1"].positions,
+                    col["group2"].positions,
+                    box=box,
+                )
+                if dist_arr.size:
+                    col["values"].append(float(np.min(dist_arr)))
+                    col["frames"].append(int(ts.frame))
+                    col["times"].append(float(ts.time))
 
     original_dir = os.getcwd()
     try:
@@ -480,6 +594,21 @@ def run_fused_raw_streaming_batch(
                     pocket_meta=col["pocket_meta"],
                     output_file=col["params"].get("output_file"),
                     working_dir=working_dir,
+                )
+            elif col["type"] == "min_dist":
+                from .proximity_analyzer import finalize_min_distance_result
+
+                results[col["step_idx"]] = finalize_min_distance_result(
+                    col["frames"], col["times"], col["values"],
+                    selection1=col["params"].get("selection1", "protein"),
+                    selection2=col["params"].get("selection2", "protein"),
+                    label1=col["params"].get("label1", "group1"),
+                    label2=col["params"].get("label2", "group2"),
+                    output_file=col["params"].get("output_file"),
+                    topology_file=topology_file,
+                    trajectory_file=trajectory_file,
+                    working_dir=working_dir,
+                    frame_interval=col["interval"],
                 )
     finally:
         if working_dir:

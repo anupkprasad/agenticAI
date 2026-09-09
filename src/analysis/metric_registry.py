@@ -140,6 +140,27 @@ METRIC_REGISTRY: Dict[str, TrajectoryMetricSpec] = {
         TrajectoryPassKind.RAW,
         TrajectoryExecutionMode.EXTERNAL,
     ),
+    "identify_nearby_residues": TrajectoryMetricSpec(
+        "identify_nearby_residues",
+        TrajectoryPassKind.RAW,
+        TrajectoryExecutionMode.EXTERNAL,
+    ),
+    "calculate_min_heavy_atom_distance": TrajectoryMetricSpec(
+        "calculate_min_heavy_atom_distance",
+        TrajectoryPassKind.RAW,
+        TrajectoryExecutionMode.STREAMING,
+        streaming_group="per_frame",
+    ),
+    "calculate_hbond_occupancy": TrajectoryMetricSpec(
+        "calculate_hbond_occupancy",
+        TrajectoryPassKind.RAW,
+        TrajectoryExecutionMode.BATCH_ANALYSIS,
+    ),
+    "calculate_salt_bridge_distances": TrajectoryMetricSpec(
+        "calculate_salt_bridge_distances",
+        TrajectoryPassKind.RAW,
+        TrajectoryExecutionMode.BATCH_ANALYSIS,
+    ),
     "wrap_trajectory": TrajectoryMetricSpec(
         "wrap_trajectory",
         TrajectoryPassKind.RAW,

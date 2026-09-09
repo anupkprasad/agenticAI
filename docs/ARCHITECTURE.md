@@ -1,5 +1,23 @@
 # Architecture
 
+**This file is the system design.** It describes how AgenticAI is wired:
+the LangGraph hub-and-spoke, the ordered pipeline, multi-simulation layout,
+shared `MDState`, and what each agent does. Read it to understand *how a run
+moves through the graph*, not how to invoke the CLI or how an RMSD is
+computed.
+
+**In this file:** high-level graph, pipeline order, multi-sim directories,
+structure acquisition, graph nodes, state fields, per-agent mechanisms, HITL
+plan edits, run summary, utilities, a short CLI reminder, recursion limit.
+
+**Not in this file:** coding rules ([CONVENTIONS.md](CONVENTIONS.md)),
+dependency versions and GROMACS workarounds ([TOOLS.md](TOOLS.md)), analysis
+observables ([ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md)), worker/SLURM
+concurrency ([POOLS.md](POOLS.md)), product overview ([PROJECT.md](PROJECT.md)),
+step-by-step run map with flag examples ([PIPELINE_WORKFLOW.md](PIPELINE_WORKFLOW.md)).
+
+---
+
 ## High-Level Design
 
 AgenticAI uses a **LangGraph StateGraph** with a hub-and-spoke topology.
@@ -42,6 +60,9 @@ Human Checks are optional. Enable with **`--HITL all`** (every checkpoint) or
 `run_summary.md` and `run_summary.json` are always written to the base
 working directory at workflow exit.
 
+Goal + command examples, directory trees, and how flags change what is
+written: [PIPELINE_WORKFLOW.md](PIPELINE_WORKFLOW.md).
+
 ## Multi-Simulation Mode
 
 When the user supplies multiple PDB files, or requests **multiple component
@@ -50,18 +71,17 @@ one AlphaFold model), the Supervisor orchestrates the simulations internally
 by looping over `sim_prompts`.
 
 ```
-run_agenticAIWork.py  --simtype multisim
+SimAgent.py --working-dir ./study
   │
   └─ Supervisor builds master plan
        ├─ sim_prompts[0]: label=p21860,       case=protein-only
        ├─ sim_prompts[1]: label=p21860_ATP_MG, case=holo
        │     (feasibility guard: skip holo if ligand/ion absent)
        │
-       ├─ Per-sim loop (sequential, state-isolated):
-       │   sim 0: preprocess → simsetup → hpcjob
-       │   sim 1: SKIPPED (missing ATP/MG in AlphaFold model)
+       ├─ Per-sim work under {base}/{label}/ (parallel when HITL is off):
+       │     prep (local workers) → HPC pool (SLURM) → analysis/reporter
        │
-       └─ Combined analysis at base_dir/ (after all sims):
+       └─ Combined analysis at base_dir/ (only if N>1):
             ├─ overlay plots (RMSD, RMSF, Rg, energy, COM distance)
             ├─ DCCM panels + apo–holo DCCM difference
             ├─ segment RMSF bars (user-defined residue windows)
@@ -69,13 +89,15 @@ run_agenticAIWork.py  --simtype multisim
             └─ combined_report.html  (Reporter)
 ```
 
+Worker counts and SLURM slots: [POOLS.md](POOLS.md).
+
 ### Directory Layout
 
 ```
 base_dir/
     p21860/                     # per-sim isolated working directory
         preprocess/             # cleaned PDB, domain-trimmed PDB
-        simsetup/               # topology, coordinates, MDP files
+        simsetup/               # topology, coordinates, MDP files, chain_residue_map.json
         hpc/                    # SLURM script, trajectories
         analysis/               # plots, CSVs, summary JSON
         reporter/               # per-sim HTML report
@@ -99,12 +121,14 @@ base_dir/
     run_summary.json            # structured run outcome data
 ```
 
-### Thread Safety
+### Isolation and concurrency
 
-The multi-sim Supervisor loop is sequential at the Python level. Each
-simulation reuses the same `MDWorkflow` instance with state fields reset
-per-sim. The shared `LLMClient` is stateless at the HTTP level.
-PDB files are copied into per-sim directories before each workflow starts.
+Each simulation has its own `{base}/{label}/` tree and a reset copy of
+per-sim `MDState` fields. Combined analysis and HITL stay sequential.
+Prep and post-HPC analysis/reporter can run as a **local worker pool**;
+production MD uses the **SLURM HPC pool** ([POOLS.md](POOLS.md)).
+The shared `LLMClient` is stateless at the HTTP level. PDB files are copied
+into per-sim directories before each sim starts.
 
 ## Structure Acquisition Pipeline
 
@@ -172,6 +196,7 @@ Fields follow the pattern `{stage}_{artifact}`:
 | `cleaned_pdb` | Preprocessing | Protonated, separated PDB |
 | `topology` | SimSetup | GROMACS `.top` path |
 | `coordinates` | SimSetup | Solvated `.gro` path |
+| `chain_residue_map` | SimSetup | PDB chain+resid → trajectory `resindex` JSON |
 | `trajectory_path` | HPC | Downloaded `.xtc` trajectory |
 | `analysis_results` | Analysis | Dict of observables and plot paths |
 | `reporter_output` | Reporter | Path to generated HTML |
@@ -201,7 +226,7 @@ Each agent writes to its own subdirectory managed by `SecureFileManager`:
 ```
 working_dir/
     preprocess/     # cleaned PDB, domain-trimmed PDB, logs
-    simsetup/       # topology, coordinates, MDP files
+    simsetup/       # topology, coordinates, MDP files, chain_residue_map.json
     hpc/            # {job_name}_run.sh, trajectories, energy files
     analysis/       # plots, CSVs, analysis_summary.json
     reporter/       # HTML report, images
@@ -265,6 +290,9 @@ Tools (auto-discovered by Planner):
 Key mechanisms:
 - **File alias map**: generic references (`ligand.pdb`) → actual outputs (`ATP_h.pdb`)
 - **Domain trimming**: applied when `structure_request` contains residue range
+- **Phospho + multi-chain PDB order**: keep SEP/TPO/PTR on the protein, sort by
+  chain/resid, insert `TER` for `pdb2gmx` C-termini (not the trajectory chain
+  map). See [TOOLS.md](TOOLS.md#phosphorylation-and-chain-order-in-the-pdb-not-this-map).
 
 ### Simulation Setup Agent (`SimulationSetupAgent`)
 
@@ -273,6 +301,10 @@ Key mechanisms:
 - ACPYPE/AmberTools for non-standard ligand parameterisation
 - **ACPYPE moleculetype resolution**: reads `[ moleculetype ]` directly from
   ITP file to align `[ molecules ]` entries — avoids `moleculetype not found`
+- **Multi-chain residue map**: after `pdb2gmx`, write
+  `chain_residue_map.json` so analysis can translate `chainID B and resid 50:75`
+  onto trajectory `resindex` (GROMACS TPR/GRO/XTC have no chain IDs). See
+  [TOOLS.md](TOOLS.md#multi-chain-residue-map).
 - Retry: failed tool calls retry up to 2× before human escalation
 
 ### HPC Agent (`MDHPCAgent`)
@@ -281,7 +313,9 @@ Key mechanisms:
 - Generates `{job_name}_run.sh` (not `slurm_job.sh` — LLM-hallucinated names ignored)
 - Script path resolved from `state["job_script"]` or `{job_name}_run.sh` pattern
 - SSH submit via Paramiko; Singularity containers on compute nodes
-- Hourly job status polling; downloads `.xtc`, `.edr`, `.log` on completion
+- Job wait is owned by the HPC pool (default poll `--hpc-check-interval 2h`);
+  analysis reads trajectories from `{sim}/hpc/` on the shared filesystem
+  ([POOLS.md](POOLS.md))
 
 ### Analysis Agent (`MDAnalysisAgent`)
 
@@ -296,6 +330,11 @@ Key analysis tools:
 - `run_combined_com_distance_analysis` (ATP pocket stability)
 - `analyze_secondary_structure` (DSSP whole + segments)
 - `compute_comparison_table` → `statistical_summary.json`
+
+**Multi-chain selections:** the LLM still writes PDB-style `chainID` /
+`resid` strings. A translator in `TrajectorySession` / `AnalysisToolExecutor`
+rewrites them to `resindex` using `simsetup/chain_residue_map.json`. Details:
+[TOOLS.md](TOOLS.md#multi-chain-residue-map).
 
 ### Reporter Agent (`ReporterAgent`)
 
@@ -360,25 +399,29 @@ Allows LLM to reason about large files without full token consumption.
 
 ## CLI Reference
 
+Common flags (full list: [PROJECT.md](PROJECT.md#cli-reference) and
+[README.md](../README.md)):
+
 ```
-python run_agenticAIWork.py \
+python SimAgent.py \
   --goal "..."                   # Natural-language simulation objective
   --working-dir <dir>            # Base output directory
   --pdb-list A.pdb B.pdb ...    # Explicit PDB list (multi-sim)
-  --simtype multisim|singlesim   # Simulation mode (default: singlesim)
   --subtask preprocess simsetup hpcjob analysis reporter
   --no-llm                       # Disable LLM (off by default: LLM on)
   --llm-base-url URL             # Ollama endpoint
   --llm-model gpt-oss:20b        # LLM model name
   --HITL error|all               # Human-in-the-loop (default: off)
+  --resume                       # Restore supervisor/state.jsonl and continue
   --allowed-hpc-jobs 5           # Cross-sim HPC pool concurrency
   --hpc-check-interval 2h      # SLURM poll interval during pool wait
   --force-field amber99sb-ildn   # Override force field
   --water-model tip3p            # Override water model
 ```
 
-When `--simtype multisim` is set or ≥2 PDB paths are detected in `--goal`,
-the Supervisor activates multi-simulation mode.
+When one or more PDB paths (or UniProt IDs) are resolved from `--goal` /
+`--pdb-list` / `--sim-dirs`, the Supervisor always uses the campaign tree
+`{base}/{label}/`. Combined analysis runs only when `len(sim_prompts) > 1`.
 
 ## Recursion Limit
 

@@ -103,6 +103,7 @@ def run_consensus_local_pca_fel(
     smooth_sigma: float = 2.0,
     min_basin_population: float = DEFAULT_MIN_BASIN_POPULATION,
     min_prominence_kj_mol: float = 1.5,
+    merge_barrier_kJ_mol: Optional[float] = None,
     chain_id: Optional[str] = None,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
@@ -112,9 +113,16 @@ def run_consensus_local_pca_fel(
     Writes into ``output_dir``:
       pca_projections.dat, pca_variance.dat, fel_pc1_pc2_grid.csv, fel_pc1_pc2.png,
       fel_features.json / .csv, fel_basins.csv, consensus_local_fel_meta.json
+
+    If ``merge_barrier_kJ_mol`` is None, defaults to 3 kBT at ``temperature_k``
+    so continuous low-energy valleys are not over-split into separate basins.
     """
     if not HAS_MDA:
         return {"success": False, "error": "MDAnalysis is required"}
+
+    if merge_barrier_kJ_mol is None:
+        # 3 kBT (kB in kJ mol^-1 K^-1)
+        merge_barrier_kJ_mol = 3.0 * 0.00831446261815324 * float(temperature_k)
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -249,6 +257,7 @@ def run_consensus_local_pca_fel(
             smooth_sigma=smooth_sigma,
             min_basin_population=min_basin_population,
             min_prominence_kj_mol=min_prominence_kj_mol,
+            merge_barrier_kJ_mol=merge_barrier_kJ_mol,
         )
         _write_fel_feature_tables(
             features,

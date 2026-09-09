@@ -207,8 +207,24 @@ def _apply_progress_indices(state: Dict[str, Any], *, rebind: bool) -> None:
     phase = progress.get("phase")
     # Do not clobber an active parallel_pool / hpc_pool phase from a stale
     # progress.phase (that previously dropped mid-campaign into sequential mode).
-    if phase and state.get("multi_sim_phase") not in ("hpc_pool", "parallel_pool"):
-        if not state.get("parallel_pool"):
+    # Never downgrade combined_* (or combined_only) to executing_sims — that
+    # re-triggers combined-only activate and loops analysis forever.
+    current = state.get("multi_sim_phase")
+    if phase and current not in ("hpc_pool", "parallel_pool"):
+        if phase == "executing_sims" and (
+            current in ("combined_analysis", "combined_reporter")
+            or state.get("combined_only")
+        ):
+            if current is None and state.get("combined_only"):
+                combined = progress.get("combined") or {}
+                if combined.get("reporter") == "done":
+                    state["multi_sim_phase"] = "complete"
+                elif combined.get("analysis") == "done":
+                    state["multi_sim_phase"] = "combined_reporter"
+                else:
+                    state["multi_sim_phase"] = "combined_analysis"
+            # else keep current combined_* phase
+        elif not state.get("parallel_pool"):
             state["multi_sim_phase"] = phase
     apply_sim_pipeline_to_state(state)
     if label and state.get("multi_sim_phase") == "executing_sims":
@@ -1022,21 +1038,86 @@ def reconcile_progress_from_disk(state: Dict[str, Any], progress: Dict[str, Any]
             _reconcile_sim_record(rec, agents, per_sim=per_sim)
 
 
-def _combined_analysis_done_on_disk(base: Path) -> bool:
-    """True when base-level combined analysis artifacts exist."""
+def _stats_csv_has_multiple_sims(path: Path) -> bool:
+    """True when a combined stats CSV has ≥2 non-error simulation rows."""
+    try:
+        lines = [
+            ln.strip()
+            for ln in path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if ln.strip()
+        ]
+    except OSError:
+        return False
+    if len(lines) < 3:  # header + 2 data rows
+        return False
+    data_rows = lines[1:]
+    ok = 0
+    for row in data_rows:
+        parts = row.split(",")
+        if len(parts) < 2:
+            continue
+        # Prefer rows without an error column filled, or with numeric mean
+        lower = row.lower()
+        if "no such file" in lower or lower.endswith(",error") or ",[errno" in lower:
+            continue
+        ok += 1
+    return ok >= 2
+
+
+def _combined_analysis_done_on_disk(
+    base: Path,
+    state: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True when base-level combined analysis produced usable multi-sim artifacts.
+
+    A single-sim failed attempt can leave ``rmsd_stats.csv`` / a 1-label marker;
+    those must not count as done when the campaign expects multiple sims.
+    """
     analysis_dir = base / "analysis"
     if not analysis_dir.is_dir():
         return False
-    markers = (
+
+    expected_labels: List[str] = []
+    if state:
+        expected_labels = [
+            str(sp.get("label") or "").strip()
+            for sp in (state.get("sim_prompts") or [])
+            if sp.get("label")
+        ]
+
+    strong = (
         analysis_dir / "classification_features.csv",
         analysis_dir / "classification_clusters.json",
         analysis_dir / "com_distance_overlay.png",
         analysis_dir / "ligand_rmsf_overlay.png",
         analysis_dir / "pocket_rmsf_overlay.png",
     )
-    if any(path.is_file() for path in markers):
+    if any(path.is_file() for path in strong):
         return True
-    return any(analysis_dir.glob("*_overlay.png"))
+    if any(analysis_dir.glob("*_overlay.png")):
+        return True
+
+    for stats_name in ("rmsd_stats.csv", "rmsf_stats.csv"):
+        stats_path = analysis_dir / stats_name
+        if stats_path.is_file() and _stats_csv_has_multiple_sims(stats_path):
+            return True
+
+    marker = analysis_dir / "combined_analysis_complete.json"
+    if not marker.is_file():
+        return False
+    try:
+        import json as _json
+
+        data = _json.loads(marker.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    labels = [str(x) for x in (data.get("labels") or []) if x]
+    if expected_labels and len(expected_labels) >= 2:
+        have = {x.lower() for x in labels}
+        need = {x.lower() for x in expected_labels}
+        return need.issubset(have) and bool(data.get("success", True))
+    # Without an expected multi-sim set, require the marker itself to list ≥2 sims.
+    return len(labels) >= 2 and bool(data.get("success", True))
 
 
 def _combined_reporter_done_on_disk(base: Path) -> bool:
@@ -1072,19 +1153,35 @@ def reconcile_multisim_progress_from_disk(
 
     progress = state.get("multi_sim_progress") or {}
     agents = progress.get("required_agents") or _required_agents(state)
-    for label in progress.get("sim_order") or []:
-        rec = _sim_record(progress, label)
-        if not rec:
-            continue
-        wd = rec.get("working_dir") or str(base / label)
-        rec["working_dir"] = wd
-        per_sim = _load_per_sim_checkpoint(wd)
-        _reconcile_sim_record(rec, agents, per_sim=per_sim)
+
+    # Combined-only skips the per-sim loop; treat planned sims as done so we
+    # never force progress.phase back to executing_sims during save/reconcile.
+    if state.get("combined_only"):
+        for label in progress.get("sim_order") or []:
+            rec = _sim_record(progress, label)
+            if not rec:
+                continue
+            wd = rec.get("working_dir") or str(base / label)
+            rec["working_dir"] = wd
+            agent_map = rec.setdefault("agents", {})
+            for a in agents:
+                agent_map[a] = "done"
+            rec["status"] = "done"
+    else:
+        for label in progress.get("sim_order") or []:
+            rec = _sim_record(progress, label)
+            if not rec:
+                continue
+            wd = rec.get("working_dir") or str(base / label)
+            rec["working_dir"] = wd
+            per_sim = _load_per_sim_checkpoint(wd)
+            _reconcile_sim_record(rec, agents, per_sim=per_sim)
 
     wants_combined = bool(
         state.get("run_combined_analysis")
+        or state.get("combined_only")
         or progress.get("combined")
-        or _combined_analysis_done_on_disk(base)
+        or _combined_analysis_done_on_disk(base, state=state)
         or _combined_reporter_done_on_disk(base)
     )
     if wants_combined:
@@ -1092,11 +1189,38 @@ def reconcile_multisim_progress_from_disk(
             "combined",
             {"analysis": "pending", "reporter": "pending"},
         )
-        if _combined_analysis_done_on_disk(base):
+        if _combined_analysis_done_on_disk(base, state=state):
             combined["analysis"] = "done"
         if _combined_reporter_done_on_disk(base):
             combined["reporter"] = "done"
         state["run_combined_analysis"] = True
+
+    # Preserve an in-flight combined phase set by the analysis agent even when
+    # disk artifacts are not yet "done" (e.g. mid-transition to reporter).
+    current_phase = state.get("multi_sim_phase")
+    if current_phase in ("combined_analysis", "combined_reporter") and wants_combined:
+        combined = progress.setdefault(
+            "combined",
+            {"analysis": "pending", "reporter": "pending"},
+        )
+        if current_phase == "combined_reporter":
+            combined["analysis"] = "done"
+            progress["phase"] = "combined_reporter"
+            progress["active_sim_label"] = None
+            progress["active_agent"] = "reporter"
+        else:
+            progress["phase"] = "combined_analysis"
+            progress["active_sim_label"] = None
+            progress["active_agent"] = "analysis"
+        state["multi_sim_progress"] = progress
+        _apply_progress_indices(state, rebind=False)
+        merge_completed_states_from_progress(state)
+        logger.info(
+            "[resume] Reconciled multi_sim_progress from disk at %s\n%s",
+            base,
+            progress_summary(state),
+        )
+        return
 
     if all_per_sim_agents_done(state):
         combined = progress.get("combined") or {}

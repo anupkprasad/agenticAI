@@ -16,6 +16,15 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434")
 # ===== MODEL CONFIGURATION =====
 DEFAULT_MODEL = os.getenv("LLM_MODEL", "gpt-oss:20b")
 
+# ===== PAID API / TOKEN BUDGET =====
+# Set LLM_API_KEY or OPENAI_API_KEY when using a hosted model.
+# Token usage is always tracked to {working-dir}/llm_usage.json when LLM is used.
+# Optional LLM_TOKEN_BUDGET / --llm-token-budget enforces a hard cap (recommended for paid APIs).
+# LLM_PROVIDER: auto | ollama | openai
+LLM_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
+LLM_TOKEN_BUDGET = os.getenv("LLM_TOKEN_BUDGET") or os.getenv("OPENAI_TOKEN_BUDGET")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "auto")
+
 # Alternative models (uncomment to use):
 # DEFAULT_MODEL = "llama2:latest"
 # DEFAULT_MODEL = "mistral:latest"
@@ -45,7 +54,10 @@ def get_llm_config():
         "base_url": LLM_BASE_URL,
         "model": DEFAULT_MODEL,
         "timeout": TIMEOUT,
-        "max_retries": MAX_RETRIES
+        "max_retries": MAX_RETRIES,
+        "token_budget": LLM_TOKEN_BUDGET,
+        "provider": LLM_PROVIDER,
+        "has_api_key": bool(LLM_API_KEY),
     }
 
 def print_config():

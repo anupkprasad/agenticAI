@@ -313,7 +313,7 @@ def summarize_override_changes(
 
 
 def apply_goal_simsetup_config(goal: str, config: Dict[str, Any]) -> None:
-    """Populate run_agenticAIWork config dict from parsed goal text."""
+    """Populate SimAgent config dict from parsed goal text."""
     if parse_box_type_from_text(goal):
         config["box_type"] = parse_box_type_from_text(goal)
     if parse_box_distance_from_text(goal) is not None:

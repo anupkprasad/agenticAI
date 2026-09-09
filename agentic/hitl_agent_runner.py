@@ -155,7 +155,7 @@ def _run_combined_reporter_hitl(
         state["reporter_instructions"] = (
             f"{prior}\n\nHITL combined report task:\n{task}".strip() if prior else task
         )
-        state = agent._run_combined_report(state)
+        state = agent._run_combined_report_via_llm(state)
         report = state.get("reporter_output")
         return HitlAgentRunResult(
             success=bool(report),

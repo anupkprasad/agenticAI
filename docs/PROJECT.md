@@ -1,5 +1,13 @@
 # AgenticAI — LLM-Powered Molecular Dynamics Workflow
 
+**This file is the project overview.** Start here to learn what AgenticAI
+does, which features it ships, how the repository is laid out, how to run a
+job, and which files a run writes. It is not the design of the LangGraph, the
+analysis-tool theory, or the coding rules — those live in the other `docs/`
+pages listed under [Documentation](#documentation).
+
+---
+
 ## Overview
 
 AgenticAI is an agentic AI system that automates molecular dynamics (MD) simulation
@@ -40,8 +48,9 @@ Given a natural-language goal and either a PDB file or a UniProt accession, the 
   Reporter synthesises a literature-grounded narrative.
 - **Human checkpoints** — optional approval gates after preprocessing, setup, HPC,
   analysis, and reporter. Enable with `--HITL all` or pause on failures with `--HITL error`.
-- **Cross-sim HPC pool** — multi-sim full pipeline preps sequentially, submits up to N
-  SLURM jobs in parallel, then runs post-HPC analysis/reporter (see `docs/HPC_POOL.md`).
+- **Cross-sim HPC pool** — multi-sim full pipeline preps in parallel (local
+  workers), submits up to N SLURM jobs in parallel, then runs post-HPC
+  analysis/reporter (see [POOLS.md](POOLS.md)).
 - **Graceful LLM fallback** — deterministic heuristic routing when LLM unavailable.
 - **Run audit trail** — `agent_conversation.log`, `execution_plan.md`,
   `execution_report.md`, `run_summary.md`, and `run_summary.json` at the
@@ -53,7 +62,7 @@ Given a natural-language goal and either a PDB file or a UniProt accession, the 
 ## Repository Layout
 
 ```
-run_agenticAIWork.py            # CLI entry point
+SimAgent.py            # CLI entry point
 environment.yml                 # Conda environment (ollama_env, Python 3.11)
 agentic/
     state.py                    # MDState TypedDict — central shared state (~65 fields)
@@ -91,6 +100,23 @@ src/
 docs/                           # Project documentation (you are here)
 ```
 
+## Documentation
+
+| Doc | What it covers |
+|-----|----------------|
+| [PROJECT.md](PROJECT.md) | This page — product overview, layout, quick start, CLI, run outputs |
+| [PIPELINE_WORKFLOW.md](PIPELINE_WORKFLOW.md) | Agent order, directories, files, and flag examples |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | LangGraph, shared state, agents, directory layout |
+| [CONVENTIONS.md](CONVENTIONS.md) | Coding and documentation rules for contributors |
+| [ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md) | Per-tool observables, theory, and output filenames |
+| [TOOLS.md](TOOLS.md) | External dependencies plus GROMACS/analysis mechanisms |
+| [POOLS.md](POOLS.md) | Local parallel workers and SLURM HPC pool |
+
+Each page opens with a purpose paragraph. Related mechanisms share one
+descriptive file (tools together, pools together). Do not leave the
+explanation only in chat or code comments. Full CLI flags:
+[README.md](../README.md).
+
 ## Quick Start
 
 ```bash
@@ -99,38 +125,36 @@ conda env create -f environment.yml
 conda activate ollama_env
 
 # 2. Basic run from a local PDB (LLM on by default, no HITL)
-python run_agenticAIWork.py \
+python SimAgent.py \
     --goal "Run MD simulation of my_protein.pdb" \
     --working-dir /work/run1
 
 # 3. From a UniProt accession (downloads AlphaFold, extracts domain)
-python run_agenticAIWork.py \
+python SimAgent.py \
     --goal "Study ATP binding dynamics of UniProt P21860 ERBB3 kinase domain" \
     --working-dir /work/erbb3 \
-    --subtask preprocess simsetup hpcjob \
-    --simtype multisim
+    --subtask preprocess simsetup hpcjob
 
 # 4. Custom LLM endpoint (Ollama must be running)
-python run_agenticAIWork.py \
+python SimAgent.py \
     --goal "Simulate the kinase-ligand complex" \
     --llm-base-url http://localhost:11434
 
 # 5. Multi-protein comparative study (explicit PDB list)
-python run_agenticAIWork.py \
+python SimAgent.py \
     --goal "Compare pseudokinase dynamics for p21860, q8iv63 — apo and ATP-bound" \
     --pdb-list p21860.pdb q8iv63.pdb \
     --working-dir /work/pseudo \
-    --subtask preprocess simsetup hpcjob \
-    --simtype multisim
+    --subtask preprocess simsetup hpcjob
 
 # 6. Interactive checkpoints
-python run_agenticAIWork.py \
+python SimAgent.py \
     --goal "..." \
     --working-dir /work/run1 \
     --HITL all
 
 # 7. Subtask mode (run only specific agents)
-python run_agenticAIWork.py \
+python SimAgent.py \
     --subtask analysis reporter \
     --goal "Analyse existing trajectory in /work/run1/hpc" \
     --working-dir /work/run1
@@ -141,8 +165,7 @@ python run_agenticAIWork.py \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--goal` | *(required)* | Natural-language simulation goal |
-| `--working-dir` | `working_dir/` | Base output directory |
-| `--simtype` | `singlesim` | `singlesim` or `multisim` |
+| `--working-dir` | `.` | Campaign base; each sim writes under `{dir}/{label}/` |
 | `--pdb-list` | *(none)* | Explicit PDB file list for multi-sim |
 | `--sim-dirs` | *(none)* | Existing sim dirs for analysis-only multi-sim |
 | `--subtask` | *(all)* | Agents to run: `preprocess simsetup hpcjob analysis reporter` |
@@ -150,12 +173,18 @@ python run_agenticAIWork.py \
 | `--llm-model` | `gpt-oss:20b` | Ollama model name |
 | `--llm-base-url` | `http://127.0.0.1:11434` | Ollama server URL |
 | `--HITL` | off | `error` or `all` — enable human-in-the-loop |
-| `--allowed-hpc-jobs` | `5` | Max concurrent SLURM jobs in cross-sim HPC pool |
+| `--resume` | off | Restore `{working-dir}/supervisor/state.jsonl` and continue |
+| `--combined-only` | off | Combined analysis + reporter only (existing per-sim results) |
+| `--allowed-hpc-jobs` | auto | Max concurrent SLURM jobs in cross-sim HPC pool |
 | `--hpc-check-interval` | `2h` | SLURM poll interval during HPC pool wait |
+| `--llm-concurrency` | auto | Cap on concurrent LLM-using workers (prep / analysis) |
 | `--force-field` | `amber99sb-ildn` | GROMACS force field override |
 | `--water-model` | `tip3p` | Water model override |
 | `--prompt` | *(none)* | Override enriched prompt |
 | `--log-file` | *(auto)* | Conversation log path |
+
+This is the common subset. Parallel-pool and remaining flags:
+[POOLS.md](POOLS.md) and [README.md](../README.md).
 
 ## Run Outputs
 

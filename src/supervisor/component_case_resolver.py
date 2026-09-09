@@ -551,29 +551,22 @@ def resolve_component_cases(
                     "LLM returned multiple cases for apo-only goal; using heuristic apo-only"
                 )
                 return heuristic
-            # Single clear heuristic case (e.g. holo-only) outweighs an LLM dump of
-            # many near-duplicate templates for a multi-PDB campaign.
+            # Single clear heuristic case outweighs an LLM dump of extra apo/holo
+            # templates for a multi-PDB campaign, unless the user explicitly asked
+            # for apo vs holo (or two systems per file).
             if (
                 len(heuristic) == 1
                 and len(llm_cases) > 1
                 and pdb_count > 1
+                and not _is_explicit_apo_holo_comparison(user_goal)
             ):
-                h = heuristic[0]
-                same_family = all(
-                    (c.get("case_id") == h.get("case_id")
-                     or (c.get("case_id") == "protein_with_ligand"
-                         and h.get("case_id") == "protein_with_ligand"))
-                    and (c.get("suffix") or "") == (h.get("suffix") or "")
-                    for c in llm_cases
+                logger.warning(
+                    "LLM returned %d cases for a single-case multi-PDB goal; "
+                    "using heuristic case %s",
+                    len(llm_cases),
+                    heuristic[0].get("description"),
                 )
-                if same_family or len(llm_cases) >= max(3, pdb_count - 1):
-                    logger.warning(
-                        "LLM returned %d cases for a single-case multi-PDB goal; "
-                        "using heuristic case %s",
-                        len(llm_cases),
-                        h.get("description"),
-                    )
-                    return heuristic
+                return heuristic
             return llm_cases
 
     return heuristic

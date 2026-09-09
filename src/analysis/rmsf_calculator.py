@@ -138,7 +138,9 @@ def calculate_rmsf(
     output_file: Optional[str] = None,
     working_dir: Optional[str] = None,
     align_trajectory: bool = True,
-    align_selection: Optional[str] = None
+    align_selection: Optional[str] = None,
+    selection_from_file: Optional[str] = None,
+    selection_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Calculate RMSF (Root Mean Square Fluctuation) for a trajectory.
@@ -148,15 +150,20 @@ def calculate_rmsf(
     
     IMPORTANT: Structural alignment is performed by default to remove translational
     and rotational motions, giving meaningful RMSF values.
+
+    For a residue subset, use a qualified output name (e.g. rmsf_1to34.dat) and
+    optionally selection_from_file pointing at identify_nearby_residues JSON.
     
     Args:
         topology_file: Topology file (.gro, .pdb, .tpr)
         trajectory_file: Trajectory file (.xtc, .trr, .dcd)
         selection: Atom selection for RMSF calculation (default: "protein and name CA")
-        output_file: Output file path for RMSF data (.dat, .csv)
+        output_file: Output file path for RMSF data (.dat, .csv). Overall: rmsf.dat; subset: rmsf_{qualifier}.dat
         working_dir: Working directory for analysis
         align_trajectory: Whether to align trajectory before RMSF calculation (default: True)
         align_selection: Atom selection for alignment (default: same as selection)
+        selection_from_file: Optional nearby_residues JSON/CSV; overrides selection
+        selection_key: JSON key to read (default mda_selection_ca)
         
     Returns:
         Dict with RMSF results and statistics
@@ -189,6 +196,17 @@ def calculate_rmsf(
         
         # Use MDAnalysis if available
         if HAS_MDA and HAS_NUMPY:
+            from .proximity_analyzer import apply_selection_from_files
+
+            resolved = apply_selection_from_files(
+                {
+                    "selection": selection,
+                    "selection_from_file": selection_from_file,
+                    "selection_key": selection_key,
+                },
+                working_dir=working_dir,
+            )
+            selection = resolved.get("selection", selection)
             logger.info(f"Calculating RMSF using MDAnalysis for {trajectory_file}")
             result = compute_rmsf_from_universe(
                 mda.Universe(topology_file, trajectory_file),

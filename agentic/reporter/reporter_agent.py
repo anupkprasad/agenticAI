@@ -162,7 +162,7 @@ class ReporterAgent:
         # ── Combined multi-sim report ─────────────────────────────────────
         # Support both initial combined analysis pass and resumed reporter pass.
         if state.get("multi_sim_phase") in {"combined_analysis", "combined_reporter"}:
-            return self._run_combined_report(state)
+            return self._run_combined_report_via_llm(state)
 
         # ── Regular per-sim report ────────────────────────────────────────
         # Extract input
@@ -341,10 +341,430 @@ class ReporterAgent:
             plt.close(fig)
             return None
 
+    def _build_combined_reporter_planning_prompt(
+        self,
+        *,
+        user_goal: str,
+        enriched_prompt: str,
+        sim_dirs: List[str],
+        labels: List[str],
+        overlay_plots: List[str],
+        analysis_dir: str,
+        reporter_dir: str,
+        tools_str: str,
+    ) -> str:
+        sim_lines = "\n".join(f"  - {lab}: {d}" for lab, d in zip(labels, sim_dirs))
+        plot_lines = "\n".join(f"  - {Path(p).name}" for p in overlay_plots[:40]) or "  (none yet)"
+        return f"""You are the Reporter Agent in COMBINED multi-simulation mode.
+
+**Original study goal:**
+{user_goal or '(not provided)'}
+
+**Enriched / master context:**
+{(enriched_prompt or '')[:3000] or '(not provided)'}
+
+**Simulations (use these exact paths for generate_combined_html_report):**
+{sim_lines or '  (none)'}
+
+**Combined analysis directory:** {analysis_dir}
+**Reporter output directory:** {reporter_dir}
+**Available overlay / comparison plots:**
+{plot_lines}
+
+**Available Tools:**
+{tools_str}
+
+**COMBINED REPORTER RULES:**
+- You MUST include a step that calls `generate_combined_html_report` (not generate_html_report).
+- Pass sim_dirs and labels exactly as listed above; output_file must be "combined_report.html".
+- Use working_dir="." (reporter output dir is applied automatically).
+- Do NOT invent classification/clustering discussion unless those plots are listed above.
+- Literature search tools are optional — the framework also runs literature collection automatically.
+- overview MUST be a single string.
+
+Output as JSON:
+{{
+  "reasoning": "How you will build the combined report",
+  "overview": "High-level summary",
+  "steps": [
+    {{
+      "name": "step name",
+      "description": "what it does",
+      "tool_name": "tool to call",
+      "tool_params": {{"param": "value"}},
+      "reason": "why"
+    }}
+  ],
+  "report_focus": ["theme1", "theme2"],
+  "literature_queries": [],
+  "estimated_complexity": "medium"
+}}
+"""
+
+    def _create_combined_reporter_plan_llm(
+        self,
+        *,
+        user_goal: str,
+        enriched_prompt: str,
+        sim_dirs: List[str],
+        labels: List[str],
+        overlay_plots: List[str],
+        analysis_dir: str,
+        reporter_dir: str,
+    ) -> Optional[ReporterPlan]:
+        """LLM plan for combined report with reporter tools exposed."""
+        tool_metadata = get_tool_metadata()
+        tools_list = []
+        for tool_name, tool_info in tool_metadata.items():
+            desc = tool_info.get("description", "")
+            args = tool_info.get("args") or tool_info.get("parameters") or {}
+            tools_list.append(f"→ {tool_name}: {desc}")
+            if isinstance(args, dict) and args:
+                # Prefer schema properties when present
+                props = args.get("properties") if "properties" in args else args
+                if isinstance(props, dict) and props:
+                    tools_list.append(
+                        "    params: " + ", ".join(sorted(props.keys())[:20])
+                    )
+        tools_str = "\n".join(tools_list)
+        prompt = self._build_combined_reporter_planning_prompt(
+            user_goal=user_goal,
+            enriched_prompt=enriched_prompt,
+            sim_dirs=sim_dirs,
+            labels=labels,
+            overlay_plots=overlay_plots,
+            analysis_dir=analysis_dir,
+            reporter_dir=reporter_dir,
+            tools_str=tools_str,
+        )
+        try:
+            response = self.llm.prompt(prompt, temperature=0.2, max_tokens=4096)
+            log_llm_interaction(
+                agent_name="reporter.combined_planning",
+                prompt=prompt,
+                response=response,
+                is_mock=not self.llm.available,
+            )
+            plan_dict = self._extract_plan_json(response)
+            if plan_dict is None:
+                return None
+            steps = [
+                ReporterStep(
+                    name=step.get("name", "unknown"),
+                    description=step.get("description", ""),
+                    tool_name=step.get("tool_name", ""),
+                    tool_params=step.get("tool_params", {}) or {},
+                    reason=step.get("reason", ""),
+                )
+                for step in plan_dict.get("steps", [])
+            ]
+            if not any(s.tool_name == "generate_combined_html_report" for s in steps):
+                steps.append(
+                    ReporterStep(
+                        name="Generate combined HTML report",
+                        description="Build cross-simulation comparison HTML report",
+                        tool_name="generate_combined_html_report",
+                        tool_params={
+                            "sim_dirs": sim_dirs,
+                            "labels": labels,
+                            "overlay_plots": overlay_plots,
+                            "output_file": "combined_report.html",
+                        },
+                        reason="Required combined report deliverable",
+                    )
+                )
+            return ReporterPlan(
+                reasoning=plan_dict.get("reasoning", "Combined LLM report plan"),
+                overview=plan_dict.get("overview", "Combined multi-simulation report"),
+                steps=steps,
+                report_focus=plan_dict.get("report_focus", []),
+                literature_queries=plan_dict.get("literature_queries", []),
+                estimated_complexity=plan_dict.get("estimated_complexity", "medium"),
+            )
+        except Exception as exc:
+            logger.warning("Combined reporter LLM planning failed: %s", exc)
+            return None
+
+    def _run_combined_report_via_llm(self, state: MDState) -> MDState:
+        """
+        Combined reporter with LLM planning (tools exposed) then execution.
+
+        Literature review / final impression remain LLM-assisted; HTML generation
+        is planned as generate_combined_html_report. Falls back to the prior
+        deterministic combined report path on planning failure.
+        """
+        from .tools import generate_combined_html_report
+        from src.reporter.combined_reporter import (
+            _parse_label_name_map,
+            apply_label_name_map,
+        )
+        import traceback
+        from agentic.multi_sim_paths import resolve_multi_sim_base_dir
+        from agentic.utils.conversation_logger import set_log_file
+
+        working_dir = resolve_multi_sim_base_dir(state)
+        if state.get("is_multi_simulation"):
+            state["multi_sim_base_dir"] = working_dir
+            state["working_directory"] = working_dir
+        set_log_file(str(Path(working_dir) / "agent_conversation.log"))
+        reporter_dir = str(Path(working_dir) / "reporter")
+        Path(reporter_dir).mkdir(parents=True, exist_ok=True)
+
+        file_registry = state.get("file_registry") or {}
+        self.file_manager = SecureFileManager(
+            working_dir=working_dir,
+            agent_name="reporter",
+            file_registry=file_registry,
+        )
+        self.tool_executor = ReporterToolExecutor(
+            config={"working_directory": self.file_manager.agent_dir}
+        )
+
+        sim_dirs, labels = resolve_combined_sim_context(state)
+        _user_goal_text = state.get("user_goal_original") or state.get("user_goal", "")
+        _enriched_text = state.get("master_enriched_prompt") or state.get("enriched_prompt", "")
+        _combined_text = f"{_user_goal_text} {_enriched_text}"
+        raw_labels = [Path(d).name for d in sim_dirs]
+        _label_name_map = _parse_label_name_map(_combined_text, sim_labels=raw_labels)
+        if _label_name_map:
+            labels = apply_label_name_map(labels, _label_name_map)
+
+        combined_info = (state.get("analysis_results") or {}).get("combined", {})
+        _analysis_dir = combined_info.get("analysis_dir") or str(Path(working_dir) / "analysis")
+        overlay_plots = collect_combined_overlay_plots(state, _analysis_dir, combined_info)
+
+        from src.reporter.figure_selector import (
+            ReportFigurePolicy,
+            resolve_report_narrative,
+        )
+        from src.reporter.protein_identity import resolve_protein_identity
+        from src.reporter.report_curator import build_combined_report_plan, display_names_for_sims
+
+        _goal_full = (_user_goal_text + " " + _enriched_text).strip()
+        _report_policy = ReportFigurePolicy.from_config(
+            self.config,
+            report_type=state.get("report_type", "comprehensive"),
+            include_visualizations=state.get("include_visualizations", True),
+        )
+        _n_sims = len(sim_dirs) if sim_dirs else len(state.get("sim_prompts") or [])
+        _narrative = resolve_report_narrative(
+            _goal_full,
+            enriched_prompt=_enriched_text,
+            n_simulations=_n_sims,
+            policy=_report_policy,
+        )
+
+        log_agent_start(
+            "reporter",
+            "Combined Multi-Simulation Report (LLM)",
+            {
+                "labels": labels,
+                "overlay_plots": overlay_plots,
+                "output_dir": reporter_dir,
+                "planning": "llm",
+            },
+        )
+
+        plan = self._create_combined_reporter_plan_llm(
+            user_goal=_user_goal_text,
+            enriched_prompt=_enriched_text,
+            sim_dirs=sim_dirs,
+            labels=labels,
+            overlay_plots=overlay_plots,
+            analysis_dir=_analysis_dir,
+            reporter_dir=reporter_dir,
+        )
+        if plan is None or not plan.steps:
+            logger.warning("Combined reporter LLM plan missing — deterministic fallback")
+            return self._run_combined_report(state)
+
+        log_agent_action(
+            "reporter",
+            "Generated combined reporter plan",
+            {
+                "steps": len(plan.steps),
+                "tools": [s.tool_name for s in plan.steps],
+                "overview": plan.overview,
+                "report_focus": plan.report_focus,
+            },
+        )
+        try:
+            from .schemas import ReporterAgentInput, ReportType
+
+            stub_input = ReporterAgentInput(
+                working_directory=working_dir,
+                analysis_summary_file=str(Path(_analysis_dir) / "analysis_summary.jsonl"),
+                user_goal=_user_goal_text,
+                report_type=ReportType.COMPREHENSIVE,
+            )
+            self._save_execution_plan(plan, stub_input)
+        except Exception:
+            pass
+
+        identity = resolve_protein_identity(state)
+        protein_name: Optional[str] = identity.get("gene_name") or identity.get("display_name")
+        if _label_name_map:
+            protein_name = ", ".join(display_names_for_sims(raw_labels, _label_name_map))
+        elif not protein_name and labels:
+            protein_name = labels[0]
+
+        try:
+            _report_enriched = (
+                state.get("master_enriched_prompt") or state.get("enriched_prompt")
+            )
+            _combined_user_goal = state.get("user_goal_original") or ""
+            if not _combined_user_goal.strip():
+                _ug = (_user_goal_text or "").strip()
+                if _ug and not _ug.startswith("## Combined Multi-Simulation"):
+                    _combined_user_goal = _ug
+
+            combined_analysis_data = self._build_combined_analysis_data(sim_dirs, labels)
+            combined_state = dict(state)
+            combined_state["user_goal"] = _combined_user_goal
+            combined_state["enriched_prompt"] = _report_enriched
+            if protein_name:
+                sys_info = dict(combined_state.get("system_info") or {})
+                sys_info["protein_name"] = protein_name
+                combined_state["system_info"] = sys_info
+
+            literature_refs = self._ensure_literature_search(
+                combined_analysis_data, combined_state
+            )
+            literature_review = self._generate_literature_review(
+                combined_analysis_data,
+                literature_refs,
+                combined_state,
+                is_combined=True,
+            )
+            final_impression = self._generate_combined_final_impression(
+                combined_analysis_data,
+                literature_refs,
+                combined_state,
+                sim_dirs=sim_dirs,
+                labels=labels,
+            )
+
+            report_plan = build_combined_report_plan(
+                overlay_plots,
+                sim_dirs,
+                raw_labels,
+                user_goal=_combined_user_goal,
+                enriched_prompt=_report_enriched,
+                base_analysis_dir=_analysis_dir,
+                label_name_map=_label_name_map,
+                llm_client=self.llm,
+                literature_snippet=(literature_review or "")[:2000],
+            )
+            overlay_plots = report_plan.included_overlay_plots
+
+            # Execute planned steps; inject resolved params for the combined HTML tool.
+            for i, step in enumerate(plan.steps):
+                if step.tool_name in (
+                    "search_pubmed",
+                    "generate_literature_queries",
+                    "search_biorxiv",
+                    "search_uniprot",
+                    "read_analysis_summary",
+                    "generate_html_report",
+                    "",
+                ):
+                    log_agent_action(
+                        "reporter",
+                        f"Step {i+1}/{len(plan.steps)} skipped (pre-handled or per-sim only)",
+                        {"step": step.name, "tool": step.tool_name},
+                    )
+                    continue
+
+                log_agent_action(
+                    "reporter",
+                    f"Executing step {i+1}/{len(plan.steps)}",
+                    {"step": step.name, "tool": step.tool_name},
+                )
+
+                if step.tool_name == "generate_combined_html_report":
+                    result = generate_combined_html_report.func(
+                        sim_dirs=sim_dirs,
+                        labels=labels,
+                        overlay_plots=overlay_plots,
+                        working_dir=reporter_dir,
+                        output_file="combined_report.html",
+                        title=report_plan.headline,
+                        enriched_prompt=_report_enriched,
+                        user_goal=_combined_user_goal,
+                        protein_name=protein_name,
+                        literature_refs=literature_refs,
+                        literature_review=literature_review,
+                        final_impression=final_impression,
+                        report_focus=(
+                            " ".join(plan.report_focus)
+                            if plan.report_focus
+                            else (
+                                " ".join(state.get("report_focus"))
+                                if isinstance(state.get("report_focus"), list)
+                                else (state.get("report_focus") or "")
+                            )
+                        ),
+                        report_plan=report_plan,
+                    )
+                    if result.get("success"):
+                        report_path = result["output_path"]
+                        state["reporter_output"] = report_path
+                        log_agent_action(
+                            agent_name="reporter",
+                            action="Combined Report Generated",
+                            details={"report_path": report_path, "planning": "llm"},
+                        )
+                        log_agent_completion(
+                            "reporter",
+                            "Combined Multi-Simulation Report (LLM)",
+                            state,
+                            True,
+                        )
+                    else:
+                        state["errors"].append(
+                            f"Combined report failed: {result.get('error', 'unknown')}"
+                        )
+                        log_agent_completion(
+                            "reporter",
+                            "Combined Multi-Simulation Report (LLM)",
+                            state,
+                            False,
+                        )
+                else:
+                    try:
+                        params = dict(step.tool_params or {})
+                        params["working_dir"] = self.file_manager.agent_dir
+                        self.tool_executor.execute_tool(step.tool_name, params)
+                    except Exception as step_exc:
+                        logger.warning(
+                            "Combined reporter step %s failed: %s", step.name, step_exc
+                        )
+
+            if not state.get("reporter_output"):
+                logger.warning(
+                    "LLM combined plan did not produce report — deterministic fallback"
+                )
+                return self._run_combined_report(state)
+
+        except Exception as exc:
+            logger.error(
+                "Combined LLM reporter failed (%s) — deterministic fallback\n%s",
+                exc,
+                traceback.format_exc(),
+            )
+            state.setdefault("warnings", []).append(
+                f"Combined LLM reporter failed ({exc}); using deterministic fallback"
+            )
+            return self._run_combined_report(state)
+
+        state["next_node"] = "human_reporter_check"
+        return state
+
     def _run_combined_report(self, state: MDState) -> MDState:
         """
         Generate a combined comparison HTML report for all simulations.
 
+        Deterministic fallback path (also used when LLM planning is unavailable).
         Reads overlay plots from state["analysis_results"]["combined"] and
         the per-sim analysis summaries, then writes a self-contained HTML to
         ``{working_directory}/reporter/combined_report.html``.
@@ -364,6 +784,9 @@ class ReporterAgent:
         if state.get("is_multi_simulation"):
             state["multi_sim_base_dir"] = working_dir
             state["working_directory"] = working_dir
+        from agentic.utils.conversation_logger import set_log_file
+
+        set_log_file(str(Path(working_dir) / "agent_conversation.log"))
         reporter_dir = str(Path(working_dir) / "reporter")
         Path(reporter_dir).mkdir(parents=True, exist_ok=True)
 
@@ -415,6 +838,16 @@ class ReporterAgent:
             enriched_prompt=_enriched_text,
             n_simulations=_n_sims,
             policy=_report_policy,
+        )
+
+        log_agent_action(
+            "reporter",
+            "Combined reporter deterministic plan",
+            {
+                "labels": labels,
+                "n_overlay_plots": len(overlay_plots),
+                "narrative": str(getattr(_narrative, "focus", None) or _narrative)[:200],
+            },
         )
 
         # DSSP: generate combined charts only when requested
@@ -1681,7 +2114,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
 **Instructions:**
 - Write specifically about {protein_label} — not generic kinase/pseudokinase commentary unless directly supported by the data
 - Correlate the analysis results with findings from the literature on {protein_label} or closely related systems
-- Highlight the most important observations: stability, flexible regions, ligand effects, FEL basins, activation-loop behaviour — whichever appear in the results
+- Highlight the most important observations: stability, flexible regions, ligand effects, FEL basins, activation-loop behaviour, interface H-bond occupancy, salt bridges, and named residue–residue interaction partners — whichever appear in the results
 - Draw a clear conclusion that answers the user's research question
 - Provide actionable insights or suggested follow-up experiments
 - Keep it concise: 3–4 paragraphs, no bullet points

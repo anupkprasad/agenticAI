@@ -28,11 +28,14 @@ from .planning_guidelines import (
     get_intent_preservation_block,
     get_planner_metric_tool_reference,
     get_standard_output_filenames_block,
+    get_com_distance_tool_guide,
+    get_proximity_tool_guide,
     get_master_plan_tools_note,
     metric_covered_by_registry,
     partition_metrics_by_registry,
 )
 from src.supervisor.component_case_resolver import resolve_component_cases, resolve_sim_label_and_dir
+from src.supervisor.component_parser import append_sim_case_requirement
 
 logger = logging.getLogger(__name__)
 
@@ -225,13 +228,19 @@ def _build_compact_per_sim_prompt(
     protein = entry.get("protein_name") or entry.get("label", "system")
     label = entry.get("label", "simulation")
     case = entry.get("case_description", "default system")
+    case_id = entry.get("case_id") or ""
+    directive = (entry.get("case_directive") or "").strip()
     wdir = entry.get("working_dir", "")
     pdb_name = Path(entry.get("pdb", "")).name or f"{label}.pdb"
     intent = shared_intent.replace("{working_dir}", wdir)
+    case_bits = case
+    if case_id:
+        case_bits = f"{case}; case_id={case_id}"
+    directive_bit = f" {directive}" if directive else ""
     return (
-        f"Simulation {label} ({protein}; {case}; source {pdb_name}; "
-        f"working directory {wdir}). {intent}"
-    )
+        f"Simulation {label} ({protein}; {case_bits}; source {pdb_name}; "
+        f"working directory {wdir}).{directive_bit} {intent}"
+    ).strip()
 
 
 _METRIC_PHRASES: Dict[str, str] = {
@@ -571,6 +580,7 @@ class MDPlanner:
             Path(state.get("multi_sim_base_dir") or state.get("working_directory", "working_dir")).resolve()
         )
         state["multi_sim_base_dir"] = base_working_dir
+        # Campaign-level master plan summary only (not per-sim preprocess/setup detail).
         from ..utils.conversation_logger import set_log_file
         set_log_file(str(Path(base_working_dir) / "agent_conversation.log"))
 
@@ -722,6 +732,8 @@ class MDPlanner:
             + f"{combined_tools_context}\n\n"
             + f"{intent_block}\n\n"
             + f"{filenames_block}\n\n"
+            + f"{get_com_distance_tool_guide()}\n\n"
+            + f"{get_proximity_tool_guide()}\n\n"
             "TASK: Return only valid JSON with keys:\n"
             f"1) sim_prompts: list of {len(expanded_entries)} complete natural-language prompts, same order as entries.\n"
             "2) run_combined_analysis: boolean; true only when the user explicitly or clearly asks for comparison, aggregation, cross-simulation trends, combined plots, or a combined report.\n"
@@ -913,6 +925,7 @@ class MDPlanner:
                     enriched_prompt=enriched_prompt,
                     agents_desc=agents_desc,
                 )
+            prompt_body = append_sim_case_requirement(prompt_body, entry)
             sim_prompts.append(
                 {
                     "pdb": str(Path(pdb).resolve()) if Path(pdb).exists() else pdb,
@@ -929,6 +942,10 @@ class MDPlanner:
             )
 
         state["sim_prompts"] = sim_prompts
+        # One simulation cannot have a meaningful cross-sim combined stage.
+        if len(sim_prompts) <= 1:
+            run_combined_analysis = False
+            combined_plan = ""
         state["run_combined_analysis"] = run_combined_analysis
         state["combined_analysis_plan"] = _coerce_plan_text(combined_plan, default="")
 
@@ -1152,6 +1169,22 @@ class MDPlanner:
         logger.info("=" * 60)
         logger.info("PLANNER: Creating execution plan from structured prompt")
         logger.info("=" * 60)
+
+        # Per-sim execution plans belong in {label}/agent_conversation.log.
+        # Master-plan creation (create_multi_sim_master_plan) stays on the base log.
+        base = state.get("multi_sim_base_dir")
+        wd = state.get("working_directory")
+        if (
+            state.get("is_multi_simulation")
+            and state.get("sim_prompts")
+            and base
+            and wd
+            and Path(wd).resolve() != Path(base).resolve()
+        ):
+            from ..utils.conversation_logger import set_log_file
+
+            Path(wd).mkdir(parents=True, exist_ok=True)
+            set_log_file(str(Path(wd) / "agent_conversation.log"))
         
         # CRITICAL: Refresh tools registry to pick up any newly generated programmer tools
         working_dir = state.get("working_directory")
@@ -1985,6 +2018,10 @@ CRITICAL: If you output JSON, YAML, or any structured format, the plan will be r
                 + get_intent_preservation_block(goal_text)
                 + "\n\n"
                 + get_standard_output_filenames_block()
+                + "\n\n"
+                + get_com_distance_tool_guide()
+                + "\n\n"
+                + get_proximity_tool_guide()
             )
         return instructions
 

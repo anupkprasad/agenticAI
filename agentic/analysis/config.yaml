@@ -21,7 +21,7 @@ agent:
   
   # Execution settings
   max_tool_retries: 2  # Max retries per tool on failure
-  max_total_steps: 25  # Max total analysis steps (raised to accommodate plot steps)
+  max_total_steps: 50  # Overall + qualified subset + per-interface H-bond/salt-bridge
   fail_fast: false  # Continue on failures to complete other analyses
   use_trajectory_batching: true  # Share trajectory loads across metrics (RAW/ALIGNED passes)
 
@@ -384,6 +384,11 @@ llm:
     - Gyration: Use "protein" for whole structure compactness
     - For ligand systems: Consider "protein or resname LIG" selections
     - Avoid hydrogen atoms: Use "not name H*" for heavy atom analyses
+    - Multi-chain complexes: GROMACS trajectories have no chain IDs. Still write
+      PDB-style selections such as "chainID B and resid 50:75" or
+      "chainID A and resid 1:10 and name CA". Analysis translates these to
+      trajectory resindex via simsetup/chain_residue_map.json. Always include
+      chainID when residue numbers overlap across chains.
 
     **Output Format:**
     Return a JSON object with this exact structure:

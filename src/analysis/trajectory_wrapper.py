@@ -23,6 +23,50 @@ from .summary_logger import append_analysis_summary
 
 logger = logging.getLogger(__name__)
 
+# Production TPR first. Equilibration TPRs share a folder with md.xtc and must
+# not be picked by a bare ``*.tpr`` glob (that is what sent wrap to nvt.tpr).
+_PREFERRED_TPR_NAMES: Tuple[str, ...] = (
+    "md.tpr",
+    "prod.tpr",
+    "production.tpr",
+)
+_EQUILIBRATION_TPR_NAMES = frozenset(
+    {"minim.tpr", "em.tpr", "ions.tpr", "nvt.tpr", "npt.tpr"}
+)
+
+
+def find_production_tpr(directory: Optional[str]) -> Optional[str]:
+    """Return ``md.tpr`` (or similar) under *directory*, not nvt/npt/minim."""
+    if not directory:
+        return None
+    root = Path(directory)
+    if not root.is_dir():
+        return None
+    for name in _PREFERRED_TPR_NAMES:
+        direct = root / name
+        if direct.is_file():
+            return str(direct.resolve())
+        matches = sorted(p for p in root.rglob(name) if p.is_file())
+        if matches:
+            return str(matches[0].resolve())
+    others = sorted(
+        p
+        for p in root.rglob("*.tpr")
+        if p.is_file() and p.name.lower() not in _EQUILIBRATION_TPR_NAMES
+    )
+    if others:
+        return str(others[0].resolve())
+    any_tpr = sorted(p for p in root.rglob("*.tpr") if p.is_file())
+    if any_tpr:
+        logger.warning(
+            "find_production_tpr: no md.tpr under %s — using %s",
+            root,
+            any_tpr[0].name,
+        )
+        return str(any_tpr[0].resolve())
+    return None
+
+
 # Tried in order when ligand is omitted / not found (kinase–ATP campaigns first).
 _COMMON_LIGAND_NAMES: Tuple[str, ...] = (
     "ATP",
@@ -320,11 +364,24 @@ def _wrap_trajectory_impl(
     )
     rc4, _out4, err4 = _run_gmx(trjconv_cmd, stdin=trjconv_stdin, cwd=str(work))
 
-    if rc4 != 0 or not out_path.exists() or out_path.stat().st_size == 0:
+    if not out_path.exists() or out_path.stat().st_size == 0:
         return {
             "success": False,
             "error": f"gmx trjconv failed (rc={rc4}): {err4[:500]}",
         }
+    if rc4 != 0:
+        # Truncated production XTCs (mdrun XTC error / disk full) make
+        # trjconv exit non-zero after writing every readable frame. Keep
+        # that output — discarding it forces analysis onto the corrupt md.xtc
+        # whose MDAnalysis n_frames is a filesize guess (e.g. 15935 vs 773).
+        logger.warning(
+            "wrap_trajectory: gmx trjconv rc=%s but %s is non-empty "
+            "(%s bytes) — using wrapped frames. stderr: %s",
+            rc4,
+            out_path.name,
+            out_path.stat().st_size,
+            err4[-400:] if err4 else "",
+        )
 
     logger.info("wrap_trajectory: done → %s", out_path)
     result: Dict[str, Any] = {

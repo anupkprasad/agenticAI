@@ -1,8 +1,21 @@
 # Tools & Dependencies
 
-This document lists the external software, libraries, and services that
-AgenticAI relies on. All packages are pinned in `environment.yml`
-(conda environment `ollama_env`, Python 3.11).
+**This file is the software catalogue plus GROMACS/analysis mechanisms.**
+Use it to see which binaries and Python libraries AgenticAI calls, and how
+setup/analysis work around format limits (multi-chain residue map, phospho
+PDB cleanup). It is not the per-tool science (RMSD formula, output CSV
+names) and not the execution pools.
+
+**In this file:** MD engines and force fields, structure prep and UniProt
+acquisition, trajectory-analysis libraries, chain-residue map, LLM stack,
+plotting/HTML report, HPC clients, literature APIs, run summary, test tools.
+
+Packages are pinned in `environment.yml` (conda environment `ollama_env`,
+Python 3.11). Per-tool observables and output filenames:
+[ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md). Parallel / HPC execution:
+[POOLS.md](POOLS.md). System wiring: [ARCHITECTURE.md](ARCHITECTURE.md).
+When agents run and which folders they fill:
+[PIPELINE_WORKFLOW.md](PIPELINE_WORKFLOW.md).
 
 ---
 
@@ -36,7 +49,7 @@ AgenticAI relies on. All packages are pinned in `environment.yml`
 
 ---
 
-## Structure Acquisition (new)
+## Structure Acquisition
 
 These modules enable starting from a UniProt accession with no local PDB file.
 
@@ -66,7 +79,8 @@ These modules enable starting from a UniProt accession with no local PDB file.
 
 ## Trajectory Analysis
 
-> **Full tool reference (calculations, theory, outputs):** [ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md)
+> **Full tool reference (calculations, theory, outputs):** [ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md).
+> Multi-chain `chainID` / resid selections: [below](#multi-chain-residue-map).
 
 Primary library: **MDAnalysis v2.10.0**
 
@@ -132,6 +146,241 @@ Primary library: **MDAnalysis v2.10.0**
 
 ---
 
+## Multi-chain residue map
+
+GROMACS production files do not keep PDB chain IDs. Users and the Analysis
+agent can still say “chain B resid 50–75” after a multi-chain complex
+simulation: setup writes a JSON map, and analysis translates PDB-style
+selections to trajectory `resindex` before MDAnalysis `select_atoms`.
+
+### The problem
+
+| File | What it stores |
+|------|----------------|
+| Input PDB (`protein_h.pdb`) | Chain ID + PDB residue number (user language) |
+| `.gro` | Residue number/name only — **no chain ID** |
+| `md.tpr` | Topology/masses; chain IDs blank or unused |
+| `.xtc` | Coordinates only |
+
+Setup runs `pdb2gmx -chainsep id_or_ter -merge all`. Chains are concatenated
+into one molecule. If chain A and chain B both start at residue 1, the
+trajectory has two copies of `resid 1`. Then:
+
+- `chainID B and resid 50:75` matches **0 atoms** on `md.tpr` + `mdWrap.xtc`
+- `resid 50:75` without a chain can pull residues from **both** chains
+
+This applies to two, three, or four (or more) chains the same way.
+
+### Design
+
+Keep the **user PDB as the naming source**. Translate to unique trajectory
+**residue indices** (`resindex`) before `select_atoms`.
+
+```
+User / LLM:  "chainID B and resid 50:75"
+                 │
+                 ▼
+        chain_residue_map.json
+        (PDB chain + PDB resid → traj resindex)
+                 │
+                 ▼
+Trajectory:  "resindex 389:414"
+                 │
+                 ▼
+     existing RMSD / RMSF / COM / DSSP / …
+```
+
+Do **not** rewrite every analysis tool. One translator sits in front of
+selections. Selections without a chain token (`protein`, `resname ATP`)
+pass through unchanged.
+
+Do **not** use original-PDB atom serial numbers on the trajectory.
+`pdb2gmx -ignh` adds hydrogens and can rename atoms. The map is
+**residue-level**.
+
+### Pipeline
+
+```
+preprocess/protein_h.pdb          (has chain IDs + TER)
+        │
+        ▼
+simsetup: pdb2gmx → protein_processed.gro
+        │
+        ▼
+build_and_save_chain_residue_map()     ← after topology, non-fatal
+        │
+        ▼
+simsetup/chain_residue_map.json
+        │
+        ▼
+HPC: md.tpr + mdWrap.xtc               (still no chain IDs)
+        │
+        ▼
+analysis: translate_selection() before select_atoms
+```
+
+| Stage | What happens |
+|-------|----------------|
+| **Setup** | After `pdb2gmx`, `ComplexSystemBuilder` maps the input PDB onto `protein_processed.gro` and writes `simsetup/chain_residue_map.json`. Failure is logged; setup continues. |
+| **State** | Path stored in `MDState["chain_residue_map"]` and `file_registry`. Cleared between multi-sim cases like `topology`. |
+| **Analysis** | `TrajectorySession`, `trajectory_compute`, and `AnalysisToolExecutor` translate `selection` / `selection1` / `selection2` / `align_selection` / `protein_selection` when they contain `chainID` or a resid range. |
+| **Analysis-only (old runs)** | If the JSON is missing, `ensure_chain_residue_map()` rebuilds it from `preprocess/protein_h.pdb` (or `protein.pdb`) plus `protein_processed.gro` or `md.tpr`. |
+
+GROMACS CLI tools (`calculate_sasa`, `calculate_pocket_sasa`, `wrap_trajectory`)
+are **not** translated — `resindex` is not a `gmx` index group.
+
+### Map file
+
+**Path:** `{sim}/simsetup/chain_residue_map.json`
+
+```json
+{
+  "version": 1,
+  "source_pdb": "/path/to/preprocess/protein_h.pdb",
+  "trajectory_topology": "/path/to/simsetup/protein_processed.gro",
+  "n_chains": 2,
+  "n_mapped_residues": 500,
+  "chain_order": ["A", "B"],
+  "warnings": [],
+  "chains": {
+    "A": {
+      "pdb_resids":      [  1,  2,  3],
+      "pdb_resnames":    ["MET", "ALA", "HIS"],
+      "traj_resindices": [  0,  1,  2],
+      "traj_resids":     [  1,  2,  3]
+    },
+    "B": {
+      "pdb_resids":      [  1, 50, 75],
+      "pdb_resnames":    ["GLY", "LYS", "PHE"],
+      "traj_resindices": [340, 389, 414],
+      "traj_resids":     [  1, 50, 75]
+    }
+  }
+}
+```
+
+`traj_resindices` are 0-based MDAnalysis residue indices. They stay valid on
+`md.tpr` because protein residues remain first after ligand/solvent merge.
+Each residue array is written on **one line**, with integers padded so the
+i-th `pdb_resid`, `traj_resindex`, and `traj_resid` line up in a column.
+
+Matching:
+
+1. Walk PDB protein residues in file order (chains as they appear; after
+   preprocess reorder this is typically A, B, C, …).
+2. Walk protein residues in `protein_processed.gro` / `md.tpr` in the same
+   concatenated order (`pdb2gmx -merge all`).
+3. If counts match, pair 1:1. Resname differences use tautomer/phospho
+   aliases (`HIS`/`HID`/`HIE`, `SEP`/`SP2`, `TPO`/`THP2`, `PTR`/`TP2`).
+4. If counts differ, Needleman–Wunsch on one-letter codes; unmapped
+   residues are omitted and a warning is stored.
+
+Three or four chains are additional keys in `chains` — same algorithm.
+
+### Selection translation
+
+Supported forms (MDAnalysis-style, as the LLM is told to write):
+
+```
+chainID B and resid 50:75
+chain B and resid 50 to 75
+protein and chainID A and resid 1:10 and name CA
+chainID C
+chainID A or chainID B
+protein and (chainID A or chainID D) and name CA
+```
+
+| Input | Result |
+|-------|--------|
+| `chainID B and resid 50:75` | `resindex 389:414` (contiguous run) |
+| `chainID A and resid 1:10 and name CA` | `name CA and resindex 0:9` |
+| `protein` / `resname ATP` | unchanged |
+| `resid 50:75` on a **multi-chain** map | unchanged + warning (ambiguous) |
+| `resid 50:75` on a **single-chain** map | mapped through that one chain |
+| Unknown chain | tool error listing available chains |
+| No map + `chainID B` | unchanged + warning (0 atoms on TPR) |
+
+COM example (DCLK3–PSMA4 style):
+
+```
+calculate_com_distance
+  selection1: "chainID B and resid 50:75"
+  selection2: "chainID A and resid 0:10"
+```
+
+The translator rewrites both strings; the COM calculator is unchanged.
+
+Always include `chainID` when residue numbers overlap across chains.
+PDB resid `0` is valid if that number exists in the source PDB.
+
+### Code map
+
+| Module | Role |
+|--------|------|
+| `src/analysis/chain_residue_map.py` | Build, load, find, translate |
+| `src/simsetup/system_builder.py` | Write JSON after `pdb2gmx` |
+| `src/analysis/trajectory_session.py` | Lazy-load map; translate align selections |
+| `src/analysis/trajectory_compute.py` | Translate batched metric params |
+| `agentic/analysis/tools.py` | Translate standalone tool kwargs |
+| `agentic/simsetup/setup_agent.py` | Register file; set `state["chain_residue_map"]` |
+| `tests/test_chain_residue_map.py` | Overlapping resids, 4 chains, HIS/phospho, PDB+GRO build |
+
+Public helpers in `chain_residue_map.py`:
+
+- `build_chain_residue_map(pdb, topology)` / `build_and_save_chain_residue_map(...)`
+- `ensure_chain_residue_map(working_dir=..., topology_file=...)`
+- `translate_selection(selection, map)` / `translate_selection_params(params, map)`
+- `lookup_resindices(map, chain_id, resid_start=..., resid_end=...)`
+- `CHAIN_SELECTION_LLM_NOTE` — inserted into Analysis agent prompts
+
+```bash
+python -m pytest tests/test_chain_residue_map.py -q
+```
+
+### Phosphorylation and chain order in the PDB (not this map)
+
+Preprocess has a **different** chain-aware step so phosphorylated residues
+stay on the protein for `pdb2gmx`. It does **not** put chain IDs back on
+the trajectory.
+
+MDAnalysis `protein` does not include SEP/TPO/PTR. Without extra handling
+they are written at the end of `protein.pdb` or classified as type `Other`
+(`residue THP173 is of type 'Other'`).
+
+What preprocess/setup already do:
+
+1. **Keep phospho on the protein** — `complex_separator.py` concatenates
+   `protein` + phospho atoms, then sorts by `(chainID, resid)`.
+2. **`reorder_pdb_by_resid` + `insert_ter_records`** (`pdb_utils.py`) —
+   sort ATOM lines by chain then resid; insert `TER` at chain boundaries.
+   MDAnalysis drops `TER`; `pdb2gmx` needs TER + chain ID for C-termini (OXT).
+3. **Rename for the force field** — `normalize_phosphorylation_for_gromacs`:
+   SEP/TPO/PTR → SP2/THP2/TP2 (CHARMM dianionic default), O3P→OT, drop H3T.
+4. **`residuetypes.dat`** — SP2/THP2/… listed as `Protein`, not `Other`.
+5. **`pdb2gmx -chainsep id_or_ter -merge all`** — split by chain/TER, then
+   merge into one molecule (chain identity is then lost in GRO/TPR).
+
+The residue map is built **after** that cleanup, from the same PDB
+(`protein_h.pdb` / `cleaned_pdb`) plus `protein_processed.gro`.
+
+| | Phospho / TER cleanup | Analysis chain map |
+|--|----------------------|--------------------|
+| When | Preprocess + setup | After `pdb2gmx` / at analysis |
+| Purpose | Keep SEP/TPO in the right chain for `pdb2gmx` | User says “chain B resid 50–75” on the XTC |
+| Output | Ordered PDB with TER | `chain_residue_map.json` |
+| Survives in `md.tpr`? | No | The JSON is the surviving record |
+
+### What not to do
+
+- Do not recover chain IDs from `md.tpr` alone.
+- Do not apply original-PDB atom indices to the trajectory.
+- Do not drop `-merge all` solely to keep chains as separate molecule types
+  (GRO still has no chain ID; overlapping resids remain).
+- Do not offset-renumber residues in the trajectory as the primary fix —
+  users still speak PDB numbering, so you still need this map.
+
+---
+
 ## AI / LLM Framework
 
 | Tool | Version | Role |
@@ -189,6 +438,9 @@ Fallback: when LLM is unreachable, heuristic routing and rule-based report synth
 ---
 
 ## HPC & Remote Execution
+
+Job queues, polling, and local workers: [POOLS.md](POOLS.md). This section
+is the client libraries and script-name rule only.
 
 | Tool | Version | Role |
 |------|---------|------|

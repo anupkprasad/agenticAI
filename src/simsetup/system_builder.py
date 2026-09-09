@@ -346,6 +346,34 @@ class ComplexSystemBuilder:
         results["files"]["protein_processed_gro"] = protein_processed
         results["files"]["topology"] = topology_file
 
+        # PDB chain IDs are dropped in GRO/TPR. Persist a residue map so analysis
+        # can translate "chainID B and resid 50:75" onto trajectory resindex.
+        if self._is_pdb(topology_input):
+            try:
+                from src.analysis.chain_residue_map import (
+                    CHAIN_MAP_FILENAME,
+                    build_and_save_chain_residue_map,
+                )
+
+                map_path = self._out(CHAIN_MAP_FILENAME)
+                map_result = build_and_save_chain_residue_map(
+                    topology_input, protein_processed, map_path
+                )
+                if map_result.get("success"):
+                    results["files"]["chain_residue_map"] = map_result["output_file"]
+                    n_chains = map_result.get("n_chains", 0)
+                    results["steps"].append(
+                        f"Wrote chain residue map ({n_chains} chain(s) → trajectory resindex)"
+                    )
+                    for warning in map_result.get("warnings") or []:
+                        logger.warning("chain residue map: %s", warning)
+                else:
+                    logger.warning(
+                        "Chain residue map skipped: %s", map_result.get("error")
+                    )
+            except Exception as exc:
+                logger.warning("Chain residue map failed (non-fatal): %s", exc)
+
         # =====================================================================
         # Step 3: Merge all components into complex.gro (gro_merger)
         # =====================================================================

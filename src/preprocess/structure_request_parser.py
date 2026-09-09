@@ -12,6 +12,21 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .domain_sources import lookup_domain_range
 
+_DASH_TRANSLATION = str.maketrans({
+    "\u2010": "-",
+    "\u2011": "-",
+    "\u2012": "-",
+    "\u2013": "-",
+    "\u2014": "-",
+    "\u2015": "-",
+    "\u2212": "-",
+})
+
+
+def _normalize_dashes(text: str) -> str:
+    """Treat en/em dashes as ASCII hyphens in residue-range parsing."""
+    return text.translate(_DASH_TRANSLATION) if text else text
+
 
 def _normalize_uniprot(raw: str) -> str:
     return raw.strip().upper()
@@ -105,6 +120,7 @@ def extract_residue_range(text: str) -> Optional[Tuple[int, int]]:
     """
     if not text:
         return None
+    text = _normalize_dashes(text)
 
     patterns = [
         r"\bresid(?:ue)?s?\s*[:=]?\s*(\d+)\s*(?:[:,\-]|to)\s*(\d+)\b",
@@ -134,6 +150,7 @@ def extract_residue_range_for_domain(
     """
     if not text or not domain_label:
         return None
+    text = _normalize_dashes(text)
 
     phrase = domain_label.replace("_", " ")
     match = re.search(rf"\b{re.escape(phrase)}\b", text, re.IGNORECASE)
@@ -226,6 +243,7 @@ def parse_structure_request(text: str) -> Optional[Dict[str, Any]]:
     """
     if not text:
         return None
+    text = _normalize_dashes(text)
 
     uniprot_ids = extract_uniprot_ids(text)
     if not uniprot_ids:
@@ -238,6 +256,8 @@ def parse_structure_request(text: str) -> Optional[Dict[str, Any]]:
     # Scope explicit ranges to the simulation domain when possible
     if domain_label:
         residue_range = extract_residue_range_for_domain(text, domain_label)
+        if residue_range is None:
+            residue_range = extract_residue_range(text)
     else:
         residue_range = extract_residue_range(text)
 

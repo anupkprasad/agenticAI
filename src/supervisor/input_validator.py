@@ -22,6 +22,50 @@ def _is_per_sim_execution(state: Dict[str, Any]) -> bool:
     return False
 
 
+def ensure_sim_case_from_context(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Fill missing ``sim_case`` from label / goal (critical for parallel workers).
+
+    Parallel prep workers historically omitted ``sim_case``, so ATP-only cases
+    fell back to PDB contents and kept crystallographic MG.
+    """
+    from pathlib import Path
+
+    from .component_parser import _label_ligand_suffix
+
+    sim_case = dict(state.get("sim_case") or {})
+    label = str(sim_case.get("label") or "").strip()
+    if not label:
+        wd = state.get("working_directory") or ""
+        label = Path(wd).name if wd else ""
+    goal = state.get("user_goal") or ""
+    case_id = str(sim_case.get("case_id") or "").strip()
+    if not case_id:
+        m = re.search(r"case_id\s*=\s*([A-Za-z0-9_]+)", goal, re.IGNORECASE)
+        if m:
+            case_id = m.group(1)
+    if not case_id and label:
+        suffix = _label_ligand_suffix(label)
+        if suffix in ("ATP", "ATP_MG"):
+            case_id = "protein_with_ligand"
+        elif re.search(r"protein[\s\-]*only|case_id\s*=\s*protein_only", goal, re.I):
+            case_id = "protein_only"
+
+    description = str(sim_case.get("case_description") or "").strip()
+    if not description:
+        m = re.search(r"Case:\s*([^.]+)", goal)
+        if m:
+            description = m.group(1).strip()
+
+    updated = {
+        "label": label or sim_case.get("label"),
+        "case_id": case_id or sim_case.get("case_id"),
+        "case_description": description or sim_case.get("case_description"),
+        "case_directive": sim_case.get("case_directive"),
+    }
+    state["sim_case"] = updated
+    return updated
+
+
 def _resolve_current_pdb_path(
     state: Dict[str, Any],
     user_goal: str,
@@ -385,7 +429,12 @@ def _validate_pdb_based_task(
     Parses component selection and validates feasibility.
     """
     from agentic.utils import log_agent_action
-    from .component_parser import parse_component_selection, validate_feasibility, build_human_summary
+    from .component_parser import (
+        apply_sim_case_to_component_selection,
+        parse_component_selection,
+        validate_feasibility,
+        build_human_summary,
+    )
     
     analysis = state.get("pdb_analysis")
     structure_request = state.get("structure_request")
@@ -412,7 +461,14 @@ def _validate_pdb_based_task(
             "(UniProt %s)",
             structure_request.get("uniprot_id"),
         )
-        state["component_selection"] = parse_component_selection(user_goal, analysis)
+        ensure_sim_case_from_context(state)
+        component_selection = parse_component_selection(user_goal, analysis)
+        component_selection = apply_sim_case_to_component_selection(
+            component_selection,
+            state.get("sim_case"),
+            analysis,
+        )
+        state["component_selection"] = component_selection
         state["pdb_summary"] = (
             f"Structure pending download for UniProt {structure_request.get('uniprot_id')}"
         )
@@ -422,6 +478,7 @@ def _validate_pdb_based_task(
             details={
                 "structure_request": structure_request,
                 "component_selection": state["component_selection"],
+                "sim_case": state.get("sim_case"),
             },
         )
         return state
@@ -435,8 +492,15 @@ def _validate_pdb_based_task(
     else:
         logger.warning(f"INPUT_VALIDATION: System info extraction failed: {sys_info.get('error')}")
 
-    # Parse user intent for component selection
+    # Parse user intent for component selection, then honor multi-sim case_id
+    # (apo protein_only must not inherit ligand/ions merely because the source PDB has them).
+    ensure_sim_case_from_context(state)
     component_selection = parse_component_selection(user_goal, analysis)
+    component_selection = apply_sim_case_to_component_selection(
+        component_selection,
+        state.get("sim_case"),
+        analysis,
+    )
     state["component_selection"] = component_selection
 
     # Validate feasibility

@@ -16,7 +16,7 @@ EOF
 )
 
 echo "Launching pseudoKin_holo campaign ($(ls -1 "$WORKDIR"/*.pdb | wc -l) PDBs) ..."
-nohup python run_agenticAIWork.py \
+nohup python SimAgent.py \
   --goal "$GOAL" \
   --working-dir "$WORKDIR" \
   --pdb-list "$WORKDIR"/*.pdb \

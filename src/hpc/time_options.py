@@ -127,7 +127,7 @@ def resolve_hpc_time_limit(
 
 
 def apply_goal_hpc_time_config(goal: str, config: Dict[str, Any]) -> None:
-    """Store parsed walltime on run_agenticAIWork config when the goal specifies it."""
+    """Store parsed walltime on SimAgent config when the goal specifies it."""
     parsed = parse_walltime_from_text(goal)
     if parsed:
         config["hpc_time_limit"] = parsed

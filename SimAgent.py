@@ -20,8 +20,9 @@ except Exception:
 
 from agentic.workflow import MDWorkflow
 from agentic.llm import LLMClient
+from agentic.llm_usage import TokenBudgetExceeded
 from agentic.utils import (
-    get_conversation_logger, log_user_prompt, log_workflow_completion, set_log_file
+    log_user_prompt, set_log_file
 )
 from src.utils.run_summary import (
     build_run_summary,
@@ -1831,11 +1832,6 @@ def main(argv=None):
                              "contain an hpc/ sub-folder with trajectory data. "
                              "The directory basename is used as the simulation label. "
                              "Example: --sim-dirs pseudokin/p17612 pseudokin/p24941"))
-    parser.add_argument("--simtype", default="singlesim", 
-                       choices=["singlesim", "multisim"],
-                       help=("Simulation type: 'singlesim' for single PDB or 'multisim' for "
-                             "multiple PDbs. Default: singlesim. If not provided, framework "
-                             "will auto-detect from --pdb-list, --sim-dirs, or user goal."))
     parser.add_argument("--subtask", default=None, nargs='+',
                        choices=["preprocess", "simsetup", "hpcjob", "analysis", "reporter"],
                        metavar="AGENT",
@@ -1848,6 +1844,13 @@ def main(argv=None):
                        help="LLM model to use")
     parser.add_argument("--llm-base-url", default="http://localhost:11434",
                        help="LLM API base URL")
+    parser.add_argument("--llm-api-key", default=None,
+                       help="Paid LLM API key (or set LLM_API_KEY / OPENAI_API_KEY)")
+    parser.add_argument("--llm-token-budget", type=int, default=None,
+                       help="Max total LLM tokens for this run (enforced when set)")
+    parser.add_argument("--llm-provider", default="auto",
+                       choices=["auto", "ollama", "openai"],
+                       help="LLM backend when using a paid API key")
     parser.add_argument("--HITL", dest="hitl", default=None,
                        choices=["error", "all"],
                        help=("Human-in-the-loop: 'error' pauses only on failures; "
@@ -1861,7 +1864,9 @@ def main(argv=None):
     parser.add_argument("--water-model", default="tip3p", 
                        help="Water model to use")
     parser.add_argument("--working-dir", default=".",
-                       help="Base working directory (agents use subdirs: working_dir/preprocess/, working_dir/hpc/, etc.)")
+                       help=("Campaign base directory. Each simulation writes under "
+                             "{working-dir}/{label}/ (preprocess, simsetup, hpc, …). "
+                             "Campaign provenance stays at the base."))
     parser.add_argument("--max-concurrent", type=int, default=4,
                        help="Maximum concurrent simulations in multi-sim mode (legacy)")
     parser.add_argument("--allowed-hpc-jobs", type=int, default=None,
@@ -2005,10 +2010,8 @@ def main(argv=None):
         print("=" * 60 + "\n", flush=True)
         return 1
     # -------------------------------------------------------------------------
-    llm_client = LLMClient(
-        model=args.llm_model,
-        base_url=args.llm_base_url if use_llm else None
-    )
+    if getattr(args, "llm_api_key", None):
+        os.environ["LLM_API_KEY"] = args.llm_api_key.strip()
     # Configuration
     config = {
         "force_field": args.force_field,
@@ -2017,6 +2020,10 @@ def main(argv=None):
         "hitl_mode": hitl_mode,
         "use_llm": use_llm,
         "working_directory": args.working_dir,
+        "llm_model": args.llm_model,
+        "llm_base_url": args.llm_base_url if use_llm else None,
+        "llm_token_budget": getattr(args, "llm_token_budget", None),
+        "llm_provider": getattr(args, "llm_provider", "auto") or "auto",
         "resume_failed_only": getattr(args, "resume", False),
         # One-shot consumed by parallel pool init — reopen failed sims on --resume.
         "requeue_failed_sims": getattr(args, "resume", False),
@@ -2086,16 +2093,50 @@ def main(argv=None):
     if not Path(working_dir).is_absolute():
         working_dir = str(Path.cwd() / working_dir)
     Path(working_dir).mkdir(parents=True, exist_ok=True)
+
+    llm_client = LLMClient(
+        model=args.llm_model,
+        base_url=args.llm_base_url if use_llm else None,
+        api_key=getattr(args, "llm_api_key", None),
+        token_budget=getattr(args, "llm_token_budget", None),
+        working_dir=working_dir if use_llm else None,
+        provider=getattr(args, "llm_provider", "auto") or "auto",
+    )
+    if use_llm:
+        _budget = llm_client.usage.limit
+        _usage_path = f"{working_dir}/llm_usage.json"
+        if llm_client.usage.billing_enabled and _budget:
+            print(
+                f"\n  LLM billing: API key set, token budget {_budget:,} "
+                f"(usage tracked in {_usage_path})",
+                flush=True,
+            )
+        elif llm_client.usage.billing_enabled:
+            print(
+                f"\n  LLM billing: API key set, usage tracked in "
+                f"{_usage_path} (no budget cap — set --llm-token-budget to enforce)",
+                flush=True,
+            )
+        elif _budget:
+            print(
+                f"\n  LLM usage: tracking + budget {_budget:,} "
+                f"(local/no API key) → {_usage_path}",
+                flush=True,
+            )
+        else:
+            print(
+                f"\n  LLM usage: tracking enabled (no budget) → {_usage_path}",
+                flush=True,
+            )
     
     # Set up logging inside working_dir (not at project root)
     log_path = str(Path(working_dir) / "agent_conversation.log")
     set_log_file(log_path)
 
     # ------------------------------------------------------------------
-    # Multi-simulation mode detection
+    # Resolve structures (always {base}/{label}/ multi-sim tree)
     # ------------------------------------------------------------------
     pdb_list = getattr(args, 'pdb_list', None) or []
-    simtype = getattr(args, 'simtype', 'singlesim')
 
     # --sim-dirs: convert per-sim directories into synthetic pdb_list entries
     # so the existing multi-sim planner logic works unchanged.
@@ -2111,28 +2152,21 @@ def main(argv=None):
         # Synthetic PDB entries: {sim_dir}/{label}.pdb (file need not exist)
         pdb_list = [str(d / f"{d.name}.pdb") for d in resolved_sim_dirs]
         print(
-            f"\n--sim-dirs: activating multi-sim for {len(pdb_list)} directories",
+            f"\n--sim-dirs: activating campaign for {len(pdb_list)} directories",
             flush=True,
         )
 
     # Auto-detect PDbs from goal if not already provided via --pdb-list or --sim-dirs
-    # This works for both explicit --simtype multisim and auto-detection mode
     structure_request_entries: List[Dict[str, Any]] = []
     if not pdb_list:
         _goal_pdbs = _extract_pdb_paths_from_goal(goal)
         if len(_goal_pdbs) > 0:
             pdb_list = _goal_pdbs
-            if len(_goal_pdbs) > 1:
-                print(
-                    f"\n  Auto-detected {len(pdb_list)} PDBs from goal: {', '.join(pdb_list)}",
-                    flush=True,
-                )
-            elif simtype == 'multisim' and len(_goal_pdbs) == 1:
-                # User specified --simtype multisim but only one PDB found in goal
-                print(
-                    f"\n  Warning: --simtype multisim specified but only 1 PDB found in goal: {_goal_pdbs[0]}",
-                    flush=True,
-                )
+            print(
+                f"\n  Auto-detected {len(pdb_list)} PDB(s) from goal: "
+                f"{', '.join(Path(p).name for p in pdb_list)}",
+                flush=True,
+            )
         else:
             # No .pdb in goal — try UniProt-based structure acquisition
             structure_request_entries = _build_pdb_list_from_uniprot_goal(goal, working_dir)
@@ -2154,192 +2188,70 @@ def main(argv=None):
                         f"{len(structure_request_entries) - _n_existing} to fetch)",
                         flush=True,
                     )
-                if len(structure_request_entries) == 1 and simtype == 'multisim':
+                if len(structure_request_entries) == 1:
                     print(
-                        "  Note: --simtype multisim with one UniProt ID will expand into "
-                        "component cases (e.g. protein-only vs protein+ATP+MG) if requested.",
+                        "  Note: one UniProt ID may expand into component cases "
+                        "(e.g. protein-only vs protein+ATP+MG) if requested.",
                         flush=True,
                     )
 
-    # Determine if multi-simulation mode should be activated
-    # Priority: 1) explicit --simtype flag, 2) multiple PDbs detected
-    is_multi_sim = (
-        simtype == 'multisim' or 
-        len(pdb_list) > 1 or 
-        bool(sim_dirs_arg)
-    )
+    if not pdb_list:
+        print(
+            "\nERROR: No PDB files or UniProt structures found!",
+            file=sys.stderr, flush=True
+        )
+        print(
+            "   Please provide structures via:",
+            file=sys.stderr, flush=True
+        )
+        print(
+            "   - --pdb-list file1.pdb file2.pdb ...",
+            file=sys.stderr, flush=True
+        )
+        print(
+            "   - --sim-dirs dir1 dir2 ...",
+            file=sys.stderr, flush=True
+        )
+        print(
+            "   - Mention .pdb files in your --goal",
+            file=sys.stderr, flush=True
+        )
+        print(
+            "   - Or request download by UniProt ID in --goal "
+            "(e.g. 'UniProt P21860, download from AlphaFold')",
+            file=sys.stderr, flush=True
+        )
+        return 1
 
-    if is_multi_sim:
-        # Validate that we have PDbs for multi-simulation mode
-        if not pdb_list:
-            print(
-                "\n❌ ERROR: Multi-simulation mode activated but no PDB files found!",
-                file=sys.stderr, flush=True
-            )
-            print(
-                "   Please provide structures via:",
-                file=sys.stderr, flush=True
-            )
-            print(
-                "   - --pdb-list file1.pdb file2.pdb ...",
-                file=sys.stderr, flush=True
-            )
-            print(
-                "   - --sim-dirs dir1 dir2 ...",
-                file=sys.stderr, flush=True
-            )
-            print(
-                "   - Mention .pdb files in your --goal",
-                file=sys.stderr, flush=True
-            )
-            print(
-                "   - Or request download by UniProt ID in --goal "
-                "(e.g. 'UniProt P21860, download from AlphaFold')",
-                file=sys.stderr, flush=True
-            )
-            return 1
-
-        # Ensure UniProt structures exist at base working_dir (shared by cases).
-        # User-provided files are reused; only missing ones are fetched.
-        if structure_request_entries:
-            n_missing = sum(
-                1 for e in structure_request_entries if not Path(e["pdb_path"]).exists()
-            )
-            if n_missing:
-                print(
-                    f"  Fetching {n_missing} missing structure(s) from database...",
-                    flush=True,
-                )
-            reused, downloaded = _prefetch_uniprot_structures(
-                structure_request_entries, goal
-            )
-            if reused:
-                print(
-                    f"  Reusing {len(reused)} existing local structure file(s)",
-                    flush=True,
-                )
-            if downloaded:
-                print(
-                    f"  Downloaded {len(downloaded)} structure file(s)",
-                    flush=True,
-                )
-            if not reused and not downloaded:
-                print(
-                    "  Warning: structure acquisition deferred to preprocessing agent",
-                    flush=True,
-                )
-            config["structure_requests"] = {
-                Path(entry["pdb_path"]).stem.lower(): _build_structure_request_config(entry, goal)
-                for entry in structure_request_entries
-            }
-            config["structure_request"] = _build_structure_request_config(
-                structure_request_entries[0], goal
-            )
-        
-        # ---- MULTI-SIMULATION (in-graph) ----
-        num_sims = len(pdb_list)
-        print(f"\nMulti-simulation mode activated ({num_sims} simulations)", flush=True)
-        if simtype == 'multisim':
-            print(f"  Mode: Explicit (--simtype multisim)", flush=True)
-        elif sim_dirs_arg:
-            print(f"  Mode: Auto-detected (--sim-dirs)", flush=True)
-        else:
-            print(f"  Mode: Auto-detected ({len(pdb_list)} PDbs)", flush=True)
-        
-        # Print detected PDbs
-        print(f"  PDbs to process:", flush=True)
-        for i, pdb in enumerate(pdb_list, 1):
-            print(f"    {i}. {Path(pdb).name}", flush=True)
-        
-        log_user_prompt(goal, config)
-
-        # Set multi-sim flags in config so _initialize_state picks them up
-        config["is_multi_simulation"] = True
-        config["multi_sim_base_dir"] = working_dir
-        # Resolve PDB paths: check working_dir first, then cwd, then keep as-is
-        resolved_pdbs = []
-        for p in pdb_list:
-            _p = Path(p)
-            if _p.is_absolute() and _p.exists():
-                resolved_pdbs.append(str(_p))
-            elif (Path(working_dir) / p).exists():
-                resolved_pdbs.append(str((Path(working_dir) / p).resolve()))
-            elif _p.exists():
-                resolved_pdbs.append(str(_p.resolve()))
-            else:
-                # File not found yet — store the path under working_dir so
-                # agents know where to look
-                resolved_pdbs.append(str((Path(working_dir) / p).resolve()))
-        from src.utils.pdb_paths import unique_pdb_paths
-
-        config["pdb_list"] = unique_pdb_paths(resolved_pdbs)
-
-        _goal_pdb_names = {
-            Path(p).name.lower() for p in _extract_pdb_paths_from_goal(goal)
-        }
-        _resolved_names = {Path(p).name.lower() for p in config["pdb_list"]}
-        _missing_pdbs = sorted(_goal_pdb_names - _resolved_names)
-        if _missing_pdbs:
-            print(
-                f"\n  Warning: goal mentions {len(_missing_pdbs)} PDB(s) not found under "
-                f"{working_dir}: {', '.join(_missing_pdbs)}",
-                flush=True,
-            )
-            print(
-                "  Those systems will be omitted from the master plan until the files exist.",
-                flush=True,
-            )
-
-        feedback_handler = None
-        if config["human_in_loop"]:
-            _hitl = config.get("hitl_mode") or "all"
-            if _hitl == "error":
-                print("\n  HITL mode: pause on errors only (--HITL error)", flush=True)
-            else:
-                print("\n  HITL mode: all checkpoints (--HITL all)", flush=True)
-            feedback_handler = interactive_feedback_handler
-
-        workflow = MDWorkflow(llm_client)
-
-        try:
-            if config["human_in_loop"] and feedback_handler:
-                final_state = workflow.run_with_human_feedback(goal, feedback_handler, config)
-            else:
-                final_state = workflow.run(goal, config)
-
-            run_summary = build_run_summary(
-                final_state,
-                working_dir=working_dir,
-                goal=goal,
-                pdb_list=pdb_list,
-                config=config,
-            )
-            summary_paths = write_run_summary(working_dir, run_summary)
-            run_summary["summary_files"] = summary_paths
-            print(f"\n{format_run_summary_terminal(run_summary)}", flush=True)
-
-            counts = run_summary.get("counts", {})
-            n_fail = counts.get("failed", 0)
-            n_skipped = counts.get("skipped", 0)
-            return 0 if n_fail == 0 else 1
-
-        except KeyboardInterrupt:
-            print("\nMulti-simulation workflow interrupted by user")
-            return 130
-        except Exception as e:
-            print(f"\nMulti-simulation workflow failed: {e}")
-            logging.exception("Multi-simulation execution failed")
-            return 1
-
-    # ------------------------------------------------------------------
-    # Single-simulation pipeline (original flow)
-    # ------------------------------------------------------------------
-
-    if pdb_list:
-        config["pdb_list"] = pdb_list
-
-    # UniProt-only single-sim: pass structure request metadata to workflow
+    # Ensure UniProt structures exist at base working_dir (shared by cases).
+    # User-provided files are reused; only missing ones are fetched.
     if structure_request_entries:
+        n_missing = sum(
+            1 for e in structure_request_entries if not Path(e["pdb_path"]).exists()
+        )
+        if n_missing:
+            print(
+                f"  Fetching {n_missing} missing structure(s) from database...",
+                flush=True,
+            )
+        reused, downloaded = _prefetch_uniprot_structures(
+            structure_request_entries, goal
+        )
+        if reused:
+            print(
+                f"  Reusing {len(reused)} existing local structure file(s)",
+                flush=True,
+            )
+        if downloaded:
+            print(
+                f"  Downloaded {len(downloaded)} structure file(s)",
+                flush=True,
+            )
+        if not reused and not downloaded:
+            print(
+                "  Warning: structure acquisition deferred to preprocessing agent",
+                flush=True,
+            )
         config["structure_requests"] = {
             Path(entry["pdb_path"]).stem.lower(): _build_structure_request_config(entry, goal)
             for entry in structure_request_entries
@@ -2347,81 +2259,104 @@ def main(argv=None):
         config["structure_request"] = _build_structure_request_config(
             structure_request_entries[0], goal
         )
-        if not any(Path(e["pdb_path"]).exists() for e in structure_request_entries):
-            print("  Downloading structure from database...", flush=True)
-            _prefetch_uniprot_structures(structure_request_entries, goal)
-    
-    # Initialize workflow
-    workflow = MDWorkflow(llm_client)
-    
-    # Initialize conversation logger
-    conversation_logger = get_conversation_logger(log_path)
-    
-    # Log user prompt
+
+    num_sims = len(pdb_list)
+    print(f"\nCampaign mode: {num_sims} source structure(s) → {{base}}/{{label}}/", flush=True)
+    if sim_dirs_arg:
+        print("  Source: --sim-dirs", flush=True)
+    elif getattr(args, "pdb_list", None):
+        print("  Source: --pdb-list", flush=True)
+    else:
+        print("  Source: goal / UniProt resolution", flush=True)
+
+    print("  Structures:", flush=True)
+    for i, pdb in enumerate(pdb_list, 1):
+        print(f"    {i}. {Path(pdb).name}", flush=True)
+
     log_user_prompt(goal, config)
-    
-    # Run workflow
-    print(f"\nStarting MD workflow for: {goal}", flush=True)
-    print(f"Configuration: {config}", flush=True)
-    if args.subtask:
-        agents_label = ", ".join(a.upper() for a in args.subtask)
-        print(f"Subtask Mode: {agents_label}", flush=True)
-    
+
+    # Always use the multi-sim tree (even for N=1). Combined analysis is skipped
+    # later when len(sim_prompts) <= 1.
+    config["is_multi_simulation"] = True
+    config["multi_sim_base_dir"] = working_dir
+    resolved_pdbs = []
+    for p in pdb_list:
+        _p = Path(p)
+        if _p.is_absolute() and _p.exists():
+            resolved_pdbs.append(str(_p))
+        elif (Path(working_dir) / p).exists():
+            resolved_pdbs.append(str((Path(working_dir) / p).resolve()))
+        elif _p.exists():
+            resolved_pdbs.append(str(_p.resolve()))
+        else:
+            resolved_pdbs.append(str((Path(working_dir) / p).resolve()))
+    from src.utils.pdb_paths import unique_pdb_paths
+
+    config["pdb_list"] = unique_pdb_paths(resolved_pdbs)
+
+    _goal_pdb_names = {
+        Path(p).name.lower() for p in _extract_pdb_paths_from_goal(goal)
+    }
+    _resolved_names = {Path(p).name.lower() for p in config["pdb_list"]}
+    _missing_pdbs = sorted(_goal_pdb_names - _resolved_names)
+    if _missing_pdbs:
+        print(
+            f"\n  Warning: goal mentions {len(_missing_pdbs)} PDB(s) not found under "
+            f"{working_dir}: {', '.join(_missing_pdbs)}",
+            flush=True,
+        )
+        print(
+            "  Those systems will be omitted from the master plan until the files exist.",
+            flush=True,
+        )
+
+    feedback_handler = None
     if config["human_in_loop"]:
         _hitl = config.get("hitl_mode") or "all"
         if _hitl == "error":
             print("\n  HITL mode: pause on errors only (--HITL error)", flush=True)
         else:
             print("\n  HITL mode: all checkpoints (--HITL all)", flush=True)
-    
+        feedback_handler = interactive_feedback_handler
+
+    workflow = MDWorkflow(llm_client)
+
     try:
-        if config["human_in_loop"]:
-            # Run with human feedback
-            final_state = workflow.run_with_human_feedback(
-                goal, 
-                feedback_handler=interactive_feedback_handler,
-                config=config
-            )
+        if config["human_in_loop"] and feedback_handler:
+            final_state = workflow.run_with_human_feedback(goal, feedback_handler, config)
         else:
-            # Run automatically
             final_state = workflow.run(goal, config)
-        
-        # Log workflow completion is handled by conversation_logger
-        # No need for separate log_workflow_state since conversation logger captures everything
-        
+
         run_summary = build_run_summary(
             final_state,
             working_dir=working_dir,
             goal=goal,
-            pdb_list=[],
+            pdb_list=pdb_list,
             config=config,
         )
-        write_run_summary(working_dir, run_summary)
-        success = len(final_state.get('errors', [])) == 0
-        summary = f"Workflow completed with {len(final_state.get('errors', []))} errors and {len(final_state.get('warnings', []))} warnings"
-        log_workflow_completion(final_state, success, summary)
-
+        summary_paths = write_run_summary(working_dir, run_summary)
+        run_summary["summary_files"] = summary_paths
         print(f"\n{format_run_summary_terminal(run_summary)}", flush=True)
 
-        if final_state.get("final_report"):
-            print("\n--- Final Report ---\n")
-            print(final_state["final_report"])
+        counts = run_summary.get("counts", {})
+        n_fail = counts.get("failed", 0)
+        return 0 if n_fail == 0 else 1
 
-        if final_state.get("errors"):
-            print("\nERRORS:")
-            for error in final_state["errors"]:
-                print(f"  - {error}")
-
-        if final_state.get("warnings"):
-            print("\nWARNINGS:")
-            for warning in final_state["warnings"]:
-                print(f"  - {warning}")
-
-        return 0 if not final_state.get("errors") else 1
-        
     except KeyboardInterrupt:
         print("\nWorkflow interrupted by user")
         return 130
+    except TokenBudgetExceeded as e:
+        print(f"\nLLM token budget exceeded: {e}", flush=True)
+        run_summary = build_run_summary(
+            {"errors": [str(e)], "warnings": []},
+            working_dir=working_dir,
+            goal=goal,
+            pdb_list=pdb_list,
+            config=config,
+        )
+        write_run_summary(working_dir, run_summary)
+        print(f"\n{format_run_summary_terminal(run_summary)}", flush=True)
+        return 1
     except Exception as e:
         print(f"\nWorkflow failed: {e}")
         logging.exception("Workflow execution failed")

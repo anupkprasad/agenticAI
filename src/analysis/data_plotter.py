@@ -42,6 +42,8 @@ _ANALYSIS_TYPE_MAP = {
     "sasa": "SASA",
     "dssp": "DSSP_SecondaryStructure",
     "com": "COM_Analysis",
+    "min_distance": "Min_Heavy_Atom_Distance",
+    "nearby": "Nearby_Residues",
 }
 
 

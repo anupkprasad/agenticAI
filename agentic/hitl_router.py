@@ -2,7 +2,7 @@
 Human-in-the-loop (HITL) routing: agent switching, context binding, delegated runs.
 
 Used by human_checkpoints, workflow.run_with_human_feedback, and the interactive
-CLI handler in run_agenticAIWork.py.
+CLI handler in SimAgent.py.
 """
 from __future__ import annotations
 

@@ -40,7 +40,9 @@ garbage/
 benchmarks/
 robustness/
 dclk3_psma4/
+dclk3_dcx_psma4/
 scripts/
+pseudo_JAK/
 
 # Project-specific local data (not source)
 pseudoKin*/

@@ -31,6 +31,7 @@ from .schemas import (
     AnalysisAgentInput, AnalysisAgentOutput
 )
 from .tools import AnalysisToolExecutor, get_tool_metadata, is_combined_analysis_tool
+from src.analysis.chain_residue_map import CHAIN_SELECTION_LLM_NOTE
 from ..planner.planning_guidelines import (
     detect_requested_metrics,
     detect_requested_metrics_union,
@@ -44,8 +45,11 @@ from ..planner.planning_guidelines import (
     resolve_sims_for_combined_metric,
     get_standard_output_filenames_block,
     get_com_distance_tool_guide,
+    get_proximity_tool_guide,
     get_pca_fel_tool_guide,
     STANDARD_OUTPUT_FILES,
+    allowed_output_files_for_metrics,
+    is_metric_output_filename,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +73,10 @@ _CALC_TOOL_TO_METRIC: Dict[str, str] = {
     "analyze_ligand_residence": "residence",
     "calculate_pocket_rmsf": "pocket_rmsf",
     "calculate_ligand_rmsf": "ligand_rmsf",
+    "identify_nearby_residues": "nearby",
+    "calculate_min_heavy_atom_distance": "min_distance",
+    "calculate_hbond_occupancy": "hbond_occupancy",
+    "calculate_salt_bridge_distances": "salt_bridge",
 }
 
 _PREP_TOOLS = frozenset({"wrap_trajectory", "run_complete_analysis"})
@@ -287,8 +295,17 @@ class MDAnalysisAgent:
         sim_dirs: List[str],
         labels: List[str],
         name_map: Optional[Dict[str, str]] = None,
+        *,
+        allow_subset: bool = True,
     ) -> tuple:
-        """Return sim_dirs/labels subset when the HITL task names specific proteins/sims."""
+        """Return sim_dirs/labels subset when the HITL task names specific proteins/sims.
+
+        For workflow combined analysis (``allow_subset=False``), always keep the
+        full simulation list — master-plan text often repeats one PDB/label and
+        would otherwise drop sibling cases (e.g. holo ``*_ATP_MG``).
+        """
+        if not allow_subset or not task:
+            return sim_dirs, labels
         task_lower = task.lower()
         matched_dirs: List[str] = []
         matched_labels: List[str] = []
@@ -298,10 +315,27 @@ class MDAnalysisAgent:
                 for key, display in name_map.items():
                     if key.lower() in tokens or display.lower() in tokens:
                         tokens.update({key.lower(), display.lower()})
+            # Prefer exact label/folder token hits; require word-ish boundaries
+            # so "jak2_atp_2mg" does not uniquely select while excluding
+            # "jak2_atp_2mg_ATP_MG" when both are campaign members.
             if any(len(t) >= 3 and t in task_lower for t in tokens):
                 matched_dirs.append(sim_dir)
                 matched_labels.append(label)
         if matched_dirs:
+            # If every campaign sim matched, or only a proper subset was named,
+            # use the match. If the shorter apo label alone matches because it
+            # is a prefix of the holo label and appears in paths, keep all sims
+            # when the task did not explicitly say "only".
+            if len(matched_dirs) == len(sim_dirs):
+                return matched_dirs, matched_labels
+            only_named = bool(
+                re.search(r"\b(?:only|just|solely)\b", task_lower)
+            )
+            if only_named:
+                return matched_dirs, matched_labels
+            # Ambiguous campaign text mentioning one shared stem — keep all.
+            if len(matched_dirs) < len(sim_dirs) and len(sim_dirs) <= 8:
+                return sim_dirs, labels
             return matched_dirs, matched_labels
         return sim_dirs, labels
 
@@ -325,7 +359,11 @@ class MDAnalysisAgent:
         name_map = _parse_label_name_map(text)
         if name_map:
             labels = apply_label_name_map(labels, name_map)
-        sim_dirs, labels = self._filter_sims_for_hitl_task(task, sim_dirs, labels, name_map)
+        # HITL chat may name a subset; workflow combined always uses full campaign.
+        allow_subset = bool(state.get("hitl_chat_task"))
+        sim_dirs, labels = self._filter_sims_for_hitl_task(
+            task, sim_dirs, labels, name_map, allow_subset=allow_subset
+        )
         params = dict(tool_params)
         params["sim_dirs"] = sim_dirs
         params["labels"] = labels
@@ -362,20 +400,57 @@ class MDAnalysisAgent:
 
         from agentic.reporter.reporter_agent import resolve_combined_sim_context
         from src.reporter.combined_reporter import _parse_label_name_map, apply_label_name_map
+        from agentic.planner.planning_guidelines import (
+            detect_classification_requested,
+            detect_phylo_tree_requested,
+            detect_requested_metrics_union,
+        )
 
         sim_dirs, labels = resolve_combined_sim_context(state)
         text = " ".join(
             filter(
                 None,
-                [task, state.get("user_goal_original"), state.get("master_enriched_prompt")],
+                [
+                    task,
+                    state.get("user_goal_original"),
+                    state.get("combined_analysis_plan"),
+                    state.get("master_enriched_prompt"),
+                ],
             )
         )
         name_map = _parse_label_name_map(text)
         if name_map:
             labels = apply_label_name_map(labels, name_map)
-        sim_dirs, labels = self._filter_sims_for_hitl_task(task, sim_dirs, labels, name_map)
+        allow_subset = bool(state.get("hitl_chat_task"))
+        sim_dirs, labels = self._filter_sims_for_hitl_task(
+            task, sim_dirs, labels, name_map, allow_subset=allow_subset
+        )
 
-        requested = detect_requested_metrics(task) or frozenset()
+        intent_texts = (
+            task,
+            state.get("user_goal_original") or "",
+            state.get("combined_analysis_plan") or "",
+            state.get("master_enriched_prompt") or "",
+        )
+        requested = detect_requested_metrics_union(*intent_texts) or frozenset()
+        class_ok = detect_classification_requested(*intent_texts)
+        phylo_req = detect_phylo_tree_requested(*intent_texts)
+        phylo_ok = bool(phylo_req.get("sequence") or phylo_req.get("structure"))
+
+        _CLASSIFICATION_TOOLS = {
+            "collect_classification_features_table",
+            "cluster_classification_features",
+            "plot_cluster_feature_trajectories",
+            "plot_cluster_rmsf_profiles",
+            "collect_fel_features_table",
+        }
+        _PHYLO_TOOLS = {
+            "build_sequence_phylo_tree",
+            "build_structure_phylo_tree",
+            "build_consensus_sequence_alignment",
+            "plot_reference_msa_alignment",
+        }
+
         recalc = any(
             kw in task.lower()
             for kw in ("recalculate", "recompute", "re-run", "rerun", "from trajectory", "from scratch")
@@ -383,7 +458,9 @@ class MDAnalysisAgent:
         prefer_existing = not recalc and (
             self._task_prefers_existing_combined_data(task) or self._is_combined_hitl_context(state)
         )
-        metrics = sorted(m for m in requested if m in {"rmsd", "rmsf", "rg", "energy", "sasa", "hbond"})
+        metrics = sorted(
+            m for m in requested if m in {"rmsd", "rmsf", "rg", "energy", "sasa", "hbond"}
+        )
         if not metrics and "rmsf" in task.lower():
             metrics = ["rmsf"]
 
@@ -392,12 +469,18 @@ class MDAnalysisAgent:
             tool = step.get("tool_name") or ""
             if prefer_existing and tool.startswith("calculate_"):
                 continue
+            if tool in _CLASSIFICATION_TOOLS and not class_ok:
+                continue
+            if tool in _PHYLO_TOOLS and not phylo_ok:
+                continue
             if is_combined_analysis_tool(tool):
                 params = dict(step.get("tool_params") or {})
                 params["sim_dirs"] = sim_dirs
                 params["labels"] = labels
                 params["working_dir"] = "."
-                if metrics:
+                # Only run_combined_analysis takes a metrics list; do not stamp
+                # metrics onto classification/clustering or overlay-specific tools.
+                if tool == "run_combined_analysis" and metrics:
                     params["metrics"] = metrics
                 step = {**step, "tool_params": params}
                 new_steps.append(step)
@@ -475,13 +558,13 @@ class MDAnalysisAgent:
         """
         Main analysis node - entry point from workflow.
 
-        In multi-sim combined_analysis phase: runs cross-simulation overlay
-        analysis using dedicated combined tools.
+        In multi-sim combined_analysis phase: LLM plans with combined tools
+        exposed, then executes (deterministic pipeline is the fallback).
         Otherwise: runs the regular per-simulation LLM-guided analysis.
         """
         # ── Combined multi-sim analysis ───────────────────────────────────
         if state.get("multi_sim_phase") == "combined_analysis":
-            return self._run_combined_analysis(state)
+            return self._run_combined_analysis_via_llm(state)
 
         # ── Regular per-sim analysis ──────────────────────────────────────
         execution_plan = state.get("execution_plan", {})
@@ -816,6 +899,7 @@ class MDAnalysisAgent:
   • Residue segment (e.g. 100–120): a second analyze_secondary_structure with selection="protein and resid 100:120",
     output_prefix="dssp_res100_120", create_heatmap=True
   • analyze_secondary_structure generates heatmaps internally — do NOT add a separate plot step for DSSP heatmaps.
+{CHAIN_SELECTION_LLM_NOTE}
 - For calculate_* metrics that produce .dat/.csv files, follow each with plot_md_data using the data filename only.
 - For combined cross-simulation overlays: use run_combined_analysis with metrics limited to what the user asked
   (e.g. metrics=["rmsf"] only) and sim_dirs/labels restricted to the simulations the user named.
@@ -897,9 +981,364 @@ Output as JSON:
 
     # ── Combined multi-sim analysis ───────────────────────────────────────
 
+    def _build_combined_analysis_task(self, state: MDState) -> str:
+        """Compose the sole planning intent for combined LLM analysis."""
+        parts = []
+        original = (state.get("user_goal_original") or "").strip()
+        combined_plan = (state.get("combined_analysis_plan") or "").strip()
+        if original:
+            parts.append(f"Original study goal:\n{original}")
+        if combined_plan:
+            parts.append(f"Combined analysis plan from master planner:\n{combined_plan}")
+        if not parts:
+            parts.append(
+                (state.get("user_goal") or state.get("analysis_instructions") or "").strip()
+                or "Compare simulations with combined overlay plots of requested metrics."
+            )
+        parts.append(
+            "Use existing per-simulation analysis outputs under each sim's analysis/ "
+            "directory. Prefer run_combined_analysis / plot_combined_overlay over "
+            "recalculating metrics from trajectories. Plan ONLY metrics and deliverables "
+            "explicitly requested — do not add classification, clustering, ligand RMSF, "
+            "DCCM, or other extras unless the goal asks for them."
+        )
+        return "\n\n".join(parts)
+
+    def _build_combined_analysis_planning_prompt(
+        self,
+        task: str,
+        agent_input: AnalysisAgentInput,
+        state: MDState,
+    ) -> str:
+        """LLM planning prompt for workflow combined analysis (tools + sim context)."""
+        tool_metadata = self._get_analysis_tool_metadata(state)
+        tools_list_str = self._format_tools_list_detailed(tool_metadata)
+        scope_note = self._get_combined_hitl_scope_note()
+        combined_context = self._format_combined_sim_context_for_hitl(state)
+        class_guide = ""
+        if detect_classification_requested(
+            task,
+            state.get("user_goal_original") or "",
+            state.get("combined_analysis_plan") or "",
+        ):
+            class_guide = "\n" + get_classification_tool_guide()
+
+        return f"""You are the Analysis Agent in COMBINED multi-simulation mode.
+
+**OBJECTIVE (plan and execute only this):**
+{task}
+{scope_note}
+{combined_context}
+{class_guide}
+
+**Available Tools (combined tools are enabled):**
+{tools_list_str}
+
+**COMBINED PLANNING RULES:**
+- Prefer cross-simulation tools (run_combined_*, plot_combined_overlay, collect_metric_files,
+  compute_comparison_table). Do NOT call per-sim calculate_* unless the user asked to recompute
+  from trajectories.
+- For overlay plots use run_combined_analysis with metrics limited to what was requested
+  (e.g. metrics=["rmsd","rmsf"] only) and the exact sim_dirs/labels listed above.
+- Classification / clustering tools are allowed ONLY when the objective explicitly asks to
+  classify or cluster simulations — never because the goal mentions an HPC cluster.
+- Use working_dir="." for combined tools (outputs go to the combined analysis directory).
+- overview MUST be a single string (not a JSON array).
+
+Output as JSON:
+{{
+  "reasoning": "How you will fulfill the combined objective",
+  "overview": "High-level summary",
+  "steps": [
+    {{
+      "name": "step name",
+      "description": "what it does",
+      "tool_name": "tool to call",
+      "tool_params": {{"param": "value"}},
+      "reason": "why this step is needed"
+    }}
+  ],
+  "potential_issues": [],
+  "recommendations": []
+}}
+"""
+
+    def _create_combined_analysis_plan_llm(
+        self,
+        agent_input: AnalysisAgentInput,
+        state: MDState,
+        task: str,
+    ) -> AnalysisPlan:
+        """LLM JSON plan for workflow combined analysis with tools exposed."""
+        prompt = self._build_combined_analysis_planning_prompt(task, agent_input, state)
+        try:
+            plan_dict = self._llm_plan_json_with_retry(
+                prompt, "analysis.combined_planning", temperature=0.2, max_tokens=16384
+            )
+            plan_dict.pop("_raw_content", None)
+            plan_dict = self._normalize_plan_steps(plan_dict, agent_input)
+            plan_dict = self._normalize_hitl_plan_dict(plan_dict)
+            plan_dict = self._sanitize_combined_hitl_plan(plan_dict, state, task)
+            # Intent filter without treating this as HITL chat (no hitl_chat_task).
+            plan_dict = self._filter_plan_steps_by_intent(plan_dict, state, agent_input)
+            if not plan_dict.get("steps"):
+                logger.warning(
+                    "Combined LLM plan empty after sanitize/filter; using fallback plan"
+                )
+                return self._create_combined_hitl_fallback_plan(agent_input, state)
+            steps = [
+                AnalysisStep(
+                    name=step.get("name") or "unknown",
+                    description=step.get("description") or "",
+                    tool_name=step.get("tool_name") or "",
+                    tool_params=step.get("tool_params") or {},
+                    reason=step.get("reason") or "",
+                )
+                for step in plan_dict.get("steps", [])
+                if (step.get("tool_name") or "").strip()
+            ]
+            if not steps:
+                logger.warning(
+                    "Combined LLM plan had no valid tool_name steps; using fallback plan"
+                )
+                return self._create_combined_hitl_fallback_plan(agent_input, state)
+            return AnalysisPlan(
+                reasoning=plan_dict.get("reasoning", "Combined LLM plan"),
+                overview=plan_dict.get("overview", "Combined multi-simulation analysis"),
+                steps=steps,
+                potential_issues=plan_dict.get("potential_issues", []),
+                recommendations=plan_dict.get("recommendations", []),
+            )
+        except Exception as exc:
+            logger.warning("Combined LLM planning failed, using fallback: %s", exc)
+            return self._create_combined_hitl_fallback_plan(agent_input, state)
+
+    def _mark_combined_analysis_complete(
+        self,
+        state: MDState,
+        *,
+        analysis_dir: str,
+        sim_dirs: List[str],
+        labels: List[str],
+        success: bool,
+    ) -> None:
+        """Persist a disk marker and advance multi-sim phase to combined reporter."""
+        import json as _json
+        from datetime import datetime as _dt
+
+        marker = Path(analysis_dir) / "combined_analysis_complete.json"
+        try:
+            marker.write_text(
+                _json.dumps(
+                    {
+                        "success": success,
+                        "timestamp": _dt.now().isoformat(timespec="seconds"),
+                        "labels": labels,
+                        "sim_dirs": sim_dirs,
+                        "planning_mode": "llm",
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning("Could not write combined_analysis_complete.json: %s", exc)
+
+        progress = state.get("multi_sim_progress") or {}
+        combined = progress.setdefault("combined", {})
+        combined["analysis"] = "done"
+        combined["reporter"] = combined.get("reporter") or "pending"
+        progress["phase"] = "combined_reporter"
+        progress["active_agent"] = "reporter"
+        progress["active_sim_label"] = None
+        state["multi_sim_progress"] = progress
+        state["multi_sim_phase"] = "combined_reporter"
+        state["current_agent_idx"] = 1
+        state["run_combined_analysis"] = True
+
+    def _populate_combined_results_from_execution(
+        self,
+        state: MDState,
+        *,
+        sim_dirs: List[str],
+        labels: List[str],
+        analysis_dir: str,
+        result: AnalysisExecutionResult,
+    ) -> None:
+        """Build analysis_results['combined'] from LLM execution + on-disk overlays."""
+        plots: List[str] = []
+        tables: List[str] = []
+        for path in (result.generated_files or {}):
+            p = str(path)
+            lower = p.lower()
+            if lower.endswith((".png", ".pdf", ".svg")):
+                plots.append(p)
+            elif lower.endswith((".csv", ".dat", ".tsv", ".xlsx")):
+                tables.append(p)
+
+        adir = Path(analysis_dir)
+        if adir.is_dir():
+            for pattern in ("*overlay*.png", "*_comparison*.png", "*apo*holo*.png"):
+                for p in sorted(adir.glob(pattern)):
+                    sp = str(p)
+                    if sp not in plots:
+                        plots.append(sp)
+            for pattern in ("*_stats.csv", "classification_features*.csv"):
+                for p in sorted(adir.glob(pattern)):
+                    sp = str(p)
+                    if sp not in tables:
+                        tables.append(sp)
+
+        analysis_results = state.get("analysis_results") or {}
+        analysis_results["combined"] = {
+            "sim_dirs": sim_dirs,
+            "labels": labels,
+            "overlay_plots": plots,
+            "stats_tables": tables,
+            "skipped_metrics": [],
+            "dccm_plots": [p for p in plots if "dccm" in Path(p).name.lower()],
+            "rmsf_apo_holo_plots": [
+                p for p in plots if "apo" in Path(p).name.lower() and "holo" in Path(p).name.lower()
+            ],
+            "apo_holo_pairs": [],
+            "rmsf_segment_plots": [],
+            "com_distance_plot": next(
+                (p for p in plots if "com" in Path(p).name.lower() or "pocket_distance" in Path(p).name.lower()),
+                None,
+            ),
+            "dssp_plots": [p for p in plots if "dssp" in Path(p).name.lower()],
+            "classification_features_table": next(
+                (t for t in tables if "classification_features" in Path(t).name.lower()),
+                None,
+            ),
+            "classification_clustering": None,
+            "classification_metric_groups": None,
+            "analysis_dir": analysis_dir,
+            "planning_mode": "llm",
+        }
+        state["analysis_results"] = analysis_results
+        state["figures"] = list(state.get("figures") or []) + [
+            p for p in plots if p not in (state.get("figures") or [])
+        ]
+
+    def _run_combined_analysis_via_llm(self, state: MDState) -> MDState:
+        """
+        Combined analysis via LLM planning with combined tools exposed.
+
+        Falls back to the deterministic pipeline if planning/execution fails.
+        """
+        from agentic.multi_sim_paths import resolve_multi_sim_base_dir
+        from agentic.utils.conversation_logger import set_log_file
+        from agentic.reporter.reporter_agent import resolve_combined_sim_context
+
+        working_dir = resolve_multi_sim_base_dir(state)
+        if state.get("is_multi_simulation"):
+            state["multi_sim_base_dir"] = working_dir
+            state["working_directory"] = working_dir
+        set_log_file(str(Path(working_dir) / "agent_conversation.log"))
+
+        analysis_dir = str(Path(working_dir) / "analysis")
+        Path(analysis_dir).mkdir(parents=True, exist_ok=True)
+        state["analysis_dir"] = analysis_dir
+        state["analysis_directory"] = analysis_dir
+        state["skip_pbc_wrap"] = True
+
+        sim_dirs, labels = resolve_combined_sim_context(state)
+        task = self._build_combined_analysis_task(state)
+
+        log_agent_start(
+            "analysis",
+            "Combined Multi-Simulation Analysis (LLM)",
+            {
+                "sim_dirs": sim_dirs,
+                "labels": labels,
+                "output_dir": analysis_dir,
+                "planning": "llm",
+            },
+        )
+
+        try:
+            self.init_for_hitl_execution(state)
+            agent_input = self.prepare_agent_input_for_hitl(state, task)
+            plan = self._create_combined_analysis_plan_llm(agent_input, state, task)
+
+            log_agent_action(
+                "analysis",
+                "Generated combined analysis plan",
+                {
+                    "steps": len(plan.steps),
+                    "tools": [s.tool_name for s in plan.steps],
+                    "reasoning": (plan.reasoning or "")[:500],
+                    "overview": plan.overview,
+                },
+            )
+
+            exec_plan = state.get("execution_plan") or {}
+            exec_plan.setdefault("structured_plans", {})["analysis"] = plan.model_dump()
+            exec_plan["format"] = "combined_analysis_llm"
+            state["execution_plan"] = exec_plan
+
+            if not plan.steps:
+                logger.warning("Combined LLM plan has no steps — deterministic fallback")
+                return self._run_combined_analysis(state)
+
+            result = self._execute_analysis_plan(agent_input, plan, state)
+            self._save_hitl_execution_artifacts(plan, result, task)
+            self._populate_combined_results_from_execution(
+                state,
+                sim_dirs=sim_dirs,
+                labels=labels,
+                analysis_dir=analysis_dir,
+                result=result,
+            )
+
+            state["errors"] = [
+                e
+                for e in state.get("errors", [])
+                if not (
+                    e.startswith("Analysis failed:") or e.startswith("Analysis error:")
+                )
+            ]
+            for issue in result.issues or []:
+                state.setdefault("warnings", []).append(f"Combined analysis: {issue}")
+
+            success = bool(result.success)
+            # Always mark complete after a full LLM plan attempt so the supervisor
+            # advances to combined reporter instead of re-planning forever.
+            self._mark_combined_analysis_complete(
+                state,
+                analysis_dir=analysis_dir,
+                sim_dirs=sim_dirs,
+                labels=labels,
+                success=success,
+            )
+            log_agent_completion(
+                "analysis", "Combined Multi-Simulation Analysis (LLM)", state, success
+            )
+            if hitl_should_interact(state):
+                state["next_node"] = "human_analysis_check"
+            else:
+                # Go straight to reporter — avoid another supervisor activate cycle.
+                state["next_node"] = "reporter"
+            return state
+
+        except Exception as exc:
+            import traceback
+
+            logger.error(
+                "Combined LLM analysis failed (%s) — falling back to deterministic pipeline\n%s",
+                exc,
+                traceback.format_exc(),
+            )
+            state.setdefault("warnings", []).append(
+                f"Combined LLM analysis failed ({exc}); using deterministic fallback"
+            )
+            return self._run_combined_analysis(state)
+
     def _run_combined_analysis(self, state: MDState) -> MDState:
         """
-        Run cross-simulation combined analysis.
+        Deterministic cross-simulation combined analysis (fallback / legacy).
 
         Collects per-sim data files, produces overlay plots and stats CSVs
         in ``{working_directory}/analysis/``, and stores the results in state
@@ -908,11 +1347,14 @@ Output as JSON:
         from .tools import run_combined_analysis, collect_metric_files
 
         from agentic.multi_sim_paths import resolve_multi_sim_base_dir
+        from agentic.utils.conversation_logger import set_log_file
 
         working_dir = resolve_multi_sim_base_dir(state)
         if state.get("is_multi_simulation"):
             state["multi_sim_base_dir"] = working_dir
             state["working_directory"] = working_dir
+        # Combined phase always records to the campaign base log.
+        set_log_file(str(Path(working_dir) / "agent_conversation.log"))
         analysis_dir = str(Path(working_dir) / "analysis")
         Path(analysis_dir).mkdir(parents=True, exist_ok=True)
         state["analysis_dir"] = analysis_dir
@@ -1054,6 +1496,18 @@ Output as JSON:
             # per-protein RMSF comparison is clearer for ligand-effect studies.
             if apo_holo_pairs and "rmsf" in combined_metrics:
                 combined_metrics = [m for m in combined_metrics if m != "rmsf"]
+
+            # Deterministic path: keep a short audit note (not a fake LLM call).
+            log_agent_action(
+                "analysis",
+                "Combined analysis deterministic plan",
+                {
+                    "metrics": combined_metrics,
+                    "requested": sorted(requested),
+                    "classification": sorted(class_groups) if class_groups else None,
+                    "apo_holo_pairs": len(apo_holo_pairs),
+                },
+            )
 
             plots = []
             tables = []
@@ -1849,11 +2303,18 @@ Output as JSON:
                 if not (e.startswith("Analysis failed:") or e.startswith("Analysis error:"))
             ]
 
+            self._mark_combined_analysis_complete(
+                state,
+                analysis_dir=analysis_dir,
+                sim_dirs=sim_dirs,
+                labels=labels,
+                success=True,
+            )
             log_agent_completion("analysis", "Combined Multi-Simulation Analysis", state, True)
             if hitl_should_interact(state):
                 state["next_node"] = "human_analysis_check"
             else:
-                state["next_node"] = "supervisor"
+                state["next_node"] = "reporter"
 
         except Exception as exc:
             import traceback
@@ -2168,12 +2629,15 @@ Output as JSON:
         return None
 
     def _find_tpr(self, directory: str) -> Optional[str]:
-        """Return the first .tpr file found in *directory* or its sub-dirs."""
-        if not directory:
-            return None
-        for candidate in Path(directory).rglob("*.tpr"):
-            return str(candidate.resolve())
-        return None
+        """Return the production TPR for wrapping / analysis.
+
+        Prefer ``md.tpr``. ``Path.rglob('*.tpr')`` is filesystem-ordered and
+        often hits ``nvt.tpr`` / ``minim.tpr`` first, which breaks
+        ``gmx trjconv`` on ``md.xtc``.
+        """
+        from src.analysis.trajectory_wrapper import find_production_tpr
+
+        return find_production_tpr(directory)
 
     def _write_pdb_info_to_summary(self, state: MDState, analysis_dir: str) -> None:
         """
@@ -2651,16 +3115,17 @@ Output as JSON:
         if requested is None:
             return plan_dict
 
-        allowed_data_files = {
-            STANDARD_OUTPUT_FILES[m]["data"]
-            for m in requested
-            if m in STANDARD_OUTPUT_FILES and "data" in STANDARD_OUTPUT_FILES[m]
-        }
-        allowed_plot_files = {
-            STANDARD_OUTPUT_FILES[m]["plot"]
-            for m in requested
-            if m in STANDARD_OUTPUT_FILES and "plot" in STANDARD_OUTPUT_FILES[m]
-        }
+        allowed_data_files, allowed_plot_files = allowed_output_files_for_metrics(requested)
+
+        calc_outputs: Set[str] = set()
+        for step in plan_dict.get("steps", []):
+            tool = step.get("tool_name", "")
+            metric = _CALC_TOOL_TO_METRIC.get(tool)
+            if metric is not None and metric not in requested:
+                continue
+            out = str((step.get("tool_params") or {}).get("output_file", "") or "")
+            if out:
+                calc_outputs.add(Path(out).name)
 
         filtered: List[Dict[str, Any]] = []
         for step in plan_dict.get("steps", []):
@@ -2676,12 +3141,19 @@ Output as JSON:
                 params = step.get("tool_params") or {}
                 data_files = params.get("data_files") or []
                 out_file = str(params.get("output_file", ""))
+                out_name = Path(out_file).name if out_file else ""
                 data_ok = any(
-                    df in allowed_data_files
-                    or any(m in str(df).lower() for m in requested)
+                    Path(str(df)).name in allowed_data_files
+                    or Path(str(df)).name in calc_outputs
+                    or is_metric_output_filename(str(df), requested)
                     for df in data_files
                 )
-                plot_ok = out_file in allowed_plot_files or not out_file
+                plot_ok = (
+                    not out_name
+                    or out_name in allowed_plot_files
+                    or is_metric_output_filename(out_name, requested)
+                    or Path(out_name).stem in {Path(str(df)).stem for df in data_files}
+                )
                 if data_ok and plot_ok:
                     filtered.append(step)
                 continue
@@ -3139,6 +3611,85 @@ Output as JSON:
                     "(%d panels: %s)", len(panel_files), panel_files
                 )
 
+        plan_dict["steps"] = steps
+        plan_dict = self._inject_missing_metric_plots(plan_dict)
+        return plan_dict
+
+    def _inject_missing_metric_plots(self, plan_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Add plot_md_data for calculate_* outputs that have no matching plot step."""
+        steps = list(plan_dict.get("steps") or [])
+        plotted: Set[str] = set()
+        for step in steps:
+            if step.get("tool_name") not in {"plot_md_data", "plot_multipanel", "plot_md_multipanel"}:
+                continue
+            for data_file in (step.get("tool_params") or {}).get("data_files") or []:
+                plotted.add(Path(str(data_file)).name)
+
+        skip_tools = _PREP_TOOLS | {
+            "identify_nearby_residues",
+            "calculate_hbond_occupancy",
+            "calculate_salt_bridge_distances",
+            "calculate_dccm",
+            "analyze_secondary_structure",
+            "calculate_trajectory_pca",
+            "calculate_free_energy_landscape",
+            "analyze_fel_landscape_features",
+            "export_fel_basin_structures",
+        }
+        ylabel_by_stem = (
+            ("rmsd", "RMSD (Å)"),
+            ("rmsf", "RMSF (Å)"),
+            ("gyration", "Rg (Å)"),
+            ("min_distance", "Min distance (Å)"),
+            ("com_distance", "COM Distance (Å)"),
+            ("ligand_pocket_distance", "COM Distance (Å)"),
+            ("sasa", "SASA (nm²)"),
+            ("energy", "Energy (kJ/mol)"),
+        )
+
+        injected = 0
+        for step in list(steps):
+            tool = step.get("tool_name", "")
+            if tool in skip_tools or tool.startswith("plot_"):
+                continue
+            if not tool.startswith("calculate_") and not tool.startswith("analyze_"):
+                continue
+            out = str((step.get("tool_params") or {}).get("output_file", "") or "")
+            name = Path(out).name
+            if not name or name in plotted:
+                continue
+            suffix = Path(name).suffix.lower()
+            if suffix not in {".dat", ".csv"}:
+                continue
+            stem = Path(name).stem
+            ylabel = "Value"
+            xlabel = "Time (ns)"
+            for key, label in ylabel_by_stem:
+                if stem == key or stem.startswith(key + "_"):
+                    ylabel = label
+                    break
+            if "rmsf" in stem.lower():
+                xlabel = "Residue"
+            plot_name = f"{stem}.png"
+            steps.append({
+                "name": f"Plot {stem}",
+                "description": f"Plot {name} as {plot_name}.",
+                "tool_name": "plot_md_data",
+                "tool_params": {
+                    "data_files": [name],
+                    "output_file": plot_name,
+                    "xlabel": xlabel,
+                    "ylabel": ylabel,
+                    "titles": stem,
+                },
+                "reason": "Mandatory plot for each calculate_* data file.",
+            })
+            plotted.add(name)
+            injected += 1
+
+        if injected:
+            logger.info("_inject_missing_metric_plots: added %d plot step(s)", injected)
+            plan_dict["steps"] = steps
         return plan_dict
 
     def _build_analysis_planning_prompt(self, agent_input: AnalysisAgentInput, 
@@ -3251,6 +3802,8 @@ If the Enriched User Goal says "RMSF only" (or similar exclusive language), plan
     {{"tool_name": "plot_md_data",   "tool_params": {{"data_files": ["rmsd.dat"], "output_file": "rmsd.png", "xlabel": "Time (ns)", "ylabel": "RMSD (Å)"}}}}
 - Apply this pattern for RMSD, RMSF, Rg, energy, and any distance calculation.
 {get_com_distance_tool_guide()}
+{get_proximity_tool_guide()}
+{CHAIN_SELECTION_LLM_NOTE}
 {_pca_fel_block}
 {_classification_block}
 - **DCCM — only when the User Goal explicitly names DCCM for this simulation:**
@@ -3916,6 +4469,101 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     ),
                 ])
 
+            if "nearby" in requested:
+                _qsel = "chainID B and resid 1:34" if (
+                    "1 to 34" in _goal_lower or "1-34" in _goal_lower or "1–34" in _goal_lower
+                ) else "chainID B"
+                steps.append(AnalysisStep(
+                    name="Identify nearby residues",
+                    description="Freeze neighbor residues within 10 Å of the query group at frame 0",
+                    tool_name="identify_nearby_residues",
+                    tool_params={
+                        "topology_file": topo_name,
+                        "trajectory_file": traj_name,
+                        "query_selection": _qsel,
+                        "neighbor_selection": "chainID A",
+                        "cutoff": 10.0,
+                        "frame": 0,
+                        "output_file": "nearby_residues_A_near_B1to34.json" if "34" in _qsel else "nearby_residues.json",
+                    },
+                    reason="User requested nearby / interface residues",
+                ))
+
+            if "min_distance" in requested:
+                steps.extend([
+                    AnalysisStep(
+                        name="Minimum heavy-atom distance",
+                        description="Per-frame minimum heavy-atom distance between the interface groups",
+                        tool_name="calculate_min_heavy_atom_distance",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "selection1": "chainID B and resid 1:34" if "34" in _goal_lower else "chainID B",
+                            "selection2": "chainID A",
+                            "label1": "B1to34",
+                            "label2": "nearbyA",
+                            "output_file": "min_distance_B1to34_vs_nearbyA.csv",
+                        },
+                        reason="User requested minimum heavy-atom distance at the interface",
+                    ),
+                    AnalysisStep(
+                        name="Plot minimum heavy-atom distance",
+                        description="Plot min heavy-atom distance over time",
+                        tool_name="plot_md_data",
+                        tool_params={
+                            "data_files": ["min_distance_B1to34_vs_nearbyA.csv"],
+                            "output_file": "min_distance_B1to34_vs_nearbyA.png",
+                            "xlabel": "Time (ns)",
+                            "ylabel": "Min distance (Å)",
+                        },
+                        reason="Visualise whether the interface stays in contact",
+                    ),
+                ])
+
+            if "hbond_occupancy" in requested:
+                _hb_sel1 = "chainID B and resid 1:34" if (
+                    "1 to 34" in _goal_lower or "1-34" in _goal_lower or "1–34" in _goal_lower
+                ) else "chainID B"
+                steps.extend([
+                    AnalysisStep(
+                        name="Hydrogen-bond occupancy",
+                        description="Residue-pair H-bond occupancy between the requested protein groups",
+                        tool_name="calculate_hbond_occupancy",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "selection1": _hb_sel1,
+                            "selection2": "chainID A",
+                            "label1": "B1to34" if "34" in _hb_sel1 else "B",
+                            "label2": "A",
+                            "output_file": "hbond_occupancy_B1to34_vs_A.csv" if "34" in _hb_sel1 else "hbond_occupancy.csv",
+                        },
+                        reason="User requested interface H-bond occupancy / interaction partners",
+                    ),
+                ])
+
+            if "salt_bridge" in requested:
+                _sb_sel1 = "chainID B and resid 1:34" if (
+                    "1 to 34" in _goal_lower or "1-34" in _goal_lower or "1–34" in _goal_lower
+                ) else "chainID B"
+                steps.extend([
+                    AnalysisStep(
+                        name="Salt-bridge distances",
+                        description="Charged-pair distances and occupancy at the protein–protein interface",
+                        tool_name="calculate_salt_bridge_distances",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "selection1": _sb_sel1,
+                            "selection2": "chainID A",
+                            "label1": "B1to34" if "34" in _sb_sel1 else "B",
+                            "label2": "A",
+                            "output_file": "saltbridge_occupancy_B1to34_vs_A.csv" if "34" in _sb_sel1 else "saltbridge_occupancy.csv",
+                        },
+                        reason="User requested salt-bridge / charged interaction partners",
+                    ),
+                ])
+
             _has_dccm_request = "dccm" in requested or any(
                 kw in _goal_lower for kw in
                 ["dccm", "cross-correlation", "cross correlation",
@@ -4054,14 +4702,34 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             params["working_dir"] = str(self.file_manager.agent_dir)
             prepared[idx] = params
 
+        from src.analysis.proximity_analyzer import apply_selection_from_files
+
+        pre_results: Dict[int, Dict[str, Any]] = {}
+        analysis_dir = str(self.file_manager.agent_dir)
+        for idx, step in enumerate(plan.steps):
+            if step.tool_name != "identify_nearby_residues":
+                continue
+            logger.info("Pre-running identify_nearby_residues before trajectory batch")
+            try:
+                result = self.tool_executor.execute(step.tool_name, **prepared[idx])
+            except Exception as exc:
+                logger.exception("identify_nearby_residues pre-batch failed: %s", exc)
+                result = {"success": False, "error": str(exc)}
+            pre_results[idx] = result
+
+        for idx, params in list(prepared.items()):
+            prepared[idx] = apply_selection_from_files(params, working_dir=analysis_dir)
+
         logger.info(summarize_batch_plan(plan.steps))
-        return run_plan_trajectory_batches(
+        batch_results = run_plan_trajectory_batches(
             plan.steps,
             topology_file=topology,
             trajectory_file=trajectory,
             working_dir=str(self.file_manager.agent_dir),
             prepared_params=prepared,
         )
+        batch_results.update(pre_results)
+        return batch_results
 
     def _execute_analysis_plan(self, agent_input: AnalysisAgentInput, 
                                plan: AnalysisPlan,
@@ -4079,7 +4747,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         # Get execution limits from config
         agent_config = self.config
         max_retries = agent_config.get("max_tool_retries", 2)
-        max_steps = agent_config.get("max_total_steps", 20)
+        max_steps = agent_config.get("max_total_steps", 40)
         fail_fast = agent_config.get("fail_fast", False)
         
         # Get analysis directory

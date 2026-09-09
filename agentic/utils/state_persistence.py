@@ -116,6 +116,7 @@ _BASE_MULTISIM_OMIT: Set[str] = {
     "cleaned_pdb",
     "coordinates",
     "topology",
+    "chain_residue_map",
     "trajectory_path",
     "energy_file",
     "job_id",

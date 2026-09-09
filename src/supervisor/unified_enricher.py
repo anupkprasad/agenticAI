@@ -148,6 +148,23 @@ def enrich_prompt_unified(
 Note: Only included components should be extracted during preprocessing and set up during simulation setup.
 """
             context_parts.append(comp_context)
+
+    # 4b. Multi-sim case metadata (authoritative for apo vs holo from one PDB)
+    sim_case = state.get("sim_case") or {}
+    if sim_case.get("case_id") or sim_case.get("case_directive"):
+        case_id = sim_case.get("case_id") or "default"
+        case_desc = sim_case.get("case_description") or ""
+        case_dir = sim_case.get("case_directive") or ""
+        case_context = f"""
+**Simulation Case (authoritative):**
+- case_id: {case_id}
+- description: {case_desc}
+- directive: {case_dir}
+CRITICAL: Honor this case_id above any components present in the source PDB.
+If case_id is protein_only (apo), extract and simulate protein only — do NOT include ligands (e.g. ATP) or crystallographic ions (e.g. MG).
+If case_id is protein_with_ligand (holo), include the ligand and any ions required by the directive.
+"""
+        context_parts.append(case_context)
     
     # 5. Task type and workflow agents context
     agent_list = state.get("agent_list") or []

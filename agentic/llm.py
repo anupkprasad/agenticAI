@@ -13,7 +13,7 @@ Example usage:
 """
 from __future__ import annotations
 
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Tuple
 from dataclasses import dataclass
 import re
 import uuid
@@ -22,6 +22,7 @@ import json
 import urllib.parse
 import sys
 import os
+from pathlib import Path
 
 # Add parent directory to path to import llm_config
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,6 +38,16 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+from agentic.llm_usage import (
+    LLMCallRecord,
+    LLMUsageTracker,
+    TokenBudgetExceeded,
+    estimate_tokens,
+    parse_usage_from_response,
+    resolve_llm_api_key,
+    resolve_llm_budget_from_env,
+)
+
 # Try to import the correct ollama client; if not installed,
 # we'll operate in a mock mode but will attempt HTTP calls to base_url if given.
 ollama_client = None
@@ -49,7 +60,16 @@ except Exception:
 
 
 class LLMClient:
-    def __init__(self, model: str = None, base_url: Optional[str] = None, **kwargs):
+    def __init__(
+        self,
+        model: str = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        token_budget: Optional[int] = None,
+        working_dir: Optional[str] = None,
+        provider: str = "auto",
+        **kwargs,
+    ):
         # Use centralized config as defaults if available
         if llm_config:
             self.model = model or llm_config.DEFAULT_MODEL
@@ -62,6 +82,27 @@ class LLMClient:
         self._is_mock_mode = False  # Track if we're in mock mode
         self._last_raw_response = None
         self._last_thinking = None  # Reasoning tokens from the last call (debug)
+        self._last_call_usage: Dict[str, Any] = {}
+        self.agent_label = kwargs.pop("agent_label", "") or ""
+
+        self.api_key = resolve_llm_api_key(api_key)
+        self.provider = self._resolve_provider(provider)
+        if self.api_key and self.provider == "openai" and (
+            not self.base_url or self.base_url.rstrip("/") in ("http://localhost:11434", "http://127.0.0.1:11434")
+        ):
+            self.base_url = "https://api.openai.com/v1"
+
+        budget = token_budget
+        if budget is None:
+            budget = resolve_llm_budget_from_env()
+        persist_path = None
+        if working_dir:
+            persist_path = str(Path(working_dir) / "llm_usage.json")
+        self.usage = LLMUsageTracker(
+            limit=budget,
+            billing_enabled=bool(self.api_key),
+            persist_path=persist_path,
+        )
         
         logger.info(f"LLMClient initialized: {self.base_url} with model {self.model}")
         
@@ -87,48 +128,142 @@ class LLMClient:
             try:
                 # Create a client instance if base_url is provided
                 if base_url:
-                    self._client = ollama.Client(host=base_url)
+                    self._client = ollama.Client(host=self.base_url)
                 else:
                     self._client = ollama_client  # Use the module directly
                 self._is_mock_mode = False
-                logger.info(f"ollama client initialized with model: {model}, base_url: {base_url}")
+                logger.info(f"ollama client initialized with model: {self.model}, base_url: {self.base_url}")
             except Exception as e:
                 logger.warning(f"Failed to initialize ollama client: {e}")
                 self._client = None
                 self._is_mock_mode = True
+        if self.api_key and self.provider == "openai":
+            self._is_mock_mode = False
+
+    def _resolve_provider(self, provider: str) -> str:
+        explicit = (provider or "auto").strip().lower()
+        if explicit in ("ollama", "openai"):
+            return explicit
+        env_provider = (os.getenv("LLM_PROVIDER") or "").strip().lower()
+        if env_provider in ("ollama", "openai"):
+            return env_provider
+        base = (self.base_url or "").lower()
+        if self.api_key and ("openai.com" in base or "api.openai" in base):
+            return "openai"
+        if self.api_key and os.getenv("OPENAI_API_KEY"):
+            return "openai"
+        return "ollama"
+
+    def set_agent(self, agent_label: str) -> None:
+        self.agent_label = (agent_label or "").strip()
+
+    def usage_summary(self) -> Dict[str, Any]:
+        return self.usage.summary_dict()
+
+    def _prepare_call(self, prompt: str, system: Optional[str] = None) -> None:
+        # Budget preflight only when a hard cap is configured (paid runs).
+        # Local track-only mode skips this to avoid extra estimate work.
+        if self.usage.limit is None:
+            return
+        est = estimate_tokens((system or "") + "\n" + (prompt or ""), model=self.model)
+        max_out = int(
+            self.config.get("max_tokens") or os.getenv("LLM_MAX_OUTPUT_TOKENS") or 4096
+        )
+        self.usage.check_budget(est + max_out)
+
+    def _finalize_call(
+        self,
+        *,
+        prompt: str,
+        response: str,
+        method: str,
+        agent: str = "",
+    ) -> None:
+        usage = self._last_call_usage or {}
+        prompt_t = int(usage.get("prompt_tokens") or 0)
+        completion_t = int(usage.get("completion_tokens") or 0)
+        estimated = bool(usage.get("estimated", False))
+        record = LLMCallRecord.from_counts(
+            prompt_tokens=prompt_t,
+            completion_tokens=completion_t,
+            model=self.model,
+            agent=agent or self.agent_label,
+            method=method,
+            estimated=estimated,
+        )
+        self.usage.record(
+            record,
+            prompt_text=prompt,
+            completion_text=response,
+            model=self.model,
+        )
+        if self.usage.limit is not None:
+            self.usage.check_budget(0)
 
     @property
     def available(self) -> bool:
         """Check if LLM client is available and not in mock mode."""
-        return not self._is_mock_mode and self._client is not None
+        if self.api_key and self.provider == "openai":
+            return True
+        return not self._is_mock_mode and (self._client is not None or bool(self.base_url))
 
-    def prompt_raw(self, prompt: str, system: Optional[str] = None, **kwargs) -> str:
-        """Send a prompt via /api/generate (no tool-call parsing).
-        
-        Use this for free-form Q&A where the model output may contain text
-        patterns that would be misinterpreted by the chat endpoint's native
-        tool-call parser (e.g. 'TOOL: ...' or 'ACTION: ...').
-        """
-        if not self.base_url:
-            return f"MOCK_LLM_RESPONSE: would send: {prompt[:200]}"
-        try:
-            return self._http_call(prompt, system=system, **kwargs)
-        except Exception as e:
-            logger.error(f"prompt_raw HTTP call failed: {e}")
-            return f"MOCK_LLM_RESPONSE: HTTP_ERROR: {e}"
+    def _openai_chat(self, prompt: str, system: Optional[str] = None, **kwargs: Any) -> str:
+        if requests is None:
+            raise RuntimeError("requests package is required for OpenAI API calls")
+        url = urllib.parse.urljoin(self.base_url.rstrip("/") + "/", "chat/completions")
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        messages: List[Dict[str, str]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": float(kwargs.get("temperature", 0.7)),
+        }
+        max_tokens = kwargs.get("max_tokens") or self.config.get("max_tokens")
+        if max_tokens:
+            payload["max_tokens"] = int(max_tokens)
+        if self._resolve_format(**kwargs) == "json":
+            payload["response_format"] = {"type": "json_object"}
+        resp = requests.post(url, headers=headers, json=payload, timeout=180)
+        resp.raise_for_status()
+        data = resp.json()
+        self._last_raw_response = json.dumps(data)
+        prompt_t, completion_t, estimated = parse_usage_from_response(data)
+        self._last_call_usage = {
+            "prompt_tokens": prompt_t,
+            "completion_tokens": completion_t,
+            "estimated": estimated,
+        }
+        choices = data.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            msg = choices[0].get("message") or {}
+            if isinstance(msg, dict) and msg.get("content"):
+                return str(msg["content"])
+            if choices[0].get("text"):
+                return str(choices[0]["text"])
+        return json.dumps(data)
 
-    def prompt(self, prompt: str, system: Optional[str] = None, **kwargs) -> str:
-        """Send a prompt to the LLM and return a text response.
+    def _capture_usage_from_data(self, data: Any) -> None:
+        if not isinstance(data, dict):
+            return
+        prompt_t, completion_t, estimated = parse_usage_from_response(data)
+        if prompt_t or completion_t:
+            self._last_call_usage = {
+                "prompt_tokens": prompt_t,
+                "completion_tokens": completion_t,
+                "estimated": estimated,
+            }
 
-        This method attempts a few common client call signatures to remain
-        compatible with different local LLM clients. If no real client is
-        available, a mock response is returned.
-        """
+    def _prompt_impl(self, prompt: str, system: Optional[str] = None, **kwargs) -> str:
+        """Internal prompt dispatch without usage accounting."""
         if self._client is None:
-            # If a base_url is provided, try an HTTP fallback to the LLM server
             if self.base_url:
                 try:
-                    # prefer the instance-level system prompt if available
                     sysp = system if system is not None else self.system_prompt
                     return self._http_call(prompt, system=sysp, **kwargs)
                 except Exception as e:
@@ -138,25 +273,17 @@ class LLMClient:
             self._last_raw_response = f"MOCK_LLM_RESPONSE: would send: {prompt[:200]}"
             return f"MOCK_LLM_RESPONSE: would send: {prompt[:200]}"
 
-        # Try ollama API first
         try:
-            # Prepare system prompt
             sysp = system if system is not None else self.system_prompt
-            
-            # Use ollama chat API
             messages = []
             if sysp:
                 messages.append({"role": "system", "content": sysp})
             messages.append({"role": "user", "content": prompt})
-            
-            # Call ollama chat
+
             if hasattr(self._client, "chat"):
-                # If using ollama.Client instance
                 out = self._client.chat(model=self.model, messages=messages)
             else:
-                # If using ollama module directly
                 out = ollama_client.chat(model=self.model, messages=messages)
-                
         except Exception as e:
             err_text = str(e)
             if "parsing tool call" in err_text.lower():
@@ -166,12 +293,11 @@ class LLMClient:
                 )
                 try:
                     sysp = system if system is not None else self.system_prompt
-                    return self.prompt_raw(prompt, system=sysp, **kwargs)
+                    return self._http_call(prompt, system=sysp, **kwargs)
                 except Exception as gen_exc:
                     logger.warning("generate retry failed: %s", gen_exc)
             else:
                 logger.exception("ollama call failed; trying fallback HTTP")
-            # Fallback to HTTP call if ollama direct call fails
             if self.base_url:
                 try:
                     sysp = system if system is not None else self.system_prompt
@@ -180,49 +306,96 @@ class LLMClient:
                     logger.exception("HTTP LLM call also failed; falling back to mock")
                     self._last_raw_response = f"HTTP_LLM_ERROR: {e2}"
                     return f"MOCK_LLM_RESPONSE: would send: {prompt[:200]}"
-            else:
-                logger.exception("LLM call failed and no base_url for HTTP fallback")
-                self._last_raw_response = f"LLM_ERROR: {e}"
-                return f"LLM_ERROR: {e}"
+            logger.exception("LLM call failed and no base_url for HTTP fallback")
+            self._last_raw_response = f"LLM_ERROR: {e}"
+            return f"LLM_ERROR: {e}"
 
-        # Normalize ollama response format
         try:
             if isinstance(out, str):
-                # record raw string response
                 self._last_raw_response = out
                 return out
             if isinstance(out, dict):
-                # record raw dict response
                 try:
                     self._last_raw_response = json.dumps(out)
                 except Exception:
                     self._last_raw_response = str(out)
-                    
-                # Handle ollama chat response format
+                self._capture_usage_from_data(out)
                 if "message" in out and isinstance(out["message"], dict):
                     if "content" in out["message"]:
                         return out["message"]["content"]
-                        
-                # common keys for other formats
                 for k in ("text", "response", "content"):
                     if k in out:
                         return out[k]
-                        
-                # openai-style
                 if "choices" in out and out["choices"]:
                     c = out["choices"][0]
                     return c.get("text") or c.get("message", {}).get("content", str(out))
-                    
-            # Handle ollama response objects (with .message.content attribute)
-            if hasattr(out, 'message') and hasattr(out.message, 'content'):
+            if hasattr(out, "message") and hasattr(out.message, "content"):
                 content = out.message.content
                 self._last_raw_response = str(out)
+                for attr, key in (
+                    ("prompt_eval_count", "prompt_tokens"),
+                    ("eval_count", "completion_tokens"),
+                ):
+                    val = getattr(out, attr, None)
+                    if val:
+                        bucket = self._last_call_usage or {}
+                        bucket[key] = int(val)
+                        bucket["estimated"] = False
+                        self._last_call_usage = bucket
                 return content
-                
-            # fallback to string conversion
             return str(out)
         except Exception:
             return str(out)
+
+    def prompt(self, prompt: str, system: Optional[str] = None, **kwargs) -> str:
+        """Send a prompt to the LLM and return a text response.
+
+        This method attempts a few common client call signatures to remain
+        compatible with different local LLM clients. If no real client is
+        available, a mock response is returned.
+        """
+        agent = kwargs.pop("agent", None) or self.agent_label
+        self._last_call_usage = {}
+        try:
+            self._prepare_call(prompt, system)
+            if self.provider == "openai" and self.api_key:
+                text = self._openai_chat(prompt, system=system, **kwargs)
+            else:
+                text = self._prompt_impl(prompt, system=system, **kwargs)
+            self._finalize_call(prompt=prompt, response=text, method="prompt", agent=agent)
+            return text
+        except TokenBudgetExceeded:
+            raise
+        except Exception as e:
+            logger.exception("LLM prompt failed: %s", e)
+            text = f"MOCK_LLM_RESPONSE: would send: {prompt[:200]}"
+            self._finalize_call(prompt=prompt, response=text, method="prompt", agent=agent)
+            return text
+
+    def prompt_raw(self, prompt: str, system: Optional[str] = None, **kwargs) -> str:
+        """Send a prompt via /api/generate (no tool-call parsing).
+        
+        Use this for free-form Q&A where the model output may contain text
+        patterns that would be misinterpreted by the chat endpoint's native
+        tool-call parser (e.g. 'TOOL: ...' or 'ACTION: ...').
+        """
+        agent = kwargs.pop("agent", None) or self.agent_label
+        self._last_call_usage = {}
+        try:
+            self._prepare_call(prompt, system)
+            if self.provider == "openai" and self.api_key:
+                text = self._openai_chat(prompt, system=system, **kwargs)
+            elif not self.base_url:
+                text = f"MOCK_LLM_RESPONSE: would send: {prompt[:200]}"
+            else:
+                text = self._http_call(prompt, system=system, **kwargs)
+            self._finalize_call(prompt=prompt, response=text, method="prompt_raw", agent=agent)
+            return text
+        except TokenBudgetExceeded:
+            raise
+        except Exception as e:
+            logger.error(f"prompt_raw call failed: {e}")
+            return f"MOCK_LLM_RESPONSE: HTTP_ERROR: {e}"
 
     # --- Compatibility adapter for frameworks that call `invoke` ---
     @dataclass
@@ -632,6 +805,7 @@ class LLMClient:
                 data = None
 
             if isinstance(data, dict):
+                self._capture_usage_from_data(data)
                 _extract_from_obj(data, pieces, thinking)
                 if pieces or thinking:
                     return _finalize(pieces, thinking)
@@ -667,6 +841,7 @@ class LLMClient:
                 except Exception:
                     continue
                 parsed_any = True
+                self._capture_usage_from_data(obj)
                 _extract_from_obj(obj, pieces, thinking)
 
             if parsed_any:
