@@ -10,8 +10,13 @@ system can:
 2. Preprocess structures (component separation, protonation, phosphorylation mapping)
 3. Build simulation systems (topology, solvation, ions, MDP files)
 4. Submit and monitor HPC jobs (SLURM)
-5. Analyse trajectories (RMSD, RMSF, Rg, DCCM, DSSP, COM distances)
+5. Analyse trajectories (RMSD, RMSF, Rg, DCCM, DSSP, COM distances, ligand RMSD, QC, …)
 6. Produce HTML reports with literature references and interactive 3D views
+
+Active campaign trees (sims + manuscript draft) live under [`campaigns/`](campaigns/README.md)
+(gitignored). One-off regenerators stay in [`archive/`](archive/README.md)
+(see also [`docs/CLEAN_AND_OPT.md`](docs/CLEAN_AND_OPT.md)). Example launcher:
+[`scripts/examples/run_simagent_example.sh`](scripts/examples/run_simagent_example.sh).
 
 **Full usage guide:** [TUTORIAL.md](TUTORIAL.md)
 
@@ -559,6 +564,7 @@ python SimAgent.py \
   --subtask analysis reporter
 
 # --- 38 holo: analysis + combined + phylogenetic comparison ---
+# Note: campaign data lives under ./campaigns/pseudoKin (gitignored local tree)
 nohup python SimAgent.py \
   --goal "Simulations are already complete (~200 ns each) for thirty-eight
           protein–ATP holo systems in ./pseudoKin: o15197, o43187, o60674, p00533,

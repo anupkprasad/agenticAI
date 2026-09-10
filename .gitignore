@@ -25,8 +25,11 @@ __pycache__/
 
 # Slurm scripts
 *.slurm
+!ollama_server.slurm
+!archive/ops/ollama_server.slurm
 
 # Local run / work directories
+campaigns/
 results/
 jobs/
 working_dir_backup/
@@ -35,17 +38,26 @@ work_dir_hl/
 work_dir_hl2/
 multi_run/
 tmp/
-ment/
 garbage/
 benchmarks/
+# Ignore ad-hoc scripts at root of scripts/, but keep helpers + examples tracked
+scripts/*
+!scripts/promote_programmer_tool.py
+!scripts/examples/
+!scripts/examples/**
+pseudo_JAK/
+
+# Active local campaigns (~60G+ sims + manuscript drafts) — keep out of git
+campaigns/
+!campaigns/README.md
+# Legacy root paths (if recreated outside campaigns/)
+ment/
 robustness/
 dclk3_psma4/
 dclk3_dcx_psma4/
-scripts/
-pseudo_JAK/
+pseudoKin*/
 
 # Project-specific local data (not source)
-pseudoKin*/
 pseudokin_june3bckp/
 pseudokin1/
 pseudokin2/
@@ -59,6 +71,12 @@ agenticB5R1_t1/
 backup/
 tests/
 examples/
+
+# Archive: keep README; ignore heavy legacy blobs
+archive/legacy/backup/
+archive/legacy/tmp/
+archive/legacy/garbage/
+!archive/README.md
 
 # Stray analysis outputs accidentally written to repo root
 /reference_pocket_*

@@ -26,8 +26,8 @@ planner:
       
     - name: "analysis"
       full_name: "Analysis Agent"
-      description: "Handles trajectory analysis and visualization"
-      capabilities: ["rmsd", "rmsf", "gyrate", "dssp", "hbond", "visualization"]
+      description: "Handles trajectory analysis and visualization (per-sim, combined overlays, shared family reference tools)"
+      capabilities: ["rmsd", "rmsf", "ligand_rmsd", "trajectory_qc", "native_contacts", "dihedrals", "gyrate", "dssp", "hbond", "pca", "fel", "dccm", "combined_overlay", "classification", "visualization"]
       
     - name: "reporter"
       full_name: "Reporter Agent"
@@ -46,7 +46,7 @@ planner:
     respect_user_analysis_scope: true  # CRITICAL: If user says "RMSF only", do not add RMSD/Rg/DCCM/etc.
     match_component_selection: true  # Only plan for components user explicitly selected
     enable_tool_creation: true  # Allow planner to invoke programmer for missing tools
-    max_tool_creation_iterations: 2  # Max iterations of tool creation before giving up
+    max_tool_creation_iterations: 4  # Prefer creating missing tools over giving up early
 
   # Standard per-simulation output basenames (same across all sims for combined overlay)
   standard_output_filenames:
@@ -115,6 +115,9 @@ planner:
       - "no existing tool"
       - "should generate"
       - "programmer should create"
+      - "not in the registry"
+      - "capability gap"
+      - "no built-in tool"
     output_directory: "programmer"  # Where programmer creates tools (relative to working_directory)
     
   # When to use fallback plan (keyword-based)

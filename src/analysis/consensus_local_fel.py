@@ -427,9 +427,9 @@ def run_consensus_local_fel_batch(
         "Per-simulation PCA/FEL on **consensus-mapped Cα** residues from "
         f"`{cjson.name}`. Each trajectory is aligned to its **own frame 0** "
         "and fitted with a **local** PCA basis (not projected onto MLKL/EPHB6).\n\n"
-        "Regenerate:\n"
+        "Regenerate via analysis tool ``run_consensus_local_fel_batch`` or:\n"
         "```bash\n"
-        "python3 scripts/run_consensus_local_fel_batch.py\n"
+        "python3 archive/scripts/pseudokin/run_consensus_local_fel_batch.py\n"
         "```\n",
         encoding="utf-8",
     )
@@ -440,3 +440,49 @@ def run_consensus_local_fel_batch(
         "output_root": str(out_root.resolve()),
         "results": results,
     }
+
+
+try:
+    from langchain.tools import tool as _lc_tool
+except ImportError:  # pragma: no cover
+    _lc_tool = None
+
+
+def _run_consensus_local_fel_batch_tool(
+    base_dir: str,
+    analysis_dir: Optional[str] = None,
+    consensus_json: Optional[str] = None,
+    output_subdir: str = DEFAULT_CONSENSUS_FEL_DIR,
+    labels: Optional[str] = None,
+    frame_interval: int = 1,
+    overwrite: bool = False,
+    max_workers: int = 1,
+) -> Dict[str, Any]:
+    """
+    Combined/shared: consensus-mapped Cα PCA/FEL per simulation (local basis).
+
+    ``labels`` may be a comma-separated string of simulation folder names.
+    """
+    label_list: Optional[List[str]] = None
+    if labels:
+        if isinstance(labels, str):
+            label_list = [x.strip() for x in labels.split(",") if x.strip()]
+        else:
+            label_list = list(labels)
+    return run_consensus_local_fel_batch(
+        base_dir=base_dir,
+        analysis_dir=analysis_dir,
+        consensus_json=consensus_json,
+        output_subdir=output_subdir,
+        labels=label_list,
+        frame_interval=frame_interval,
+        overwrite=overwrite,
+        max_workers=max_workers,
+    )
+
+
+if _lc_tool is not None:
+    run_consensus_local_fel_batch_tool = _lc_tool(_run_consensus_local_fel_batch_tool)
+    run_consensus_local_fel_batch_tool.name = "run_consensus_local_fel_batch"
+else:  # pragma: no cover
+    run_consensus_local_fel_batch_tool = _run_consensus_local_fel_batch_tool

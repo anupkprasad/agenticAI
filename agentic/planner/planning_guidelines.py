@@ -35,6 +35,10 @@ STANDARD_OUTPUT_FILES: Dict[str, Dict[str, str]] = {
     "min_distance": {"data": "min_distance.csv", "plot": "min_distance.png"},
     "hbond_occupancy": {"data": "hbond_occupancy.csv", "plot": "hbond_occupancy.png"},
     "salt_bridge": {"data": "saltbridge_occupancy.csv", "plot": "saltbridge_occupancy.png"},
+    "ligand_rmsd": {"data": "ligand_rmsd.dat", "plot": "ligand_rmsd.png"},
+    "trajectory_qc": {"data": "trajectory_qc.json"},
+    "native_contacts": {"data": "native_contacts.dat", "plot": "native_contacts.png"},
+    "backbone_dihedrals": {"data": "backbone_dihedrals.dat", "plot": "backbone_dihedrals.png"},
 }
 
 # Extra overall names that also satisfy a metric (e.g. generic two-group COM).
@@ -71,6 +75,10 @@ METRIC_TO_CANONICAL_TOOLS: Dict[str, tuple[str, ...]] = {
     "min_distance": ("calculate_min_heavy_atom_distance",),
     "hbond_occupancy": ("calculate_hbond_occupancy",),
     "salt_bridge": ("calculate_salt_bridge_distances",),
+    "ligand_rmsd": ("calculate_ligand_rmsd",),
+    "trajectory_qc": ("run_trajectory_qc",),
+    "native_contacts": ("calculate_native_contacts",),
+    "backbone_dihedrals": ("calculate_backbone_dihedrals",),
 }
 
 
@@ -224,6 +232,26 @@ _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
         r"salt[-\s]?bridges?",
         r"charged[-\s]?pair",
         r"electrostatic\s+(?:pair|interaction)",
+    ),
+    "ligand_rmsd": (
+        r"ligand[-\s]?rmsd",
+        r"rmsd\s+of\s+(?:the\s+)?ligand",
+        r"ligand\s+root\s+mean\s+square",
+    ),
+    "trajectory_qc": (
+        r"trajectory[-\s]?qc",
+        r"\bqc\b.*(?:trajectory|traj)",
+        r"quality[-\s]?control",
+    ),
+    "native_contacts": (
+        r"native[-\s]?contacts?",
+        r"fraction\s+of\s+native",
+    ),
+    "backbone_dihedrals": (
+        r"backbone[-\s]?dihedral",
+        r"\bphi\b.*\bpsi\b",
+        r"\bpsi\b.*\bphi\b",
+        r"ramachandran",
     ),
     "pocket_sasa": (
         r"pocket\s+sasa",
@@ -1186,6 +1214,19 @@ Rules:
   `output_file="hbond_occupancy_B1to34_vs_A.csv"` / `saltbridge_occupancy_B1to34_vs_A.csv`.
 - For a three-chain complex, run one H-bond + one salt-bridge job **per interface the user asked about** (A–B, A–C, B–C), each with its own qualifier.
 - Never use `calculate_protein_ligand_contacts` for chain–chain H-bonds."""
+
+
+def get_family_scale_planning_guide() -> str:
+    """Prompt block for multi-sim / family campaigns seeking interesting dynamics."""
+    return """**FAMILY-SCALE / MULTI-SIM DYNAMICS (general-purpose):**
+
+This framework targets protein *families* and multi-system campaigns, not one-off single sims.
+
+1. **Per-sim first** — identical metric set and standard filenames under `{label}/analysis/` so overlays work.
+2. **QC early** — prefer `run_trajectory_qc` when runs may be truncated or unstable.
+3. **Interesting dynamics** — after per-sim RMSD/RMSF/Rg/DCCM/PCA/FEL (as requested), use **combined** tools for overlays, comparison tables, apo–holo diffs, and clustering; use **shared** tools (MSA, reference PCA/FEL, consensus pocket) when comparing related sequences/structures.
+4. **Do not invent campaign-specific scripts** — use registry tools; if a genuine gap remains after checking the metric map, request programmer creation once with a clear capability statement.
+5. **Combined reporter** — when comparing many systems, plan `generate_combined_html_report` (and literature tools only if the goal asks)."""
 
 
 def _metric_clause_pattern(metric: str) -> str:

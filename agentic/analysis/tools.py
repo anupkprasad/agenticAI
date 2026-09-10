@@ -104,9 +104,19 @@ from src.analysis.consensus_pocket import (
     run_consensus_pocket_metrics_batch,
 )
 from src.analysis.msa_plotting import plot_reference_msa_alignment
+from src.analysis.ligand_rmsd import calculate_ligand_rmsd
+from src.analysis.trajectory_qc import run_trajectory_qc
+from src.analysis.md_basics import calculate_native_contacts, calculate_backbone_dihedrals
+from src.analysis.consensus_local_fel import run_consensus_local_fel_batch_tool
 
 # Import dynamic tool loader for programmer-generated tools
 from agentic.utils import get_dynamic_tool_loader
+from agentic.analysis.tool_buckets import (
+    COMBINED_TOOL_NAMES,
+    SHARED_TOOL_NAMES,
+    PER_SIM_TOOL_NAMES,
+    names_for_scope,
+)
 
 # Export all tools
 __all__ = [
@@ -144,6 +154,10 @@ __all__ = [
     "analyze_ligand_residence",
     "calculate_pocket_rmsf",
     "calculate_ligand_rmsf",
+    "calculate_ligand_rmsd",
+    "run_trajectory_qc",
+    "calculate_native_contacts",
+    "calculate_backbone_dihedrals",
     # Combined (multi-sim) tools
     "collect_metric_files",
     "plot_combined_overlay",
@@ -173,6 +187,7 @@ __all__ = [
     "calculate_consensus_pocket_metrics",
     "run_consensus_pocket_metrics_batch",
     "plot_reference_msa_alignment",
+    "run_consensus_local_fel_batch",
     "AnalysisToolExecutor",
     "get_analysis_tools",
     "get_tool_metadata",
@@ -184,42 +199,8 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# Cross-simulation tools — only for the combined_analysis phase after all per-sim runs.
-# Must NOT be exposed to the planner or analysis LLM during individual simulation workflows.
-COMBINED_ANALYSIS_TOOL_NAMES = frozenset({
-    "collect_metric_files",
-    "plot_combined_overlay",
-    "compute_comparison_table",
-    "run_combined_analysis",
-    "run_combined_dccm_analysis",
-    "run_combined_dccm_difference",
-    "plot_combined_rmsf_segment_bars",
-    "run_combined_rmsf_segment_analysis",
-    "run_combined_com_distance_analysis",
-    "plot_rmsf_apo_holo_comparison",
-    "run_combined_rmsf_apo_holo_analysis",
-    "run_combined_dccm_apo_holo_analysis",
-    "run_combined_rmsf_segment_apo_holo_analysis",
-    "run_combined_binding_rmsf_overlay",
-    "collect_fel_features_table",
-    "collect_classification_features_table",
-    "cluster_classification_features",
-    "plot_cluster_feature_trajectories",
-    "plot_cluster_rmsf_profiles",
-    "build_sequence_phylo_tree",
-    "build_structure_phylo_tree",
-    "build_consensus_sequence_alignment",
-    "fit_reference_pca_model",
-    "project_simulations_reference_pca",
-    "build_shared_reference_fel_landscapes",
-    "cluster_reference_fel_landscapes",
-    "run_reference_landscape_pipeline",
-    "define_reference_consensus_pocket",
-    "map_consensus_pocket_residues",
-    "calculate_consensus_pocket_metrics",
-    "run_consensus_pocket_metrics_batch",
-    "plot_reference_msa_alignment",
-})
+# Cross-simulation + shared/family tools — not for per-sim planner/analysis LLMs.
+COMBINED_ANALYSIS_TOOL_NAMES = frozenset(COMBINED_TOOL_NAMES | SHARED_TOOL_NAMES)
 
 _PER_SIM_ANALYSIS_TOOLS = [
     calculate_rmsd,
@@ -253,6 +234,10 @@ _PER_SIM_ANALYSIS_TOOLS = [
     analyze_ligand_residence,
     calculate_pocket_rmsf,
     calculate_ligand_rmsf,
+    calculate_ligand_rmsd,
+    run_trajectory_qc,
+    calculate_native_contacts,
+    calculate_backbone_dihedrals,
 ]
 
 _COMBINED_ANALYSIS_TOOLS = [
@@ -277,6 +262,9 @@ _COMBINED_ANALYSIS_TOOLS = [
     plot_cluster_rmsf_profiles,
     build_sequence_phylo_tree,
     build_structure_phylo_tree,
+]
+
+_SHARED_ANALYSIS_TOOLS = [
     build_consensus_sequence_alignment,
     fit_reference_pca_model,
     project_simulations_reference_pca,
@@ -288,29 +276,37 @@ _COMBINED_ANALYSIS_TOOLS = [
     calculate_consensus_pocket_metrics,
     run_consensus_pocket_metrics_batch,
     plot_reference_msa_alignment,
+    run_consensus_local_fel_batch_tool,
 ]
 
 
 def is_combined_analysis_tool(tool_name: str) -> bool:
-    """Return True if *tool_name* is a cross-simulation combined-analysis tool."""
+    """Return True if *tool_name* is a cross-simulation or shared/family tool."""
     return tool_name in COMBINED_ANALYSIS_TOOL_NAMES
 
 
-def get_analysis_tools(include_combined: bool = False) -> list:
+def get_analysis_tools(
+    include_combined: bool = False,
+    include_shared: Optional[bool] = None,
+) -> list:
     """
     Get analysis @tool functions for LLM binding and tool registry.
 
     Args:
         include_combined: When True, include cross-simulation combined-analysis tools.
-            Default False — per-simulation planner/analysis agents must not see them.
+        include_shared: Family/shared tools. Defaults to True when include_combined.
 
     Returns:
         List of StructuredTool objects ready for LLM use
     """
+    if include_shared is None:
+        include_shared = include_combined
+    tools = list(_PER_SIM_ANALYSIS_TOOLS)
     if include_combined:
-        return _PER_SIM_ANALYSIS_TOOLS + _COMBINED_ANALYSIS_TOOLS
-    return list(_PER_SIM_ANALYSIS_TOOLS)
-
+        tools.extend(_COMBINED_ANALYSIS_TOOLS)
+    if include_shared:
+        tools.extend(_SHARED_ANALYSIS_TOOLS)
+    return tools
 
 def get_tool_metadata(
     working_directory: Optional[str] = None,
@@ -447,6 +443,10 @@ class AnalysisToolExecutor:
             "analyze_ligand_residence": analyze_ligand_residence,
             "calculate_pocket_rmsf": calculate_pocket_rmsf,
             "calculate_ligand_rmsf": calculate_ligand_rmsf,
+            "calculate_ligand_rmsd": calculate_ligand_rmsd,
+            "run_trajectory_qc": run_trajectory_qc,
+            "calculate_native_contacts": calculate_native_contacts,
+            "calculate_backbone_dihedrals": calculate_backbone_dihedrals,
         }
         if include_combined:
             self.tools.update({
@@ -482,6 +482,7 @@ class AnalysisToolExecutor:
                 "calculate_consensus_pocket_metrics": calculate_consensus_pocket_metrics,
                 "run_consensus_pocket_metrics_batch": run_consensus_pocket_metrics_batch,
                 "plot_reference_msa_alignment": plot_reference_msa_alignment,
+                "run_consensus_local_fel_batch": run_consensus_local_fel_batch_tool,
             })
         
         # Record built-in tool names BEFORE loading programmer tools

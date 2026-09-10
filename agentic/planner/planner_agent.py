@@ -30,6 +30,7 @@ from .planning_guidelines import (
     get_standard_output_filenames_block,
     get_com_distance_tool_guide,
     get_proximity_tool_guide,
+    get_family_scale_planning_guide,
     get_master_plan_tools_note,
     metric_covered_by_registry,
     partition_metrics_by_registry,
@@ -734,6 +735,7 @@ class MDPlanner:
             + f"{filenames_block}\n\n"
             + f"{get_com_distance_tool_guide()}\n\n"
             + f"{get_proximity_tool_guide()}\n\n"
+            + f"{get_family_scale_planning_guide()}\n\n"
             "TASK: Return only valid JSON with keys:\n"
             f"1) sim_prompts: list of {len(expanded_entries)} complete natural-language prompts, same order as entries.\n"
             "2) run_combined_analysis: boolean; true only when the user explicitly or clearly asks for comparison, aggregation, cross-simulation trends, combined plots, or a combined report.\n"
@@ -2522,22 +2524,26 @@ If you identify that a tool is truly missing, include a clear statement using on
 - "Need to create custom tool for [specific purpose]"  
 - "No existing tool available for [task]"
 
-**EXAMPLE (genuine gap):**
-"Missing tool for Ramachandran phi/psi dihedral analysis. Need to create custom tool for
- calculating backbone dihedral distributions from trajectory data."
+**EXAMPLE (genuine gap — after checking the metric map):**
+"Missing tool for hydrogen-bond lifetime autocorrelation. Need to create custom tool for
+ time-correlation of intermittent H-bonds between ligand and pocket residues."
 
 **DO NOT declare missing** for metrics covered in the map above (e.g. FEL uses
 `calculate_free_energy_landscape`, pocket SASA uses `calculate_pocket_sasa`,
-residence uses `analyze_ligand_residence`).
+residence uses `analyze_ligand_residence`, ligand RMSD uses `calculate_ligand_rmsd`,
+native contacts / φψ use `calculate_native_contacts` / `calculate_backbone_dihedrals`).
 
 **WHAT HAPPENS NEXT:**
-When you indicate genuinely missing tools, the Programmer Agent creates them before
-the execution plan is finalized.
+When you indicate genuinely missing tools, the Programmer Agent creates them under
+`{working_dir}/programmer/` before the execution plan is finalized. Prefer that path
+over skipping the analysis. After a successful campaign, humans may promote useful
+tools into `src/analysis/` via `scripts/promote_programmer_tool.py`.
 
 **IMPORTANT:**
 - DO match metric names to the tool map and tools list before claiming anything is missing
 - DO be specific about what functionality is missing
 - DO NOT request tools that already exist under a different name
+- DO prefer automatic tool creation (up to the configured iteration limit) over omitting requested science
 """
     
     def _parse_llm_plan_response(self, response: str, state: MDState) -> Optional[Dict[str, Any]]:

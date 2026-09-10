@@ -32,14 +32,21 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def get_reporter_tools() -> list:
+def get_reporter_tools(include_combined: bool = True, include_shared: bool = True) -> list:
     """
-    Get all reporter @tool functions for LLM binding.
-    
-    Returns:
-        List of StructuredTool objects ready for LLM use
+    Get reporter @tool functions for LLM binding.
+
+    Args:
+        include_combined: Include combined HTML report tool.
+        include_shared: Include literature search tools (usable in both modes).
     """
-    return [
+    from agentic.reporter.tool_buckets import (
+        COMBINED_TOOL_NAMES,
+        PER_SIM_TOOL_NAMES,
+        SHARED_TOOL_NAMES,
+    )
+
+    all_tools = [
         read_analysis_summary,
         search_pubmed,
         search_biorxiv,
@@ -48,6 +55,12 @@ def get_reporter_tools() -> list:
         generate_html_report,
         generate_combined_html_report,
     ]
+    allowed = set(PER_SIM_TOOL_NAMES)
+    if include_combined:
+        allowed |= set(COMBINED_TOOL_NAMES)
+    if include_shared:
+        allowed |= set(SHARED_TOOL_NAMES)
+    return [t for t in all_tools if getattr(t, "name", "") in allowed]
 
 
 def get_tool_metadata() -> Dict[str, Dict[str, Any]]:
