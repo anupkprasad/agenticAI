@@ -79,6 +79,37 @@ METRIC_TO_CANONICAL_TOOLS: Dict[str, tuple[str, ...]] = {
     "trajectory_qc": ("run_trajectory_qc",),
     "native_contacts": ("calculate_native_contacts",),
     "backbone_dihedrals": ("calculate_backbone_dihedrals",),
+    "consensus_torsions": (
+        "calculate_consensus_torsions",
+        "run_consensus_torsions_batch",
+    ),
+    "dihedral_pca": ("run_independent_dynamics_fel",),
+    "dihedral_tica": ("run_independent_dynamics_fel",),
+    "cart_pca": ("run_independent_dynamics_fel", "calculate_trajectory_pca"),
+    "cart_tica": ("run_independent_dynamics_fel",),
+    "shared_dihedral_pca": (
+        "fit_dynamics_model",
+        "project_dynamics_model",
+        "run_shared_dynamics_fel_batch",
+    ),
+    "shared_dihedral_tica": (
+        "fit_dynamics_model",
+        "project_dynamics_model",
+        "run_shared_dynamics_fel_batch",
+    ),
+    "shared_cart_pca": (
+        "fit_dynamics_model",
+        "project_dynamics_model",
+        "fit_reference_pca_model",
+        "project_simulations_reference_pca",
+    ),
+    "shared_cart_tica": (
+        "fit_dynamics_model",
+        "project_dynamics_model",
+        "run_shared_dynamics_fel_batch",
+    ),
+    "consensus_rmsf": ("calculate_consensus_rmsf_features",),
+    "consensus_dccm": ("calculate_consensus_dccm_features",),
 }
 
 
@@ -311,6 +342,70 @@ _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
         r"\bbasin",
         r"\bminima",
     ),
+    "consensus_torsions": (
+        r"consensus\s+(?:torsions?|dihedrals?)",
+        r"\bchi\s*1\b",
+        r"\bχ\s*₁\b",
+        r"\bφ\b.*\bψ\b",
+        r"phi\s*/\s*psi\s*/\s*chi",
+        r"pocket\s+chi\s*1",
+        r"circular\s+mean.*chi",
+    ),
+    "dihedral_pca": (
+        r"dihedral\s+pca",
+        r"torsion(?:al)?\s+pca",
+        r"independent\s+dihedral\s+pca",
+        r"pca\s+on\s+(?:torsions?|dihedrals?)",
+        r"pca_grid_entropy",
+    ),
+    "dihedral_tica": (
+        r"dihedral\s+tica",
+        r"torsion(?:al)?\s+tica",
+        r"tica\s+on\s+(?:torsions?|dihedrals?)",
+        r"tica_grid_entropy",
+    ),
+    "cart_pca": (
+        r"cartesian\s+pca",
+        r"c[\s-]?alpha\s+pca",
+        r"cα\s+pca",
+        r"cart_pca",
+    ),
+    "cart_tica": (
+        r"cartesian\s+tica",
+        r"c[\s-]?alpha\s+tica",
+        r"cα\s+tica",
+        r"cart_tica",
+    ),
+    "shared_dihedral_pca": (
+        r"shared[-\s]?reference\s+dihedral\s+pca",
+        r"project(?:ion)?\s+onto\s+.*dihedral\s+pca",
+        r"reference\s+dihedral\s+pca",
+    ),
+    "shared_dihedral_tica": (
+        r"shared[-\s]?reference\s+dihedral\s+tica",
+        r"reference\s+dihedral\s+tica",
+        r"pka[-\s]?ref(?:erence)?\s+tica",
+    ),
+    "shared_cart_pca": (
+        r"shared[-\s]?reference\s+(?:cartesian\s+)?pca",
+        r"reference\s+pca\s+model",
+    ),
+    "shared_cart_tica": (
+        r"shared[-\s]?reference\s+cartesian\s+tica",
+        r"reference\s+cartesian\s+tica",
+    ),
+    "consensus_rmsf": (
+        r"consensus\s+rmsf",
+        r"mapped\s+rmsf",
+        r"consensus_rmsf_mean",
+    ),
+    "consensus_dccm": (
+        r"consensus\s+dccm",
+        r"n[-\s]?lobe.*c[-\s]?lobe",
+        r"dccm_N_C",
+        r"dccm\s+n\s*[-–—/]\s*c",
+        r"mapped\s+dccm",
+    ),
 }
 
 _CLASSIFICATION_REQUEST_PATTERNS: tuple[str, ...] = (
@@ -421,6 +516,31 @@ def _normalize_metric_false_positives(text: str, found: Set[str]) -> None:
             lower,
         ):
             found.discard("energy")
+    # Consensus φ/ψ/χ₁ should not also force limited backbone Ramachandran tool
+    if "backbone_dihedrals" in found and (
+        "consensus_torsions" in found
+        or re.search(r"chi\s*1|χ\s*₁|consensus\s+(?:torsion|dihedral)", lower)
+    ):
+        if not re.search(r"backbone[-\s]?dihedral|ramachandran", lower):
+            found.discard("backbone_dihedrals")
+    # "consensus RMSF" should not also schedule generic pocket_rmsf
+    if "pocket_rmsf" in found and "consensus_rmsf" in found:
+        if not re.search(r"pocket\s+rmsf|binding[-\s]?site\s+rmsf", lower):
+            found.discard("pocket_rmsf")
+    # Independent dihedral PCA implies FEL; prefer modular tools over bare pca
+    if ("dihedral_pca" in found or "dihedral_tica" in found) and "pca" in found:
+        if not re.search(
+            r"cartesian\s+pca|trajectory\s+pca|c[\s-]?alpha\s+pca|calculate_trajectory_pca",
+            lower,
+        ):
+            found.discard("pca")
+    if "consensus_dccm" in found and "dccm" in found:
+        if not re.search(r"\bdccm\b(?!\s+n)", lower) and re.search(
+            r"dccm\s+n|consensus\s+dccm|n[-\s]?lobe", lower
+        ):
+            # Keep both only if user also asked for generic DCCM maps
+            if not re.search(r"dccm\s+(?:map|matrix|plot|overlay|difference)", lower):
+                found.discard("dccm")
 
 
 def _normalize_binding_rmsf_metrics(text: str, found: Set[str]) -> None:
@@ -1218,15 +1338,31 @@ Rules:
 
 def get_family_scale_planning_guide() -> str:
     """Prompt block for multi-sim / family campaigns seeking interesting dynamics."""
-    return """**FAMILY-SCALE / MULTI-SIM DYNAMICS (general-purpose):**
+    return """**FAMILY-SCALE / MULTI-SIM DYNAMICS (general-purpose, modular):**
 
 This framework targets protein *families* and multi-system campaigns, not one-off single sims.
 
 1. **Per-sim first** — identical metric set and standard filenames under `{label}/analysis/` so overlays work.
 2. **QC early** — prefer `run_trajectory_qc` when runs may be truncated or unstable.
-3. **Interesting dynamics** — after per-sim RMSD/RMSF/Rg/DCCM/PCA/FEL (as requested), use **combined** tools for overlays, comparison tables, apo–holo diffs, and clustering; use **shared** tools (MSA, reference PCA/FEL, consensus pocket) when comparing related sequences/structures.
-4. **Do not invent campaign-specific scripts** — use registry tools; if a genuine gap remains after checking the metric map, request programmer creation once with a clear capability statement.
-5. **Combined reporter** — when comparing many systems, plan `generate_combined_html_report` (and literature tools only if the goal asks)."""
+3. **Modular features — do NOT hard-wire a fixed feature matrix.**
+   - Parse the user goal for an **explicit feature list** and schedule **only** those tools.
+   - Examples of atomic tools: `calculate_consensus_torsions`, `run_independent_dynamics_fel`
+     (set `space=dihedral|cartesian`, `method=pca|tica`), `fit_dynamics_model` +
+     `project_dynamics_model` / `run_shared_dynamics_fel_batch` for shared-reference mode,
+     `calculate_consensus_rmsf_features`, `calculate_consensus_dccm_features`,
+     consensus pocket tools, Cartesian `calculate_trajectory_pca` / FEL.
+   - **Independent vs shared-reference** is a tool kwarg / tool choice from the goal:
+     - "independent" / "per-protein PCA/tICA" → `run_independent_dynamics_fel`
+     - "shared reference" / "project onto PKA/reference" → fit then project batch
+   - When collecting for clustering, pass `requested_metric_groups` and/or
+     `feature_columns` matching **only** what the user asked; use `auto_discover`
+     only if the goal says to use whatever modular artifacts were computed.
+4. **Interesting dynamics** — after requested per-sim metrics, use **combined** overlays /
+   comparison / Ward clustering; use **shared** MSA / consensus pocket when comparing related sequences.
+5. **Do not invent campaign-specific scripts** — use registry tools; if a genuine gap remains
+   after checking the metric map, request programmer creation once with a clear capability statement.
+6. **Combined reporter** — when comparing many systems, plan `generate_combined_html_report`
+   (and literature tools only if the goal asks)."""
 
 
 def _metric_clause_pattern(metric: str) -> str:

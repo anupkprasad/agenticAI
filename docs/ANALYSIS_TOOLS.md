@@ -38,6 +38,10 @@ Always include `chainID` when residue numbers overlap across chains.
 | Category          | Tools                                                                          |
 | ----------------- | ------------------------------------------------------------------------------ |
 | Global structure  | RMSD, RMSF, Rg, SASA, DSSP, energy                                             |
+| Binding / pocket  | COM distance, contacts, pocket SASA/RMSF, residence, consensus pocket          |
+| Collective motion | Cartesian PCA/FEL, **modular family dynamics** (torsions, dihedral/cart PCA·tICA) |
+| Family consensus  | MSA alignment, consensus torsions, consensus RMSF/DCCM features                 |
+| Combined / class. | Overlays, feature table, Ward/k-means clustering                               |
 | Interface / proximity | nearby residues (frame 0), min heavy-atom distance, generic COM            |
 | Binding site      | ligand-pocket distance, contacts, pocket SASA, residence, pocket RMSF          |
 | Collective motion | DCCM, PCA, FEL, FEL features                                                   |
@@ -479,6 +483,50 @@ Trees are clustered with UPGMA (`scipy` average linkage), colored by up to six
 sub-clusters, and logged to `analysis_summary.jsonl` as
 `Sequence_Phylogenetic_Tree` / `Structure_Phylogenetic_Tree`. The combined
 report renders them in a dedicated **Phylogenetic Trees** section.
+
+---
+
+## Modular family dynamics (torsions / PCA / tICA)
+
+Atomic tools for family-level MD. The **planner schedules only tools named in the
+user goal** — there is no hard-wired mega feature list.
+
+| Tool | Scope | Role |
+| --- | --- | --- |
+| `calculate_consensus_torsions` | per_sim | Consensus-mapped φ/ψ/χ₁ (+ sin/cos matrix, circular means) |
+| `run_consensus_torsions_batch` | shared | Batch torsions for all sims under a base directory |
+| `run_independent_dynamics_fel` | per_sim | PCA or tICA on **dihedral** or **cartesian** space → FEL + `grid_entropy` |
+| `fit_dynamics_model` | shared | Fit shared-reference PCA/tICA on one `reference_label` |
+| `project_dynamics_model` | per_sim | Project one sim onto a fitted model → FEL |
+| `run_shared_dynamics_fel_batch` | shared | Fit + project all labels |
+| `calculate_consensus_rmsf_features` | per_sim | Mapped Cα RMSF mean/std |
+| `calculate_consensus_dccm_features` | per_sim | Mapped DCCM scalars (incl. N↔C lobe mean corr) |
+
+**Kwargs that control flexibility**
+
+- `space`: `dihedral` \| `cartesian`
+- `method`: `pca` \| `tica`
+- Independent vs shared: choose `run_independent_dynamics_fel` **or**
+  `fit_dynamics_model` + `project_dynamics_model` (goal text: “independent” vs
+  “shared reference / project onto …”).
+
+**Output dirs** (under `{label}/analysis/`): `consensus_dihedrals/`,
+`consensus_PCA/`, `consensus_TICA/`, `consensus_cart_PCA/`, `consensus_cart_TICA/`,
+and `*_ref` variants for shared-reference mode.
+
+**Classification collection**
+
+- Pass `requested_metric_groups` such as `dihedral_pca`, `consensus_torsions`,
+  `consensus_rmsf`, `consensus_dccm`, `cart_tica`, …
+- Or exact `feature_columns=[...]`
+- Or `auto_discover=True` to include modular scalars found on disk
+- Do **not** assume a fixed ment-style 9/12-feature bundle
+
+Example goal:
+
+> For all systems: consensus φ/ψ/χ₁, independent dihedral PCA FEL entropy, pocket
+> χ₁ circular mean, reference pocket COM/angle, consensus RMSF mean/std, DCCM N–C;
+> then Ward-cluster on those columns.
 
 ---
 

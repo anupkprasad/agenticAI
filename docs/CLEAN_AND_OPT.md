@@ -68,6 +68,25 @@ Planner metric map + standard output filenames updated for the new metrics.
 
 ---
 
+## Phase 6 — Modular family dynamics tools (done)
+
+Atomic tools (no fixed ment feature mega-bundle); LLM picks from the user goal.
+
+| Tool | Bucket |
+|------|--------|
+| `calculate_consensus_torsions` / `run_consensus_torsions_batch` | per_sim / shared |
+| `run_independent_dynamics_fel` | per_sim (dihedral\|cartesian × pca\|tica) |
+| `fit_dynamics_model` / `project_dynamics_model` / `run_shared_dynamics_fel_batch` | shared / per_sim |
+| `calculate_consensus_rmsf_features` / `calculate_consensus_dccm_features` | per_sim |
+
+Helpers: `src/analysis/family_dynamics_core.py`.  
+Classification: `feature_columns` / modular groups / `auto_discover` on
+`collect_classification_features_table`.  
+Planner: metric map + expanded `get_family_scale_planning_guide()`.  
+Docs: `ANALYSIS_TOOLS.md` § Modular family dynamics.
+
+---
+
 ## Intentionally not done yet
 
 - Deleting `pseudo_JAK` or merging all `run_combined_*` wrappers

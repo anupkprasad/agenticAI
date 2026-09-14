@@ -633,15 +633,17 @@ def _short_feature_label(col: str) -> str:
         "consensus_rmsf_mean_A": "consensus RMSF (mean)",
         "consensus_rmsf_std_A": "consensus RMSF (std)",
         "reference_pocket_ligand_distance_p95_A": "Pocket–ATP COM (p95)",
+        "reference_pocket_ligand_distance_mean_A": "Pocket–ATP COM (mean)",
         "reference_pocket_ligand_distance_std_A": "Pocket–ATP COM (std)",
         "reference_pocket_fraction_bound": "Fraction bound",
         "reference_pocket_ligand_axis_angle_p95_deg": "ATP–Pocket angle (p95)",
+        "reference_pocket_ligand_axis_angle_mean_deg": "ATP–Pocket angle (mean)",
         "reference_pocket_std_ligand_axis_angle_deg": "ATP–Pocket angle (std)",
         "mean_abs_corr_offdiag": r"DCCM $\langle|C|\rangle$",
         "dccm_mean_abs_corr_offdiag": r"DCCM $\langle|C|\rangle$",
         "dccm_top_eigenvalue": r"$\lambda_1$",
-        "N_C_mean_corr": r"DCCM N$\leftrightarrow$C",
-        "dccm_N_C_mean_corr": r"DCCM N$\leftrightarrow$C",
+        "N_C_mean_corr": r"DCCM N lobe$\leftrightarrow$C lobe",
+        "dccm_N_C_mean_corr": r"DCCM N lobe$\leftrightarrow$C lobe",
         "pocket_C_mean_corr": r"pocket$\leftrightarrow$C",
         "C_C_mean_corr": r"C$\leftrightarrow$C",
         "timescale_ic1_ns": r"$\tau_1$ (ns)",
@@ -651,7 +653,11 @@ def _short_feature_label(col: str) -> str:
         "grid_entropy": "grid entropy",
         "tica_grid_entropy": "TICA grid entropy",
         "tica_major_basin_population": "TICA major basin pop.",
-        "pca_grid_entropy": "PCA grid entropy",
+        "pca_grid_entropy": r"PCA grid entropy ($\phi$/$\psi$/$\chi_1$)",
+        "pca_phipsi_grid_entropy": r"PCA grid entropy ($\phi$/$\psi$)",
+        "chi1_circ_mean_deg": r"Torsion $\chi_1$ global (circ. mean)",
+        "chi1_pocket_circ_mean_deg": r"Torsion $\chi_1$ pocket (circ. mean)",
+        "phi_circ_mean_deg": r"Torsion $\phi$ (circ. mean)",
         "frac_frames_within_3kBT_of_minF": r"frac $\leq$ 3 kBT",
     }
     if col in aliases:
@@ -772,7 +778,7 @@ def _draw_simulation_label_bar(
     """Colored cluster strip with black protein names centered on each row.
 
     Names in ``highlight_names`` (e.g. ground-truth kinases) are prefixed with
-    ``*`` on this label bar only (no border styling).
+    a large filled star (★) on this label bar only (no border styling).
     """
     from matplotlib.patches import Rectangle
 
@@ -782,7 +788,6 @@ def _draw_simulation_label_bar(
     ax.set_ylim(n - 0.5, -0.5)
     for i, (name, cid) in enumerate(zip(names_ord, cids_ord)):
         is_hi = str(name).strip().lower() in hi
-        label = f"*{name}" if is_hi else str(name)
         ax.add_patch(
             Rectangle(
                 (0.02, i - 0.46),
@@ -793,16 +798,30 @@ def _draw_simulation_label_bar(
                 linewidth=0.6,
             )
         )
+        if is_hi:
+            # Star in left gutter; names share one left-aligned column.
+            ax.scatter(
+                [0.06],
+                [i],
+                marker="*",
+                s=9 ** 2,
+                c="black",
+                zorder=6,
+                clip_on=False,
+                linewidths=0.2,
+                edgecolors="black",
+            )
         ax.text(
-            0.5,
+            0.22,
             i,
-            label,
-            ha="center",
+            str(name),
+            ha="left",
             va="center",
             color="black",
             fontsize=fontsize,
             fontweight="bold",
             clip_on=True,
+            zorder=5,
         )
     ax.axis("off")
 
@@ -834,7 +853,7 @@ def _plot_dendrogram_heatmap_panel(
     Rows share the same simulation order top→bottom. Protein names appear in black
     on the colored cluster bar; the heatmap has no y-axis labels.
     Optional ``highlight_display_names`` (e.g. ground-truth kinases) are shown with
-    a leading ``*`` on the label bar only.
+    a leading ★ on the label bar only.
     When ``colorbar_symmetric`` is False, the heatmap uses the data min/max (or
     [0, 1] if values already lie in that range) instead of a ±vmax diverging scale.
     When ``highlight_dominant_features`` is True, thin rectangles outline the
@@ -861,18 +880,17 @@ def _plot_dendrogram_heatmap_panel(
     fig = plt.figure(figsize=(fig_w, fig_h))
     gs = fig.add_gridspec(
         1,
-        4,
-        width_ratios=[1.15, 0.32, 1.55, 0.05],
+        3,
+        width_ratios=[1.10, 0.42, 1.60],
         wspace=0.05 if layout_tight else 0.06,
         left=0.03,
-        right=0.97,
+        right=0.90,
         top=0.92 if layout_tight else 0.91,
         bottom=0.16,
     )
     ax_dend = fig.add_subplot(gs[0, 0])
     ax_bar = fig.add_subplot(gs[0, 1])
     ax_hm = fig.add_subplot(gs[0, 2])
-    ax_cbar = fig.add_subplot(gs[0, 3])
 
     ddata = hierarchy.dendrogram(
         linkage_matrix,
@@ -893,7 +911,7 @@ def _plot_dendrogram_heatmap_panel(
     ax_dend.tick_params(axis="x", labelsize=11)
     ax_dend.tick_params(axis="y", left=False, labelleft=False)
 
-    _align_subplot_heights(ax_dend, ax_bar, ax_hm, ax_cbar)
+    _align_subplot_heights(ax_dend, ax_bar, ax_hm)
 
     order = leaf_order_tb
     X_ord = X[order, :]
@@ -950,13 +968,13 @@ def _plot_dendrogram_heatmap_panel(
     ax_hm.set_xticks(np.arange(len(feature_cols)))
     ax_hm.set_xticklabels(
         feat_labels,
-        rotation=25,
+        rotation=20,
         ha="right",
         rotation_mode="anchor",
         fontsize=9.5 if layout_tight else 11,
     )
     for tick in ax_hm.get_xticklabels():
-        tick.set_rotation(25)
+        tick.set_rotation(20)
         tick.set_ha("right")
         tick.set_rotation_mode("anchor")
     ax_hm.tick_params(axis="x", pad=6 if layout_tight else 6, labelsize=9.5 if layout_tight else 11)
@@ -1013,18 +1031,6 @@ def _plot_dendrogram_heatmap_panel(
                     )
                 )
 
-    cbar = fig.colorbar(
-        ScalarMappable(norm=im.norm, cmap=im.cmap),
-        cax=ax_cbar,
-    )
-    if colorbar_label:
-        # Strip incidental "(k=…)" suffixes if a caller passes them.
-        cbar_lab = str(colorbar_label)
-        for tok in (" (k=5)", " (k = 5)", f" (k={len(clusters)})"):
-            cbar_lab = cbar_lab.replace(tok, "")
-        cbar.set_label(cbar_lab, fontsize=11)
-    cbar.ax.tick_params(labelsize=10)
-
     counts: Dict[int, int] = {}
     for cid in cluster_ids:
         counts[int(cid)] = counts.get(int(cid), 0) + 1
@@ -1046,15 +1052,15 @@ def _plot_dendrogram_heatmap_panel(
             Line2D(
                 [0],
                 [0],
-                marker="$\\ast$",
+                marker="*",
                 color="black",
                 markerfacecolor="black",
-                markersize=11,
+                markersize=9,
                 linestyle="None",
                 label="ground-truth kinase",
             )
         )
-    ncol = int(legend_ncol) if legend_ncol else min(len(handles), 2)
+    ncol = int(legend_ncol) if legend_ncol is not None else 3
     if legend_row_major and ncol > 1 and len(handles) > 1:
         # Matplotlib fills legends column-major; permute so display is row-major
         # (left→right, then next row): e.g. C1 C2 C3 / C4 *
@@ -1077,12 +1083,31 @@ def _plot_dendrogram_heatmap_panel(
         framealpha=0.95,
         bbox_to_anchor=(0.5, 0.02),
         borderaxespad=0.0,
-        columnspacing=2.4 if layout_tight else 1.5,
+        columnspacing=2.0 if layout_tight else 1.5,
         handletextpad=0.7,
         labelspacing=0.7 if layout_tight else 0.5,
         borderpad=0.6,
-        markerscale=1.05,
+        markerscale=1.0,
     )
+
+    # Explicit half-height colorbar (after legend so layout is final).
+    fig.canvas.draw()
+    _bbox = ax_hm.get_position()
+    _cax = fig.add_axes(
+        [
+            _bbox.x1 + 0.012,
+            _bbox.y0 + 0.25 * _bbox.height,
+            0.014,
+            0.50 * _bbox.height,
+        ]
+    )
+    cbar = fig.colorbar(im, cax=_cax)
+    if colorbar_label:
+        cbar_lab = str(colorbar_label)
+        for tok in (" (k=5)", " (k = 5)", f" (k={len(clusters)})"):
+            cbar_lab = cbar_lab.replace(tok, "")
+        cbar.set_label(cbar_lab, fontsize=11)
+    cbar.ax.tick_params(labelsize=10)
 
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)

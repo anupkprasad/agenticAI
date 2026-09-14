@@ -1025,12 +1025,19 @@ def load_fel_grid_csv(path: str) -> Dict[str, Any]:
         for row in reader:
             try:
                 pc_cols = [c for c in reader.fieldnames if c.startswith("PC")]
+                ic_cols = [c for c in reader.fieldnames if c.startswith("IC")]
                 if len(pc_cols) >= 2:
                     xs.append(float(row[pc_cols[0]]))
                     ys.append(float(row[pc_cols[1]]))
+                elif len(ic_cols) >= 2:
+                    xs.append(float(row[ic_cols[0]]))
+                    ys.append(float(row[ic_cols[1]]))
+                elif "phi_deg" in reader.fieldnames and "psi_deg" in reader.fieldnames:
+                    xs.append(float(row["phi_deg"]))
+                    ys.append(float(row["psi_deg"]))
                 else:
-                    xs.append(float(row.get("PC1", row.get("x", 0))))
-                    ys.append(float(row.get("PC2", row.get("y", 0))))
+                    xs.append(float(row.get("PC1", row.get("IC1", row.get("x", 0)))))
+                    ys.append(float(row.get("PC2", row.get("IC2", row.get("y", 0)))))
                 fs.append(float(row.get("free_energy_kJ_mol", row.get("F", 0))))
                 ps.append(float(row.get("probability", row.get("P", 0))))
             except (TypeError, ValueError, KeyError):

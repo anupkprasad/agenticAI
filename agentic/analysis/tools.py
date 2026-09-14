@@ -108,6 +108,20 @@ from src.analysis.ligand_rmsd import calculate_ligand_rmsd
 from src.analysis.trajectory_qc import run_trajectory_qc
 from src.analysis.md_basics import calculate_native_contacts, calculate_backbone_dihedrals
 from src.analysis.consensus_local_fel import run_consensus_local_fel_batch_tool
+from src.analysis.consensus_torsions import (
+    calculate_consensus_torsions,
+    run_consensus_torsions_batch,
+)
+from src.analysis.family_dynamics import (
+    run_independent_dynamics_fel,
+    fit_dynamics_model,
+    project_dynamics_model,
+    run_shared_dynamics_fel_batch,
+)
+from src.analysis.consensus_structural_features import (
+    calculate_consensus_rmsf_features,
+    calculate_consensus_dccm_features,
+)
 
 # Import dynamic tool loader for programmer-generated tools
 from agentic.utils import get_dynamic_tool_loader
@@ -158,6 +172,11 @@ __all__ = [
     "run_trajectory_qc",
     "calculate_native_contacts",
     "calculate_backbone_dihedrals",
+    "calculate_consensus_torsions",
+    "run_independent_dynamics_fel",
+    "project_dynamics_model",
+    "calculate_consensus_rmsf_features",
+    "calculate_consensus_dccm_features",
     # Combined (multi-sim) tools
     "collect_metric_files",
     "plot_combined_overlay",
@@ -188,6 +207,9 @@ __all__ = [
     "run_consensus_pocket_metrics_batch",
     "plot_reference_msa_alignment",
     "run_consensus_local_fel_batch",
+    "run_consensus_torsions_batch",
+    "fit_dynamics_model",
+    "run_shared_dynamics_fel_batch",
     "AnalysisToolExecutor",
     "get_analysis_tools",
     "get_tool_metadata",
@@ -238,6 +260,11 @@ _PER_SIM_ANALYSIS_TOOLS = [
     run_trajectory_qc,
     calculate_native_contacts,
     calculate_backbone_dihedrals,
+    calculate_consensus_torsions,
+    run_independent_dynamics_fel,
+    project_dynamics_model,
+    calculate_consensus_rmsf_features,
+    calculate_consensus_dccm_features,
 ]
 
 _COMBINED_ANALYSIS_TOOLS = [
@@ -277,6 +304,9 @@ _SHARED_ANALYSIS_TOOLS = [
     run_consensus_pocket_metrics_batch,
     plot_reference_msa_alignment,
     run_consensus_local_fel_batch_tool,
+    run_consensus_torsions_batch,
+    fit_dynamics_model,
+    run_shared_dynamics_fel_batch,
 ]
 
 

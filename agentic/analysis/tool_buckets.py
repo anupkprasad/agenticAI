@@ -49,6 +49,11 @@ PER_SIM_TOOL_NAMES: FrozenSet[str] = frozenset({
     "run_trajectory_qc",
     "calculate_native_contacts",
     "calculate_backbone_dihedrals",
+    "calculate_consensus_torsions",
+    "run_independent_dynamics_fel",
+    "project_dynamics_model",
+    "calculate_consensus_rmsf_features",
+    "calculate_consensus_dccm_features",
 })
 
 COMBINED_TOOL_NAMES: FrozenSet[str] = frozenset({
@@ -88,6 +93,9 @@ SHARED_TOOL_NAMES: FrozenSet[str] = frozenset({
     "run_consensus_pocket_metrics_batch",
     "plot_reference_msa_alignment",
     "run_consensus_local_fel_batch",
+    "run_consensus_torsions_batch",
+    "fit_dynamics_model",
+    "run_shared_dynamics_fel_batch",
 })
 
 

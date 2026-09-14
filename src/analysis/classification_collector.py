@@ -111,6 +111,131 @@ CLASSIFICATION_FEATURE_GROUPS["reference_fel_archetype"] = (
     "ref_major_basin_population",
 )
 
+# Optional modular family-dynamics groups (user/planner selects; never forced).
+CLASSIFICATION_FEATURE_GROUPS["consensus_torsions"] = (
+    "chi1_circ_mean_deg",
+    "chi1_pocket_circ_mean_deg",
+)
+CLASSIFICATION_FEATURE_GROUPS["consensus_rmsf"] = (
+    "consensus_rmsf_mean_A",
+    "consensus_rmsf_std_A",
+)
+CLASSIFICATION_FEATURE_GROUPS["consensus_dccm"] = (
+    "dccm_N_C_mean_corr",
+    "mean_abs_dccm",
+)
+CLASSIFICATION_FEATURE_GROUPS["dihedral_pca"] = (
+    "pca_grid_entropy",
+    "pca_major_basin_population",
+)
+CLASSIFICATION_FEATURE_GROUPS["dihedral_tica"] = (
+    "tica_grid_entropy",
+    "tica_major_basin_population",
+)
+CLASSIFICATION_FEATURE_GROUPS["cart_pca"] = (
+    "cart_pca_grid_entropy",
+    "cart_pca_major_basin_population",
+)
+CLASSIFICATION_FEATURE_GROUPS["cart_tica"] = (
+    "cart_tica_grid_entropy",
+    "cart_tica_major_basin_population",
+)
+CLASSIFICATION_FEATURE_GROUPS["dihedral_pca_ref"] = (
+    "pca_ref_grid_entropy",
+    "pca_ref_major_basin_population",
+)
+CLASSIFICATION_FEATURE_GROUPS["dihedral_tica_ref"] = (
+    "tica_ref_grid_entropy",
+    "tica_ref_major_basin_population",
+)
+
+# (subdir under analysis/, json relative path, column_prefix for grid/major)
+_MODULAR_DYNAMICS_FEL_DIRS: Tuple[Tuple[str, str], ...] = (
+    ("consensus_PCA", "pca"),
+    ("consensus_TICA", "tica"),
+    ("consensus_cart_PCA", "cart_pca"),
+    ("consensus_cart_TICA", "cart_tica"),
+    ("consensus_PCA_ref", "pca_ref"),
+    ("consensus_TICA_ref", "tica_ref"),
+    ("consensus_cart_PCA_ref", "cart_pca_ref"),
+    ("consensus_cart_TICA_ref", "cart_tica_ref"),
+)
+
+_MODULAR_SCALAR_JSON: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    (
+        "consensus_dihedrals/torsion_summary.json",
+        ("chi1_circ_mean_deg", "chi1_pocket_circ_mean_deg"),
+    ),
+    (
+        "consensus_dihedrals/dihedral_features_meta.json",
+        ("chi1_circ_mean_deg", "chi1_pocket_circ_mean_deg"),
+    ),
+    (
+        "consensus_rmsf/consensus_rmsf_features.json",
+        ("consensus_rmsf_mean_A", "consensus_rmsf_std_A"),
+    ),
+    (
+        "consensus_DCCM/consensus_dccm_features.json",
+        ("dccm_N_C_mean_corr", "mean_abs_dccm"),
+    ),
+)
+
+
+def discover_modular_feature_columns(row: Dict[str, Any]) -> List[str]:
+    """Columns present on a feature row that belong to modular family tools."""
+    known: List[str] = []
+    for cols in (
+        CLASSIFICATION_FEATURE_GROUPS["consensus_torsions"],
+        CLASSIFICATION_FEATURE_GROUPS["consensus_rmsf"],
+        CLASSIFICATION_FEATURE_GROUPS["consensus_dccm"],
+        CLASSIFICATION_FEATURE_GROUPS["dihedral_pca"],
+        CLASSIFICATION_FEATURE_GROUPS["dihedral_tica"],
+        CLASSIFICATION_FEATURE_GROUPS["cart_pca"],
+        CLASSIFICATION_FEATURE_GROUPS["cart_tica"],
+        CLASSIFICATION_FEATURE_GROUPS["dihedral_pca_ref"],
+        CLASSIFICATION_FEATURE_GROUPS["dihedral_tica_ref"],
+    ):
+        for c in cols:
+            if row.get(c) is not None and c not in known:
+                known.append(c)
+    # Also pick up any *_grid_entropy / *_major_basin_population already on row
+    for k, v in row.items():
+        if v is None:
+            continue
+        if k.endswith("_grid_entropy") or k.endswith("_major_basin_population"):
+            if k not in known:
+                known.append(k)
+    return known
+
+
+def _ingest_modular_family_features(adir: Path, row: Dict[str, Any]) -> None:
+    """Pull scalars from modular torsion / RMSF / DCCM / dynamics FEL artifacts."""
+    for rel, keys in _MODULAR_SCALAR_JSON:
+        data = _load_json(adir / rel) or {}
+        for k in keys:
+            if row.get(k) is None and data.get(k) is not None:
+                row[k] = data.get(k)
+
+    for subdir, prefix in _MODULAR_DYNAMICS_FEL_DIRS:
+        fel = _load_json(adir / subdir / "fel_features.json") or {}
+        if not fel:
+            fel = _load_json(adir / subdir / "dynamics_features.json") or {}
+        gkey = f"{prefix}_grid_entropy"
+        mkey = f"{prefix}_major_basin_population"
+        if row.get(gkey) is None and fel.get("grid_entropy") is not None:
+            row[gkey] = fel.get("grid_entropy")
+        if row.get(mkey) is None and fel.get("major_basin_population") is not None:
+            row[mkey] = fel.get("major_basin_population")
+        # Optional extras when present
+        for src, dst_suffix in (
+            ("landscape_entropy", "_landscape_entropy"),
+            ("n_basins", "_n_basins"),
+        ):
+            dkey = f"{prefix}{dst_suffix}"
+            if row.get(dkey) is None and fel.get(src) is not None:
+                row[dkey] = fel.get(src)
+
+
 # Local (per-simulation) FEL counterpart to reference_fel_archetype — same two
 # scalars, read from {uid}/analysis/fel_features.json rather than reference_fel/.
 CLASSIFICATION_FEATURE_GROUPS["fel_archetype"] = (
@@ -980,6 +1105,9 @@ def collect_features_for_sim(
         except Exception as exc:
             logger.debug("reference PCA load for %s: %s", label, exc)
 
+    # Modular family dynamics (torsions / consensus RMSF-DCCM / PCA-tICA FELs)
+    _ingest_modular_family_features(adir, row)
+
     # Summary fallbacks for missing fields
     if any(row.get(c) is None for c in FEATURE_COLUMNS):
         by_type = _extract_from_summary(adir)
@@ -1132,6 +1260,8 @@ def collect_classification_features_table(
     working_dir: Optional[str] = None,
     include_zscore: bool = True,
     requested_metric_groups: Optional[List[str]] = None,
+    feature_columns: Optional[List[str]] = None,
+    auto_discover: bool = False,
     allowed_labels: Optional[List[str]] = None,
     local_fel_root: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -1142,24 +1272,17 @@ def collect_classification_features_table(
     unsupervised grouping** — it is not part of default combined analysis.
 
     Scans ``{base}/{label}/analysis/`` and writes one row per simulation.
-    Which columns appear depends on ``requested_metric_groups`` (from the user
-    goal). If omitted, uses the default binding-site + FEL bundle.
 
-    **Metric groups** (subset or extend freely):
+    Column selection (flexible; pick one style):
 
-    ``com``, ``contacts``, ``pocket_sasa``, ``residence``, ``pocket_rmsf``,
-    ``ligand_rmsf``, ``fel``, ``rmsd``, ``rmsf``, ``rg``, ``sasa``, ``energy``,
-    ``dccm``
+    - ``feature_columns=[...]`` — exact CSV columns (highest priority)
+    - ``requested_metric_groups=[...]`` — named groups (``com``, ``dihedral_pca``, …)
+    - ``auto_discover=True`` — include modular family scalars found on disk
+      (torsions, consensus RMSF/DCCM, PCA/tICA grid entropy, …) **plus**
+      default binding/FEL groups when no groups were named
+    - If all omitted: default binding-site + FEL bundle
 
-    Example: user asks for "classification using pocket RMSF and ligand pocket distance
-    only" → pass ``requested_metric_groups=["pocket_rmsf", "com"]``.
-
-    **Outputs:**
-
-    - ``classification_features.csv`` — raw scalars
-    - ``classification_features_zscore.csv`` — z-scores across sims (for k-means)
-    - ``classification_features.json`` — column manifest
-    - ``classification_features.xlsx`` — workbook (README, definitions, raw, z-score)
+    Do **not** invent a fixed mega feature matrix — pass only what the user goal asked for.
     """
     original_dir = None
     try:
@@ -1205,8 +1328,35 @@ def collect_classification_features_table(
                 ),
             }
 
-        metric_groups = tuple(requested_metric_groups or DEFAULT_CLASSIFICATION_METRIC_GROUPS)
-        feature_cols = columns_for_metric_groups(metric_groups)
+        metric_groups: Tuple[str, ...] = tuple(
+            requested_metric_groups or ()
+        )
+        if feature_columns:
+            feature_cols = tuple(dict.fromkeys(feature_columns))
+        elif metric_groups:
+            feature_cols = columns_for_metric_groups(metric_groups)
+            if auto_discover:
+                extra: List[str] = []
+                for row in rows:
+                    for c in discover_modular_feature_columns(row):
+                        if c not in feature_cols and c not in extra:
+                            extra.append(c)
+                feature_cols = tuple(list(feature_cols) + extra)
+        elif auto_discover:
+            # Discover modular columns present; keep default groups as baseline
+            # only when user asked for auto_discover without naming groups.
+            base_cols = list(columns_for_metric_groups(DEFAULT_CLASSIFICATION_METRIC_GROUPS))
+            extra = []
+            for row in rows:
+                for c in discover_modular_feature_columns(row):
+                    if c not in base_cols and c not in extra:
+                        extra.append(c)
+            feature_cols = tuple(base_cols + extra)
+            metric_groups = tuple(DEFAULT_CLASSIFICATION_METRIC_GROUPS)
+        else:
+            metric_groups = tuple(DEFAULT_CLASSIFICATION_METRIC_GROUPS)
+            feature_cols = columns_for_metric_groups(metric_groups)
+
         for row in rows:
             for col in feature_cols:
                 row.setdefault(col, None)
@@ -1242,6 +1392,7 @@ def collect_classification_features_table(
             "labels": [r["label"] for r in rows],
             "requested_metric_groups": list(metric_groups),
             "feature_columns": list(feature_cols),
+            "auto_discover": bool(auto_discover),
             "feature_definitions": _feature_definitions_rows(feature_cols),
             "raw_output": str(raw_path.resolve()),
             "zscore_output": str(z_path.resolve()) if z_path else None,
