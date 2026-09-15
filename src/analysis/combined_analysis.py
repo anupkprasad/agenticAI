@@ -47,32 +47,47 @@ _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf", ".webp"}
 
 def _find_metric_file(directory: str, filename_pattern: str) -> Optional[str]:
     """
-    Search *directory* recursively for the best file whose stem starts with
-    *filename_pattern* (case-insensitive).
+    Search *directory* recursively for the best file matching *filename_pattern*
+    (case-insensitive).
 
-    Prefers numeric data files (``.xvg``, ``.dat``, …) over plot images
-    (``.png``) so ``energy.xvg`` wins over ``energy.png`` for overlays.
+    *filename_pattern* may be a basename (``rmsd.dat``) or a stem (``rmsd``).
+    Prefers an exact basename match, then an exact stem match, then stem prefix.
+    Among those, prefers numeric data files (``.xvg``, ``.dat``, …) over plot
+    images (``.png``) so ``energy.xvg`` wins over ``energy.png`` for overlays.
     """
     d = Path(directory)
     if not d.is_dir():
         return None
-    pat = filename_pattern.lower()
+    pat_name = filename_pattern.lower()
+    pat_stem = Path(filename_pattern).stem.lower()
     matches: List[Path] = []
     for p in d.rglob("*"):
-        if p.is_file() and p.stem.lower().startswith(pat):
+        if not p.is_file():
+            continue
+        name = p.name.lower()
+        stem = p.stem.lower()
+        if name == pat_name or stem == pat_stem or stem.startswith(pat_stem):
             matches.append(p)
     if not matches:
         return None
 
-    def _priority(p: Path) -> Tuple[int, str]:
+    def _priority(p: Path) -> Tuple[int, int, str]:
+        name = p.name.lower()
+        stem = p.stem.lower()
+        if name == pat_name:
+            name_tier = 0
+        elif stem == pat_stem:
+            name_tier = 1
+        else:
+            name_tier = 2
         ext = p.suffix.lower()
         if ext in _DATA_EXTS:
-            tier = 0
+            data_tier = 0
         elif ext in _IMAGE_EXTS:
-            tier = 2
+            data_tier = 2
         else:
-            tier = 1
-        return (tier, str(p))
+            data_tier = 1
+        return (name_tier, data_tier, str(p))
 
     matches.sort(key=_priority)
     return str(matches[0])
@@ -193,17 +208,47 @@ def collect_metric_files(
     missing: List[str] = []
 
     for sim_dir in sim_dirs:
-        search_root = Path(sim_dir) / search_subdir if search_subdir else Path(sim_dir)
-        hit = _find_metric_file(str(search_root), metric_filename)
+        hit = None
+        try:
+            from src.analysis.replicate_paths import (
+                analysis_avg_dir,
+                parse_rep_id,
+                preferred_analysis_metric_dirs,
+            )
+
+            avg = analysis_avg_dir(sim_dir)
+            if avg.is_dir():
+                hit = _find_metric_file(str(avg), metric_filename)
+            if not hit:
+                flat = Path(sim_dir) / search_subdir if search_subdir else Path(sim_dir)
+                # Flat analysis/ only (not nested repXX)
+                if flat.is_dir() and parse_rep_id(flat.name) is None:
+                    hit = _find_metric_file(str(flat), metric_filename)
+                    if hit and parse_rep_id(Path(hit).parent.name) is not None:
+                        # Recursive search drifted into repXX — ignore for now
+                        hit = None
+                        for child in flat.iterdir():
+                            if child.is_file() and metric_filename in child.name:
+                                hit = str(child)
+                                break
+            if not hit:
+                for d in preferred_analysis_metric_dirs(sim_dir):
+                    if parse_rep_id(d.name) is None:
+                        continue
+                    hit = _find_metric_file(str(d), metric_filename)
+                    if hit:
+                        break
+        except Exception:
+            search_root = Path(sim_dir) / search_subdir if search_subdir else Path(sim_dir)
+            hit = _find_metric_file(str(search_root), metric_filename)
+
+        if not hit:
+            hit = _find_metric_file(sim_dir, metric_filename)
+
         if hit:
             found.append({"sim_dir": sim_dir, "file": hit})
         else:
-            # Broader fallback: search the whole sim_dir
-            hit = _find_metric_file(sim_dir, metric_filename)
-            if hit:
-                found.append({"sim_dir": sim_dir, "file": hit})
-            else:
-                missing.append(sim_dir)
+            missing.append(sim_dir)
 
     return {
         "success": len(missing) == 0,

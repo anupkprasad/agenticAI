@@ -1874,6 +1874,18 @@ def main(argv=None):
                            "Max concurrent SLURM jobs in cross-sim HPC pool mode. "
                            "Default: auto from CPU/memory when --parallel-workers is auto."
                        ))
+    parser.add_argument(
+        "--rep-num",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Number of independent MD production replicates per system label "
+            "(default: 1, or soft-parsed from goal like '3 replicates'). "
+            "Prep/simsetup run once; HPC writes hpc/rep01..repNN "
+            "and analysis fans out into analysis/rep01..repNN + analysis/avg/."
+        ),
+    )
     parser.add_argument("--parallel-workers", default="auto",
                        help=(
                            "Max parallel local workers for multi-sim prep and "
@@ -2034,6 +2046,8 @@ def main(argv=None):
         "_allowed_hpc_jobs_explicit": getattr(args, "allowed_hpc_jobs", None) is not None,
         "max_concurrent": getattr(args, "max_concurrent", 4),
         "hpc_check_interval": getattr(args, "hpc_check_interval", "2h"),
+        "rep_num": 1,
+        "replicate_base_seed": 12345,
         "parallel_workers": getattr(args, "parallel_workers", "auto"),
         "parallel_mem_gb_per_job": getattr(args, "parallel_mem_gb", None),
         "parallel_cpus_per_job": getattr(args, "parallel_cpus", None),
@@ -2071,6 +2085,19 @@ def main(argv=None):
             config["pipeline_agent_list"] = list(args.subtask)
     
     goal = args.goal
+    from src.analysis.replicate_paths import normalize_rep_num, parse_rep_num_from_text
+
+    if getattr(args, "rep_num", None) is not None:
+        config["rep_num"] = normalize_rep_num(args.rep_num)
+    else:
+        config["rep_num"] = parse_rep_num_from_text(goal, default=1)
+    if config["rep_num"] > 1:
+        print(
+            f"Note: rep_num={config['rep_num']} — each label gets "
+            f"{config['rep_num']} nested production replicates (hpc/repXX, analysis/repXX + avg/).",
+            flush=True,
+        )
+
     production_ns = _extract_production_ns_from_goal(goal)
     if production_ns is not None:
         config["production_ns"] = production_ns

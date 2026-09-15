@@ -139,6 +139,13 @@ uses the registry automatically.
 - `sim_prompts` is the authoritative count of simulations (not `pdb_list`).
   `len(sim_prompts)` = total cases including all component variants.
 - Each simulation gets an isolated `working_dir/{label}/` directory.
+- **Multi-replicate (`--rep-num N`, N>1):** preprocess + simsetup stay once per
+  label; production MD forks into `{label}/hpc/rep01`…`repNN` with deterministic
+  seeds (`replicate_base_seed + k - 1`). Analysis fans the same plan across
+  `{label}/analysis/repXX/` and writes mean±std under `{label}/analysis/avg/`.
+  Combined collectors prefer `analysis/avg/` so family overlays stay one curve
+  per chemical system (not one per replicate). `rep_num=1` keeps legacy flat
+  `{label}/hpc/` and `{label}/analysis/`.
 - Per-sim `MDState` fields (`raw_pdb`, `cleaned_pdb`, `topology`, …) are
   reset between simulations. Prep and post-HPC analysis/reporter may run as
   a local worker pool; production MD uses the SLURM HPC pool

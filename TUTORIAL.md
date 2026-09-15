@@ -97,6 +97,7 @@ python SimAgent.py --goal "..." [options]
 | `--force-field` | Override force field (default `amber99sb-ildn`) |
 | `--water-model` | Override water model (default `tip3p`) |
 | `--allowed-hpc-jobs` | Max concurrent SLURM jobs in cross-sim HPC pool (default `5`) |
+| `--rep-num` | Independent production replicates per label (default `1`; nested `hpc/repXX` + `analysis/avg/`) |
 | `--hpc-check-interval` | Poll interval during HPC pool wait (default `2h`) |
 | `--resume` | Multi-sim: skip succeeded sims, retry failures |
 | `--retry-labels` | Force-retry specific simulation labels |

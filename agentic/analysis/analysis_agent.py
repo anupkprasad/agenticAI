@@ -32,6 +32,7 @@ from .schemas import (
 )
 from .tools import AnalysisToolExecutor, get_tool_metadata, is_combined_analysis_tool
 from src.analysis.chain_residue_map import CHAIN_SELECTION_LLM_NOTE
+from src.analysis.replicate_paths import effective_rep_num as _effective_rep_num_for_state
 from ..planner.planning_guidelines import (
     detect_requested_metrics,
     detect_requested_metrics_union,
@@ -617,6 +618,9 @@ class MDAnalysisAgent:
                 "working_directory": analysis_dir,
                 "include_combined_tools": False,
                 "user_goal": state.get("user_goal_original") or state.get("user_goal", ""),
+                "rep_num": _effective_rep_num_for_state(state, working_dir),
+                "sim_root": working_dir,
+                "replicate_base_seed": int(state.get("replicate_base_seed") or 12345),
             })
             
             # Copy files from HPC output directory if needed (using secure file manager)
@@ -700,6 +704,9 @@ class MDAnalysisAgent:
                     or state.get("hitl_combined_execute")
                 ),
                 "user_goal": state.get("user_goal_original") or state.get("user_goal", ""),
+                "rep_num": _effective_rep_num_for_state(state, working_dir),
+                "sim_root": working_dir,
+                "replicate_base_seed": int(state.get("replicate_base_seed") or 12345),
             }
         )
         self._copy_files_from_hpc_secure(state)
@@ -2484,6 +2491,72 @@ Output as JSON:
             logger.info("_wrap_trajectory_pbc: skip_pbc_wrap=True — skipping")
             return
 
+        # Multi-rep: wrap each hpc/repXX independently (once). Do NOT recurse via
+        # rep_num alone — effective_rep_num() still sees nested dirs on disk.
+        if not state.get("_wrap_single_rep"):
+            try:
+                from src.analysis.replicate_paths import (
+                    discover_hpc_rep_dirs,
+                    resolve_production_trajectory,
+                )
+
+                rep_hpcs = discover_hpc_rep_dirs(
+                    state.get("working_directory", "working_dir")
+                )
+                nested = [p for p in rep_hpcs if p.name.startswith("rep")]
+                if nested and _effective_rep_num_for_state(state) > 1:
+                    log_agent_action(
+                        "analysis",
+                        "Deterministic PBC wrap (pre-plan; all replicates)",
+                        {
+                            "note": (
+                                "Not an LLM plan step. Analysis agent wraps each "
+                                "hpc/repXX trajectory before metrics."
+                            ),
+                            "replicates": [p.name for p in nested],
+                            "n_reps": len(nested),
+                        },
+                    )
+                    first_wrapped = None
+                    for hpc in nested:
+                        traj_p = resolve_production_trajectory(hpc)
+                        tpr_p = hpc / "md.tpr"
+                        if not traj_p or not tpr_p.is_file():
+                            logger.warning(
+                                "_wrap_trajectory_pbc: skip %s (missing traj/tpr)", hpc
+                            )
+                            continue
+                        snap = dict(state)
+                        snap["trajectory_path"] = str(traj_p)
+                        snap["hpc_dir"] = str(hpc)
+                        snap["tpr_file"] = str(tpr_p)
+                        snap["_wrap_single_rep"] = True
+                        try:
+                            self._wrap_trajectory_pbc(snap, analysis_dir)
+                            log_agent_action(
+                                "analysis",
+                                f"PBC wrap complete for {hpc.name}",
+                                {
+                                    "hpc_dir": str(hpc),
+                                    "trajectory": snap.get("trajectory_path"),
+                                    "source": "deterministic_pre_plan",
+                                },
+                            )
+                        except Exception as rep_exc:
+                            logger.warning(
+                                "_wrap_trajectory_pbc: %s failed: %s", hpc.name, rep_exc
+                            )
+                            continue
+                        if snap.get("trajectory_path") and first_wrapped is None:
+                            first_wrapped = snap["trajectory_path"]
+                    if first_wrapped:
+                        state["trajectory_path"] = first_wrapped
+                    return
+            except Exception as exc:
+                logger.warning(
+                    "_wrap_trajectory_pbc multi-rep dispatch failed: %s", exc
+                )
+
         # Resolve trajectory
         traj = state.get("trajectory_path")
         if not traj or not Path(traj).exists():
@@ -2498,6 +2571,20 @@ Output as JSON:
             Path(state.get("working_directory", "working_dir")) / "hpc"
         )
         force = bool(state.get("force_pbc_wrap"))
+
+        if not state.get("_wrap_single_rep"):
+            log_agent_action(
+                "analysis",
+                "Deterministic PBC wrap (pre-plan)",
+                {
+                    "note": (
+                        "Not an LLM plan step. Analysis agent wraps the "
+                        "production trajectory before metrics."
+                    ),
+                    "hpc_dir": hpc_dir,
+                    "trajectory": traj,
+                },
+            )
 
         if not force:
             # Case 1: current trajectory already points to the wrapped file.
@@ -4760,7 +4847,21 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 plan.steps = plan.steps[:max_steps]
 
             batch_results: Dict[int, Dict[str, Any]] = {}
-            if agent_config.get("use_trajectory_batching", True):
+            # Multi-rep: skip trajectory batching so metrics go through
+            # AnalysisToolExecutor fan-out into analysis/repXX/ + avg/.
+            use_batch = bool(agent_config.get("use_trajectory_batching", True))
+            try:
+                rn = _effective_rep_num_for_state(state)
+                if rn > 1:
+                    use_batch = False
+                    logger.info(
+                        "Trajectory batching disabled for multi-rep (rep_num=%d); "
+                        "using executor fan-out",
+                        rn,
+                    )
+            except Exception:
+                pass
+            if use_batch:
                 batch_results = self._run_trajectory_batch_precache(plan, state)
                 if batch_results:
                     execution_log.append(
@@ -5088,6 +5189,19 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
         # Hardcoded input directory for this agent
         input_subdir = AGENT_IO_MAP.get("analysis", {}).get("input_dir", "hpc")
         input_dir = str(Path(working_dir) / input_subdir) if input_subdir else working_dir
+        # Multi-rep: prefer first nested hpc/repXX for planner path resolution
+        try:
+            from src.analysis.replicate_paths import discover_hpc_rep_dirs
+
+            if _effective_rep_num_for_state(state, working_dir) > 1:
+                reps = discover_hpc_rep_dirs(working_dir)
+                nested = [p for p in reps if p.name.startswith("rep")]
+                if nested:
+                    input_dir = str(nested[0])
+                elif reps:
+                    input_dir = str(reps[0])
+        except Exception:
+            pass
 
         # --- 1. Try state fields first (set by HPC / simsetup agent) --------
         _STATE_KEYS = {

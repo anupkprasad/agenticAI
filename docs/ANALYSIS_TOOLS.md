@@ -47,6 +47,7 @@ Always include `chainID` when residue numbers overlap across chains.
 | Collective motion | DCCM, PCA, FEL, FEL features                                                   |
 | Plotting          | plot_md_data, plot_pca_projection, combined overlays                           |
 | Multi-simulation  | collect_metric_files, compute_comparison_table, collect_fel_features_table, … |
+| Multi-replicate   | `--rep-num N` → fan-out + `aggregate_replicate_metrics` → `analysis/avg/`     |
 
 ---
 

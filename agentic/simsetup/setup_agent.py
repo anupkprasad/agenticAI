@@ -437,21 +437,43 @@ class SimulationSetupAgent:
                         potential_issues=_updated.get("potential_issues", []),
                         recommendations=_updated.get("recommendations", []),
                     )
+                    plan = self._normalize_multi_rep_setup_plan(plan, state)
                 else:
                     # LLM unavailable — fall back; human_rec is already in additional_instructions
                     plan = self._create_setup_plan(agent_input, state)
             else:
                 plan = self._create_setup_plan(agent_input, state)
 
-            log_agent_action("setup", "Generated setup plan (LLM proposal — may differ from executed params)", {
+            try:
+                _rn = int(state.get("rep_num") or 1)
+            except (TypeError, ValueError):
+                _rn = 1
+            _log = {
                 "steps": len(plan.steps),
-                "reasoning": plan.reasoning[:200],
+                "tools": [s.tool_name for s in plan.steps],
+                "reasoning": (plan.reasoning or "")[:300],
+                "overview": (plan.overview or "")[:300],
                 "note": (
-                    "LLM tool_params are overridden at execution by goal/state "
-                    "(box_type, box_distance, ions, temperature, production_ns, etc.). "
-                    "See 'Resolved simsetup parameters' and 'Applied deterministic overrides' logs."
+                    "Box/ions/temperature/production_ns may still be overridden at "
+                    "execution (see 'Resolved simsetup parameters')."
                 ),
-            })
+            }
+            if _rn > 1:
+                _log["rep_num"] = _rn
+                _log["multi_rep_setup"] = (
+                    f"Single shared simsetup/ for all {_rn} replicates; "
+                    "HPC stages hpc/repXX with different seeds. "
+                    "Per-replicate setup dirs (rep1/rep2) are not used."
+                )
+            log_agent_action(
+                "setup",
+                (
+                    "Generated setup plan (shared simsetup; replicates staged at HPC)"
+                    if _rn > 1
+                    else "Generated setup plan (LLM proposal — may differ from executed params)"
+                ),
+                _log,
+            )
 
             # Persist structured plan to state for HITL inspection/modification
             if exec_plan is not None:
@@ -550,7 +572,7 @@ class SimulationSetupAgent:
                 logger.warning("LLM setup plan had no executable steps; falling back to deterministic plan")
                 return self._create_fallback_plan(agent_input, analysis)
             
-            return SimSetupPlan(
+            plan = SimSetupPlan(
                 reasoning=plan_dict.get("reasoning", content[:500]),
                 overview=plan_dict.get("overview", "Setting up GROMACS simulation system"),
                 steps=[
@@ -566,10 +588,86 @@ class SimulationSetupAgent:
                 potential_issues=plan_dict.get("potential_issues", []),
                 recommendations=plan_dict.get("recommendations", [])
             )
+            return self._normalize_multi_rep_setup_plan(plan, state)
             
         except Exception as e:
             logger.warning(f"LLM planning failed, using fallback: {e}")
             return self._create_fallback_plan(agent_input, analysis)
+
+    def _normalize_multi_rep_setup_plan(
+        self, plan: SimSetupPlan, state: Optional[MDState]
+    ) -> SimSetupPlan:
+        """Collapse LLM multi-rep setup mistakes into one shared simsetup.
+
+        Production replicates are created later by HPC (``hpc/repXX`` copies +
+        different seeds). Setup must remain a single ``simsetup/`` build.
+        """
+        try:
+            rep_num = int((state or {}).get("rep_num") or 1)
+        except (TypeError, ValueError):
+            rep_num = 1
+        if rep_num <= 1 or not plan.steps:
+            return plan
+
+        build_tools = {"build_simulation_system"}
+        kept: list = []
+        dropped_builds = 0
+        for step in plan.steps:
+            params = dict(step.tool_params or {})
+            out = str(params.get("output_dir") or "").strip().lower()
+            # Strip LLM inventing rep1/rep2/rep01 as setup destinations
+            if out and (
+                out in {"rep1", "rep2", "rep01", "rep02"}
+                or (out.startswith("rep") and out[3:].isdigit())
+            ):
+                params.pop("output_dir", None)
+                step = SimSetupStep(
+                    name=step.name,
+                    description=step.description,
+                    tool_name=step.tool_name,
+                    tool_params=params,
+                    reason=step.reason,
+                )
+            if step.tool_name in build_tools:
+                if any(s.tool_name in build_tools for s in kept):
+                    dropped_builds += 1
+                    continue
+                step = SimSetupStep(
+                    name="Build shared simulation system",
+                    description=(
+                        f"Create one GROMACS system under simsetup/; HPC will "
+                        f"stage it into hpc/rep01…rep{rep_num:02d} with "
+                        f"independent production seeds."
+                    ),
+                    tool_name=step.tool_name,
+                    tool_params=step.tool_params,
+                    reason=(
+                        f"Single shared setup for all {rep_num} production "
+                        "replicates (not one setup per replicate)."
+                    ),
+                )
+            kept.append(step)
+
+        if dropped_builds:
+            logger.info(
+                "Normalized multi-rep setup plan: kept 1 build_simulation_system, "
+                "dropped %d duplicate per-replicate build(s) (rep_num=%d)",
+                dropped_builds,
+                rep_num,
+            )
+            plan.reasoning = (
+                f"Multi-rep (rep_num={rep_num}): one shared simsetup serves all "
+                f"production replicates; HPC copies into hpc/repXX with different "
+                f"seeds. Collapsed {dropped_builds} duplicate build step(s) from "
+                f"the LLM proposal. "
+                + (plan.reasoning or "")
+            )[:2000]
+            plan.overview = (
+                f"Build one shared GROMACS system in simsetup/; "
+                f"{rep_num} production replicates are staged later under hpc/repXX."
+            )
+        plan.steps = kept
+        return plan
     
     # Known ligand residue names (non-standard residues that need parameters)
     KNOWN_LIGAND_RESNAMES = {
@@ -935,6 +1033,13 @@ class SimulationSetupAgent:
   b) OMIT that step entirely from your plan (do NOT include it with tool_name="none")
 - When you cannot perform a step, simply do NOT include it in the steps array
 
+**MULTI-REPLICATE (rep_num > 1):**
+- Call `build_simulation_system` **ONCE** into the shared simsetup directory.
+- Do NOT create `rep1/`, `rep2/`, `rep01/`, or any per-replicate setup folders.
+- Do NOT call build_simulation_system once per replicate.
+- Independent production replicates are created later by the HPC agent
+  (copy the same simsetup into `hpc/repXX` with different velocity seeds).
+
 **FILE PATH REQUIREMENTS:**
 - In tool_params, you MUST specify only FILENAMES, never full paths
 - ❌ WRONG: "output_file": "/path/to/file.gro" or "output_file": "working_dir/simsetup/file.gro"
@@ -1044,6 +1149,8 @@ Available tools:
 {tools_list_str}
 
 **CRITICAL: You MUST ONLY use the tools listed above. Do NOT invent or suggest non-existent tools.**
+- For multi-replicate campaigns: call build_simulation_system ONCE (shared simsetup/).
+  Do NOT make per-replicate setup directories (rep1/rep2). HPC stages hpc/repXX later.
 
 Return JSON with: reasoning, overview, steps (name, description, tool_name, tool_params, reason)
 """

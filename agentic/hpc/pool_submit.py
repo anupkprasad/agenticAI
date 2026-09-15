@@ -28,18 +28,24 @@ def prepare_hpc_without_submit(
     sim_label: str,
     production_ns: Optional[float] = None,
     workflow_state: Optional[Dict[str, Any]] = None,
+    *,
+    hpc_dir: Optional[str] = None,
+    rep_id: Optional[str] = None,
+    seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Stage HPC directory for a reuse-hpc demo: copy simsetup → hpc (without
     clobbering existing md.tpr/mdWrap.xtc) and create a SLURM script, but do
     **not** call sbatch.
+
+    Optional *hpc_dir* / *rep_id* / *seed* support nested ``hpc/repXX`` replicates.
     """
     from src.hpc.script_creator import create_slurm_script
     from src.hpc.file_copy import copy_simulation_files
 
     wd = Path(sim_working_dir)
     simsetup_dir = wd / "simsetup"
-    hpc_dir = wd / "hpc"
+    hpc_dir = Path(hpc_dir) if hpc_dir else (wd / "hpc")
     hpc_dir.mkdir(parents=True, exist_ok=True)
 
     # Snapshot protected production files (hardlinks/inodes) before copy.
@@ -70,6 +76,8 @@ def prepare_hpc_without_submit(
                 "simsetup_dir": str(simsetup_dir),
                 "hpc_dir": str(hpc_dir),
                 "production_ns": ns,
+                "rep_id": rep_id,
+                "seed": seed,
             },
         )
 
@@ -79,6 +87,23 @@ def prepare_hpc_without_submit(
             source_dir=str(simsetup_dir),
             dest_dir=str(hpc_dir),
         )
+        if seed is not None:
+            from src.analysis.replicate_paths import (
+                apply_gen_seed_to_mdp_dir,
+                parse_rep_id,
+                write_replicate_meta,
+            )
+
+            apply_gen_seed_to_mdp_dir(hpc_dir, int(seed))
+            if rep_id:
+                write_replicate_meta(
+                    hpc_dir,
+                    rep_id=rep_id,
+                    seed=int(seed),
+                    parent_label=sim_label,
+                    rep_index=int(parse_rep_id(rep_id) or 1),
+                    rep_num=int((workflow_state or {}).get("rep_num") or 1),
+                )
         # Restore protected trajectories if copy somehow replaced them.
         import os
 
@@ -109,7 +134,10 @@ def prepare_hpc_without_submit(
             sim_label,
         )
 
-    job_name = derive_job_name(sim_label, sim_working_dir)
+    job_name = derive_job_name(
+        f"{sim_label}_{rep_id}" if rep_id else sim_label,
+        sim_working_dir,
+    )
     slurm_params = build_slurm_script_params(
         job_name=job_name,
         hpc_dir=str(hpc_dir),
@@ -152,9 +180,15 @@ def submit_simulation_job(
     sim_label: str,
     production_ns: Optional[float] = None,
     workflow_state: Optional[Dict[str, Any]] = None,
+    *,
+    hpc_dir: Optional[str] = None,
+    rep_id: Optional[str] = None,
+    seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Prepare and submit one SLURM job for *sim_working_dir*.
+
+    Optional *hpc_dir* / *rep_id* / *seed* for nested ``hpc/repXX`` replicates.
 
     Returns dict with success, job_id, job_script, error.
     """
@@ -164,8 +198,9 @@ def submit_simulation_job(
 
     wd = Path(sim_working_dir)
     simsetup_dir = wd / "simsetup"
-    hpc_dir = wd / "hpc"
-    hpc_dir.mkdir(parents=True, exist_ok=True)
+    hpc_path = Path(hpc_dir) if hpc_dir else (wd / "hpc")
+    hpc_path.mkdir(parents=True, exist_ok=True)
+    hpc_dir = hpc_path  # Path below
 
     ns = production_ns
     if ns is None:
@@ -178,17 +213,20 @@ def submit_simulation_job(
         temporary_log_file,
     )
 
+    display_label = f"{sim_label}/{rep_id}" if rep_id else sim_label
     log_path = str(wd / "agent_conversation.log")
     with temporary_log_file(log_path):
         log_agent_action(
             "hpc",
-            f"HPC pool: prepare and submit SLURM job for {sim_label}",
+            f"HPC pool: prepare and submit SLURM job for {display_label}",
             {
                 "mode": "hpc_pool",
                 "sim_label": sim_label,
                 "simsetup_dir": str(simsetup_dir),
                 "hpc_dir": str(hpc_dir),
                 "production_ns": ns,
+                "rep_id": rep_id,
+                "seed": seed,
             },
         )
 
@@ -203,6 +241,23 @@ def submit_simulation_job(
             "success": False,
             "error": copy_result.get("error", "copy_simulation_files failed"),
         }
+    if seed is not None:
+        from src.analysis.replicate_paths import (
+            apply_gen_seed_to_mdp_dir,
+            parse_rep_id,
+            write_replicate_meta,
+        )
+
+        apply_gen_seed_to_mdp_dir(hpc_dir, int(seed))
+        if rep_id:
+            write_replicate_meta(
+                hpc_dir,
+                rep_id=rep_id,
+                seed=int(seed),
+                parent_label=sim_label,
+                rep_index=int(parse_rep_id(rep_id) or 1),
+                rep_num=int((workflow_state or {}).get("rep_num") or 1),
+            )
     with temporary_log_file(log_path):
         log_file_operation(
             "hpc",
@@ -212,7 +267,10 @@ def submit_simulation_job(
             f"simsetup → hpc ({copy_result.get('files_copied', 'ok')})",
         )
 
-    job_name = derive_job_name(sim_label, sim_working_dir)
+    job_name = derive_job_name(
+        f"{sim_label}_{rep_id}" if rep_id else sim_label,
+        sim_working_dir,
+    )
     slurm_params = build_slurm_script_params(
         job_name=job_name,
         hpc_dir=str(hpc_dir),

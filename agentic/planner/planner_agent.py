@@ -2535,7 +2535,7 @@ native contacts / φψ use `calculate_native_contacts` / `calculate_backbone_dih
 
 **WHAT HAPPENS NEXT:**
 When you indicate genuinely missing tools, the Programmer Agent creates them under
-`{working_dir}/programmer/` before the execution plan is finalized. Prefer that path
+`{{working_dir}}/programmer/` before the execution plan is finalized. Prefer that path
 over skipping the analysis. After a successful campaign, humans may promote useful
 tools into `src/analysis/` via `scripts/promote_programmer_tool.py`.
 

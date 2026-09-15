@@ -37,9 +37,9 @@ def reuse_hpc_enabled(state: Optional[Dict[str, Any]] = None) -> bool:
     )
 
 
-def _reuse_hpc_files_ready(sim_dir: str) -> bool:
+def _reuse_hpc_files_ready(sim_dir: str, hpc_dir: Optional[str] = None) -> bool:
     """Ready under ``--reuse-hpc``: non-empty ``md.tpr`` + ``mdWrap.xtc`` only (no md.log)."""
-    hpc = Path(sim_dir) / "hpc"
+    hpc = Path(hpc_dir) if hpc_dir else (Path(sim_dir) / "hpc")
     tpr = hpc / "md.tpr"
     xtc = hpc / "mdWrap.xtc"
     try:
@@ -68,14 +68,16 @@ def _md_production_finished(hpc_dir: Path) -> bool:
 def _sim_production_trajectory_ready(
     sim_dir: str,
     state: Optional[Dict[str, Any]] = None,
+    hpc_dir: Optional[str] = None,
 ) -> bool:
     """Production trajectory complete — equilibration ``nvt``/``npt`` files do not count.
 
     With ``--reuse-hpc``, only ``hpc/md.tpr`` + ``hpc/mdWrap.xtc`` are required (no md.log).
+    Pass ``hpc_dir`` for nested replicates (``…/hpc/rep01``).
     """
+    hpc = Path(hpc_dir) if hpc_dir else (Path(sim_dir) / "hpc")
     if reuse_hpc_enabled(state):
-        return _reuse_hpc_files_ready(sim_dir)
-    hpc = Path(sim_dir) / "hpc"
+        return _reuse_hpc_files_ready(sim_dir, hpc_dir=str(hpc))
     if not hpc.is_dir():
         return False
     has_prod = any(
@@ -93,6 +95,65 @@ def _sim_trajectory_ready(
 ) -> bool:
     """Backward-compatible alias used by supervisor helpers."""
     return _sim_production_trajectory_ready(sim_dir, state=state)
+
+
+def _rec_hpc_dir(rec: Dict[str, Any]) -> Optional[str]:
+    hpc = rec.get("hpc_dir")
+    if hpc:
+        return str(hpc)
+    wd = rec.get("working_dir") or ""
+    return str(Path(wd) / "hpc") if wd else None
+
+
+def _rec_prod_ready(rec: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> bool:
+    wd = rec.get("working_dir") or ""
+    return _sim_production_trajectory_ready(wd, state=state, hpc_dir=rec.get("hpc_dir"))
+
+
+def _slot_parent_label(slot_key: str, rec: Optional[Dict[str, Any]] = None) -> str:
+    if rec and rec.get("parent_label"):
+        return str(rec["parent_label"])
+    from src.analysis.replicate_paths import split_pool_slot_key
+
+    label, _ = split_pool_slot_key(slot_key)
+    return label
+
+
+def _iter_pool_slot_order(state: Dict[str, Any], pool: Dict[str, Any]) -> List[str]:
+    """Ordered pool keys: sim_prompt order × rep01…repN (or legacy label)."""
+    from src.analysis.replicate_paths import (
+        build_rep_plan,
+        normalize_rep_num,
+        uses_nested_reps,
+    )
+
+    sims = pool.get("sims") or {}
+    rep_num = normalize_rep_num(state.get("rep_num", 1))
+    base_seed = int(state.get("replicate_base_seed") or 12345)
+    order: List[str] = []
+    for idx, sp in enumerate(state.get("sim_prompts") or []):
+        label = sp.get("label") or f"sim_{idx}"
+        wd = sp.get("working_dir") or ""
+        for slot in build_rep_plan(label, wd, rep_num, base_seed=base_seed):
+            key = slot["slot_key"]
+            if key in sims:
+                order.append(key)
+            elif not uses_nested_reps(rep_num) and label in sims:
+                order.append(label)
+                break
+    # Append any leftover keys (resume edge cases)
+    for key in sims:
+        if key not in order:
+            order.append(key)
+    return order
+
+
+def _label_pool_recs(pool: Dict[str, Any], label: str) -> List[Tuple[str, Dict[str, Any]]]:
+    out: List[Tuple[str, Dict[str, Any]]] = []
+    for key, rec in (pool.get("sims") or {}).items():
+        if _slot_parent_label(key, rec) == label:
+            out.append((key, rec))
+    return out
 
 
 def _log_hpc_pool_event(
@@ -340,7 +401,12 @@ def _goal_requests_continuation(state: Dict[str, Any]) -> bool:
     )
 
 
-def _should_skip_existing_production(state: Dict[str, Any], sim_dir: str) -> bool:
+def _should_skip_existing_production(
+    state: Dict[str, Any],
+    sim_dir: str,
+    *,
+    hpc_dir: Optional[str] = None,
+) -> bool:
     """Skip prep+HPC for finished production runs that are not being continued.
 
     Under ``--reuse-hpc``, return False so preprocess/simsetup still run; only
@@ -348,7 +414,7 @@ def _should_skip_existing_production(state: Dict[str, Any], sim_dir: str) -> boo
     """
     if reuse_hpc_enabled(state):
         return False
-    if not _sim_production_trajectory_ready(sim_dir, state=state):
+    if not _sim_production_trajectory_ready(sim_dir, state=state, hpc_dir=hpc_dir):
         return False
     return not _goal_requests_continuation(state)
 
@@ -411,7 +477,7 @@ def _revalidate_pool_sim(
 ) -> None:
     """Fix spurious skip/complete flags when only equilibration trajectories exist."""
     wd = rec.get("working_dir") or ""
-    prod_ready = _sim_production_trajectory_ready(wd, state=state)
+    prod_ready = _rec_prod_ready(rec, state)
     hpc = rec.get("hpc_status")
 
     # --reuse-hpc: never skip preprocess/simsetup. Keep HPC *pending* until
@@ -495,8 +561,13 @@ def _revalidate_pool_sim(
 
 
 def init_hpc_pool(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Build or refresh ``state['hpc_pool']`` from ``sim_prompts``."""
+    """Build or refresh ``state['hpc_pool']`` from ``sim_prompts``.
+
+    When ``rep_num > 1``, expands each label into ``label::repXX`` slots with
+    nested ``hpc/repXX`` paths. Prep remains shared per chemical label.
+    """
     from agentic.parallel_resources import resolve_allowed_hpc_jobs
+    from src.analysis.replicate_paths import build_rep_plan, normalize_rep_num
 
     sim_prompts = state.get("sim_prompts") or []
     max_concurrent = resolve_allowed_hpc_jobs(state)
@@ -505,26 +576,83 @@ def init_hpc_pool(state: Dict[str, Any]) -> Dict[str, Any]:
         default_sec=int(state.get("hpc_check_interval_sec") or 7200),
     )
     existing = state.get("hpc_pool") or {}
-    sims: Dict[str, Any] = dict(existing.get("sims") or {})
+    existing_sims: Dict[str, Any] = dict(existing.get("sims") or {})
     skip_existing_production = not _goal_requests_continuation(state)
+    rep_num = normalize_rep_num(state.get("rep_num", 1))
+    base_seed = int(state.get("replicate_base_seed") or 12345)
+    sims: Dict[str, Any] = {}
 
     for idx, sp in enumerate(sim_prompts):
         label = sp.get("label") or f"sim_{idx}"
         wd = sp.get("working_dir") or ""
-        rec = sims.get(label) or {}
-        rec.setdefault("label", label)
-        rec.setdefault("index", idx)
-        rec["working_dir"] = wd
-        if _should_skip_existing_production(state, wd):
-            rec["prep_status"] = "skipped"
-            rec["hpc_status"] = "skipped"
-            rec["skip_reason"] = "production trajectory on disk"
-            rec.pop("job_id", None)
-            rec.pop("job_script", None)
-            rec.pop("last_slurm_state", None)
-        elif reuse_hpc_enabled(state) and _sim_production_trajectory_ready(wd, state=state):
-            # Full-pipeline demo: still run preprocess/simsetup; HPC submit skipped later.
-            if _sim_setup_ready(wd):
+        plan = build_rep_plan(label, wd, rep_num, base_seed=base_seed)
+        # Shared prep status: any prior slot for this label, or legacy flat key
+        shared_prep = None
+        for key, erec in existing_sims.items():
+            if _slot_parent_label(key, erec) == label and erec.get("prep_status"):
+                shared_prep = erec.get("prep_status")
+                break
+        if shared_prep is None and label in existing_sims:
+            shared_prep = (existing_sims.get(label) or {}).get("prep_status")
+
+        for slot in plan:
+            key = slot["slot_key"]
+            rec = dict(existing_sims.get(key) or {})
+            # Migrate one-time from legacy flat label record (rep_num==1 or first expand)
+            if not rec and label in existing_sims and key == label:
+                rec = dict(existing_sims[label])
+            elif not rec and label in existing_sims and slot.get("nested"):
+                # Do not copy job_id from flat label onto every nested rep
+                legacy = existing_sims[label]
+                if legacy.get("prep_status"):
+                    rec["prep_status"] = legacy.get("prep_status")
+                if legacy.get("error") and legacy.get("prep_status") == "failed":
+                    rec["error"] = legacy.get("error")
+
+            rec["label"] = key
+            rec["parent_label"] = label
+            rec["index"] = idx
+            rec["working_dir"] = wd
+            rec["rep_id"] = slot["rep_id"]
+            rec["rep_index"] = slot["rep_index"]
+            rec["rep_num"] = slot["rep_num"]
+            rec["seed"] = slot["seed"]
+            rec["hpc_dir"] = slot["hpc_dir"]
+            rec["analysis_dir"] = slot["analysis_dir"]
+            if shared_prep and rec.get("prep_status") not in ("done", "failed", "skipped"):
+                rec["prep_status"] = shared_prep
+
+            hpc_dir = slot["hpc_dir"]
+            if _should_skip_existing_production(state, wd, hpc_dir=hpc_dir):
+                rec["prep_status"] = "skipped"
+                rec["hpc_status"] = "skipped"
+                rec["skip_reason"] = "production trajectory on disk"
+                rec.pop("job_id", None)
+                rec.pop("job_script", None)
+                rec.pop("last_slurm_state", None)
+            elif reuse_hpc_enabled(state) and _sim_production_trajectory_ready(
+                wd, state=state, hpc_dir=hpc_dir
+            ):
+                if _sim_setup_ready(wd):
+                    rec["prep_status"] = "done"
+                    if rec.get("hpc_status") not in (
+                        "submitted",
+                        "running",
+                        "completed",
+                        "skipped",
+                        "failed",
+                    ):
+                        rec["hpc_status"] = "pending"
+                elif rec.get("prep_status") not in ("done", "failed", "skipped"):
+                    rec["prep_status"] = "pending"
+                    if rec.get("hpc_status") not in (
+                        "submitted",
+                        "running",
+                        "completed",
+                        "skipped",
+                    ):
+                        rec["hpc_status"] = "pending"
+            elif _sim_setup_ready(wd):
                 rec["prep_status"] = "done"
                 if rec.get("hpc_status") not in (
                     "submitted",
@@ -534,54 +662,58 @@ def init_hpc_pool(state: Dict[str, Any]) -> Dict[str, Any]:
                     "failed",
                 ):
                     rec["hpc_status"] = "pending"
-            elif rec.get("prep_status") not in ("done", "failed", "skipped"):
+            elif rec.get("prep_status") == "failed":
+                if state.get("requeue_failed_sims"):
+                    rec["prep_status"] = "pending"
+                    rec.pop("error", None)
+                    if rec.get("hpc_status") not in (
+                        "submitted",
+                        "running",
+                        "completed",
+                        "skipped",
+                    ):
+                        rec["hpc_status"] = "pending"
+                elif reuse_hpc_enabled(state) and _sim_production_trajectory_ready(
+                    wd, state=state, hpc_dir=hpc_dir
+                ):
+                    if rec.get("hpc_status") not in (
+                        "submitted",
+                        "running",
+                        "completed",
+                        "skipped",
+                    ):
+                        rec["hpc_status"] = "pending"
+                else:
+                    rec["hpc_status"] = "failed"
+            else:
+                if rec.get("prep_status") == "done":
+                    logger.warning(
+                        "HPC pool: %s marked prep done but simsetup not ready — resetting",
+                        key,
+                    )
                 rec["prep_status"] = "pending"
-                if rec.get("hpc_status") not in (
+                if rec.get("hpc_status") == "failed" and not rec.get("job_id"):
+                    rec["hpc_status"] = "pending"
+                    rec.pop("error", None)
+                elif rec.get("hpc_status") not in (
                     "submitted",
                     "running",
                     "completed",
                     "skipped",
                 ):
                     rec["hpc_status"] = "pending"
-        elif _sim_setup_ready(wd):
-            rec["prep_status"] = "done"
-            if rec.get("hpc_status") not in ("submitted", "running", "completed", "skipped", "failed"):
-                rec["hpc_status"] = "pending"
-        elif rec.get("prep_status") == "failed":
-            # Fail-soft: keep terminal prep failure unless --resume requeues.
-            if state.get("requeue_failed_sims"):
-                rec["prep_status"] = "pending"
-                rec.pop("error", None)
-                if rec.get("hpc_status") not in ("submitted", "running", "completed", "skipped"):
-                    rec["hpc_status"] = "pending"
-            elif reuse_hpc_enabled(state) and _sim_production_trajectory_ready(wd, state=state):
-                # Prep failed but frozen traj exists — leave HPC pending for staging.
-                if rec.get("hpc_status") not in ("submitted", "running", "completed", "skipped"):
-                    rec["hpc_status"] = "pending"
-            else:
-                rec["hpc_status"] = "failed"
-        else:
-            if rec.get("prep_status") == "done":
-                logger.warning(
-                    "HPC pool: %s marked prep done but simsetup not ready — resetting to pending",
-                    label,
-                )
-            rec["prep_status"] = "pending"
-            if rec.get("hpc_status") == "failed" and not rec.get("job_id"):
-                rec["hpc_status"] = "pending"
-                rec.pop("error", None)
-            elif rec.get("hpc_status") not in ("submitted", "running", "completed", "skipped"):
-                rec["hpc_status"] = "pending"
-        _revalidate_pool_sim(
-            rec,
-            skip_existing_production=skip_existing_production,
-            state=state,
-        )
-        sims[label] = rec
+
+            _revalidate_pool_sim(
+                rec,
+                skip_existing_production=skip_existing_production,
+                state=state,
+            )
+            sims[key] = rec
 
     prep_cursor = existing.get("prep_cursor", 0)
     pool = {
-        "version": 1,
+        "version": 2 if rep_num > 1 else 1,
+        "rep_num": rep_num,
         "max_concurrent": max_concurrent,
         "check_interval_sec": interval,
         "last_check_at": existing.get("last_check_at"),
@@ -594,7 +726,31 @@ def init_hpc_pool(state: Dict[str, Any]) -> Dict[str, Any]:
     state["hpc_pool"] = pool
     state["allowed_hpc_jobs"] = max_concurrent
     state["hpc_check_interval_sec"] = interval
+    _sync_pool_reps_into_progress(state)
     return pool
+
+
+def _sync_pool_reps_into_progress(state: Dict[str, Any]) -> None:
+    """Mirror ``hpc_pool`` slot statuses into ``multi_sim_progress.sims[label].reps``."""
+    progress = state.get("multi_sim_progress") or {}
+    sims_prog = progress.get("sims") or {}
+    if not sims_prog:
+        return
+    pool = state.get("hpc_pool") or {}
+    for key, rec in (pool.get("sims") or {}).items():
+        parent = rec.get("parent_label") or _slot_parent_label(key, rec)
+        preg = sims_prog.get(parent)
+        if not preg:
+            continue
+        reps = preg.setdefault("reps", {})
+        rid = rec.get("rep_id") or "rep01"
+        entry = reps.setdefault(rid, {})
+        entry["hpc_status"] = rec.get("hpc_status")
+        entry["job_id"] = rec.get("job_id")
+        entry["seed"] = rec.get("seed")
+        if rec.get("hpc_status") in ("completed", "skipped") and _rec_prod_ready(rec, state):
+            entry.setdefault("analysis_status", entry.get("analysis_status") or "pending")
+    state["multi_sim_progress"] = progress
 
 
 def _count_running(pool: Dict[str, Any]) -> int:
@@ -618,22 +774,22 @@ def _all_hpc_done(pool: Dict[str, Any], state: Optional[Dict[str, Any]] = None) 
             continue
         # Prep failure: under --reuse-hpc still wait for staging/skip when traj exists.
         if rec.get("prep_status") == "failed":
-            if reuse_hpc_enabled(state) and _sim_production_trajectory_ready(wd, state=state):
+            if reuse_hpc_enabled(state) and _rec_prod_ready(rec, state):
                 st = rec.get("hpc_status")
                 if st == "pending":
                     return False
-                if st == "skipped" and not _sim_production_trajectory_ready(wd, state=state):
+                if st == "skipped" and not _rec_prod_ready(rec, state):
                     return False
                 if st not in ("skipped", "completed"):
                     return False
             continue
         st = rec.get("hpc_status")
         if st == "skipped":
-            if not _sim_production_trajectory_ready(wd, state=state):
+            if not _rec_prod_ready(rec, state):
                 return False
         elif st != "completed":
             return False
-        elif not _sim_production_trajectory_ready(wd, state=state):
+        elif not _rec_prod_ready(rec, state):
             return False
     return True
 
@@ -683,7 +839,7 @@ def _sync_jobs_from_slurm(state: Dict[str, Any], pool: Dict[str, Any], *, force:
         slurm_state = str(status.get("status", "UNKNOWN")).upper()
         rec["last_slurm_state"] = slurm_state
         if slurm_state in _TERMINAL_SUCCESS or slurm_state == "COMPLETED":
-            if _sim_production_trajectory_ready(wd, state=state):
+            if _rec_prod_ready(rec, state):
                 rec["hpc_status"] = "completed"
                 rec["trajectory_ready"] = True
                 if prev_status != "completed":
@@ -706,6 +862,7 @@ def _sync_jobs_from_slurm(state: Dict[str, Any], pool: Dict[str, Any], *, force:
 
     pool["last_check_at"] = now.isoformat()
     state["hpc_pool"] = pool
+    _sync_pool_reps_into_progress(state)
     # Live status → pool_status.json only (not agent_conversation.log).
     log_pool_to_base(
         state, "SLURM poll sync (sq --me)", pool=pool, by_id=by_id, log_to_conversation=False
@@ -713,7 +870,7 @@ def _sync_jobs_from_slurm(state: Dict[str, Any], pool: Dict[str, Any], *, force:
 
 
 def _submit_ready_sims(state: Dict[str, Any], pool: Dict[str, Any]) -> List[str]:
-    """Submit/stage jobs for prepared sims while slots remain. Returns labels submitted.
+    """Submit/stage jobs for prepared sims while slots remain. Returns slot keys submitted.
 
     Under ``--reuse-hpc``, staging (copy + SLURM script, no sbatch) is parallelized
     across ready sims so the pool does not look single-threaded.
@@ -725,30 +882,29 @@ def _submit_ready_sims(state: Dict[str, Any], pool: Dict[str, Any]) -> List[str]
 
     submitted: List[str] = []
     slots = int(pool.get("max_concurrent") or 5) - _count_running(pool)
-    order = [sp.get("label") for sp in (state.get("sim_prompts") or [])]
+    order = _iter_pool_slot_order(state, pool)
     sims = pool.get("sims") or {}
 
-    def _prep_allows_hpc(rec: Dict[str, Any], wd: str) -> bool:
+    def _prep_allows_hpc(rec: Dict[str, Any]) -> bool:
         if rec.get("prep_status") in ("done", "skipped"):
             return True
         return bool(
             reuse_hpc_enabled(state)
             and rec.get("prep_status") == "failed"
-            and _sim_production_trajectory_ready(wd, state=state)
+            and _rec_prod_ready(rec, state)
         )
 
     # --- Parallel reuse-hpc staging (no SLURM slots needed) ---
     reuse_batch: List[tuple] = []
     if reuse_hpc_enabled(state):
-        for label in order:
-            rec = sims.get(label)
+        for key in order:
+            rec = sims.get(key)
             if not rec or rec.get("hpc_status") != "pending":
                 continue
-            wd = rec.get("working_dir") or ""
-            if not _prep_allows_hpc(rec, wd):
+            if not _prep_allows_hpc(rec):
                 continue
-            if _sim_production_trajectory_ready(wd, state=state):
-                reuse_batch.append((label, wd, rec))
+            if _rec_prod_ready(rec, state):
+                reuse_batch.append((key, rec))
 
     if reuse_batch:
         max_workers = min(8, max(1, len(reuse_batch)))
@@ -759,24 +915,33 @@ def _submit_ready_sims(state: Dict[str, Any], pool: Dict[str, Any]) -> List[str]
         )
 
         def _stage_one(item):
-            label, wd, _rec = item
-            return label, prepare_hpc_without_submit(wd, label, workflow_state=state)
+            key, rec = item
+            parent = rec.get("parent_label") or _slot_parent_label(key, rec)
+            wd = rec.get("working_dir") or ""
+            return key, prepare_hpc_without_submit(
+                wd,
+                parent,
+                workflow_state=state,
+                hpc_dir=rec.get("hpc_dir"),
+                rep_id=rec.get("rep_id"),
+                seed=rec.get("seed"),
+            )
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futs = [ex.submit(_stage_one, item) for item in reuse_batch]
             for fut in as_completed(futs):
-                label, prep_hpc = fut.result()
-                rec = sims.get(label) or {}
+                key, prep_hpc = fut.result()
+                rec = sims.get(key) or {}
                 if prep_hpc.get("job_script"):
                     rec["job_script"] = prep_hpc.get("job_script")
                     rec["job_name"] = prep_hpc.get("job_name")
                 rec["hpc_status"] = "skipped"
                 rec["skip_reason"] = "reuse-hpc"
                 rec.pop("job_id", None)
-                sims[label] = rec
+                sims[key] = rec
                 logger.info(
                     "HPC pool: %s reuse-hpc — staged HPC files, skipped sbatch (%s)",
-                    label,
+                    key,
                     prep_hpc.get("message") or "ok",
                 )
 
@@ -785,18 +950,19 @@ def _submit_ready_sims(state: Dict[str, Any], pool: Dict[str, Any]) -> List[str]
         state["hpc_pool"] = pool
         return submitted
 
-    for label in order:
+    for key in order:
         if slots <= 0:
             break
-        rec = sims.get(label)
+        rec = sims.get(key)
         if not rec:
             continue
         wd = rec.get("working_dir") or ""
-        if not _prep_allows_hpc(rec, wd):
+        parent = rec.get("parent_label") or _slot_parent_label(key, rec)
+        if not _prep_allows_hpc(rec):
             continue
         if rec.get("hpc_status") != "pending":
             continue
-        if _sim_production_trajectory_ready(wd, state=state):
+        if _rec_prod_ready(rec, state):
             # Non-reuse: skip submit when traj already present.
             rec["hpc_status"] = "skipped"
             rec["skip_reason"] = "production trajectory on disk"
@@ -807,19 +973,26 @@ def _submit_ready_sims(state: Dict[str, Any], pool: Dict[str, Any]) -> List[str]
             rec["error"] = "sbatch blocked: --reuse-hpc active but md.tpr/mdWrap.xtc not ready"
             logger.error(
                 "HPC pool: refusing submit for %s under --reuse-hpc (trajectory not ready)",
-                label,
+                key,
             )
             continue
-        result = submit_simulation_job(wd, label, workflow_state=state)
+        result = submit_simulation_job(
+            wd,
+            parent,
+            workflow_state=state,
+            hpc_dir=rec.get("hpc_dir"),
+            rep_id=rec.get("rep_id") if (rec.get("rep_num") or 1) > 1 else None,
+            seed=rec.get("seed") if (rec.get("rep_num") or 1) > 1 else None,
+        )
         if result.get("success"):
             rec["hpc_status"] = "submitted"
             rec["job_id"] = result.get("job_id")
             rec["job_script"] = result.get("job_script")
             rec["job_name"] = result.get("job_name")
             rec.pop("error", None)
-            submitted.append(label)
+            submitted.append(key)
             slots -= 1
-            logger.info("HPC pool: submitted %s job_id=%s", label, rec.get("job_id"))
+            logger.info("HPC pool: submitted %s job_id=%s", key, rec.get("job_id"))
         else:
             err = result.get("error", "submit failed")
             if not _sim_setup_ready(wd):
@@ -828,7 +1001,7 @@ def _submit_ready_sims(state: Dict[str, Any], pool: Dict[str, Any]) -> List[str]
                 rec.pop("error", None)
                 logger.warning(
                     "HPC pool: %s submit skipped — prep incomplete (%s)",
-                    label,
+                    key,
                     err,
                 )
                 continue
@@ -836,7 +1009,7 @@ def _submit_ready_sims(state: Dict[str, Any], pool: Dict[str, Any]) -> List[str]
             rec["error"] = err
             logger.error(
                 "HPC pool: submit failed for %s: %s — continuing other sims",
-                label,
+                key,
                 rec["error"],
             )
             continue
@@ -856,14 +1029,25 @@ def _submit_ready_sims(state: Dict[str, Any], pool: Dict[str, Any]) -> List[str]
         )
 
     state["hpc_pool"] = pool
+    _sync_pool_reps_into_progress(state)
     return submitted
 
 
 def _next_prep_label(pool: Dict[str, Any], sim_prompts: List[Dict]) -> Optional[str]:
+    """Return next chemical label that still needs preprocess/simsetup (once per label)."""
     for sp in sim_prompts:
         label = sp.get("label")
-        rec = (pool.get("sims") or {}).get(label) or {}
-        if rec.get("prep_status") == "pending":
+        if not label:
+            continue
+        slots = _label_pool_recs(pool, label)
+        if not slots:
+            # Legacy flat key
+            rec = (pool.get("sims") or {}).get(label) or {}
+            if rec.get("prep_status") == "pending":
+                return label
+            continue
+        # Prep is shared — any pending slot means prep not finished for the label
+        if any(r.get("prep_status") == "pending" for _, r in slots):
             return label
     return None
 
@@ -878,23 +1062,31 @@ def hpc_pool_prep_pending(state: Dict[str, Any]) -> bool:
 
 def mark_prep_done(state: Dict[str, Any], sim_label: str) -> None:
     pool = state.get("hpc_pool") or {}
-    rec = (pool.get("sims") or {}).get(sim_label)
-    if rec:
-        wd = rec.get("working_dir") or ""
-        # Require real simsetup artifacts. Existing trajectories (reuse-hpc) must
-        # not short-circuit prep — otherwise HPC staging never sees topol/mdp.
-        if not _sim_setup_ready(wd):
-            logger.warning(
-                "HPC pool: refusing to mark prep done for %s — simsetup not ready",
-                sim_label,
-            )
+    slots = _label_pool_recs(pool, sim_label)
+    if not slots:
+        rec = (pool.get("sims") or {}).get(sim_label)
+        if rec:
+            parent = rec.get("parent_label") or _slot_parent_label(sim_label, rec)
+            slots = _label_pool_recs(pool, parent) or [(sim_label, rec)]
+    if not slots:
+        return
+    wd = slots[0][1].get("working_dir") or ""
+    # Require real simsetup artifacts. Existing trajectories (reuse-hpc) must
+    # not short-circuit prep — otherwise HPC staging never sees topol/mdp.
+    if not _sim_setup_ready(wd):
+        logger.warning(
+            "HPC pool: refusing to mark prep done for %s — simsetup not ready",
+            sim_label,
+        )
+        for _, rec in slots:
             rec["prep_status"] = "pending"
-            state["hpc_pool"] = pool
-            return
+        state["hpc_pool"] = pool
+        return
+    for _, rec in slots:
         rec["prep_status"] = "done"
         if (
             rec.get("hpc_status") == "pending"
-            and _should_skip_existing_production(state, wd)
+            and _should_skip_existing_production(state, wd, hpc_dir=rec.get("hpc_dir"))
         ):
             rec["hpc_status"] = "skipped"
             rec["skip_reason"] = (
@@ -904,7 +1096,7 @@ def mark_prep_done(state: Dict[str, Any], sim_label: str) -> None:
         elif (
             rec.get("hpc_status") == "pending"
             and reuse_hpc_enabled(state)
-            and _sim_production_trajectory_ready(wd, state=state)
+            and _rec_prod_ready(rec, state)
         ):
             # Leave pending so _submit_ready_sims can stage (copy + SLURM, no sbatch).
             pass
@@ -919,21 +1111,25 @@ def mark_prep_failed(
 ) -> None:
     """Record a terminal prep failure so the HPC pool does not wait forever."""
     pool = state.get("hpc_pool") or {}
-    rec = (pool.get("sims") or {}).get(sim_label)
-    if not rec:
+    slots = _label_pool_recs(pool, sim_label)
+    if not slots:
+        rec = (pool.get("sims") or {}).get(sim_label)
+        if rec:
+            parent = rec.get("parent_label") or _slot_parent_label(sim_label, rec)
+            slots = _label_pool_recs(pool, parent) or [(sim_label, rec)]
+    if not slots:
         return
-    wd = rec.get("working_dir") or ""
-    rec["prep_status"] = "failed"
-    if error:
-        rec["error"] = error
-    # Under --reuse-hpc, keep HPC pending so staging can still run when traj exists.
-    if reuse_hpc_enabled(state) and _sim_production_trajectory_ready(wd, state=state):
-        if rec.get("hpc_status") not in ("submitted", "running", "completed", "skipped"):
-            rec["hpc_status"] = "pending"
-    elif rec.get("hpc_status") == "pending":
-        # No usable traj / not reuse-hpc — nothing further to wait on for this sim.
-        rec["hpc_status"] = "failed"
-        rec.setdefault("error", error or "prep failed; HPC not staged")
+    for _, rec in slots:
+        rec["prep_status"] = "failed"
+        if error:
+            rec["error"] = error
+        # Under --reuse-hpc, keep HPC pending so staging can still run when traj exists.
+        if reuse_hpc_enabled(state) and _rec_prod_ready(rec, state):
+            if rec.get("hpc_status") not in ("submitted", "running", "completed", "skipped"):
+                rec["hpc_status"] = "pending"
+        elif rec.get("hpc_status") == "pending":
+            rec["hpc_status"] = "failed"
+            rec.setdefault("error", error or "prep failed; HPC not staged")
     state["hpc_pool"] = pool
     logger.warning(
         "HPC pool: marked prep failed for %s (%s)",
@@ -959,15 +1155,20 @@ def abandon_orphan_prep_pending(state: Dict[str, Any]) -> List[str]:
         pass
     pool = state.get("hpc_pool") or {}
     abandoned: List[str] = []
-    for label, rec in list((pool.get("sims") or {}).items()):
+    seen_parents: set = set()
+    for key, rec in list((pool.get("sims") or {}).items()):
         if (rec.get("prep_status") or "") != "pending":
             continue
+        parent = rec.get("parent_label") or _slot_parent_label(key, rec)
+        if parent in seen_parents:
+            continue
+        seen_parents.add(parent)
         mark_prep_failed(
             state,
-            label,
+            parent,
             error="prep unfinished after parallel prep phase — continuing campaign",
         )
-        abandoned.append(label)
+        abandoned.append(parent)
     return abandoned
 
 

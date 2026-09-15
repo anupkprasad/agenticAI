@@ -77,6 +77,8 @@ def build_per_sim_job_spec(state: Dict[str, Any], sim_info: Dict[str, Any], *, p
         "extended_minimization": bool(state.get("extended_minimization", False)),
         "md_engine": state.get("md_engine", "gromacs"),
         "reuse_hpc": bool(state.get("reuse_hpc", False)),
+        "rep_num": int(state.get("rep_num") or 1),
+        "replicate_base_seed": int(state.get("replicate_base_seed") or 12345),
         # Component-case metadata — without this, workers treat source-PDB MG/ATP
         # as always-on and ATP-only cases incorrectly keep crystallographic ions.
         "sim_case": {
@@ -222,6 +224,8 @@ def run_per_sim_workflow(job: Dict[str, Any]) -> Dict[str, Any]:
             config["extended_minimization"] = True
         if job.get("sim_case"):
             config["sim_case"] = job["sim_case"]
+        config["rep_num"] = int(job.get("rep_num") or 1)
+        config["replicate_base_seed"] = int(job.get("replicate_base_seed") or 12345)
 
         final = workflow.run(job.get("user_goal", ""), config)
         status = final.get("workflow_status") or ""

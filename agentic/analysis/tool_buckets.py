@@ -49,6 +49,7 @@ PER_SIM_TOOL_NAMES: FrozenSet[str] = frozenset({
     "run_trajectory_qc",
     "calculate_native_contacts",
     "calculate_backbone_dihedrals",
+    "aggregate_replicate_metrics",
     "calculate_consensus_torsions",
     "run_independent_dynamics_fel",
     "project_dynamics_model",

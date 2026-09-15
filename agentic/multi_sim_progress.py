@@ -61,7 +61,28 @@ def init_multi_sim_progress(state: Dict[str, Any]) -> Dict[str, Any]:
             "agents": {a: "pending" for a in agents},
             "status": "pending",
             "pipeline": {"input_validated": False, "enriched": False, "planned": False},
+            "rep_num": int(state.get("rep_num") or 1),
+            "reps": {},
         }
+        try:
+            from src.analysis.replicate_paths import build_rep_plan, normalize_rep_num
+
+            rn = normalize_rep_num(state.get("rep_num", 1))
+            if rn > 1:
+                for slot in build_rep_plan(
+                    label,
+                    sims[label]["working_dir"],
+                    rn,
+                    base_seed=int(state.get("replicate_base_seed") or 12345),
+                ):
+                    sims[label]["reps"][slot["rep_id"]] = {
+                        "hpc_status": "pending",
+                        "analysis_status": "pending",
+                        "job_id": None,
+                        "seed": slot["seed"],
+                    }
+        except Exception:
+            pass
 
     existing = state.get("multi_sim_progress") or {}
     # Preserve completed agents when re-init (e.g. replan)
@@ -75,6 +96,8 @@ def init_multi_sim_progress(state: Dict[str, Any]) -> Dict[str, Any]:
                         **sims[label]["pipeline"],
                         **rec["pipeline"],
                     }
+                if rec.get("reps"):
+                    sims[label]["reps"] = {**sims[label].get("reps", {}), **rec["reps"]}
 
     active_label = existing.get("active_sim_label") or sim_order[0]
     if active_label not in sims:
@@ -324,9 +347,19 @@ def per_sim_analysis_done_on_disk(working_dir: str) -> bool:
     A lone ``ligand_pocket_distance.*`` file is also insufficient: sequential
     retry loops often inject only that mandatory metric and then mark analysis
     "done", skipping PCA/FEL/contacts/residence and blocking combined analysis.
+
+    Multi-rep campaigns may store metrics under ``analysis/avg/`` or ``analysis/rep01/``.
     """
     analysis_dir = Path(working_dir) / "analysis"
-    if not (analysis_dir / "analysis_summary.jsonl").is_file():
+    summary_ok = (analysis_dir / "analysis_summary.jsonl").is_file()
+    if not summary_ok:
+        # Also accept per-rep summaries
+        for sub in analysis_dir.glob("rep*/analysis_summary.jsonl") if analysis_dir.is_dir() else []:
+            summary_ok = True
+            break
+        if (analysis_dir / "avg" / "summary_scalars.json").is_file():
+            summary_ok = True
+    if not summary_ok:
         return False
     strong_markers = (
         "rmsd.dat",
@@ -338,12 +371,21 @@ def per_sim_analysis_done_on_disk(working_dir: str) -> bool:
         "protein_ligand_contacts.csv",
         "ligand_residence.csv",
         "pocket_sasa.csv",
+        "rmsd_mean_std.dat",
+        "summary_scalars.json",
     )
-    if any((analysis_dir / name).is_file() for name in strong_markers):
-        return True
-    for pattern in ("rmsd*", "rmsf*", "pca_*", "fel_*", "*contacts*", "*residence*"):
-        if any(analysis_dir.glob(pattern)):
+    search_dirs = [analysis_dir]
+    if analysis_dir.is_dir():
+        avg = analysis_dir / "avg"
+        if avg.is_dir():
+            search_dirs.insert(0, avg)
+        search_dirs.extend(sorted(analysis_dir.glob("rep*")))
+    for d in search_dirs:
+        if any((d / name).is_file() for name in strong_markers):
             return True
+        for pattern in ("rmsd*", "rmsf*", "pca_*", "fel_*", "*contacts*", "*residence*"):
+            if any(d.glob(pattern)):
+                return True
     # Pocket COM alone is a mandatory inject, not a complete analysis.
     return False
 

@@ -107,6 +107,7 @@ from src.analysis.msa_plotting import plot_reference_msa_alignment
 from src.analysis.ligand_rmsd import calculate_ligand_rmsd
 from src.analysis.trajectory_qc import run_trajectory_qc
 from src.analysis.md_basics import calculate_native_contacts, calculate_backbone_dihedrals
+from src.analysis.replicate_aggregate import aggregate_replicate_metrics
 from src.analysis.consensus_local_fel import run_consensus_local_fel_batch_tool
 from src.analysis.consensus_torsions import (
     calculate_consensus_torsions,
@@ -477,6 +478,7 @@ class AnalysisToolExecutor:
             "run_trajectory_qc": run_trajectory_qc,
             "calculate_native_contacts": calculate_native_contacts,
             "calculate_backbone_dihedrals": calculate_backbone_dihedrals,
+            "aggregate_replicate_metrics": aggregate_replicate_metrics,
         }
         if include_combined:
             self.tools.update({
@@ -522,6 +524,11 @@ class AnalysisToolExecutor:
         # Setup working directory BEFORE loading programmer tools
         self.working_dir = self.config.get("working_directory", "./working_dir/analysis")
         os.makedirs(self.working_dir, exist_ok=True)
+        from src.analysis.replicate_paths import normalize_rep_num
+
+        self.rep_num = normalize_rep_num(self.config.get("rep_num", 1))
+        self.sim_root = self.config.get("sim_root") or str(Path(self.working_dir).parent)
+        self.include_combined_tools = bool(include_combined)
         
         # Load programmer-generated tools dynamically (needs working_dir to be set)
         self._load_programmer_tools()
@@ -533,7 +540,12 @@ class AnalysisToolExecutor:
         except Exception as e:
             logger.warning(f"Failed to initialize summary file: {e}")
         
-        logger.info(f"AnalysisToolExecutor initialized with {len(self.tools)} tools (working_dir: {self.working_dir})")
+        logger.info(
+            "AnalysisToolExecutor initialized with %d tools (working_dir: %s, rep_num=%d)",
+            len(self.tools),
+            self.working_dir,
+            self.rep_num,
+        )
     
     def _wrap_tool_for_working_dir(self, tool_func, tool_name: str):
         """
@@ -630,6 +642,115 @@ class AnalysisToolExecutor:
     def execute(self, tool_name: str, **kwargs) -> Dict[str, Any]:
         """
         Execute an analysis tool with given parameters.
+
+        When ``rep_num > 1`` (per-sim mode), runs the same tool across
+        ``analysis/repXX`` with matching ``hpc/repXX`` inputs, then aggregates
+        numeric metrics into ``analysis/avg/``.
+        """
+        if self._should_fanout_replicates(tool_name):
+            return self._execute_across_replicates(tool_name, kwargs)
+        return self._execute_once(tool_name, **kwargs)
+
+    def _should_fanout_replicates(self, tool_name: str) -> bool:
+        if self.include_combined_tools:
+            return False
+        if self.rep_num <= 1:
+            return False
+        if tool_name in {
+            "aggregate_replicate_metrics",
+            "wrap_trajectory",
+            "collect_metric_files",
+            "plot_combined_overlay",
+            "compute_comparison_table",
+            "run_combined_analysis",
+        }:
+            return False
+        return True
+
+    def _execute_across_replicates(self, tool_name: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        from src.analysis.replicate_paths import (
+            build_rep_plan,
+            resolve_production_trajectory,
+        )
+
+        plan = build_rep_plan(
+            Path(self.sim_root).name,
+            self.sim_root,
+            self.rep_num,
+            base_seed=int(self.config.get("replicate_base_seed") or 12345),
+        )
+        per_rep: Dict[str, Any] = {}
+        saved_wd = self.working_dir
+        all_ok = True
+        for slot in plan:
+            rep_id = slot["rep_id"]
+            analysis_dir = slot["analysis_dir"]
+            hpc_dir = Path(slot["hpc_dir"])
+            Path(analysis_dir).mkdir(parents=True, exist_ok=True)
+            self.working_dir = analysis_dir
+            call_kw = dict(kwargs)
+            traj = resolve_production_trajectory(hpc_dir)
+            topo = hpc_dir / "md.tpr"
+            if not topo.is_file():
+                for name in ("md.gro", "system.gro", "solvated.gro"):
+                    if (hpc_dir / name).is_file():
+                        topo = hpc_dir / name
+                        break
+            # Remap absolute paths that point at flat analysis/ or hpc/
+            # (strings and list-of-strings, e.g. data_files)
+            def _remap_path(val: str) -> str:
+                out = val
+                if "/hpc/" in out and f"/hpc/{rep_id}/" not in out:
+                    out = out.replace("/hpc/", f"/hpc/{rep_id}/")
+                if "/analysis/" in out and f"/analysis/{rep_id}/" not in out:
+                    if "/analysis/avg" not in out:
+                        out = out.replace("/analysis/", f"/analysis/{rep_id}/")
+                return out
+
+            for key, val in list(call_kw.items()):
+                if isinstance(val, str):
+                    call_kw[key] = _remap_path(val)
+                elif isinstance(val, list):
+                    call_kw[key] = [
+                        _remap_path(v) if isinstance(v, str) else v for v in val
+                    ]
+            for tkey in ("trajectory_file", "trajectory", "traj_file"):
+                if traj and (tkey not in call_kw or not Path(str(call_kw.get(tkey) or "")).is_file()):
+                    call_kw[tkey] = str(traj)
+            for tkey in ("topology_file", "topology", "structure_file"):
+                if topo.is_file() and (
+                    tkey not in call_kw or not Path(str(call_kw.get(tkey) or "")).is_file()
+                ):
+                    call_kw[tkey] = str(topo)
+            logger.info("Replicate fan-out: %s → %s", tool_name, rep_id)
+            result = self._execute_once(tool_name, **call_kw)
+            per_rep[rep_id] = result
+            if not result.get("success"):
+                all_ok = False
+        self.working_dir = saved_wd
+
+        agg = None
+        if all_ok:
+            try:
+                agg = aggregate_replicate_metrics.func(
+                    sim_dir=self.sim_root,
+                    rep_num=self.rep_num,
+                )
+            except Exception as exc:
+                logger.warning("aggregate_replicate_metrics after %s failed: %s", tool_name, exc)
+                agg = {"success": False, "error": str(exc)}
+
+        return {
+            "success": all_ok,
+            "rep_num": self.rep_num,
+            "per_rep": per_rep,
+            "aggregate": agg,
+            "error": None if all_ok else "one or more replicates failed",
+        }
+
+    def _execute_once(self, tool_name: str, **kwargs) -> Dict[str, Any]:
+        """
+        Execute an analysis tool with given parameters.
         
         Args:
             tool_name: Name of the tool to execute
@@ -698,6 +819,46 @@ class AnalysisToolExecutor:
                 kwargs = apply_selection_from_files(kwargs, working_dir=self.working_dir)
             except Exception as exc:
                 logger.warning("selection_from_file resolution skipped: %s", exc)
+
+            # Combined-analysis LLM plans often pass labels/working_dir instead of
+            # sim_dirs for collect_metric_files / compute_comparison_table.
+            if tool_name in {"collect_metric_files", "compute_comparison_table"}:
+                sim_dirs = kwargs.get("sim_dirs")
+                if not sim_dirs:
+                    labels = kwargs.get("labels")
+                    wd_hint = kwargs.get("working_dir") or self.working_dir
+                    if labels and wd_hint:
+                        base = Path(str(wd_hint))
+                        if base.name == "analysis":
+                            base = base.parent
+                        kwargs["sim_dirs"] = [str(base / str(lab)) for lab in labels]
+                        logger.info(
+                            "Synthesized sim_dirs for %s from labels under %s",
+                            tool_name,
+                            base,
+                        )
+
+            # Prefer analysis/avg/<metric> when LLM hardcodes flat analysis/<metric>
+            # paths that do not exist after multi-rep aggregation.
+            def _prefer_avg_path(val: str) -> str:
+                p = Path(val)
+                if p.is_file():
+                    return val
+                if p.parent.name == "analysis":
+                    alt = p.parent / "avg" / p.name
+                    if alt.is_file():
+                        return str(alt)
+                return val
+
+            for key in ("data_files", "files", "metric_files"):
+                raw = kwargs.get(key)
+                if isinstance(raw, list):
+                    kwargs[key] = [
+                        _prefer_avg_path(v) if isinstance(v, str) else v for v in raw
+                    ]
+                elif isinstance(raw, str):
+                    kwargs[key] = _prefer_avg_path(raw)
+
             # Also strip completely unknown kwargs so they don't cause TypeErrors
             unknown = [k for k in kwargs if k not in valid_params]
             for k in unknown:

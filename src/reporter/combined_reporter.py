@@ -950,9 +950,27 @@ def _build_combined_final_impression(
 
     labels_str = ", ".join(s["label"] for s in sims_summary)
     n_sims = len(sims_summary)
+    n_reps = 1
+    for s in sims_summary:
+        wd = s.get("working_dir") or s.get("sim_dir") or ""
+        if not wd:
+            continue
+        avg_summary = Path(wd) / "analysis" / "avg" / "summary_scalars.json"
+        if avg_summary.is_file():
+            try:
+                payload = json.loads(avg_summary.read_text(encoding="utf-8"))
+                n_reps = max(n_reps, int(payload.get("n_reps") or 1))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                pass
+    rep_note = (
+        f" Each system used {n_reps} independent production replicate"
+        f"{'s' if n_reps != 1 else ''} (metrics shown are replicate means)."
+        if n_reps > 1
+        else ""
+    )
     parts.append(
         f"This combined analysis compared {n_sims} molecular dynamics "
-        f"simulation{'s' if n_sims != 1 else ''} ({labels_str}). "
+        f"simulation{'s' if n_sims != 1 else ''} ({labels_str}).{rep_note} "
         "The cross-simulation comparison reveals both shared trends and notable "
         "differences in structural dynamics."
     )

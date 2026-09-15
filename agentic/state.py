@@ -146,8 +146,12 @@ class MDState(TypedDict):
     # Agent-specific output directories (hardcoded structure)
     preprocess_dir: Optional[str]      # working_dir/preprocess/
     simsetup_dir: Optional[str]        # working_dir/simsetup/
-    hpc_dir: Optional[str]             # working_dir/hpc/
-    analysis_dir: Optional[str]        # working_dir/analysis/
+    hpc_dir: Optional[str]             # working_dir/hpc/ (or hpc/repXX when multi-rep)
+    analysis_dir: Optional[str]        # working_dir/analysis/ (or analysis/repXX)
+    # Multi-replicate production (prep/simsetup once; N seeded MD runs)
+    rep_num: Optional[int]             # N replicates (default 1 = legacy flat layout)
+    active_rep_id: Optional[str]       # e.g. rep01 when a pool worker is bound to one rep
+    replicate_base_seed: Optional[int] # seed for rep01; rep_k uses base + k - 1
     
     execution_path: List[str]          # Track which nodes have been visited
     execution_plan: Optional[Dict[str, Any]]  # Detailed execution plan from planner

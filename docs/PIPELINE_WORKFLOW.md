@@ -212,6 +212,7 @@ Full filename list: [ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md#standard-output-filena
 | `--retry-labels L1 L2` | Re-run those labels even if they succeeded | Overwrites those `{label}/` stages that re-run |
 | `--combined-only` | Skip per-sim analysis/reporter | Writes `{base}/analysis/` and `combined_report.html` only when N>1 |
 | `--allowed-hpc-jobs N` | Max concurrent `sbatch` | Same files; fewer/more jobs in flight |
+| `--rep-num N` | N production replicates per label | Nested `hpc/repXX`, `analysis/repXX`, `analysis/avg/` (metrics mean±std; not averaged .xtc) |
 | `--hpc-check-interval 3m` | Poll SLURM more often | Same files; shorter wait between checks |
 | `--llm-concurrency` / `--parallel-workers` | Local worker count | Same tree; more `{label}/` dirs fill in parallel |
 | `--no-llm` | Heuristic routing / plans | Same folders; weaker tool selection |
