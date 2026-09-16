@@ -20,6 +20,10 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -44,6 +48,15 @@ except Exception:  # pragma: no cover
 DEFAULT_ALIGNMENT_FASTA = "reference_msa_alignment.fasta"
 DEFAULT_RESIDUE_MAP_CSV = "reference_msa_residue_map.csv"
 DEFAULT_ALIGNMENT_JSON = "reference_msa_alignment.json"
+DEFAULT_MSA_METHOD = "mafft"
+DEFAULT_CONSERVATION_METRIC = "similarity"
+DEFAULT_MIN_CONSERVATION = 0.5
+DEFAULT_MIN_COVERAGE = 0.5
+
+_MAFFT_CANDIDATES = (
+    "/apps/gb/multi-bacpipe/0.8.0/libexec/t-coffee-13.46.0.919e8c6b-4/plugins/linux/mafft",
+    "/apps/gb/multi-bacpipe/0.8.0/lib/t_coffee-11.0.8/plugins/linux/mafft",
+)
 
 
 def _json_safe(obj: Any) -> Any:
@@ -278,19 +291,31 @@ def build_star_msa_to_reference(
 def select_consensus_positions(
     msa: Dict[str, Any],
     *,
-    min_coverage: float = 0.85,
+    min_coverage: float = DEFAULT_MIN_COVERAGE,
     require_reference: bool = True,
+    conservation_metric: str = DEFAULT_CONSERVATION_METRIC,
+    min_conservation: float = DEFAULT_MIN_CONSERVATION,
 ) -> List[Dict[str, Any]]:
     """
-    Return consensus columns where mapped sequences meet ``min_coverage``.
+    Return consensus columns meeting coverage **and** conservation filters.
 
-    Only columns with a reference residue are considered when
-    ``require_reference`` is True (default).
+    ``conservation_metric``:
+      * ``similarity`` — mean pairwise BLOSUM62 score normalized to ~[0, 1]
+        (default; keep columns with score ≥ ``min_conservation``, default 0.5)
+      * ``identity`` — fraction of non-gap residues matching the modal AA
+      * ``coverage`` / ``none`` — coverage only (legacy)
     """
     labels: List[str] = msa.get("labels") or []
     n_labels = max(len(labels), 1)
     threshold = float(min_coverage) * n_labels
+    metric = (conservation_metric or "similarity").strip().lower()
     consensus: List[Dict[str, Any]] = []
+    blosum = None
+    if metric == "similarity" and HAS_BIO:
+        try:
+            blosum = substitution_matrices.load("BLOSUM62")
+        except Exception:
+            blosum = None
 
     for col in msa.get("columns", []):
         if require_reference and col.get("reference_seq_index") is None:
@@ -299,6 +324,14 @@ def select_consensus_positions(
         present = [lab for lab in labels if lab in mappings]
         if len(present) < threshold:
             continue
+        aas = [
+            str((mappings[lab] or {}).get("aa") or "")[:1]
+            for lab in present
+            if (mappings.get(lab) or {}).get("aa")
+        ]
+        cons_score = _column_conservation(aas, metric=metric, blosum=blosum)
+        if metric in ("similarity", "identity") and cons_score < float(min_conservation):
+            continue
         entry = {
             "consensus_index": len(consensus),
             "msa_col": col.get("msa_col"),
@@ -306,11 +339,241 @@ def select_consensus_positions(
             "reference_resid": col.get("reference_resid"),
             "reference_aa": col.get("reference_aa"),
             "coverage_fraction": len(present) / n_labels,
+            "conservation": cons_score,
             "mappings": mappings,
         }
         consensus.append(entry)
 
     return consensus
+
+
+def _column_conservation(
+    aas: Sequence[str],
+    *,
+    metric: str,
+    blosum: Any = None,
+) -> float:
+    letters = [a.upper() for a in aas if a and a != "-"]
+    if not letters:
+        return 0.0
+    if metric in ("coverage", "none", ""):
+        return 1.0
+    if metric == "identity":
+        from collections import Counter
+
+        mode, count = Counter(letters).most_common(1)[0]
+        return float(count) / float(len(letters))
+    # similarity (default)
+    if blosum is None or len(letters) == 1:
+        from collections import Counter
+
+        mode, count = Counter(letters).most_common(1)[0]
+        return float(count) / float(len(letters))
+    scores: List[float] = []
+    norms: List[float] = []
+    for i in range(len(letters)):
+        for j in range(i + 1, len(letters)):
+            a, b = letters[i], letters[j]
+            try:
+                s = float(blosum[a, b])
+                na = float(blosum[a, a])
+                nb = float(blosum[b, b])
+            except Exception:
+                continue
+            denom = max(0.5 * (na + nb), 1e-6)
+            scores.append(s / denom)
+            norms.append(1.0)
+    if not scores:
+        return 0.0
+    # Clamp to [0, 1]
+    mean = float(np.mean(scores))
+    return float(max(0.0, min(1.0, mean)))
+
+
+def find_mafft_executable() -> Optional[str]:
+    """Locate a usable ``mafft`` binary (sets MAFFT_BINARIES when needed)."""
+    env_bin = os.environ.get("MAFFT") or os.environ.get("MAFFT_BIN")
+    which = shutil.which("mafft")
+    for cand in (env_bin, which, *_MAFFT_CANDIDATES):
+        if not cand:
+            continue
+        p = Path(cand)
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p.resolve())
+    return None
+
+
+def build_mafft_msa_to_reference(
+    chains: Dict[str, ChainSequence],
+    reference_label: str,
+    *,
+    mafft_bin: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Run MAFFT on all sequences and index columns by the reference row.
+
+    Falls back to Biopython star pairwise if MAFFT is unavailable.
+    """
+    if reference_label not in chains:
+        raise KeyError(f"Reference label {reference_label!r} not in chain set")
+
+    exe = mafft_bin or find_mafft_executable()
+    if not exe:
+        logger.warning("MAFFT not found — falling back to Biopython star pairwise MSA")
+        msa = build_star_msa_to_reference(chains, reference_label)
+        msa["msa_method"] = "star_pairwise"
+        return msa
+
+    other_labels = [k for k in sorted(chains.keys()) if k != reference_label]
+    labels = [reference_label] + other_labels
+
+    with tempfile.TemporaryDirectory(prefix="mafft_msa_") as tmp:
+        tmp_path = Path(tmp)
+        in_fa = tmp_path / "input.fasta"
+        out_fa = tmp_path / "aligned.fasta"
+        with open(in_fa, "w", encoding="utf-8") as fh:
+            for lab in labels:
+                fh.write(f">{lab}\n")
+                seq = chains[lab].sequence
+                for i in range(0, len(seq), 80):
+                    fh.write(seq[i : i + 80] + "\n")
+
+        env = os.environ.copy()
+        # Older mafft wrappers require sibling binaries via MAFFT_BINARIES.
+        env.setdefault("MAFFT_BINARIES", str(Path(exe).resolve().parent))
+        cmd = [exe, "--auto", "--quiet", str(in_fa)]
+        try:
+            proc = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=600,
+            )
+        except Exception as exc:
+            logger.warning("MAFFT failed (%s) — star pairwise fallback", exc)
+            msa = build_star_msa_to_reference(chains, reference_label)
+            msa["msa_method"] = "star_pairwise"
+            return msa
+        if proc.returncode != 0 or not (proc.stdout or "").strip():
+            logger.warning(
+                "MAFFT exit=%s stderr=%s — star pairwise fallback",
+                proc.returncode,
+                (proc.stderr or "")[:300],
+            )
+            msa = build_star_msa_to_reference(chains, reference_label)
+            msa["msa_method"] = "star_pairwise"
+            return msa
+        out_fa.write_text(proc.stdout, encoding="utf-8")
+        aligned = _read_fasta_rows(out_fa)
+
+    if reference_label not in aligned:
+        # Case-insensitive header match
+        for k in list(aligned.keys()):
+            if k.lower() == reference_label.lower():
+                aligned[reference_label] = aligned.pop(k)
+                break
+    if reference_label not in aligned:
+        logger.warning("MAFFT output missing reference — star pairwise fallback")
+        msa = build_star_msa_to_reference(chains, reference_label)
+        msa["msa_method"] = "star_pairwise"
+        return msa
+
+    ref_row = aligned[reference_label]
+    width = len(ref_row)
+    # Ensure equal width
+    for lab in labels:
+        row = aligned.get(lab, "-" * width)
+        if len(row) < width:
+            row = row + "-" * (width - len(row))
+        elif len(row) > width:
+            row = row[:width]
+        aligned[lab] = row
+
+    # Map MSA columns → ungapped sequence indices
+    ungapped_idx: Dict[str, List[Optional[int]]] = {}
+    for lab in labels:
+        idxs: List[Optional[int]] = []
+        si = 0
+        for ch in aligned[lab]:
+            if ch == "-":
+                idxs.append(None)
+            else:
+                idxs.append(si)
+                si += 1
+        ungapped_idx[lab] = idxs
+
+    columns: List[Dict[str, Any]] = []
+    rows: Dict[str, str] = {}
+    # Reference-indexed rows (collapse MSA onto reference non-gap columns)
+    ref_keep = [i for i, ch in enumerate(ref_row) if ch != "-"]
+    for lab in labels:
+        rows[lab] = "".join(
+            aligned[lab][i] if aligned[lab][i] != "-" else "-" for i in ref_keep
+        )
+
+    for new_col, msa_i in enumerate(ref_keep):
+        ref_seq_i = ungapped_idx[reference_label][msa_i]
+        assert ref_seq_i is not None
+        ref_chain = chains[reference_label]
+        col: Dict[str, Any] = {
+            "msa_col": new_col,
+            "mafft_col": msa_i,
+            "reference_seq_index": int(ref_seq_i),
+            "reference_resid": int(ref_chain.resids[ref_seq_i]),
+            "reference_aa": ref_chain.sequence[ref_seq_i],
+            "mappings": {
+                reference_label: {
+                    "seq_index": int(ref_seq_i),
+                    "resid": int(ref_chain.resids[ref_seq_i]),
+                    "aa": ref_chain.sequence[ref_seq_i],
+                }
+            },
+        }
+        for lab in other_labels:
+            oth_i = ungapped_idx[lab][msa_i]
+            if oth_i is None:
+                continue
+            oth = chains[lab]
+            col["mappings"][lab] = {
+                "seq_index": int(oth_i),
+                "resid": int(oth.resids[oth_i]),
+                "aa": oth.sequence[oth_i],
+            }
+        columns.append(col)
+
+    return {
+        "reference_label": reference_label,
+        "msa_width": len(ref_keep),
+        "mafft_width": width,
+        "rows": rows,
+        "columns": columns,
+        "labels": labels,
+        "msa_method": "mafft",
+        "full_msa_rows": {lab: aligned[lab] for lab in labels},
+    }
+
+
+def _read_fasta_rows(path: Path) -> Dict[str, str]:
+    rows: Dict[str, str] = {}
+    label = None
+    chunks: List[str] = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if label is not None:
+                    rows[label] = "".join(chunks)
+                label = line[1:].split()[0]
+                chunks = []
+            else:
+                chunks.append(line.replace(" ", ""))
+        if label is not None:
+            rows[label] = "".join(chunks)
+    return rows
 
 
 def write_consensus_outputs(
@@ -322,8 +585,16 @@ def write_consensus_outputs(
     csv_name: str = DEFAULT_RESIDUE_MAP_CSV,
     json_name: str = DEFAULT_ALIGNMENT_JSON,
     chains: Optional[Dict[str, ChainSequence]] = None,
+    conservation_metric: str = DEFAULT_CONSERVATION_METRIC,
+    min_conservation: float = DEFAULT_MIN_CONSERVATION,
+    min_coverage: float = DEFAULT_MIN_COVERAGE,
 ) -> Dict[str, str]:
-    """Write FASTA, CSV, and JSON artifacts."""
+    """Write FASTA, CSV, and compact consensus JSON artifacts."""
+    from src.analysis.cross_sim_artifacts import (
+        compact_consensus_from_positions,
+        write_json_compact,
+    )
+
     out_dir.mkdir(parents=True, exist_ok=True)
     fasta_path = out_dir / fasta_name
     csv_path = out_dir / csv_name
@@ -351,6 +622,7 @@ def write_consensus_outputs(
         "reference_resid",
         "reference_aa",
         "coverage_fraction",
+        "conservation",
     ]
     for lab in labels:
         header.extend([f"{lab}_seq_index", f"{lab}_resid", f"{lab}_aa"])
@@ -367,6 +639,7 @@ def write_consensus_outputs(
                 pos.get("reference_resid"),
                 pos.get("reference_aa"),
                 f"{pos.get('coverage_fraction', 0):.4f}",
+                f"{float(pos.get('conservation') or 0):.4f}",
             ]
             mappings = pos.get("mappings") or {}
             for lab in labels:
@@ -377,17 +650,23 @@ def write_consensus_outputs(
                     row.extend(["", "", ""])
             writer.writerow(row)
 
-    payload = {
-        "reference_label": ref_label,
-        "labels": labels,
-        "msa_width": msa.get("msa_width"),
-        "n_consensus_positions": len(consensus),
-        "consensus_positions": _json_safe(consensus),
-        "fasta_file": fasta_name,
-        "residue_map_csv": csv_name,
-    }
-    with open(json_path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2)
+    payload = compact_consensus_from_positions(
+        reference_label=ref_label,
+        labels=labels,
+        consensus_positions=consensus,
+        msa_width=msa.get("msa_width"),
+        msa_method=str(msa.get("msa_method") or DEFAULT_MSA_METHOD),
+        conservation_metric=conservation_metric,
+        min_conservation=min_conservation,
+        min_coverage=min_coverage,
+        extra={
+            "fasta_file": fasta_name,
+            "residue_map_csv": csv_name,
+        },
+    )
+    # Keep expanded positions available in-memory consumers that read the file
+    # via expand_consensus_positions; compact is the on-disk form.
+    write_json_compact(json_path, payload)
 
     return {
         "fasta_file": str(fasta_path),
@@ -409,50 +688,60 @@ def build_consensus_sequence_alignment(
     sim_dirs: Optional[List[str]] = None,
     base_dir: str = "",
     chain_id: Optional[str] = None,
-    min_coverage: float = 0.85,
+    min_coverage: float = DEFAULT_MIN_COVERAGE,
     alignment_fasta: str = DEFAULT_ALIGNMENT_FASTA,
     residue_map_csv: str = DEFAULT_RESIDUE_MAP_CSV,
     alignment_json: str = DEFAULT_ALIGNMENT_JSON,
+    consensus_json: str = "",
+    msa_method: str = DEFAULT_MSA_METHOD,
+    conservation_metric: str = DEFAULT_CONSERVATION_METRIC,
+    min_conservation: float = DEFAULT_MIN_CONSERVATION,
 ) -> Dict[str, Any]:
     """
-    Build a star sequence alignment to a reference and export consensus residue maps.
+    Build a consensus MSA to a reference and export residue maps.
+
+    Default alignment engine is **MAFFT** (falls back to Biopython star
+    pairwise if MAFFT is unavailable). Consensus columns require both
+    ``min_coverage`` presence and ``conservation_metric`` ≥ ``min_conservation``.
+
+    ``conservation_metric``: ``similarity`` (default, BLOSUM62-based, threshold
+    0.5) or ``identity`` (modal AA fraction). Pass either explicitly when the
+    user requests it.
 
     Provide sequences via **one** of:
       * ``pdb_files`` + ``labels``
       * ``fasta_file`` (headers become labels; reference must appear in FASTA)
       * ``sim_dirs`` + ``labels`` (PDBs resolved from ``base_dir`` / sim folders)
 
-    Each non-reference sequence is pairwise-aligned to the reference (Biopython
-    PairwiseAligner, global, BLOSUM62, gap open/extend −10/−0.5); MSA columns
-    are indexed by reference residues. This star MSA is the basis for
-    reference-projected PCA **and** for transferring the reference ligand pocket
-    via ``define_reference_consensus_pocket`` / pocket metrics.
-
-    The reference sequence is listed **first** in the output FASTA. Consensus
-    columns are reference residues mapped in at least ``min_coverage`` fraction
-    of sequences (default 0.85). Use ``consensus_residue_map.csv`` to verify
-    residue mappings before reference-projected PCA. Visualize with
-    ``plot_reference_msa_alignment``.
-
     Args:
         working_dir: Output directory (e.g. ``{base}/analysis``).
-        reference_label: Label of the reference sequence (e.g. ``q8nb16`` for MLKL).
+        reference_label: Label of the reference sequence.
         labels: Sequence/simulation labels (required unless only ``fasta_file``).
         pdb_files: Optional list of PDB paths (parallel to ``labels``).
         fasta_file: Optional FASTA path instead of PDBs.
         sim_dirs: Optional per-simulation directories for PDB resolution.
         base_dir: Base multi-simulation directory for ``{label}.pdb`` lookup.
         chain_id: Optional protein chain ID when reading PDBs.
-        min_coverage: Minimum fraction of sequences that must map to a column.
+        min_coverage: Min fraction of sequences mapped in a column (default 0.5).
         alignment_fasta: Output MSA FASTA filename.
         residue_map_csv: Output mapping table for manual inspection.
-        alignment_json: Output JSON consumed by reference-projected PCA tools.
+        alignment_json: Output compact consensus JSON.
+        consensus_json: Optional alias for ``alignment_json``.
+        msa_method: ``mafft`` (default) or ``star_pairwise``.
+        conservation_metric: ``similarity`` (default) or ``identity``.
+        min_conservation: Threshold for conservation_metric (default 0.5).
 
     Returns:
         Dict with ``success``, output paths, ``n_sequences``, ``n_consensus_positions``.
     """
     if not HAS_BIO:
         return {"success": False, "error": "Biopython is required for consensus alignment"}
+
+    # LLM plans often pass consensus_json instead of alignment_json.
+    if consensus_json and (
+        not alignment_json or alignment_json == DEFAULT_ALIGNMENT_JSON
+    ):
+        alignment_json = consensus_json
 
     out_dir = Path(working_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -471,7 +760,41 @@ def build_consensus_sequence_alignment(
                     }
                 chains = {l: chains[l] for l in labels}
         elif pdb_files and labels:
-            chains = load_sequences_from_pdbs(pdb_files, labels, chain_id=chain_id)
+            # Drop hallucinated / missing PDB paths and fall back to sim_dirs.
+            valid_pairs = [
+                (p, lab)
+                for p, lab in zip(pdb_files, labels)
+                if p and Path(p).is_file()
+            ]
+            if len(valid_pairs) >= 2:
+                pdb_files = [p for p, _ in valid_pairs]
+                labels = [lab for _, lab in valid_pairs]
+                chains = load_sequences_from_pdbs(pdb_files, labels, chain_id=chain_id)
+            elif sim_dirs and labels:
+                base = base_dir or str(out_dir.parent)
+                pdbs, used_labels, missing = _resolve_pdbs_from_sims(
+                    sim_dirs, labels, base
+                )
+                if len(pdbs) < 2:
+                    return {
+                        "success": False,
+                        "error": "Need >=2 structures for alignment",
+                        "missing": missing,
+                        "invalid_pdb_files": [
+                            p for p in (pdb_files or []) if not Path(p).is_file()
+                        ],
+                    }
+                chains = load_sequences_from_pdbs(pdbs, used_labels, chain_id=chain_id)
+                labels = used_labels
+            else:
+                return {
+                    "success": False,
+                    "error": (
+                        "pdb_files were missing on disk and no sim_dirs were "
+                        "provided for fallback resolution"
+                    ),
+                    "invalid_pdb_files": list(pdb_files or []),
+                }
         elif sim_dirs and labels:
             base = base_dir or str(out_dir.parent)
             pdbs, used_labels, missing = _resolve_pdbs_from_sims(sim_dirs, labels, base)
@@ -492,26 +815,58 @@ def build_consensus_sequence_alignment(
             }
 
         if reference_label not in chains:
-            return {
-                "success": False,
-                "error": (
-                    f"Reference label {reference_label!r} not found; "
-                    f"available: {sorted(chains.keys())}"
-                ),
-            }
+            resolved_ref = None
+            ref_l = str(reference_label).lower()
+            for key in chains:
+                k = str(key).lower()
+                if (
+                    k == ref_l
+                    or k.startswith(ref_l + "_")
+                    or ref_l.startswith(k + "_")
+                    or ref_l in k
+                    or k in ref_l
+                ):
+                    resolved_ref = key
+                    break
+            if resolved_ref is None:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Reference label {reference_label!r} not found; "
+                        f"available: {sorted(chains.keys())}"
+                    ),
+                }
+            reference_label = resolved_ref
 
         if len(chains) < 2:
             return {"success": False, "error": "Need at least two sequences to align"}
 
-        msa = build_star_msa_to_reference(chains, reference_label)
-        consensus = select_consensus_positions(msa, min_coverage=min_coverage)
+        method = (msa_method or DEFAULT_MSA_METHOD).strip().lower()
+        if method in ("star", "star_pairwise", "pairwise", "biopython"):
+            msa = build_star_msa_to_reference(chains, reference_label)
+            msa["msa_method"] = "star_pairwise"
+        else:
+            msa = build_mafft_msa_to_reference(chains, reference_label)
+
+        metric = (conservation_metric or DEFAULT_CONSERVATION_METRIC).strip().lower()
+        if metric not in ("similarity", "identity", "coverage", "none"):
+            metric = DEFAULT_CONSERVATION_METRIC
+
+        consensus = select_consensus_positions(
+            msa,
+            min_coverage=min_coverage,
+            conservation_metric=metric,
+            min_conservation=min_conservation,
+        )
         if len(consensus) < 3:
             return {
                 "success": False,
                 "error": (
                     f"Only {len(consensus)} consensus positions at "
-                    f"min_coverage={min_coverage}; need >=3 for PCA"
+                    f"min_coverage={min_coverage}, "
+                    f"{metric}>={min_conservation}; need >=3"
                 ),
+                "msa_method": msa.get("msa_method"),
             }
 
         paths = write_consensus_outputs(
@@ -522,6 +877,9 @@ def build_consensus_sequence_alignment(
             csv_name=residue_map_csv,
             json_name=alignment_json,
             chains=chains,
+            conservation_metric=metric,
+            min_conservation=min_conservation,
+            min_coverage=min_coverage,
         )
 
         try:
@@ -534,6 +892,9 @@ def build_consensus_sequence_alignment(
                     "n_sequences": len(chains),
                     "n_consensus_positions": len(consensus),
                     "min_coverage": min_coverage,
+                    "min_conservation": min_conservation,
+                    "conservation_metric": metric,
+                    "msa_method": msa.get("msa_method"),
                     "reference_label": reference_label,
                 },
                 files=paths,
@@ -545,12 +906,16 @@ def build_consensus_sequence_alignment(
         return {
             "success": True,
             "message": (
-                f"Consensus alignment: {len(chains)} sequences, "
-                f"{len(consensus)} consensus positions"
+                f"Consensus alignment ({msa.get('msa_method')}): {len(chains)} sequences, "
+                f"{len(consensus)} consensus positions "
+                f"({metric}>={min_conservation})"
             ),
             "reference_label": reference_label,
             "n_sequences": len(chains),
             "n_consensus_positions": len(consensus),
+            "msa_method": msa.get("msa_method"),
+            "conservation_metric": metric,
+            "min_conservation": min_conservation,
             "labels": list(chains.keys()),
             **paths,
         }

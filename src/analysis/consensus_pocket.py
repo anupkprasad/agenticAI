@@ -192,6 +192,7 @@ def _write_residue_map_csv(
     for label in labels:
         fieldnames.extend([f"{label}_resid", f"{label}_aa"])
 
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()
@@ -871,7 +872,7 @@ def define_reference_consensus_pocket(
         sim_dir: Reference simulation root directory.
         consensus_json: Path to ``consensus_alignment.json`` (relative to working_dir).
         ligand_selection: Ligand MDAnalysis selection string.
-        pocket_cutoff_A: Distance cutoff in Å (default 10).
+        pocket_cutoff_A: Distance cutoff in Å (default 15).
         chain_id: Optional protein chain ID.
         output_json: Output pocket definition JSON filename.
         residue_map_csv: Output wide residue map CSV filename.
@@ -887,7 +888,7 @@ def define_reference_consensus_pocket(
 
     align_path = Path(consensus_json)
     if not align_path.is_absolute():
-        align_path = out_dir / consensus_json
+        align_path = out_dir / Path(consensus_json).name
     loaded = load_consensus_alignment(str(align_path))
     if not loaded.get("success"):
         return loaded
@@ -1005,7 +1006,9 @@ def map_consensus_pocket_residues(
     out_dir = Path(working_dir)
     def_path = Path(definition_json)
     if not def_path.is_absolute():
-        def_path = out_dir / definition_json
+        # LLM plans often pass ``./analysis/foo.json`` while working_dir is already
+        # ``.../analysis`` — always resolve by basename under working_dir.
+        def_path = out_dir / Path(definition_json).name
     if not def_path.is_file():
         return {"success": False, "error": f"Pocket definition not found: {def_path}"}
 
@@ -1292,6 +1295,40 @@ def run_consensus_pocket_metrics_batch(
     out_dir = Path(working_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    def _match_ref(candidate: str, lab: str, sd: str) -> bool:
+        """Match UniProt id, display label, or ``{id}_ATP`` sim folder names."""
+        c = str(candidate or "").lower().strip()
+        if not c:
+            return False
+        l = str(lab or "").lower().strip()
+        name = Path(sd).name.lower()
+        if c in {l, name}:
+            return True
+        # p17612 ↔ p17612_ATP / KAPCA_ATP folder prefixes
+        for other in (l, name):
+            if other.startswith(c + "_") or c.startswith(other + "_"):
+                return True
+            # strip common ligand suffixes before compare
+            for suf in ("_atp", "_adp", "_amp"):
+                if other.endswith(suf) and other[: -len(suf)] == c:
+                    return True
+                if c.endswith(suf) and c[: -len(suf)] == other:
+                    return True
+        return False
+
+    def_path = out_dir / definition_json
+    # Prefer an existing pocket definition's reference label when callers pass a
+    # mismatched default (e.g. q8nb16) while pre_combined wrote p17612_ATP.
+    if def_path.is_file() and not rebuild_definition:
+        try:
+            with open(def_path, encoding="utf-8") as _dfh:
+                _def = json.load(_dfh)
+            def_ref = str((_def or {}).get("reference_label") or "").strip()
+            if def_ref:
+                reference_label = def_ref
+        except Exception:
+            pass
+
     ref_sim = reference_sim_dir
     ref_key = str(reference_label).lower()
     if not ref_sim:
@@ -1302,10 +1339,16 @@ def run_consensus_pocket_metrics_batch(
         ref_uid = disp_to_uid.get(reference_label, ref_key)
         for sd, lab in zip(sim_dirs, labels):
             if (
-                str(lab).lower() == ref_key
-                or str(lab) == reference_label
-                or Path(sd).name.lower() == str(ref_uid).lower()
+                _match_ref(ref_key, lab, sd)
+                or _match_ref(reference_label, lab, sd)
+                or _match_ref(ref_uid, lab, sd)
             ):
+                ref_sim = sd
+                break
+    if not ref_sim:
+        # Last resort: first sim_dir whose folder matches reference_label loosely.
+        for sd, lab in zip(sim_dirs, labels):
+            if _match_ref(reference_label, lab, sd):
                 ref_sim = sd
                 break
     if not ref_sim:
@@ -1314,7 +1357,6 @@ def run_consensus_pocket_metrics_batch(
             "error": f"reference_sim_dir not found for {reference_label!r}",
         }
 
-    def_path = out_dir / definition_json
     if rebuild_definition or not def_path.is_file():
         def_res = define_reference_consensus_pocket.func(
             working_dir=str(out_dir),

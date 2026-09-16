@@ -11,11 +11,12 @@ troubleshooting. For a short overview, see [README.md](README.md).
 1. [How a run works](#1-how-a-run-works)
 2. [Prerequisites](#2-prerequisites)
 3. [Core CLI flags](#3-core-cli-flags)
-4. [Workflow recipes](#4-workflow-recipes) (including [HPC pool](#48-full-multi-sim-pipeline-with-hpc-pool))
+4. [Workflow recipes](#4-workflow-recipes) (including [HPC pool](#48-full-multi-sim-pipeline-with-hpc-pool) and [family modular](#49-family-modular-comparative-dynamics--classification))
 5. [Artifacts — what gets produced](#5-artifacts--what-gets-produced)
 6. [Simulation parameters](#6-simulation-parameters)
 7. [LLM setup](#7-llm-setup)
 8. [Resume and retry](#8-resume-and-retry)
+8.1. [Unsupervised classification](#81-unsupervised-classification-multi-simulation)
 9. [Reading run outputs](#9-reading-run-outputs)
 10. [Troubleshooting](#10-troubleshooting)
 11. [Best practices](#11-best-practices)
@@ -37,13 +38,21 @@ Your --goal  →  Supervisor  →  Planner  →  Field agents  →  Summary + re
 | **Preprocess** | Preprocessing | Clean PDB, separate components, domain trim |
 | **Sim setup** | SimSetup | Topology, solvation, ions, MDP files |
 | **HPC** | HPC | SLURM script, submit, monitor |
-| **Analysis** | Analysis | RMSD, RMSF, Rg, DCCM, DSSP, overlays |
+| **Analysis** | Analysis | Traj metrics; optional modular family tools; combined overlays + classification |
 | **Report** | Reporter | HTML report + literature |
 
 Use `--subtask` to run only the stages you need (e.g. `analysis reporter` on
 finished trajectories). Every campaign uses `{base}/{label}/` directories.
 When `len(sim_prompts) > 1`, the supervisor also runs **combined analysis**
 and a **combined HTML report** at the base `--working-dir`.
+
+Stage order for multi-sim (`n_sims > 1`):
+
+1. Optional **`pre_combined`** — MSA / consensus pocket → `{base}/cross_sim/`
+2. Per-sim analysis → reporter (with `--rep-num N`, fan-out to `analysis/avg/`)
+3. Optional **`post_combined`** — overlays; if classification requested: collect
+   features → LLM feature selection → Ward dendrogram+heatmap
+4. **`combined_reporter`** when post ran
 
 When the full pipeline runs (preprocess through reporter), the **HPC pool**
 uses three explicit stages:
@@ -266,6 +275,31 @@ status. See [docs/POOLS.md](docs/POOLS.md).
 Use `--HITL error` to pause on SLURM submit failures or terminal job states;
 use `--HITL all` to review after every stage.
 
+### 4.9 Family modular comparative dynamics (+ classification)
+
+For kinase/pseudokinase panels, describe **scientific descriptors** in the goal
+(not internal CSV column names). The planner schedules consensus tools; after
+collecting the feature table, the analysis agent asks the LLM to select a
+subset with written reasoning, then builds a dendrogram+heatmap.
+
+```bash
+python SimAgent.py \
+  --goal "Protein–ATP holo systems under this working directory. Use KAPCA
+          (p17612) as the reference to define the ATP pocket (15 Å of ATP),
+          map with a global MSA. From both replicates (then average): ATP–pocket
+          COM distance mean/std, pocket axis orientation mean/std, consensus Cα
+          RMSF mean/std, pocket χ₁ circular mean, N↔C DCCM, independent
+          dihedral PCA landscape entropy. Hierarchical clustering dendrogram
+          with feature heatmap; do not fix k. Combined HTML report." \
+  --working-dir ./pseudokin_5x2/run_01 \
+  --rep-num 2 \
+  --subtask analysis reporter \
+  --combined-only
+```
+
+Details: [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md#modular-family-dynamics-torsions--pca--tica)
+and [§8.1](#81-unsupervised-classification-multi-simulation).
+
 ---
 
 ## 5. Artifacts — what gets produced
@@ -283,7 +317,8 @@ feed downstream analysis.
 | `run_summary.json` | Same data in machine-readable form |
 | `agent_conversation.log` | Full audit trail (routing, LLM calls, tool results) |
 | `supervisor/state.jsonl` | Checkpoint for resume / combined-only routing |
-| `analysis/` | **Combined** overlay plots, DCCM panels, DSSP comparison |
+| `analysis/` | **Combined** overlays, DCCM panels; `classification_*` when requested |
+| `cross_sim/` | Optional pre_combined MSA / pocket-map artifacts |
 | `reporter/combined_report.html` | Multi-simulation HTML report (multi-sim only) |
 | `planner/master_plan.md` | Cross-simulation plan and per-case prompts |
 
@@ -295,8 +330,8 @@ Each simulation (e.g. `p21860/`, `p21860_ATP_MG/`) is isolated:
 {label}/
   preprocess/     # cleaned PDB, protonated structures, component splits
   simsetup/       # topol.top, *.gro, *.mdp
-  hpc/            # SLURM script, *.xtc, *.edr, job logs
-  analysis/       # per-sim plots, *.dat, analysis_summary.jsonl
+  hpc/            # SLURM script, *.xtc (or hpc/rep01, rep02 with --rep-num)
+  analysis/       # per-sim plots; optional consensus_*/ and avg/
   reporter/       # per-sim report.html
   planner/        # execution_plan.md
   supervisor/     # per-sim state checkpoint
@@ -308,11 +343,16 @@ Each simulation (e.g. `p21860/`, `p21860_ATP_MG/`) is isolated:
 - `analysis_summary.jsonl` — structured record of every analysis step (required for `--combined-only`)
 - `rmsd.png`, `rmsf.png`, `rg.png`, `dccm_heatmap.png`
 - `dssp_raw_data.dat`, `dssp_heatmap.png` (when DSSP was run)
+- `avg/` — multi-rep mean±std products when `--rep-num N`
+- `consensus_dihedrals/`, `consensus_rmsf/`, `consensus_DCCM/`, `consensus_PCA/` — family modular outputs
 
 **Key combined artifacts** (under `{working-dir}/analysis/`):
 
 - `rmsd_overlay.png`, `rmsf_apo_holo_*.png`, `dccm_apo_holo_*_panels.png`
 - `dssp_comparison.png` — helix/sheet/coil bar chart across all sims
+- `classification_features.csv` / `_zscore.csv` — when classification requested
+- `classification_feature_selection.json` — LLM-chosen columns + reasoning
+- `classification_dendrogram_heatmap.png` — dendrogram + feature heatmap
 - `dssp_activation_loop_*.png` — activation-loop DSSP heatmaps (residues 150–200 by default)
 
 Artifacts are referenced in `run_summary.md` and embedded in HTML reports.
@@ -373,12 +413,19 @@ added salt"*). See README for a published MLKL validation example.
 
 ## 7. LLM setup
 
-LLM planning is **enabled by default**. Point `--llm-base-url` and `--llm-model`
-at your Ollama-compatible endpoint.
+LLM planning is **enabled by default**. SimAgent’s conda env only includes the
+**Python client**. Install the **Ollama server** and pull **`gpt-oss:20b`**
+separately — full steps: **[docs/OLLAMA_SETUP.md](docs/OLLAMA_SETUP.md)**.
 
-### Local Ollama
+### Quick local check
 
 ```bash
+# Terminal A
+ollama serve
+
+# Terminal B
+ollama pull gpt-oss:20b   # once
+curl -s http://127.0.0.1:11434/api/tags
 python SimAgent.py \
   --goal "Setup MD for protein.pdb" \
   --working-dir working_dir \
@@ -452,42 +499,52 @@ to combined analysis when all sims complete.
 
 ## 8.1 Unsupervised classification (multi-simulation)
 
-Use when you have many finished trajectories (e.g. 35 protein–ATP systems at ~200 ns)
-and want a **numeric feature matrix** for clustering — without manual labels.
+Use when you have finished trajectories and want a **numeric feature matrix** for
+clustering — without manual labels.
 
-**Important:** The framework builds `classification_features.csv` **only** when your
-`--goal` explicitly requests classification, clustering, unsupervised grouping, or a
-feature matrix. Ordinary combined analysis (overlays, comparison tables) does **not**
-create this file.
+**Important:** The framework builds `classification_features.csv` when your
+`--goal` requests classification / clustering / a feature matrix, **or** when it
+describes family modular comparative descriptors (pocket COM/orientation,
+consensus RMSF, χ₁, N↔C DCCM, dihedral PCA entropy, hierarchical heatmap).
+Ordinary overlay-only combined analysis does **not** create this file.
 
-**Full feature set example:**
+**Classic binding + Cartesian FEL example:**
 
 ```bash
 python SimAgent.py \
-  --goal "All trajectories under ./agenticB5R1/<label>/ are complete (~200 ns). Per simulation: ligand pocket distance, protein–ATP contacts, pocket SASA, residence/unbinding, pocket RMSF, ligand RMSF, PCA, FEL, and FEL basin features. Then unsupervised classification across all systems (feature table + z-score CSV). Combined: overlay pocket distance and RMSF." \
+  --goal "All trajectories under ./agenticB5R1/<label>/ are complete. Per simulation: ligand pocket distance, protein–ATP contacts, pocket SASA, residence/unbinding, pocket RMSF, ligand RMSF, PCA, FEL, and FEL basin features. Then unsupervised classification across all systems (feature table + z-score CSV). Combined: overlay pocket distance and RMSF." \
   --working-dir ./agenticB5R1 \
   --subtask analysis reporter
 ```
 
-**Subset example** (only RMSF + pocket distance are analyzed and featurized):
+**Family modular example** (scientific descriptors; LLM selects columns):
 
 ```bash
 python SimAgent.py \
-  --goal "Per simulation compute RMSF and ligand pocket distance only. Unsupervised classification using those features across all systems." \
-  --working-dir ./agenticB5R1 \
-  --subtask analysis reporter
+  --goal "Use KAPCA (p17612) as the reference pocket (15 Å of ATP), map via MSA.
+          Extract: ATP–pocket COM mean/std, axis orientation mean/std, consensus
+          Cα RMSF mean/std, pocket χ₁, N↔C DCCM, independent dihedral PCA
+          landscape entropy. Hierarchical dendrogram with feature heatmap;
+          do not fix k." \
+  --working-dir ./pseudokin_5x2/run_01 \
+  --rep-num 2 \
+  --subtask analysis reporter \
+  --combined-only
 ```
 
 **Outputs** (when classification is requested):
 
 | File | Purpose |
 |------|---------|
-| `{base}/analysis/classification_features.csv` | Raw scalars — one row per protein |
-| `{base}/analysis/classification_features_zscore.csv` | Z-scores for k-means / hierarchical clustering |
+| `{base}/analysis/classification_features.csv` | Raw scalars — one row per system |
+| `{base}/analysis/classification_features_zscore.csv` | Robust/IQR or classic z-scores — clustering input |
+| `{base}/analysis/classification_feature_selection.json` | LLM-chosen columns + scientific reasoning |
+| `{base}/analysis/classification_dendrogram_heatmap.png` | Dendrogram + feature heatmap panel |
 | `{base}/analysis/classification_features.json` | Column list and metric groups used |
 
-Use the **z-score** file for clustering (scales differ between contacts, entropy, etc.).
-Details: [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md).
+Use the **z-score** file for clustering. Prefer scientific wording in the goal;
+the LLM may keep a paper-like subset or a slightly larger/smaller set with
+written rationale. Details: [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md).
 
 ---
 
@@ -590,6 +647,9 @@ Add the label to `--retry-labels` with `--resume`.
 5. **Stage incrementally** — `--subtask preprocess simsetup` before adding `hpcjob`.
 6. **Check artifacts before re-running** — read `run_summary.md` and key files under `analysis/`.
 7. **Use `--combined-only`** when per-sim analysis is done and you only need overlays + report.
+8. **For family classification, write science not schema** — COM/orientation/RMSF/χ₁/DCCM/entropy
+   in plain language; let modular tools + LLM feature selection assemble the matrix.
+9. **Use `--rep-num 2` (or more)** when you want replicate-averaged dynamics features.
 
 ---
 
@@ -597,8 +657,12 @@ Add the label to `--retry-labels` with `--resume`.
 
 | Document | Contents |
 |----------|----------|
-| [README.md](README.md) | Overview, quick start, force fields |
+| [README.md](README.md) | Overview, quick start, force fields, classification examples |
+| [docs/PROJECT.md](docs/PROJECT.md) | Product overview, layout, CLI, run outputs |
+| [docs/PIPELINE_WORKFLOW.md](docs/PIPELINE_WORKFLOW.md) | Agent order, directories, flag examples |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | LangGraph pipeline and multi-sim design |
-| [docs/TOOLS.md](docs/TOOLS.md) | Agent tool catalogue |
-| [docs/CONVENTIONS.md](docs/CONVENTIONS.md) | Naming and development conventions |
-| [docs/PROJECT.md](docs/PROJECT.md) | Extended project overview |
+| [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md) | Analysis tools, modular dynamics, classification |
+| [docs/TOOLS.md](docs/TOOLS.md) | Dependencies and MD mechanisms |
+| [docs/POOLS.md](docs/POOLS.md) | Local workers and SLURM HPC pool |
+| [docs/OLLAMA_SETUP.md](docs/OLLAMA_SETUP.md) | Ollama server + `gpt-oss:20b` install |
+| [docs/CONVENTIONS.md](docs/CONVENTIONS.md) | Contributor coding rules |

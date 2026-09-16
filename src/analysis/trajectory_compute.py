@@ -146,7 +146,7 @@ def compute_metric_from_session(
             universe,
             query_selection=params.get("query_selection", "protein"),
             neighbor_selection=params.get("neighbor_selection", "protein"),
-            cutoff=float(params.get("cutoff", params.get("proximity_cutoff", 10.0))),
+            cutoff=float(params.get("cutoff", params.get("proximity_cutoff", 15.0))),
             frame=int(params.get("frame", 0) or 0),
             output_file=params.get("output_file"),
             **common,

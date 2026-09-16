@@ -580,6 +580,44 @@ def build_pool_status_snapshot(state: Dict[str, Any]) -> Optional[Dict[str, Any]
                 )
                 for label in labels
             }
+            # When the workflow has finished, do not leave stale "pending" rows.
+            wf = str(state.get("workflow_status") or "")
+            snap_phase = str(snap.get("workflow_phase") or "")
+            if (
+                phase == "complete"
+                or snap_phase == "complete"
+                or wf.startswith("completed")
+                or wf == "complete"
+            ):
+                for lab, entry in snap["simulations"].items():
+                    if entry.get("status") in ("pending", "in_progress"):
+                        if entry.get("analysis") == "done" and entry.get("reporter") in (
+                            "done",
+                            "pending",
+                        ):
+                            # Reporter may finish after the last pool write.
+                            if entry.get("reporter") != "done":
+                                entry["reporter"] = "done"
+                            entry["status"] = "done"
+                            entry["worker"] = "done"
+                    # Also promote fully-done ladder entries left as pending.
+                    if (
+                        entry.get("status") in ("pending", "in_progress")
+                        and entry.get("analysis") == "done"
+                        and entry.get("reporter") == "done"
+                    ):
+                        entry["status"] = "done"
+                        entry["worker"] = "done"
+                snap["pending"] = []
+                snap["running"] = []
+                snap["pending_count"] = 0
+                snap["done"] = sorted(
+                    lab
+                    for lab, e in snap["simulations"].items()
+                    if e.get("status") == "done"
+                )
+                snap["done_count"] = len(snap["done"])
+                snap["workflow_phase"] = "complete"
             return snap
 
     if phase in ("executing_sims", "combined_analysis", "combined_reporter", "complete"):

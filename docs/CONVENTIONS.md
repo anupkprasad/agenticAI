@@ -152,8 +152,13 @@ uses the registry automatically.
   ([POOLS.md](POOLS.md)). Combined analysis and `--HITL` stay sequential.
 - Skipped simulations are recorded in `completed_sim_states` with `skipped=True`
   and a `skip_reason` string — they are not silent failures.
-- After all sims, `multi_sim_phase` advances to `combined_analysis` then
-  `combined_reporter` automatically when the user goal requests it.
+- After all sims, `multi_sim_phase` may advance to `combined_analysis` /
+  `post_combined` then `combined_reporter` when the master plan sets
+  `run_post_combined` (legacy `run_combined_analysis` is an alias for post).
+  Optional `pre_combined` runs **before** the per-sim pool when
+  `run_pre_combined` is set (`n_sims > 1`), writing `{base}/cross_sim/`.
+- Planner master-plan fields: `run_pre_combined` / `pre_combined_plan`,
+  `run_post_combined` / `post_combined_plan`.
 - **`multi_sim_base_dir`** is the project root (`--working-dir`). Per-simulation
   paths in `sim_prompts` are always `{base}/{label}/`.
 - **`--resume`** restores `sim_prompts`, `completed_sim_states`, and loop

@@ -1,90 +1,89 @@
-# AgenticAI Conda Environment - ollama_env
-# ==========================================
+# AgenticAI Conda Environment — ollama_env
+# ========================================
 #
-# This environment provides molecular dynamics simulation, analysis,
-# and LLM-powered workflow automation capabilities.
-#
-# For detailed software documentation, see: AVAILABLE_SOFTWARE.md
-#
-# Recreation:
+# Portable recipe for a new machine. Create with:
 #   conda env create -f environment.yml
+#   conda activate ollama_env
+#
+# This env includes the *Ollama Python client* (`pip: ollama`) used by SimAgent.
+# The Ollama *server* and the `gpt-oss:20b` model are NOT in conda — install
+# them separately: see docs/OLLAMA_SETUP.md
+#
+# Related docs: docs/PROJECT.md, docs/TOOLS.md, TUTORIAL.md §7
 #
 name: ollama_env
 channels:
   - conda-forge
 dependencies:
   # ===== Core Python =====
-  - python=3.11.14
-  
-  # ===== Molecular Dynamics Simulation =====
-  - gromacs=2025.4              # gmx - MD simulation suite with 50+ analysis tools
-  - ambertools=24.8             # Includes: sander, cpptraj, antechamber, tleap, pdb4amber
-  
-  # ===== Structure and Chemistry Tools =====
-  - openbabel=3.1.1             # obabel - Chemical format conversion
-  - parmed=4.3.0                # Amber/GROMACS topology editor
-  
-  # ===== Scientific Python Stack =====
-  - numpy=2.4.1                 # Numerical arrays and linear algebra
-  - scipy=1.17.0                # Scientific computing and optimization
-  - pandas=3.0.0                # Data manipulation and analysis
-  - matplotlib-base=3.10.8      # 2D plotting and visualization
-  
-  # ===== LLM and Agentic AI Framework =====
-  - langgraph=1.0.7             # Stateful multi-agent workflows
-  - langgraph-checkpoint=4.0.0  # Checkpoint system
-  - langgraph-prebuilt=1.0.7    # Prebuilt agent components
-  - langgraph-sdk=0.3.3         # SDK utilities
-  
-  # ===== Network and Remote Execution =====
-  - paramiko=4.0.0              # SSH client for HPC job submission
-  - requests=2.32.5             # HTTP client
-  
-  # ===== Data Serialization =====
-  - pyyaml=6.0.3                # YAML parser
-  - orjson=3.11.5               # Fast JSON parser
-  - ormsgpack=1.12.2            # MessagePack serialization
-  
-  # ===== Testing =====
-  - pytest=9.0.2                # Testing framework
-  - invoke=2.2.1                # Task execution
-  
-  # ===== Pip-installed packages =====
-  - pip:
-      # === Molecular Dynamics Analysis ===
-      - mdanalysis==2.10.0      # Trajectory analysis framework
-      - pytraj==2.0.6           # Amber trajectory analysis
-      
-      # === Chemistry and Structure ===
-      - rdkit==2025.9.3         # Cheminformatics toolkit
-      - biopython               # Biological computation
-      - acpype==2023.10.27      # AMBER to GROMACS converter
-      - openbabel-wheel==3.1.1.22  # OpenBabel Python bindings
-      
-      # === Amber/AmberTools Python Modules ===
-      - amberutils==21.0        # Amber utility functions
-      - pdb4amber==22.0         # PDB preparation for Amber
-      - pymsmt==22.0            # Metal site modeling
-      - sander==22.0            # Amber MD engine Python bindings
-      - mmpbsa-py==16.0         # MM-PBSA analysis
-      - edgembar==3.0           # Edge-based analysis
-      
-      # === Structure Preparation ===
-      - pdb2pqr==3.7.1          # Add hydrogens and charges to PDB
-      - propka==3.5.1           # pKa prediction
-      - packmol-memgen==2025.1.29  # Membrane system builder
-      
-      # === LLM and AI ===
-      - langchain==1.2.8        # LLM application framework
-      - langchain-core==1.2.8   # LangChain core components
-      - langsmith==0.6.4        # LangSmith tracing
-      - ollama==0.6.1           # Local LLM inference client
-      
-      # === Visualization ===
-      - seaborn==0.13.2         # Statistical visualization
-      
-      # === Data Utilities ===
-      - tqdm==4.67.3            # Progress bars
-      - uuid-utils==0.14.0      # UUID utilities
+  - python=3.11
 
-prefix: /home/akp66103/conda_envs/ollama_env
+  # ===== Molecular Dynamics Simulation =====
+  - gromacs>=2024                # gmx — MD suite
+  - ambertools>=24               # antechamber, tleap, pdb4amber, cpptraj, …
+
+  # ===== Structure / chemistry (CLI) =====
+  - openbabel>=3.1
+  - parmed>=4.3
+  - mafft>=7                     # star / consensus MSA (family modular + pocket map)
+
+  # ===== Scientific Python =====
+  - numpy>=1.26
+  - scipy>=1.11
+  - pandas>=2.0
+  - matplotlib-base>=3.8
+  - pillow>=10
+  - scikit-learn>=1.4            # PCA / clustering helpers in analysis
+  - openpyxl>=3.1                # classification_features.xlsx export
+
+  # ===== LLM agent graph (conda) =====
+  - langgraph>=0.2
+  - langgraph-checkpoint
+  - langgraph-prebuilt
+  - langgraph-sdk
+
+  # ===== Network / serialization / tests =====
+  - paramiko>=3
+  - requests>=2.31
+  - pyyaml>=6
+  - orjson
+  - ormsgpack
+  - pytest>=8
+  - invoke>=2
+
+  # ===== Pip packages =====
+  - pip
+  - pip:
+      # --- MD analysis ---
+      - mdanalysis>=2.7
+      - pytraj>=2.0.5
+
+      # --- Chemistry / structure ---
+      - rdkit>=2023.9.1
+      - biopython>=1.83
+      - acpype>=2023.10.27
+      - openbabel-wheel>=3.1.1
+
+      # --- AmberTools Python modules ---
+      - amberutils>=21.0
+      - pdb4amber>=22.0
+      - pymsmt>=22.0
+      - sander>=22.0
+      - mmpbsa-py>=16.0
+      - edgembar>=3.0
+
+      # --- Structure preparation ---
+      - pdb2pqr>=3.6
+      - propka>=3.5
+      - packmol-memgen>=2023.1
+
+      # --- LLM client (talks to a *running* Ollama server) ---
+      - langchain>=0.3
+      - langchain-core>=0.3
+      - langsmith>=0.1
+      - ollama>=0.4               # Python API only — NOT the Ollama daemon
+
+      # --- Viz / utils ---
+      - seaborn>=0.13
+      - tqdm>=4.66
+      - uuid-utils>=0.9

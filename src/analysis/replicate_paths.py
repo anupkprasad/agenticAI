@@ -156,6 +156,25 @@ def resolve_production_trajectory(hpc_dir: Path) -> Optional[Path]:
     return None
 
 
+def resolve_production_topology(hpc_dir: Path) -> Optional[Path]:
+    """Pick a topology that matches the production trajectory atom count.
+
+    Prefer ``md.tpr`` / ``md.gro`` from the same MD run. Fresh simsetup
+    ``system.gro`` / ``solvated.gro`` staged under ``--reuse-hpc`` often have a
+    different atom count than the reused ``mdWrap.xtc`` and must not win.
+    """
+    hpc = Path(hpc_dir)
+    for name in ("md.tpr", "md.gro"):
+        p = hpc / name
+        if p.is_file() and p.stat().st_size > 0:
+            return p
+    for name in ("npt.gro", "nvt.gro", "system.gro", "solvated.gro"):
+        p = hpc / name
+        if p.is_file() and p.stat().st_size > 0:
+            return p
+    return None
+
+
 def pool_slot_key(label: str, rep_id: Optional[str] = None, *, nested: bool = True) -> str:
     """HPC pool / progress key. Nested multi-rep uses ``label::rep01``."""
     if nested and rep_id:

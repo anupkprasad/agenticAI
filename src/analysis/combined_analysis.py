@@ -1589,36 +1589,41 @@ def run_combined_rmsf_apo_holo_analysis(
 def _find_sim_traj_topology(sim_dir: str) -> Tuple[Optional[str], Optional[str]]:
     """Locate (topology, trajectory) for a simulation directory.
 
-    Prefers a wrapped trajectory (``mdWrap.xtc``) and a ``.tpr``/``.gro``
-    topology under the simulation's ``hpc/`` folder, falling back to the sim
-    directory itself.  Returns ``(topology, trajectory)`` (either may be None).
+    Prefers a wrapped trajectory (``mdWrap.xtc``) and ``md.tpr``/``md.gro``
+    under ``hpc/repXX`` (or flat ``hpc/``). Avoids fresh simsetup ``system.gro``
+    when production topologies exist (atom-count mismatch under reuse-hpc).
     """
-    search_roots = [Path(sim_dir) / "hpc", Path(sim_dir)]
+    from src.analysis.replicate_paths import (
+        discover_hpc_rep_dirs,
+        resolve_production_topology,
+        resolve_production_trajectory,
+    )
+
+    search_roots: list[Path] = list(discover_hpc_rep_dirs(sim_dir))
+    flat = Path(sim_dir) / "hpc"
+    if flat.is_dir() and flat not in search_roots:
+        search_roots.append(flat)
+    search_roots.append(Path(sim_dir))
+
     topo: Optional[str] = None
     traj: Optional[str] = None
     for root in search_roots:
         if not root.is_dir():
             continue
         if traj is None:
-            for name in ("mdWrap.xtc", "md.xtc", "md.trr"):
-                cand = root / name
-                if cand.is_file():
-                    traj = str(cand)
-                    break
-            if traj is None:
-                xtcs = sorted(root.glob("*.xtc"))
-                if xtcs:
-                    traj = str(xtcs[0])
+            found = resolve_production_trajectory(root)
+            if found is not None:
+                traj = str(found)
+            else:
+                for name in ("mdWrap.xtc", "md.xtc", "md.trr"):
+                    cand = root / name
+                    if cand.is_file():
+                        traj = str(cand)
+                        break
         if topo is None:
-            for name in ("md.tpr", "md.gro", "npt.gro", "system.gro"):
-                cand = root / name
-                if cand.is_file():
-                    topo = str(cand)
-                    break
-            if topo is None:
-                tps = sorted(root.glob("*.tpr")) or sorted(root.glob("*.gro"))
-                if tps:
-                    topo = str(tps[0])
+            found_t = resolve_production_topology(root)
+            if found_t is not None:
+                topo = str(found_t)
         if traj and topo:
             break
     return topo, traj

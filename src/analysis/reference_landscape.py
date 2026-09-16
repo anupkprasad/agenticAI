@@ -143,13 +143,19 @@ def _restore_cwd(original_dir: Optional[str]) -> None:
 
 
 def load_consensus_alignment(path: str) -> Dict[str, Any]:
-    """Load ``consensus_alignment.json`` from ``build_consensus_sequence_alignment``."""
+    """Load consensus alignment JSON (legacy or compact v2)."""
+    from src.analysis.cross_sim_artifacts import expand_consensus_positions
+
     p = Path(path)
     if not p.is_file():
         return {"success": False, "error": f"Consensus alignment JSON not found: {path}"}
     with open(p, encoding="utf-8") as fh:
         data = json.load(fh)
     positions = data.get("consensus_positions") or []
+    if not positions:
+        positions = expand_consensus_positions(data)
+        data = dict(data)
+        data["consensus_positions"] = positions
     if len(positions) < 3:
         return {
             "success": False,

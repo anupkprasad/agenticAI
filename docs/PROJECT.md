@@ -22,7 +22,8 @@ Given a natural-language goal and either a PDB file or a UniProt accession, the 
 3. Validates and preprocesses the structure (protonation, component separation)
 4. Generates simulation parameters, topology, and coordinates (GROMACS)
 5. Submits and monitors HPC jobs via SLURM
-6. Analyses the resulting trajectory (RMSD, RMSF, Rg, DCCM, DSSP, COM distances)
+6. Analyses the resulting trajectory (RMSD, RMSF, Rg, DCCM, DSSP, COM distances,
+   plus optional family-scale modular dynamics)
 7. Produces an interactive HTML report with literature references, figures, and a
    3D structure viewer
 
@@ -37,6 +38,8 @@ Given a natural-language goal and either a PDB file or a UniProt accession, the 
 - **Multi-simulation and component-case expansion** — a single command can drive
   N proteins × M component cases (e.g. apo + holo) with isolated per-sim
   directories and a combined analysis phase.
+- **Multi-replicate MD** — `--rep-num N` fans analysis across `hpc/repXX/` and
+  writes mean±std under `analysis/avg/` for overlays and classification.
 - **Holo feasibility guard** — if a requested ligand/ion is absent in the source
   structure (e.g. AlphaFold has no ATP), the Supervisor skips the holo case and
   records the reason rather than producing a broken simulation.
@@ -46,6 +49,14 @@ Given a natural-language goal and either a PDB file or a UniProt accession, the 
 - **LLM-driven scientific inference** — the Planner selects analysis observables
   from goal semantics; the Analysis agent selects tools per trajectory; the
   Reporter synthesises a literature-grounded narrative.
+- **Family modular dynamics** — consensus-mapped torsions, RMSF, N↔C DCCM, and
+  independent dihedral PCA landscape entropy when the goal asks for comparative
+  kinase/pseudokinase descriptors (not a fixed paper schema).
+- **Consensus reference pocket** — define ATP pocket on a reference (e.g. KAPCA),
+  map via star MSA, compute COM distance + axis orientation for all systems.
+- **LLM classification feature selection** — after collecting dynamics scalars,
+  the Analysis agent asks the LLM to choose a scientifically motivated subset
+  (with written reasoning) before hierarchical clustering / dendrogram+heatmap.
 - **Human checkpoints** — optional approval gates after preprocessing, setup, HPC,
   analysis, and reporter. Enable with `--HITL all` or pause on failures with `--HITL error`.
 - **Cross-sim HPC pool** — multi-sim full pipeline preps in parallel (local
@@ -72,10 +83,14 @@ agentic/
     preprocess/                 # PreprocessingAgent: download, domain trim, clean
     simsetup/                   # SimulationSetupAgent: topology, MDP, solvation
     hpc/                        # MDHPCAgent: SLURM, SSH, job monitoring
-    analysis/                   # MDAnalysisAgent: RMSD/RMSF/DCCM/combined overlays
+    analysis/                   # MDAnalysisAgent: traj metrics, modular family tools,
+                                #   combined overlays, LLM feature selection + clustering
     reporter/                   # ReporterAgent: HTML report, literature, 3D viewer
     utils/                      # Logging, SecureFileManager, plan persistence
+    multi_sim_progress.py       # Per-sim / family-modular completion checks
 src/
+    analysis/                   # Trajectory tools, classification collector/clustering,
+                                #   consensus pocket, family_dynamics_core, replicate avg
     preprocess/
         structure_sources/      # AlphaFold + RCSB download backends (pluggable)
         domain_sources/         # UniProt domain lookup + offline fallback
@@ -111,6 +126,7 @@ docs/                           # Project documentation (you are here)
 | [ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md) | Per-tool observables, theory, and output filenames |
 | [TOOLS.md](TOOLS.md) | External dependencies plus GROMACS/analysis mechanisms |
 | [POOLS.md](POOLS.md) | Local parallel workers and SLURM HPC pool |
+| [OLLAMA_SETUP.md](OLLAMA_SETUP.md) | Ollama server + `gpt-oss:20b` (separate from conda) |
 
 Each page opens with a purpose paragraph. Related mechanisms share one
 descriptive file (tools together, pools together). Do not leave the
@@ -180,6 +196,7 @@ python SimAgent.py \
 | `--llm-concurrency` | auto | Cap on concurrent LLM-using workers (prep / analysis) |
 | `--force-field` | `amber99sb-ildn` | GROMACS force field override |
 | `--water-model` | `tip3p` | Water model override |
+| `--rep-num` | `1` | Independent production replicates per system (`hpc/repXX/`) |
 | `--prompt` | *(none)* | Override enriched prompt |
 | `--log-file` | *(auto)* | Conversation log path |
 
@@ -199,3 +216,7 @@ After every run the following are written to the base working directory:
 | `supervisor/execution_report.md` | Stage-by-stage execution summary |
 | `reporter/combined_report.html` | Interactive HTML report (multi-sim) |
 | `analysis/statistical_summary.json` | Cross-simulation statistics table |
+| `analysis/classification_features*.csv` | Raw + robust z-score feature matrix (when classified) |
+| `analysis/classification_feature_selection.json` | LLM-chosen columns + scientific reasoning |
+| `analysis/classification_dendrogram_heatmap.png` | Ward dendrogram + feature heatmap panel |
+| `cross_sim/` | Pre-combined MSA / pocket-map artifacts (multi-sim) |

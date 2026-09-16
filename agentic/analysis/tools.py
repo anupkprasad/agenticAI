@@ -479,6 +479,11 @@ class AnalysisToolExecutor:
             "calculate_native_contacts": calculate_native_contacts,
             "calculate_backbone_dihedrals": calculate_backbone_dihedrals,
             "aggregate_replicate_metrics": aggregate_replicate_metrics,
+            # Paper Ward-4 / family modular features (per-sim)
+            "calculate_consensus_torsions": calculate_consensus_torsions,
+            "calculate_consensus_rmsf_features": calculate_consensus_rmsf_features,
+            "calculate_consensus_dccm_features": calculate_consensus_dccm_features,
+            "run_independent_dynamics_fel": run_independent_dynamics_fel,
         }
         if include_combined:
             self.tools.update({
@@ -649,7 +654,49 @@ class AnalysisToolExecutor:
         """
         if self._should_fanout_replicates(tool_name):
             return self._execute_across_replicates(tool_name, kwargs)
+        kwargs = self._ensure_family_tool_kwargs(tool_name, kwargs)
         return self._execute_once(tool_name, **kwargs)
+
+    def _ensure_family_tool_kwargs(
+        self, tool_name: str, kwargs: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Fill alignment_json / label / pocket_map for modular family tools.
+
+        Parallel workers sometimes lose analysis-agent injection; resolve from
+        the campaign ``analysis/`` directory next to this simulation root.
+        """
+        family = {
+            "calculate_consensus_torsions",
+            "calculate_consensus_rmsf_features",
+            "calculate_consensus_dccm_features",
+            "run_independent_dynamics_fel",
+        }
+        if tool_name not in family:
+            return kwargs
+        out = dict(kwargs or {})
+        if not out.get("label"):
+            out["label"] = Path(self.sim_root).name
+        if not out.get("sim_directory"):
+            out["sim_directory"] = str(self.sim_root)
+        if not out.get("alignment_json"):
+            for cand in (
+                Path(self.sim_root).parent / "analysis" / "reference_msa_alignment.json",
+                Path(self.working_dir).resolve().parents[1] / "analysis" / "reference_msa_alignment.json",
+            ):
+                if cand.is_file():
+                    out["alignment_json"] = str(cand.resolve())
+                    break
+        if not out.get("pocket_map_csv"):
+            for name in (
+                "reference_pocket_residue_map.csv",
+                "reference_pocket_resid_map.csv",
+                "reference_msa_residue_map.csv",
+            ):
+                cand = Path(self.sim_root).parent / "analysis" / name
+                if cand.is_file():
+                    out["pocket_map_csv"] = str(cand.resolve())
+                    break
+        return out
 
     def _should_fanout_replicates(self, tool_name: str) -> bool:
         if self.include_combined_tools:
@@ -670,6 +717,7 @@ class AnalysisToolExecutor:
     def _execute_across_replicates(self, tool_name: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         from src.analysis.replicate_paths import (
             build_rep_plan,
+            resolve_production_topology,
             resolve_production_trajectory,
         )
 
@@ -690,51 +738,143 @@ class AnalysisToolExecutor:
             self.working_dir = analysis_dir
             call_kw = dict(kwargs)
             traj = resolve_production_trajectory(hpc_dir)
-            topo = hpc_dir / "md.tpr"
-            if not topo.is_file():
-                for name in ("md.gro", "system.gro", "solvated.gro"):
-                    if (hpc_dir / name).is_file():
-                        topo = hpc_dir / name
-                        break
-            # Remap absolute paths that point at flat analysis/ or hpc/
-            # (strings and list-of-strings, e.g. data_files)
-            def _remap_path(val: str) -> str:
+            topo = resolve_production_topology(hpc_dir)
+            # Remap absolute paths that point at *this sim's* flat analysis/ or
+            # hpc/ into the per-rep slot. Do NOT remap campaign-level shared
+            # artifacts (e.g. run_01/analysis/reference_msa_alignment.json) —
+            # naive "/analysis/" → "/analysis/rep01/" breaks family tools.
+            sim_root_resolved = Path(self.sim_root).resolve()
+            shared_input_keys = {
+                "alignment_json",
+                "consensus_json",
+                "pocket_map_csv",
+                "pocket_definition_json",
+                "definition_json",
+                "residue_map_csv",
+                "reference_msa_alignment",
+            }
+
+            def _remap_path(val: str, *, key: str = "") -> str:
+                if key in shared_input_keys:
+                    return val
+                try:
+                    p = Path(val)
+                    if p.is_absolute():
+                        try:
+                            p.resolve().relative_to(sim_root_resolved)
+                        except ValueError:
+                            # Outside this simulation root — shared campaign path
+                            return val
+                except (OSError, RuntimeError, ValueError):
+                    pass
                 out = val
                 if "/hpc/" in out and f"/hpc/{rep_id}/" not in out:
                     out = out.replace("/hpc/", f"/hpc/{rep_id}/")
                 if "/analysis/" in out and f"/analysis/{rep_id}/" not in out:
                     if "/analysis/avg" not in out:
-                        out = out.replace("/analysis/", f"/analysis/{rep_id}/")
+                        candidate = out.replace("/analysis/", f"/analysis/{rep_id}/")
+                        # Keep original when remap would break an existing shared file
+                        if Path(out).is_file() and not Path(candidate).is_file():
+                            # Only preserve if original is outside sim analysis
+                            # or is a known shared basename under parent analysis/
+                            try:
+                                Path(out).resolve().relative_to(sim_root_resolved / "analysis")
+                            except ValueError:
+                                return out
+                        out = candidate
                 return out
 
             for key, val in list(call_kw.items()):
                 if isinstance(val, str):
-                    call_kw[key] = _remap_path(val)
+                    call_kw[key] = _remap_path(val, key=key)
                 elif isinstance(val, list):
                     call_kw[key] = [
-                        _remap_path(v) if isinstance(v, str) else v for v in val
+                        _remap_path(v, key=key) if isinstance(v, str) else v for v in val
                     ]
             for tkey in ("trajectory_file", "trajectory", "traj_file"):
                 if traj and (tkey not in call_kw or not Path(str(call_kw.get(tkey) or "")).is_file()):
                     call_kw[tkey] = str(traj)
+            # Always force traj-matched topology when available. LLM / remapped
+            # paths often keep fresh simsetup system.gro, which mismatches
+            # reused mdWrap.xtc atom counts under --reuse-hpc.
             for tkey in ("topology_file", "topology", "structure_file"):
-                if topo.is_file() and (
-                    tkey not in call_kw or not Path(str(call_kw.get(tkey) or "")).is_file()
-                ):
+                if topo is not None and topo.is_file():
+                    prev = call_kw.get(tkey)
                     call_kw[tkey] = str(topo)
+                    if prev and Path(str(prev)).name != topo.name:
+                        logger.info(
+                            "Replicate fan-out: override %s %s → %s (%s)",
+                            tkey,
+                            prev,
+                            topo,
+                            rep_id,
+                        )
             logger.info("Replicate fan-out: %s → %s", tool_name, rep_id)
+            call_kw = self._ensure_family_tool_kwargs(tool_name, call_kw)
             result = self._execute_once(tool_name, **call_kw)
             per_rep[rep_id] = result
             if not result.get("success"):
                 all_ok = False
+                logger.error(
+                    "Replicate fan-out: %s failed on %s: %s",
+                    tool_name,
+                    rep_id,
+                    result.get("error") or result,
+                )
         self.working_dir = saved_wd
 
         agg = None
         if all_ok:
             try:
+                # Prefer filenames referenced by this tool call so avg/ is
+                # populated immediately after each successful fan-out.
+                hint_names: list[str] = []
+                for key in (
+                    "output_file",
+                    "data_file",
+                    "csv_file",
+                    "results_file",
+                    "matrix_file",
+                    "rmsd_file",
+                    "rmsf_file",
+                ):
+                    val = kwargs.get(key)
+                    if isinstance(val, str) and val.strip():
+                        hint_names.append(Path(val).name)
+                    elif isinstance(val, list):
+                        for v in val:
+                            if isinstance(v, str) and v.strip():
+                                hint_names.append(Path(v).name)
+                for key in ("data_files",):
+                    val = kwargs.get(key)
+                    if isinstance(val, list):
+                        for v in val:
+                            if isinstance(v, str) and v.strip():
+                                hint_names.append(Path(v).name)
+                # Map calculate_* tools to conventional basenames
+                tool_defaults = {
+                    "calculate_rmsd": ["rmsd.dat"],
+                    "calculate_rmsf": ["rmsf.dat"],
+                    "calculate_gyration": ["rg.dat", "gyrate.dat"],
+                    "calculate_radius_of_gyration": ["rg.dat"],
+                    "calculate_sasa": ["sasa.dat"],
+                    "calculate_dccm": ["dccm.dat", "dccm.csv", "dccm_matrix.dat"],
+                    "calculate_com_distance": ["com_distance.dat", "com_distance.csv"],
+                    "calculate_ligand_pocket_distance": [
+                        "ligand_pocket_distance.csv",
+                        "ligand_pocket_distance.dat",
+                    ],
+                    "calculate_pocket_rmsf": ["pocket_rmsf.dat"],
+                    "calculate_ligand_rmsf": ["ligand_rmsf.dat"],
+                    "calculate_ligand_rmsd": ["ligand_rmsd.dat"],
+                }
+                for name in tool_defaults.get(tool_name, []):
+                    if name not in hint_names:
+                        hint_names.append(name)
                 agg = aggregate_replicate_metrics.func(
                     sim_dir=self.sim_root,
                     rep_num=self.rep_num,
+                    metric_filenames=hint_names or None,
                 )
             except Exception as exc:
                 logger.warning("aggregate_replicate_metrics after %s failed: %s", tool_name, exc)
@@ -760,6 +900,11 @@ class AnalysisToolExecutor:
             Dict with execution result
         """
         if tool_name not in self.tools:
+            logger.error(
+                "Unknown analysis tool %s (available=%s)",
+                tool_name,
+                sorted(self.tools.keys()),
+            )
             return {
                 "success": False,
                 "error": f"Unknown tool: {tool_name}. Available: {list(self.tools.keys())}"
@@ -788,7 +933,6 @@ class AnalysisToolExecutor:
             "xlabel": "xlabels",  # multipanel expects plural
             "plot_type": "plot_types",  # multipanel expects plural
             "color": "colors",
-            "label": "labels",
             "data_file": "data_files",   # LLM often sends singular
             "csv_file": "data_files",    # LLM may use csv_file instead
             "input_file": "data_files",  # another common LLM alias
@@ -799,7 +943,14 @@ class AnalysisToolExecutor:
             valid_params = set(inspect.signature(actual_fn).parameters.keys())
         except Exception:
             valid_params = None
-        
+
+        # Only alias label→labels when the tool does NOT accept singular ``label``
+        # (family consensus tools use label=sim id; multipanel uses labels=list).
+        if valid_params is not None and "label" not in valid_params and "labels" in valid_params:
+            _PARAM_ALIASES = {**_PARAM_ALIASES, "label": "labels"}
+        elif valid_params is None:
+            _PARAM_ALIASES = {**_PARAM_ALIASES, "label": "labels"}
+
         if valid_params is not None:
             aliases_applied = {}
             for alias, canonical in (_TOOL_SPECIFIC_ALIASES.get(tool_name) or {}).items():

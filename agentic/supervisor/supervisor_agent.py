@@ -86,18 +86,19 @@ def _is_post_simulation_subtask(state: Dict[str, Any]) -> bool:
 
 def _should_run_combined_analysis(state: Dict[str, Any]) -> bool:
     """
-    True when multi-sim should run cross-simulation analysis + reporter at basepath.
+    True when multi-sim should run *post* cross-simulation analysis + reporter.
 
     Only when ``len(sim_prompts) > 1`` after planning (unless ``--combined-only``).
+    Legacy ``run_combined_analysis`` is an alias of ``run_post_combined``.
     """
     n_sims = len(state.get("sim_prompts") or [])
     if n_sims <= 1 and not state.get("combined_only"):
         return False
     if state.get("combined_only"):
         return n_sims > 1
-    if state.get("run_combined_analysis") is False:
+    if state.get("run_post_combined") is False and state.get("run_combined_analysis") is False:
         return False
-    if state.get("run_combined_analysis") is True:
+    if state.get("run_post_combined") is True or state.get("run_combined_analysis") is True:
         return True
 
     subtask_type = state.get("subtask_type")
@@ -107,6 +108,25 @@ def _should_run_combined_analysis(state: Dict[str, Any]) -> bool:
     if subtask_type in ("analysis_only", "reporter_only", "full_task", None):
         return True
     return False
+
+
+def _should_run_pre_combined(state: Dict[str, Any]) -> bool:
+    """True when optional pre-combined (pocket/MSA/consensus) should run before traj."""
+    n_sims = len(state.get("sim_prompts") or [])
+    if n_sims <= 1:
+        return False
+    if state.get("combined_only"):
+        # Combined-only skips per-sim traj; pre mapping still useful when requested
+        return bool(state.get("run_pre_combined"))
+    return bool(state.get("run_pre_combined"))
+
+
+def _is_post_combined_phase(phase: Optional[str]) -> bool:
+    return phase in ("combined_analysis", "post_combined")
+
+
+def _is_pre_combined_phase(phase: Optional[str]) -> bool:
+    return phase == "pre_combined"
 
 
 def _build_per_sim_prep_prompt(
@@ -488,24 +508,40 @@ class MDSupervisor:
 
         # ── Combined cross-sim phases (must run analysis before reporter) ─
         if state.get("is_multi_simulation") and multi_sim_phase in (
+            "pre_combined",
             "combined_analysis",
+            "post_combined",
             "combined_reporter",
         ):
             from agentic.multi_sim_progress import (
                 _combined_analysis_done_on_disk,
                 _combined_reporter_done_on_disk,
             )
+            from src.analysis.cross_sim_artifacts import pre_combined_done_on_disk
 
             base = Path(_get_multi_sim_base_dir(state))
+
+            if multi_sim_phase == "pre_combined":
+                if pre_combined_done_on_disk(base):
+                    logger.info(
+                        "SUPERVISOR [multi-sim]: Pre-combined on disk — "
+                        "starting post-HPC / per-sim execution"
+                    )
+                    return self._start_per_sim_execution_after_pre(state)
+                logger.info(
+                    "SUPERVISOR [multi-sim]: Pre-combined pending — entering setup"
+                )
+                return self._setup_combined_analysis(state, mode="pre")
+
             analysis_done = _combined_analysis_done_on_disk(base, state=state)
             reporter_done = _combined_reporter_done_on_disk(base)
-            if multi_sim_phase == "combined_analysis" and not analysis_done:
+            if multi_sim_phase in ("combined_analysis", "post_combined") and not analysis_done:
                 logger.info(
                     "SUPERVISOR [multi-sim]: Combined analysis pending — entering setup"
                 )
-                return self._setup_combined_analysis(state)
+                return self._setup_combined_analysis(state, mode="post")
             # Analysis finished (disk or just marked) — always advance to reporter.
-            if multi_sim_phase == "combined_analysis" and analysis_done and not reporter_done:
+            if multi_sim_phase in ("combined_analysis", "post_combined") and analysis_done and not reporter_done:
                 state["multi_sim_phase"] = "combined_reporter"
                 state["plan_executed"] = False
                 state["current_agent_idx"] = 1
@@ -539,7 +575,8 @@ class MDSupervisor:
                     "SUPERVISOR [multi-sim]: Combined reporter pending but analysis "
                     "incomplete — re-entering combined analysis"
                 )
-                return self._setup_combined_analysis(state)
+                return self._setup_combined_analysis(state, mode="post")
+
 
         # ── Cross-sim HPC pool (prep sequential, SLURM jobs parallel) ───
         if multi_sim_phase == "hpc_pool":
@@ -681,10 +718,24 @@ class MDSupervisor:
                 )
             # Overall orchestration (enrichment, master plan, combined analysis, HPC pool)
             # is logged at the base working directory — except during active per-sim prep.
-            if multi_sim_phase in (None, "combined_analysis", "hpc_pool", "parallel_pool"):
+            if multi_sim_phase in (
+                None,
+                "combined_analysis",
+                "post_combined",
+                "pre_combined",
+                "hpc_pool",
+                "parallel_pool",
+            ):
                 if (
                     (state.get("hpc_pool_prep_only") or state.get("post_hpc_analysis_only"))
-                    and multi_sim_phase not in ("combined_analysis", "combined_reporter", "parallel_pool")
+                    and multi_sim_phase
+                    not in (
+                        "combined_analysis",
+                        "post_combined",
+                        "pre_combined",
+                        "combined_reporter",
+                        "parallel_pool",
+                    )
                 ):
                     from agentic.multi_sim_progress import ensure_per_sim_working_directory
 
@@ -1060,10 +1111,26 @@ class MDSupervisor:
             if not (
                 state.get("resume_failed_only")
                 and (state.get("multi_sim_progress") or {}).get("phase")
-                in ("combined_analysis", "combined_reporter", "complete")
+                in (
+                    "pre_combined",
+                    "combined_analysis",
+                    "post_combined",
+                    "combined_reporter",
+                    "complete",
+                )
             ):
                 if not state.get("resume_failed_only"):
                     init_multi_sim_progress(state)
+            # Optional pre-combined (pocket/MSA) before any per-sim traj analysis
+            if _should_run_pre_combined(state):
+                from src.analysis.cross_sim_artifacts import pre_combined_done_on_disk
+
+                base = Path(_get_multi_sim_base_dir(state))
+                if not pre_combined_done_on_disk(base):
+                    logger.info(
+                        "SUPERVISOR [multi-sim]: Starting pre_combined before per-sim loop"
+                    )
+                    return self._setup_combined_analysis(state, mode="pre")
             if should_use_parallel_pool(state):
                 logger.info("SUPERVISOR [multi-sim]: Using parallel analysis/reporter pool")
                 return self._ensure_valid_next_node(start_parallel_agent_phase(state))
@@ -1195,7 +1262,24 @@ class MDSupervisor:
                     state["current_agent_idx"] = 1
                     state["next_node"] = "reporter"
                     return state
-                if state.get("multi_sim_phase") == "combined_analysis":
+                if state.get("multi_sim_phase") == "pre_combined":
+                    from src.analysis.cross_sim_artifacts import pre_combined_done_on_disk
+
+                    base = Path(_get_multi_sim_base_dir(state))
+                    if pre_combined_done_on_disk(base):
+                        logger.info(
+                            "SUPERVISOR: Pre-combined done — starting per-sim execution"
+                        )
+                        return self._start_per_sim_execution_after_pre(state)
+                    logger.info(
+                        "SUPERVISOR: Pre-combined still pending — re-entering setup"
+                    )
+                    state["plan_executed"] = False
+                    return self._setup_combined_analysis(state, mode="pre")
+                if state.get("multi_sim_phase") in (
+                    "combined_analysis",
+                    "post_combined",
+                ):
                     from agentic.multi_sim_progress import _combined_analysis_done_on_disk
 
                     base = Path(_get_multi_sim_base_dir(state))
@@ -1219,7 +1303,7 @@ class MDSupervisor:
                         "SUPERVISOR: Combined analysis still pending — re-entering setup"
                     )
                     state["plan_executed"] = False
-                    return self._setup_combined_analysis(state)
+                    return self._setup_combined_analysis(state, mode="post")
                 if state.get("next_node") == "supervisor":
                     logger.info(
                         "SUPERVISOR: plan_executed with next_node=supervisor — "
@@ -1862,22 +1946,7 @@ class MDSupervisor:
                 return self._start_next_sim(state)
             if state.pop("hpc_pool_post_hpc_start", None):
                 logger.info("HPC pool: all jobs done — starting post-HPC analysis")
-                from agentic.multi_sim_parallel_pool import (
-                    should_use_parallel_pool,
-                    start_parallel_agent_phase,
-                )
-
-                # Prefer parallel analysis/reporter workers for family-scale campaigns
-                # (esp. --reuse-hpc). Sequential _start_next_sim can miss this branch
-                # after the first sim's input_validation sets input_validated=True.
-                if should_use_parallel_pool(state):
-                    logger.info(
-                        "HPC pool: post-HPC — launching parallel analysis/reporter pool"
-                    )
-                    return self._ensure_valid_next_node(
-                        start_parallel_agent_phase(state)
-                    )
-                return self._start_next_sim(state)
+                return self._begin_post_hpc_analysis_phase(state)
             logger.error(
                 "HPC pool tick returned next_node=supervisor with no hand-off flag"
             )
@@ -2856,25 +2925,39 @@ class MDSupervisor:
         )
         return state
 
-    def _setup_combined_analysis(self, state: MDState) -> MDState:
+    def _setup_combined_analysis(
+        self, state: MDState, *, mode: str = "post"
+    ) -> MDState:
         """
         Prepare state for combined analysis at basepath level.
 
-        After this, the regular supervisor flow handles everything:
-          enrichment is skipped (enriched_prompt is set)
-          planner creates a combined execution plan
-          analysis and reporter agents run in {basepath}/
+        mode:
+          - ``pre``: pocket/MSA/consensus before per-sim traj (``pre_combined``)
+          - ``post``: compare/Ward/overlays after all sims (``combined_analysis`` /
+            ``post_combined``); then combined reporter
         """
+        mode = "pre" if mode == "pre" else "post"
         basepath = _get_multi_sim_base_dir(state)
         state["multi_sim_base_dir"] = basepath
 
-        # Idempotent: combined analysis already finished on disk — go to reporter.
-        # Do not require multi_sim_phase == combined_analysis: combined-only activate
-        # clears phase before calling setup, and stale 1-sim markers must not block
-        # a fresh multi-sim discovery (handled inside _combined_analysis_done_on_disk).
         from agentic.multi_sim_progress import _combined_analysis_done_on_disk
+        from src.analysis.cross_sim_artifacts import (
+            ensure_cross_sim_dir,
+            pre_combined_done_on_disk,
+        )
 
-        if _combined_analysis_done_on_disk(Path(basepath), state=state):
+        ensure_cross_sim_dir(basepath)
+
+        # ── Pre-combined already done → start per-sim pool ───────────────
+        if mode == "pre" and pre_combined_done_on_disk(basepath):
+            logger.info(
+                "SUPERVISOR [multi-sim]: Pre-combined already complete — "
+                "starting per-sim execution"
+            )
+            return self._start_per_sim_execution_after_pre(state)
+
+        # ── Post-combined already done → reporter ────────────────────────
+        if mode == "post" and _combined_analysis_done_on_disk(Path(basepath), state=state):
             logger.info(
                 "SUPERVISOR [multi-sim]: Combined analysis already complete — "
                 "routing to combined reporter"
@@ -2907,28 +2990,59 @@ class MDSupervisor:
 
         completed = state.get("completed_sim_states", [])
         sim_prompts = state.get("sim_prompts") or []
-        from agentic.multi_sim_progress import sync_post_hpc_progress_from_disk
+        if mode == "post":
+            from agentic.multi_sim_progress import sync_post_hpc_progress_from_disk
 
-        sync_post_hpc_progress_from_disk(state)
-        completed = _dedupe_completed_sim_states(completed, sim_prompts)
-        if len(completed) < len(sim_prompts):
-            logger.info(
-                "SUPERVISOR [multi-sim]: completed_sim_states has %s/%s entries — "
-                "rebuilding from per-sim state on disk",
-                len(completed),
-                len(sim_prompts),
-            )
-            completed = self._rebuild_completed_states_from_disk(state)
+            sync_post_hpc_progress_from_disk(state)
             completed = _dedupe_completed_sim_states(completed, sim_prompts)
-            state["completed_sim_states"] = completed
+            if len(completed) < len(sim_prompts):
+                logger.info(
+                    "SUPERVISOR [multi-sim]: completed_sim_states has %s/%s entries — "
+                    "rebuilding from per-sim state on disk",
+                    len(completed),
+                    len(sim_prompts),
+                )
+                completed = self._rebuild_completed_states_from_disk(state)
+                completed = _dedupe_completed_sim_states(completed, sim_prompts)
+                state["completed_sim_states"] = completed
 
-        logger.info(f"SUPERVISOR [multi-sim]: Combined analysis at basepath={basepath}")
+        phase_name = "pre_combined" if mode == "pre" else "combined_analysis"
+        logger.info(
+            "SUPERVISOR [multi-sim]: %s at basepath=%s",
+            phase_name,
+            basepath,
+        )
 
         _set_base_conversation_log(state)
 
         # Build combined instructions
-        sim_data_summary = self._build_sim_data_summary(completed)
-        combined_plan = state.get("combined_analysis_plan", "")
+        sim_data_summary = (
+            self._build_sim_data_summary(completed)
+            if mode == "post"
+            else self._build_pre_combined_inventory_summary(state)
+        )
+        if mode == "pre":
+            combined_plan = (
+                state.get("pre_combined_plan")
+                or "Map reference pocket / consensus residues and write base/cross_sim/."
+            )
+            heading = "## Pre-Combined Cross-Simulation Setup"
+            save_note = (
+                f"Write shared artifacts under `{basepath}/cross_sim/` "
+                f"(pocket_map.json, MSA, consensus residues). "
+                f"Do not run per-sim trajectory metrics here."
+            )
+        else:
+            combined_plan = (
+                state.get("post_combined_plan")
+                or state.get("combined_analysis_plan")
+                or ""
+            )
+            heading = "## Combined Multi-Simulation Analysis (post)"
+            save_note = (
+                f"Save all combined plots and reports to the analysis and reporter "
+                f"directories under: {basepath}"
+            )
         original_goal = (state.get("user_goal_original") or "").strip()
         combined_instructions = ""
         if original_goal:
@@ -2936,16 +3050,18 @@ class MDSupervisor:
                 f"## Original Study Goal\n\n{original_goal}\n\n"
             )
         combined_instructions += (
-            f"## Combined Multi-Simulation Analysis\n\n"
+            f"{heading}\n\n"
             f"{combined_plan}\n\n"
             f"## Simulation Data\n\n{sim_data_summary}\n\n"
-            f"Save all combined plots and reports to the analysis and reporter "
-            f"directories under: {basepath}"
+            f"{save_note}"
         )
 
         # Preserve multi-sim bookkeeping + config
         preserved_keys = {
-            "is_multi_simulation", "sim_prompts", "run_combined_analysis", "combined_analysis_plan",
+            "is_multi_simulation", "sim_prompts",
+            "run_combined_analysis", "combined_analysis_plan",
+            "run_pre_combined", "pre_combined_plan",
+            "run_post_combined", "post_combined_plan",
             "sim_working_dirs", "pdb_list", "completed_sim_states",
             "multi_sim_base_dir", "combined_only",
             "md_engine", "force_field", "water_model", "human_in_loop",
@@ -2953,10 +3069,11 @@ class MDSupervisor:
             "required_inputs",
             "pipeline_subtask_type",
             "hpc_pool", "hpc_pool_phase_complete",
-            # Master prompt — preserved so combined reporter shows supervisor's rephrased goal
             "master_enriched_prompt",
-            # Original --goal text — shown verbatim in the combined report
             "user_goal_original",
+            "rep_num", "reuse_hpc", "skip_hpc_submit",
+            "parallel_workers", "parallel_mem_gb_per_job", "llm_concurrency",
+            "multi_sim_progress",
         }
         if not state.get("pipeline_subtask_type"):
             if state.get("hpc_pool"):
@@ -3001,8 +3118,9 @@ class MDSupervisor:
         state["post_hpc_analysis_only"] = False
 
         # Set up combined analysis context
-        state["multi_sim_phase"] = "combined_analysis"
-        state["current_sim_index"] = len(state.get("sim_prompts", []))  # mark sims done
+        state["multi_sim_phase"] = "pre_combined" if mode == "pre" else "combined_analysis"
+        if mode == "post":
+            state["current_sim_index"] = len(state.get("sim_prompts", []))
         state["working_directory"] = basepath
         state["user_goal"] = combined_instructions
         state["enriched_prompt"] = combined_instructions  # skip enrichment
@@ -3023,11 +3141,9 @@ class MDSupervisor:
         state["setup_issues"] = []
 
         # Ensure basepath agent dirs exist
-        for sub in ("analysis", "reporter", "supervisor", "planner"):
+        for sub in ("analysis", "reporter", "supervisor", "planner", "cross_sim"):
             Path(basepath, sub).mkdir(parents=True, exist_ok=True)
 
-        # State update preserves dir fields for combined (SecureFileManager will
-        # create them at basepath level when agents run)
         state["analysis_dir"] = str(Path(basepath) / "analysis")
         state["analysis_directory"] = str(Path(basepath) / "analysis")
         state["reporter_dir"] = str(Path(basepath) / "reporter")
@@ -3035,38 +3151,161 @@ class MDSupervisor:
         state["simsetup_dir"] = str(Path(basepath) / "simsetup")
         state["hpc_dir"] = str(Path(basepath) / "hpc")
 
-        # Override subtask type so only analysis + reporter agents run
+        # Pre: analysis only. Post: analysis then combined reporter.
         state["subtask_type"] = "analysis_only"
         state["subtask_type_initialized"] = True
+        agent_sequence = ["analysis"] if mode == "pre" else ["analysis", "reporter"]
+        state["agent_list"] = list(agent_sequence)
 
-        # Combined analysis/reporter agents run LLM planning with combined tools
-        # exposed (deterministic pipelines remain as fallbacks).
+        progress = state.get("multi_sim_progress") or {}
+        if mode == "pre":
+            progress["phase"] = "pre_combined"
+            progress["pre_combined"] = progress.get("pre_combined") or {
+                "analysis": "pending",
+            }
+            progress["active_agent"] = "analysis"
+            progress["active_sim_label"] = None
+        else:
+            progress.setdefault(
+                "combined", {"analysis": "pending", "reporter": "pending"}
+            )
+            progress["phase"] = "combined_analysis"
+            progress["active_agent"] = "analysis"
+            progress["active_sim_label"] = None
+        state["multi_sim_progress"] = progress
+
+        title = (
+            "Pre-Combined Cross-Simulation Setup"
+            if mode == "pre"
+            else "Combined Multi-Simulation Analysis"
+        )
         state["execution_plan"] = {
             "format": "combined_analysis_llm",
-            "title": "Combined Multi-Simulation Analysis",
+            "title": title,
             "full_plan": combined_instructions,
             "agent_plans": {},
-            "agent_sequence": ["analysis", "reporter"],
+            "agent_sequence": agent_sequence,
+            "combined_mode": mode,
         }
-        state["preprocessing_instructions"] = "N/A"  # skip step-4 extraction
+        state["preprocessing_instructions"] = "N/A"
 
-        # Route directly to analysis — no extra supervisor round-trip needed
         state["next_node"] = "analysis"
         log_supervisor_routing(
-            state, "analysis",
-            f"Multi-sim combined analysis: starting for {len(completed)} sims at {basepath}"
+            state,
+            "analysis",
+            f"Multi-sim {phase_name}: starting at {basepath} "
+            f"(sims={len(sim_prompts)}, mode={mode})",
         )
         return state
+
+    def _begin_post_hpc_analysis_phase(self, state: MDState) -> MDState:
+        """After HPC pool completes: optional pre_combined, then per-sim analysis.
+
+        pre_combined (pocket/MSA/consensus → ``cross_sim/``) must run before the
+        parallel analysis pool so per-sim tools can auto-discover mappings.
+        """
+        from agentic.multi_sim_parallel_pool import (
+            should_use_parallel_pool,
+            start_parallel_agent_phase,
+        )
+        from src.analysis.cross_sim_artifacts import pre_combined_done_on_disk
+
+        state["post_hpc_analysis_only"] = True
+        state["hpc_pool_phase_complete"] = True
+
+        if _should_run_pre_combined(state):
+            base = Path(_get_multi_sim_base_dir(state))
+            if not pre_combined_done_on_disk(base):
+                logger.info(
+                    "SUPERVISOR [multi-sim]: Starting pre_combined before "
+                    "post-HPC per-sim analysis"
+                )
+                return self._setup_combined_analysis(state, mode="pre")
+
+        if should_use_parallel_pool(state):
+            logger.info(
+                "SUPERVISOR [multi-sim]: post-HPC — launching parallel "
+                "analysis/reporter pool"
+            )
+            return self._ensure_valid_next_node(start_parallel_agent_phase(state))
+        state["multi_sim_phase"] = "executing_sims"
+        return self._ensure_valid_next_node(self._start_next_sim(state))
+
+    def _build_pre_combined_inventory_summary(self, state: MDState) -> str:
+        """Short inventory of PDBs/labels for pre-combined pocket/MSA tools."""
+        lines = []
+        for sp in state.get("sim_prompts") or []:
+            label = sp.get("label", "?")
+            pdb = sp.get("pdb") or ""
+            wd = sp.get("working_dir") or ""
+            protein = sp.get("protein_name") or ""
+            lines.append(
+                f"- {label} ({protein}): pdb=`{pdb}` working_dir=`{wd}`"
+            )
+        return "\n".join(lines) if lines else "_No simulation entries._"
+
+    def _start_per_sim_execution_after_pre(self, state: MDState) -> MDState:
+        """After pre_combined finishes, enter HPC or post-HPC analysis pool."""
+        from agentic.multi_sim_progress import init_multi_sim_progress
+        from agentic.multi_sim_hpc_pool import should_use_hpc_pool, init_hpc_pool
+        from agentic.multi_sim_parallel_pool import (
+            should_use_parallel_pool,
+            start_parallel_agent_phase,
+        )
+        from agentic.parallel_resources import resolve_allowed_hpc_jobs
+
+        basepath = _get_multi_sim_base_dir(state)
+        state["working_directory"] = basepath
+        progress = state.get("multi_sim_progress") or {}
+        pre = progress.setdefault("pre_combined", {})
+        pre["analysis"] = "done"
+        progress["phase"] = "executing_sims"
+        state["multi_sim_progress"] = progress
+
+        # HPC already finished (or skipped submit) → analysis/reporter only.
+        if state.get("hpc_pool_phase_complete") or state.get("post_hpc_analysis_only"):
+            state["post_hpc_analysis_only"] = True
+            if should_use_parallel_pool(state):
+                logger.info(
+                    "SUPERVISOR [multi-sim]: Pre-combined done — parallel "
+                    "post-HPC analysis pool"
+                )
+                return self._ensure_valid_next_node(start_parallel_agent_phase(state))
+            state["multi_sim_phase"] = "executing_sims"
+            state["current_sim_index"] = 0
+            return self._ensure_valid_next_node(self._start_next_sim(state))
+
+        if should_use_hpc_pool(state):
+            state["multi_sim_phase"] = "hpc_pool"
+            state["allowed_hpc_jobs"] = resolve_allowed_hpc_jobs(state)
+            init_hpc_pool(state)
+            return self._apply_hpc_pool_tick(state)
+
+        if not state.get("multi_sim_progress") or not (
+            state.get("multi_sim_progress") or {}
+        ).get("sim_order"):
+            init_multi_sim_progress(state)
+
+        if should_use_parallel_pool(state):
+            logger.info(
+                "SUPERVISOR [multi-sim]: Pre-combined done — parallel per-sim pool"
+            )
+            return self._ensure_valid_next_node(start_parallel_agent_phase(state))
+
+        state["multi_sim_phase"] = "executing_sims"
+        state["current_sim_index"] = 0
+        return self._ensure_valid_next_node(self._start_next_sim(state))
 
     def _handle_multi_sim_phase(self, state: MDState) -> MDState:
         """Legacy shim — delegates to the appropriate method."""
         phase = state.get("multi_sim_phase")
         if phase == "executing_sims":
             return self._start_next_sim(state)
-        elif phase == "combined_analysis":
+        elif phase in ("combined_analysis", "post_combined", "pre_combined"):
             logger.warning(
-                "SUPERVISOR [multi-sim]: _handle_multi_sim_phase(combined_analysis) "
-                "— delegating to normal supervisor routing"
+                "SUPERVISOR [multi-sim]: _handle_multi_sim_phase(%s) "
+                "— delegating to normal supervisor routing",
+                phase,
             )
             state["next_node"] = "supervisor"
             return state
@@ -3092,25 +3331,23 @@ class MDSupervisor:
         preserved_keys = {
             # Multi-sim bookkeeping
             "is_multi_simulation", "multi_sim_phase", "sim_prompts",
-            "run_combined_analysis", "combined_analysis_plan", "current_sim_index",
+            "run_combined_analysis", "combined_analysis_plan",
+            "run_pre_combined", "pre_combined_plan",
+            "run_post_combined", "post_combined_plan",
+            "current_sim_index",
             "completed_sim_states", "sim_working_dirs",
             "multi_sim_base_dir", "multi_sim_progress",
             "structure_requests",
-            # NOTE: pdb_list and all_pdb_analyses are NOT preserved - each per-sim
-            # iteration should only see its own PDB via raw_pdb, not the full list.
-            # This prevents input validation from treating per-sim as multi-sim.
             # Global config
             "md_engine", "force_field", "water_model", "human_in_loop",
             "subtask_type", "subtask_type_initialized", "agent_list",
             "required_inputs",
-            # Master prompt — preserved so combined reporter shows supervisor's rephrased goal
             "master_enriched_prompt",
-            # Original --goal text — shown verbatim in the combined report
             "user_goal_original",
-            # HPC pool prep context (must survive per-sim reset)
             "hpc_pool_prep_only", "hpc_pool_agent_filter", "hpc_pool",
             "allowed_hpc_jobs", "hpc_check_interval_sec", "hpc_check_interval",
             "max_concurrent", "production_ns",
+            "rep_num", "reuse_hpc", "skip_hpc_submit",
         }
 
         # Save values to preserve

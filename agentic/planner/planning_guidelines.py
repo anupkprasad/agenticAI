@@ -29,8 +29,12 @@ STANDARD_OUTPUT_FILES: Dict[str, Dict[str, str]] = {
     "residence": {"data": "ligand_residence.csv", "plot": "ligand_residence.png"},
     "pocket_rmsf": {"data": "pocket_rmsf.dat", "plot": "pocket_rmsf.png"},
     "ligand_rmsf": {"data": "ligand_rmsf.dat", "plot": "ligand_rmsf.png"},
-    "pca": {"data": "pca_projections.dat", "plot": "pca_pc1_pc2.png"},
-    "fel": {"data": "fel_pc1_pc2_grid.csv", "plot": "fel_pc1_pc2.png", "features": "fel_features.json"},
+    "pca": {"data": "pca_projections.dat", "plot": "pca_pc1_pc2_time.png"},
+    "fel": {
+        "data": "fel_pc1_pc2_grid.csv",
+        "plot": "fel_basins.png",
+        "features": "fel_features.json",
+    },
     "nearby": {"data": "nearby_residues.json", "table": "nearby_residues.csv"},
     "min_distance": {"data": "min_distance.csv", "plot": "min_distance.png"},
     "hbond_occupancy": {"data": "hbond_occupancy.csv", "plot": "hbond_occupancy.png"},
@@ -242,6 +246,8 @@ _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
         r"ligand[-\s]?pocket[-\s]?distance",
         r"pocket[-\s]?distance",
         r"atp[-\s]?(?:to[-\s]?)?(?:protein[-\s]?)?(?:pocket[-\s]?)?distance",
+        r"how far\s+(?:atp|the\s+ligand|ligand)",
+        r"atp\s+stays\s+from\s+the\s+pocket",
     ),
     "contacts": (
         r"protein[-\s]?ligand[-\s]?contact",
@@ -346,10 +352,13 @@ _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
         r"consensus\s+(?:torsions?|dihedrals?)",
         r"\bchi\s*1\b",
         r"\bχ\s*₁\b",
+        r"\bχ1\b",
+        r"side[-\s]?chain\s+χ",
         r"\bφ\b.*\bψ\b",
         r"phi\s*/\s*psi\s*/\s*chi",
         r"pocket\s+chi\s*1",
         r"circular\s+mean.*chi",
+        r"χ1\s+preference",
     ),
     "dihedral_pca": (
         r"dihedral\s+pca",
@@ -398,6 +407,9 @@ _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
         r"consensus\s+rmsf",
         r"mapped\s+rmsf",
         r"consensus_rmsf_mean",
+        r"c[αa]\s+flexibility",
+        r"consensus\s+c[αa]",
+        r"flexibility\s+across\s+the\s+domain",
     ),
     "consensus_dccm": (
         r"consensus\s+dccm",
@@ -405,12 +417,16 @@ _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
         r"dccm_N_C",
         r"dccm\s+n\s*[-–—/]\s*c",
         r"mapped\s+dccm",
+        r"correlated\s+motion\s+between\s+the\s+n",
     ),
 }
 
 _CLASSIFICATION_REQUEST_PATTERNS: tuple[str, ...] = (
     r"\bclassif(y|ication|y\s+proteins?|y\s+systems?)\b",
     r"\bcluster(ing|ed|s)?\b",
+    r"\bward\b",
+    r"\bdendrogram\b",
+    r"feature\s+heatmap",
     r"\bunsupervised\b",
     r"\bfeature\s+(matrix|table|vector)\b",
     r"\bgroup\s+(?:the\s+)?(?:proteins?|systems?|simulations?|kinases?)\b",
@@ -621,6 +637,44 @@ def detect_requested_metrics(goal: str) -> Optional[FrozenSet[str]]:
         found.discard("gyration")
         found.add("rg")
 
+    # Family modular dynamics: schedule consensus_* / dihedral PCA tools when
+    # the goal describes comparative pocket/flexibility/correlation/landscape
+    # features (scientific language). Do not force a fixed cluster count.
+    if detect_family_modular_dynamics_requested(goal):
+        found.update(
+            {
+                "consensus_rmsf",
+                "consensus_torsions",
+                "consensus_dccm",
+                "dihedral_pca",
+            }
+        )
+        # Prefer dihedral PCA entropy; only keep Cartesian FEL if explicitly asked
+        # (and not in a "do not use … FEL" negation).
+        negated_fel = bool(
+            re.search(
+                r"(?:do\s+not|don't|not)\s+use\s+.{0,60}fel|"
+                r"do\s+not\s+use\s+a\s+shared[-\s]?reference",
+                text,
+            )
+        )
+        explicit_cart_fel = (not negated_fel) and bool(
+            re.search(
+                r"cartesian\s+fel|trajectory\s+pca.{0,40}fel|"
+                r"calculate_free_energy_landscape|fel_pc1_pc2",
+                text,
+            )
+        )
+        if not explicit_cart_fel:
+            found.discard("fel")
+            # Keep bare pca only when user also asked for Cartesian trajectory PCA.
+            if not re.search(
+                r"cartesian\s+pca|trajectory\s+pca|calculate_trajectory_pca|"
+                r"c[\s-]?alpha\s+pca",
+                text,
+            ):
+                found.discard("pca")
+
     for pattern in _EXCLUSIVE_PATTERNS:
         match = re.search(pattern, text)
         if match:
@@ -706,13 +760,11 @@ def detect_phylo_tree_requested(*goal_texts: str) -> Dict[str, bool]:
 _REFERENCE_LANDSCAPE_PATTERNS: tuple[str, ...] = (
     r"reference[-\s]?projected\s+pca",
     r"reference\s+landscape",
-    r"consensus\s+sequence\s+alignment",
-    r"consensus\s+alignment",
-    r"consensus\s+cα",
-    r"consensus\s+ca",
-    r"shared\s+reference\s+fel",
-    r"shared\s+fel",
-    r"reference\s+fel",
+    r"shared[-\s]reference\s+fel",
+    r"shared\s+fel\b",
+    r"shared\s+free[-\s]?energy\s+landscape",
+    # Bare "reference FEL" — not "shared-reference FEL" (hyphenated compound).
+    r"(?<![-\w])reference\s+fel\b",
     r"reference\s+fel\s+cluster",
     r"run_reference_landscape_pipeline",
     r"build_consensus_sequence_alignment",
@@ -724,9 +776,76 @@ _CONSENSUS_POCKET_PATTERNS: tuple[str, ...] = (
     r"consensus\s+pocket",
     r"reference\s+pocket",
     r"mapped\s+pocket",
+    r"define\s+(?:the\s+)?(?:atp\s+)?pocket",
+    r"as\s+the\s+reference\s+to\s+define\s+(?:the\s+)?(?:atp\s+)?pocket",
     r"run_consensus_pocket_metrics_batch",
     r"define_reference_consensus_pocket",
 )
+
+_FAMILY_MODULAR_TOOL_PATTERNS: tuple[str, ...] = (
+    r"calculate_consensus_torsions",
+    r"calculate_consensus_rmsf_features",
+    r"calculate_consensus_dccm_features",
+    r"run_independent_dynamics_fel",
+    r"independent\s+dihedral\s+pca",
+    r"φ\s*/\s*ψ\s*/\s*χ\s*₁",
+    r"phi\s*/\s*psi\s*/\s*chi",
+)
+
+
+def detect_family_modular_dynamics_requested(*goal_texts: str) -> bool:
+    """True when the goal asks for comparative modular dynamics features.
+
+    Matches scientific descriptions (pocket–ligand COM/orientation, consensus
+    flexibility, pocket χ₁, N↔C correlation, dihedral landscape entropy) or
+    explicit modular tool names. Does **not** encode a fixed cluster count.
+    """
+    text = _normalize_goal_text(*goal_texts)
+    if not text:
+        return False
+    if any(re.search(p, text) for p in _FAMILY_MODULAR_TOOL_PATTERNS):
+        return True
+    has_pocket = bool(
+        re.search(
+            r"pocket.*(distance|com)|how far .*(atp|ligand)|"
+            r"(?:atp|ligand).*(?:center\s+of\s+mass|com).*pocket|"
+            r"distance of the (?:atp|ligand)",
+            text,
+        )
+    )
+    has_angle = bool(
+        re.search(r"axis\s+orientation|ligand.*angle|pocket.*angle|orientation of the atp", text)
+    )
+    has_rmsf = bool(
+        re.search(
+            r"consensus\s+(?:c[αa]|rmsf)|flexibility\s+across\s+the\s+domain|"
+            r"flexibility of consensus",
+            text,
+        )
+    )
+    has_chi = bool(re.search(r"χ\s*₁|chi\s*1|side[-\s]?chain", text))
+    has_dccm = bool(
+        re.search(r"n[-\s]?lobe|c[-\s]?lobe|correlated\s+motion|dccm", text)
+    )
+    has_entropy = bool(
+        re.search(
+            r"landscape\s+entropy|grid\s+entropy|free[-\s]?energy\s+landscape|"
+            r"dihedral\s+pca|conformational[-\s]?landscape\s+entropy",
+            text,
+        )
+    )
+    return sum(
+        [has_pocket, has_angle, has_rmsf, has_chi, has_dccm, has_entropy]
+    ) >= 4
+
+
+def detect_paper_ward4_requested(*goal_texts: str) -> bool:
+    """Deprecated alias — use :func:`detect_family_modular_dynamics_requested`.
+
+    Kept for older callers; no longer treats "Ward-4" / fixed-k language as
+    special. Returns the family-modular detector result only.
+    """
+    return detect_family_modular_dynamics_requested(*goal_texts)
 
 
 def detect_consensus_pocket_requested(*goal_texts: str) -> Dict[str, Any]:
@@ -762,17 +881,19 @@ def _parse_reference_label_from_goal(text: str) -> Optional[str]:
     if not text:
         return None
     lowered = text.lower()
+    # UniProt-like: letter + digit + alnum (rejects words like "pocket").
+    uid = r"([opq][0-9][a-z0-9]{3,6})"
 
     # Explicit forms: reference_label=q8nb16, reference label: q8nb16
     m = re.search(
-        r"reference[_\s-]*label\s*[=:]\s*([qp][a-z0-9]{4,7})",
+        rf"reference[_\s-]*label\s*[=:]\s*{uid}",
         lowered,
     )
     if m:
         return m.group(1)
 
     m = re.search(
-        r"reference(?:\s+label|\s+id|\s+pseudokinase|\s+kinase)?\s*[=:]\s*([qp][a-z0-9]{4,7})",
+        rf"reference(?:\s+label|\s+id|\s+pseudokinase|\s+kinase)?\s*[=:]\s*{uid}",
         lowered,
     )
     if m:
@@ -780,14 +901,22 @@ def _parse_reference_label_from_goal(text: str) -> Optional[str]:
 
     # UniProt-style id immediately after "reference is" / "reference:"
     m = re.search(
-        r"reference\s+(?:is\s+)?([qp][a-z0-9]{4,7})\b",
+        rf"reference\s+(?:is\s+)?{uid}\b",
         lowered,
     )
     if m:
         return m.group(1)
 
     m = re.search(
-        r"\b([qp][a-z0-9]{4,7})\s+as\s+(?:the\s+)?reference\b",
+        rf"\b{uid}\s+as\s+(?:the\s+)?reference\b",
+        lowered,
+    )
+    if m:
+        return m.group(1)
+
+    # Parenthetical: KAPCA (p17612) as the reference
+    m = re.search(
+        rf"\({uid}\)\s+as\s+(?:the\s+)?reference\b",
         lowered,
     )
     if m:
@@ -796,6 +925,8 @@ def _parse_reference_label_from_goal(text: str) -> Optional[str]:
     # Protein name → common pseudoKin label (MLKL = q8nb16)
     if re.search(r"\bmlkl\b", lowered):
         return "q8nb16"
+    if re.search(r"\bkapca\b", lowered):
+        return "p17612"
     return None
 
 
@@ -817,8 +948,22 @@ def _resolve_reference_label(
         candidate = _parse_reference_label_from_goal(text)
         if not candidate:
             continue
-        if labels is None or str(candidate) in {str(l) for l in labels}:
+        if labels is None:
             return str(candidate)
+        label_set = {str(l) for l in labels}
+        if str(candidate) in label_set:
+            return str(candidate)
+        # UniProt bare id → ``p17612_ATP`` folder / label
+        cand_l = str(candidate).lower()
+        for lab in labels:
+            lab_s = str(lab)
+            lab_l = lab_s.lower()
+            if lab_l.startswith(cand_l + "_") or cand_l.startswith(lab_l + "_"):
+                return lab_s
+            for suf in ("_atp", "_adp", "_amp"):
+                if lab_l.endswith(suf) and lab_l[: -len(suf)] == cand_l:
+                    return lab_s
+        return str(candidate)
     if labels and default in {str(l) for l in labels}:
         return default
     return default
@@ -833,6 +978,22 @@ def detect_reference_landscape_requested(*goal_texts: str) -> Dict[str, Any]:
     text = _normalize_goal_text(*goal_texts)
     if not text:
         return {"requested": False, "reference_label": None}
+
+    # Family modular dynamics uses independent dihedral PCA entropy, not shared-ref FEL.
+    if detect_family_modular_dynamics_requested(*goal_texts):
+        # Only honor shared-ref FEL if explicitly named.
+        explicit_shared = any(
+            re.search(p, text)
+            for p in (
+                r"shared[-\s]reference\s+fel",
+                r"shared\s+fel\b",
+                r"shared\s+free[-\s]?energy\s+landscape",
+                r"run_reference_landscape_pipeline",
+                r"reference[-\s]?projected\s+pca",
+            )
+        )
+        if not explicit_shared:
+            return {"requested": False, "reference_label": None}
 
     requested = any(re.search(p, text) for p in _REFERENCE_LANDSCAPE_PATTERNS)
     if not requested:
@@ -889,6 +1050,8 @@ def classification_metric_groups_for_goal(*goal_texts: str) -> Optional[FrozenSe
     metrics = detect_requested_metrics_union(*goal_texts)
     cp_req = detect_consensus_pocket_requested(*goal_texts)
     ref_req = detect_reference_landscape_requested(*goal_texts)
+    family_modular = detect_family_modular_dynamics_requested(*goal_texts)
+
     if metrics is None:
         groups = set(DEFAULT_CLASSIFICATION_METRIC_GROUPS)
     else:
@@ -901,6 +1064,56 @@ def classification_metric_groups_for_goal(*goal_texts: str) -> Optional[FrozenSe
         base = set(DEFAULT_CLASSIFICATION_METRIC_GROUPS)
         extras = groups - base
         groups = base | extras if extras else base
+
+    if family_modular:
+        groups = {
+            "consensus_rmsf",
+            "consensus_torsions",
+            "consensus_dccm",
+            "dihedral_pca",
+        }
+        if cp_req.get("requested"):
+            groups.add("reference_pocket")
+            # Also keep local COM columns so distance survives when the
+            # consensus-pocket batch is incomplete.
+            groups.add("com")
+        # Keep any explicitly named modular extras from the goal.
+        if metrics is not None:
+            for m in metrics:
+                if m in CLASSIFICATION_FEATURE_GROUPS and m not in (
+                    "fel",
+                    "pca",
+                    "paper_ward4",
+                ):
+                    if m.startswith("consensus") or m in (
+                        "dihedral_pca",
+                        "dihedral_tica",
+                        "cart_pca",
+                        "cart_tica",
+                        "reference_pocket",
+                        "com",
+                    ):
+                        groups.add(m)
+        return frozenset(groups)
+
+    modular = groups & {
+        "consensus_rmsf",
+        "consensus_torsions",
+        "consensus_dccm",
+        "dihedral_pca",
+        "dihedral_tica",
+        "cart_pca",
+        "cart_tica",
+    }
+    # Modular family-dynamics features → keep them; do not collapse to
+    # reference-only archetype (that path yields only 2 FEL scalars).
+    if modular:
+        if cp_req.get("requested"):
+            groups.add("reference_pocket")
+        groups.discard("reference_fel")
+        groups.discard("reference_pca")
+        groups.discard("paper_ward4")
+        return frozenset(groups)
 
     if cp_req.get("requested") and ref_req.get("requested"):
         return frozenset({"reference_pocket", "reference_fel", "reference_pca"})
@@ -920,28 +1133,32 @@ def get_classification_tool_guide() -> str:
     """Prompt block when user requests unsupervised classification."""
     return """**UNSUPERVISED CLASSIFICATION (only when user explicitly requests it):**
 
-Per-simulation: run ONLY analyses the user named. If they say "classify" without
-listing metrics, use the default binding-site + FEL bundle (pocket distance,
-contacts, pocket SASA, residence, pocket/ligand RMSF, FEL features).
+When the goal asks for comparative dynamics features (pocket–ligand COM /
+orientation, consensus flexibility, pocket χ₁, N↔C correlation, dihedral
+landscape entropy, etc.), schedule the matching modular metric groups below.
+Do **not** invent fixed cluster counts (k) or paper-specific feature schemas —
+extract features, build a dendrogram + heatmap, and leave cut interpretation
+to the human.
 
 | Group | Tools | Notes |
 |-------|-------|-------|
-| com | calculate_ligand_pocket_distance | |
-| contacts | calculate_protein_ligand_contacts | |
-| pocket_sasa | calculate_pocket_sasa | needs .tpr |
-| residence | analyze_ligand_residence | |
-| pocket_rmsf | calculate_pocket_rmsf | |
-| ligand_rmsf | calculate_ligand_rmsf | |
-| fel | PCA + FEL + analyze_fel_landscape_features | |
-| rmsd/rmsf/rg/sasa/energy/dccm | standard per-sim tools | optional extras |
+| reference_pocket | run_consensus_pocket_metrics_batch (combined) | mean/std COM + axis angle |
+| consensus_rmsf | calculate_consensus_rmsf_features | mapped Cα mean/std |
+| consensus_torsions | calculate_consensus_torsions | pocket χ₁ circular mean |
+| consensus_dccm | calculate_consensus_dccm_features | N↔C lobe correlation |
+| dihedral_pca | run_independent_dynamics_fel (space=dihedral, method=pca) | landscape grid entropy |
+| com | calculate_ligand_pocket_distance | local pocket distance |
+| fel | PCA + FEL + analyze_fel_landscape_features | local Cartesian FEL (optional) |
 
-Combined phase ONLY when classification requested:
-`collect_classification_features_table` → classification_features.csv + z-score CSV,
-then `cluster_classification_features` (default: hierarchical Ward linkage; use
-method='kmeans' if user asks for k-means). Plots: PCA scatter, dendrogram, and
-unrooted phylogenetic tree (cluster-colored) with protein names from id:name pairs in the goal (e.g. p23458:JAK1).
+Combined phase:
+`collect_classification_features_table` → `cluster_classification_features`
+(hierarchical). Prefer a single dendrogram+heatmap panel. Do not hard-code k.
 
-Do NOT run the collector unless the user asked for classification/clustering."""
+Pre-combined: also `plot_reference_msa_alignment` → global + pocket MSA PNGs
+when a consensus/reference pocket is requested.
+
+Do NOT run the collector unless the user asked for classification/clustering
+or a dendrogram / feature heatmap."""
 
 
 def get_classification_per_sim_tool_guide() -> str:
@@ -954,6 +1171,10 @@ those run automatically at combined phase after all simulations finish.
 
 | Group | Per-sim tools |
 |-------|----------------|
+| consensus_torsions | calculate_consensus_torsions → consensus_dihedrals/ |
+| consensus_rmsf | calculate_consensus_rmsf_features → consensus_rmsf/ |
+| consensus_dccm | calculate_consensus_dccm_features → consensus_DCCM/ |
+| dihedral_pca | run_independent_dynamics_fel (dihedral/pca) → consensus_PCA/ |
 | com | calculate_ligand_pocket_distance |
 | contacts | calculate_protein_ligand_contacts |
 | pocket_sasa | calculate_pocket_sasa (needs .tpr) |
@@ -962,8 +1183,15 @@ those run automatically at combined phase after all simulations finish.
 | ligand_rmsf | calculate_ligand_rmsf |
 | fel | calculate_trajectory_pca → calculate_free_energy_landscape → analyze_fel_landscape_features |
 
-After each calculate_*/analyze_* step that writes a data file, add plot_md_data using
-the standard output basename from the filenames guide above."""
+For family modular dynamics, prefer the consensus_* + dihedral_pca rows (not
+shared-reference FEL). Include reference_pocket (COM + axis angle) and local
+``com`` as fallbacks when the goal asks for pocket–ligand geometry. After
+features are collected, the analysis agent asks the LLM to select a
+scientifically motivated subset (with written reasoning) before hierarchical
+clustering — similar to, but not locked to, paper Ward-4 descriptors. After
+each calculate_*/analyze_* step that writes a data file, add plot_md_data using
+the standard output basename from the filenames guide above (never plot FEL
+grid CSVs)."""
 
 
 def detect_combined_only_metrics(goal: str) -> FrozenSet[str]:
@@ -1091,9 +1319,12 @@ def get_pca_fel_tool_guide() -> str:
 | Step | Tool | Output |
 |------|------|--------|
 | 1 | `calculate_trajectory_pca` | `pca_projections.dat`, `pca_variance.dat` |
-| 2 | `plot_pca_projection` | `pca_pc1_pc2.png` (PC1 vs PC2, coloured by time) |
-| 3 | `calculate_free_energy_landscape` | `fel_pc1_pc2.png`, `fel_pc1_pc2_grid.csv` |
-| 4 | `analyze_fel_landscape_features` | `fel_features.json`, `fel_features.csv`, `fel_basins.csv` |
+| 2 | `plot_pca_projection` | `pca_pc1_pc2_time.png` (PC1 vs PC2, coloured by time) |
+| 3 | `calculate_free_energy_landscape` | `fel_pc1_pc2_grid.csv` only (no plain FEL PNG) |
+| 4 | `analyze_fel_landscape_features` | `fel_features.json/.csv`, `fel_basins.csv`, `fel_basins.png` |
+
+Do **not** plot `fel_pc1_pc2_grid.csv` or `fel_features.csv` with `plot_md_data` (wrong line plots).
+Do **not** emit `fel_pc1_pc2.png`, `fel_pc1_pc2_grid.png`, or `fel_features.png` — basins map + feature tables suffice.
 
 **FEL classification metrics (step 4):**
 - Number of minima / basins
@@ -1358,7 +1589,8 @@ This framework targets protein *families* and multi-system campaigns, not one-of
      `feature_columns` matching **only** what the user asked; use `auto_discover`
      only if the goal says to use whatever modular artifacts were computed.
 4. **Interesting dynamics** — after requested per-sim metrics, use **combined** overlays /
-   comparison / Ward clustering; use **shared** MSA / consensus pocket when comparing related sequences.
+   comparison / hierarchical clustering; use **shared** MSA / consensus pocket when comparing related sequences.
+   Do **not** hard-code a cluster count (k); emit dendrogram + heatmap and leave cuts to the human.
 5. **Do not invent campaign-specific scripts** — use registry tools; if a genuine gap remains
    after checking the metric map, request programmer creation once with a clear capability statement.
 6. **Combined reporter** — when comparing many systems, plan `generate_combined_html_report`

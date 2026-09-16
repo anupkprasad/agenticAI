@@ -26,10 +26,20 @@ _PRODUCTION_TRAJECTORIES = ("mdWrap.xtc", "md.xtc", "prod.xtc", "production.xtc"
 
 
 def reuse_hpc_enabled(state: Optional[Dict[str, Any]] = None) -> bool:
-    """True when ``--reuse-hpc`` / ``AGENTIC_REUSE_HPC`` is active (skip sbatch)."""
-    if state and state.get("reuse_hpc"):
-        return True
+    """True when ``--reuse-hpc`` / ``--skip-hpc-submit`` / env is active (skip sbatch).
+
+    ``--skip-hpc-submit`` is the preferred CLI for campaigns that still run
+    preprocess+simsetup normally but must not call sbatch (seeded trajs).
+    """
+    if state:
+        if state.get("reuse_hpc") or state.get("skip_hpc_submit"):
+            return True
     return os.environ.get("AGENTIC_REUSE_HPC", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ) or os.environ.get("AGENTIC_SKIP_HPC_SUBMIT", "").strip().lower() in (
         "1",
         "true",
         "yes",

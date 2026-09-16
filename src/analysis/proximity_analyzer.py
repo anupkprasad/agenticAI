@@ -164,7 +164,7 @@ def freeze_nearby_residues(
     *,
     query_selection: str,
     neighbor_selection: str,
-    cutoff: float = 10.0,
+    cutoff: float = 15.0,
     frame: int = 0,
 ) -> Tuple[Any, List[Dict[str, Any]], Dict[str, Any]]:
     """
@@ -274,7 +274,7 @@ def compute_nearby_residues_from_universe(
     trajectory_file: str,
     query_selection: str,
     neighbor_selection: str,
-    cutoff: float = 10.0,
+    cutoff: float = 15.0,
     frame: int = 0,
     output_file: Optional[str] = None,
     working_dir: Optional[str] = None,
@@ -350,7 +350,7 @@ def identify_nearby_residues(
     trajectory_file: str,
     query_selection: str,
     neighbor_selection: str,
-    cutoff: float = 10.0,
+    cutoff: float = 15.0,
     frame: int = 0,
     output_file: Optional[str] = None,
     working_dir: Optional[str] = None,
@@ -368,7 +368,7 @@ def identify_nearby_residues(
         trajectory_file: Trajectory file (.xtc, .trr)
         query_selection: Reference group (e.g. "chainID B and resid 1:34")
         neighbor_selection: Group to search (e.g. "chainID A")
-        cutoff: Distance cutoff in Ångström (default 10.0)
+        cutoff: Distance cutoff in Ångström (default 15.0)
         frame: Trajectory frame used to define neighbors (default 0)
         output_file: JSON basename (also writes a matching .csv table)
         working_dir: Analysis output directory

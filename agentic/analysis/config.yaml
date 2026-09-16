@@ -112,7 +112,7 @@ tools:
     defaults:
       pc_x: 1
       pc_y: 2
-      output_file: "pca_pc1_pc2.png"
+      output_file: "pca_pc1_pc2_time.png"
 
   calculate_free_energy_landscape:
     description: "Free energy F = -kT ln P from PC1/PC2 density (kJ/mol, min=0)"
@@ -121,7 +121,7 @@ tools:
       pc_y: 2
       bins: 50
       temperature_k: 310.0
-      output_plot: "fel_pc1_pc2.png"
+      output_plot: ""
       output_grid: "fel_pc1_pc2_grid.csv"
 
   analyze_fel_landscape_features:
@@ -131,6 +131,7 @@ tools:
       output_json: "fel_features.json"
       output_csv: "fel_features.csv"
       output_basins_csv: "fel_basins.csv"
+      output_plot: "fel_basins.png"
       smooth_sigma: 2.0
       min_basin_population: 0.05
       min_prominence_kj_mol: 1.5
@@ -249,16 +250,49 @@ tools:
     phase: combined_analysis
 
   plot_reference_msa_alignment:
-    description: "Plot star-MSA as full alignment + focused panel; column selection via min_occupancy / min_conservation / target_n_columns (display only)"
+    description: "Plot star-MSA as full alignment + focused pocket/high-consensus panel (paper-style)"
     defaults:
       alignment_fasta: "reference_msa_alignment.fasta"
       pocket_definition_json: "reference_pocket_definition.json"
       full_plot_file: "reference_msa_full.png"
-      focused_plot_file: "reference_msa_high_consensus.png"
+      focused_plot_file: "reference_msa_pocket.png"
       min_occupancy: 0.90
       min_conservation: 0.40
       target_n_columns: 40
     phase: combined_analysis
+
+  calculate_consensus_torsions:
+    description: "Consensus-mapped φ/ψ/χ₁ torsions (paper Ward-4 χ₁ pocket)"
+    defaults:
+      output_dir: "consensus_dihedrals"
+      angles: ["phi", "psi", "chi1"]
+      residue_scope: "mapped"
+      alignment_json: "reference_msa_alignment.json"
+    phase: per_simulation
+
+  calculate_consensus_rmsf_features:
+    description: "Consensus-mapped Cα RMSF mean/std (paper Ward-4)"
+    defaults:
+      output_dir: "consensus_rmsf"
+      alignment_json: "reference_msa_alignment.json"
+    phase: per_simulation
+
+  calculate_consensus_dccm_features:
+    description: "Consensus-mapped DCCM N↔C correlation (paper Ward-4)"
+    defaults:
+      output_dir: "consensus_DCCM"
+      alignment_json: "reference_msa_alignment.json"
+    phase: per_simulation
+
+  run_independent_dynamics_fel:
+    description: "Independent dihedral PCA → FEL grid entropy (paper Ward-4 pca_grid_entropy)"
+    defaults:
+      space: "dihedral"
+      method: "pca"
+      dihedral_dir: "consensus_dihedrals"
+      dihedral_angles: ["phi", "psi", "chi1"]
+      output_dir: "consensus_PCA"
+    phase: per_simulation
 
   fit_reference_pca_model:
     description: "Fit reference-projected PCA on consensus Cα from a reference trajectory"

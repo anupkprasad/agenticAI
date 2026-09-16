@@ -79,6 +79,7 @@ only; each simulation’s agent work lives under its label directory.
 - `run_summary.md` / `run_summary.json`
 - `supervisor/state.jsonl`, pool status
 - Combined `analysis/` + `reporter/combined_report.html` **only when** `len(sim_prompts) > 1`
+- Optional `cross_sim/` — pre-combined pocket/MSA/consensus artifacts
 
 **Per simulation (`{base}/{label}/`):**
 - `agent_conversation.log` — per-sim validation, execution plan, preprocess → reporter
@@ -100,11 +101,12 @@ only; each simulation’s agent work lives under its label directory.
 │   └── …
 ├── p21860_ATP_MG/           # holo (skipped if ATP/MG absent in the PDB)
 │   └── …
-├── analysis/                # combined overlays (only if N>1)
+├── cross_sim/               # optional pre_combined artifacts (pocket_map.json, MSA)
+├── analysis/                # post_combined overlays (only if N>1)
 ├── reporter/
 │   └── combined_report.html
 ├── planner/
-│   ├── master_plan.md       # campaign summary
+│   ├── master_plan.md       # campaign summary (incl. pre/post plans)
 │   └── master_plan.json
 ├── supervisor/
 │   ├── state.jsonl
@@ -119,9 +121,18 @@ Labels come from PDB basenames and component cases (e.g. `p21860` vs
 `p21860_ATP_MG`). The Supervisor copies each input PDB into that sim’s
 directory before work starts. Combined analysis/reporter runs only when the
 master plan yields more than one `sim_prompts` entry (e.g. apo+holo from one
-PDB still gets combined). Combined stages use the same analysis/reporter
-agents as per-sim, with **LLM planning** and combined tool metadata exposed
-(deterministic pipelines remain as fallbacks).
+PDB still gets combined). Stage order when `n_sims > 1`:
+
+1. Optional **`pre_combined`** (pocket/MSA/consensus → `{base}/cross_sim/`)
+2. Per-sim traj analysis → reporter (multi-rep fan-out → `analysis/avg/`)
+3. Optional **`post_combined`** / legacy `combined_analysis` (overlays,
+   consensus-pocket batch, classification collect → LLM feature selection →
+   Ward dendrogram+heatmap, …)
+4. **`combined_reporter`** when post ran
+
+Combined stages use the same analysis/reporter agents as per-sim, with **LLM
+planning** and combined tool metadata exposed (deterministic pipelines remain
+as fallbacks).
 
 `--HITL` (any mode) forces **sequential** per-sim execution. Without HITL,
 prep and post-HPC analysis/reporter use the local worker pool; production MD
@@ -185,6 +196,11 @@ but never calls `sbatch` (keeps existing `md.tpr` / `mdWrap.xtc`).
 | `rmsd.png`, `rmsf.dat`, `gyration.dat`, … | Goal-selected observables |
 | `{base}/analysis/statistical_summary.json` | Cross-sim table |
 | `{base}/analysis/classification_features.csv` | When the goal asks for classification |
+| `{base}/analysis/classification_features_zscore.csv` | Robust/IQR z-scores for clustering |
+| `{base}/analysis/classification_feature_selection.json` | LLM-chosen columns + reasoning |
+| `{base}/analysis/classification_dendrogram_heatmap.png` | Dendrogram + feature heatmap panel |
+| `{label}/analysis/avg/` | Multi-rep mean±std products (`--rep-num N`) |
+| `{label}/analysis/consensus_*/` | Modular family dynamics outputs |
 
 Full filename list: [ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md#standard-output-filenames-multi-sim).
 

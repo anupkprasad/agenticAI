@@ -267,6 +267,41 @@ def calculate_consensus_torsions(
             **{k: summary[k] for k in summary if k.startswith("chi1_")},
         }
         meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        try:
+            from src.analysis.feature_matrix_plots import (
+                save_dihedral_summary_png,
+                save_feature_matrix_png,
+            )
+
+            plots = []
+            for npy_name, kind in (
+                ("phi_deg.npy", "angle_deg"),
+                ("psi_deg.npy", "angle_deg"),
+                ("chi1_deg.npy", "angle_deg"),
+                ("dihedral_sincos.npy", "sincos"),
+            ):
+                src = out / npy_name
+                if src.is_file():
+                    png = save_feature_matrix_png(
+                        np.load(src),
+                        out / f"{src.stem}.png",
+                        title=src.stem,
+                        kind=kind,
+                    )
+                    if png:
+                        plots.append(png)
+            if stats_path.is_file():
+                p = save_dihedral_summary_png(
+                    stats_path,
+                    out / "per_residue_dihedrals.png",
+                )
+                if p:
+                    plots.append(p)
+            if plots:
+                meta["plots"] = plots
+                meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            logger.debug("consensus torsions plots skipped", exc_info=True)
         return meta
     except Exception as exc:
         logger.exception("calculate_consensus_torsions failed")

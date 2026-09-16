@@ -207,7 +207,7 @@ class MDWorkflow:
             polls = max(48, int(7 * 86400 / max(interval, 60)))
             # --reuse-hpc uses short waits (≈15s); keep a high family-scale floor.
             floor = 20 * n_scale + 200 if reuse else 120
-            return min(max(polls * 2 + 40, floor), 8000)
+            return min(max(polls * 2 + 40, floor), 50000)
 
         if not state.get("is_multi_simulation"):
             return 40
@@ -236,17 +236,28 @@ class MDWorkflow:
         if state.get("multi_sim_phase") == "parallel_pool":
             steps_per_sim = 30
             combined_headroom = max(combined_headroom, 150)
+            pool = state.get("parallel_pool") or {}
+            interval = int(
+                state.get("parallel_pool_poll_sec")
+                or pool.get("poll_sec")
+                or 30
+            )
+            # supervisor + parallel_pool_wait per poll; allow ~7 days for
+            # family-scale analysis (50 sims × long modular tools).
+            polls = max(48, int(7 * 86400 / max(interval, 15)))
+            poll_budget = polls * 2 + 100
+            family_floor = 30 * n_scale + 500
+            return min(max(poll_budget, family_floor, 5000), 50000)
 
         budget = steps_per_sim * max(remaining, 1) + combined_headroom
         # Family-scale floor: enough for ≥50 sims even if "remaining" is undercounted
         # on resume (missing progress / dropped reuse_hpc flag).
-        # Example: 50 sims → 30*50+300 = 1800; enforce ≥2000 for long pool polls.
         family_floor = 30 * n_scale + 300
-        if reuse or n_campaign >= 10 or state.get("multi_sim_phase") == "parallel_pool":
+        if reuse or n_campaign >= 10:
             floor = max(family_floor, 2000)
         else:
             floor = max(120, 12 * n_campaign + 50)
-        return min(max(budget, floor), 8000)
+        return min(max(budget, floor), 50000)
     
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph workflow with proper agent hierarchy."""

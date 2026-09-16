@@ -75,9 +75,9 @@ def calculate_ligand_rmsd(
             out = Path(output_file)
         out.parent.mkdir(parents=True, exist_ok=True)
         with open(out, "w", encoding="utf-8") as fh:
-            fh.write("# Time(ps)\tLigand_RMSD(Angstrom)\n")
+            fh.write("# Time(ns)\tLigand_RMSD(Angstrom)\n")
             for t, r in zip(times, arr):
-                fh.write(f"{t:.4f}\t{r:.4f}\n")
+                fh.write(f"{float(t) / 1000.0:.4f}\t{r:.4f}\n")
 
         stats = {
             "n_frames": int(arr.size),

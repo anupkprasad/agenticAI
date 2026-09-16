@@ -10,12 +10,13 @@ system can:
 2. Preprocess structures (component separation, protonation, phosphorylation mapping)
 3. Build simulation systems (topology, solvation, ions, MDP files)
 4. Submit and monitor HPC jobs (SLURM)
-5. Analyse trajectories (RMSD, RMSF, Rg, DCCM, DSSP, COM distances, ligand RMSD, QC, …)
+5. Analyse trajectories (RMSD, RMSF, Rg, DCCM, DSSP, COM distances, ligand RMSD,
+   QC, plus optional family-scale modular dynamics and unsupervised classification)
 6. Produce HTML reports with literature references and interactive 3D views
 
 Active campaign trees (sims + manuscript draft) live under [`campaigns/`](campaigns/README.md)
-(gitignored). One-off regenerators stay in [`archive/`](archive/README.md)
-(see also [`docs/CLEAN_AND_OPT.md`](docs/CLEAN_AND_OPT.md)). Example launcher:
+(gitignored). One-off regenerators stay in [`archive/`](archive/README.md).
+Example launcher:
 [`scripts/examples/run_simagent_example.sh`](scripts/examples/run_simagent_example.sh).
 
 **Full usage guide:** [TUTORIAL.md](TUTORIAL.md)
@@ -27,9 +28,16 @@ Active campaign trees (sims + manuscript draft) live under [`campaigns/`](campai
 - **Natural-language goals** — describe what you want; agents build a concrete plan
 - **UniProt / AlphaFold integration** — start from an accession without a local PDB
 - **Multi-simulation mode** — run several proteins or component cases in one study
+- **Multi-replicate MD** — `--rep-num N` writes `hpc/repXX/` and mean±std under `analysis/avg/`
 - **Holo feasibility guard** — skips holo cases when ligands are missing (e.g. AlphaFold)
 - **Phosphorylated proteins** — SEP/TPO/PTR stay in the protein chain; mapped for
   CHARMM36 (SP2/THP/TP2), not parameterized as separate ligands
+- **Family modular dynamics** — consensus-mapped torsions, RMSF, N↔C DCCM, and
+  independent dihedral PCA landscape entropy when the goal asks for comparative descriptors
+- **Consensus reference pocket** — define ATP pocket on a reference, map via MSA,
+  compute COM distance + axis orientation across systems
+- **LLM classification** — feature table → LLM selects a scientifically motivated
+  subset (with reasoning) → hierarchical dendrogram + heatmap
 - **Supervisor → Planner → Agents** — validated routing, planner-owned master plans, and tool-based execution
 - **Resume / retry** — re-run failed multi-sim jobs without redoing successes
 - **Cross-sim HPC pool** — prep in parallel (auto-sized), submit up to N SLURM jobs in parallel, then post-HPC analysis ([docs/POOLS.md](docs/POOLS.md))
@@ -50,6 +58,9 @@ curl -s http://127.0.0.1:11434/api/tags
 ```
 
 Use `--no-llm` only for offline or deterministic fallback runs.
+
+**Ollama server + `gpt-oss:20b` are not inside conda.** Install them once per
+machine: **[docs/OLLAMA_SETUP.md](docs/OLLAMA_SETUP.md)**.
 
 **GROMACS** is included in the conda environment. For phosphorylated proteins with
 CHARMM36, install `charmm36-jul2022.ff` (see [Force fields](#force-fields)).
@@ -112,6 +123,7 @@ Include these details when they apply:
 - **Workflow stage:** say whether to preprocess, set up simulation, submit to HPC, analyze completed trajectories, report results, or only run a subset via `--subtask`.
 - **Simulation intent:** specify component cases such as protein-only, protein+ATP+MG, mutant vs wild type, phosphorylated vs dephosphorylated, or chain/residue windows.
 - **Analysis scope:** name the exact analyses you want. For example, “RMSF only for all simulations” will keep the analysis focused on RMSF. If you ask broadly for “protein dynamics” without naming metrics, the planner may choose appropriate dynamics analyses such as RMSD, RMSF, Rg, DCCM, or interaction distances based on available tools and biological context.
+- **Family comparative descriptors (recommended for kinase/pseudokinase panels):** describe science, not internal column names — e.g. ATP–pocket COM distance mean/std, pocket axis orientation, consensus Cα RMSF, pocket χ₁, N↔C DCCM, independent dihedral PCA landscape entropy, then hierarchical clustering with a feature heatmap (do not force a fixed cluster count unless you want one). The framework schedules modular tools and lets the LLM pick a feature subset with written reasoning.
 - **Per-metric simulation subsets (multi-sim):** each combined metric can target a different set of simulations. You do not need every metric on every protein. Examples:
   - “RMSF for all four simulations” → combined RMSF overlay uses all sims.
   - “DCCM for JAK1 and TYK2 only” → per-sim DCCM on those two; combined DCCM compares only them.
@@ -189,12 +201,12 @@ re-run those stages with new instructions (full pipeline rerun, not just a singl
 
 | Situation                                                       | Recommended command                                                                                                |
 | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| First run, pause after each sim’s analysis                     | `--HITL all`                                                                                                   |
+| First run, pause after each sim’s analysis                     | `--HITL all`                                                                                                     |
 | Automatic run; pause only if something fails                    | `--HITL error`                                                                                                   |
 | Per-sim work already done; review combined report interactively | Re-run with`--HITL all` — framework auto-detects existing `analysis/` folders and enters combined-only review |
 | Retry only failed sims                                          | Add`--resume` (optionally `--retry-labels p23458`)                                                             |
-| Re-run combined overlay + report only                           | `--combined-only` (requires N>1)                                                                               |
-| Full campaign with parallel HPC                                 | `--allowed-hpc-jobs 4 --hpc-check-interval 3m` (see [pools](docs/POOLS.md))                                    |
+| Re-run combined overlay + report only                           | `--combined-only` (requires N>1)                                                                                 |
+| Full campaign with parallel HPC                                 | `--allowed-hpc-jobs 4 --hpc-check-interval 3m` (see [pools](docs/POOLS.md))                                       |
 
 State is saved to `{working_dir}/supervisor/state.jsonl` (and per-sim copies under
 `{label}/supervisor/`). See [docs/CONVENTIONS.md](docs/CONVENTIONS.md) for resume semantics.
@@ -217,29 +229,30 @@ python SimAgent.py \
 python SimAgent.py --goal "..." [options]
 ```
 
-| Flag                     | Default                    | Description                                                                                                    |
-| ------------------------ | -------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `--goal`               | *(required)*             | Natural-language simulation goal                                                                               |
-| `--working-dir`        | `.`                      | Campaign base; each sim under `{dir}/{label}/`                                                             |
-| `--pdb-list`           | —                         | Explicit PDB list                                                                                          |
-| `--sim-dirs`           | —                         | Existing sim directories for analysis-only                                                                  |
-| `--subtask`            | all agents                 | `preprocess simsetup hpcjob analysis reporter`                                                               |
-| `--no-llm`             | off                        | Disable LLM planning (deterministic fallback)                                                                  |
-| `--llm-model`          | `gpt-oss:20b`            | Model name                                                                                                     |
-| `--llm-base-url`       | `http://localhost:11434` | LLM API base URL                                                                                               |
-| `--HITL`               | off                        | `error` or `all` — enable human-in-the-loop (default: off)                                                |
-| `--force-field`        | `amber99sb-ildn`         | GROMACS force field (e.g.`charmm36-jul2022`)                                                                 |
-| `--water-model`        | `tip3p`                  | Water model                                                                                                    |
-| `--max-concurrent`     | `4`                      | Max concurrent sims (legacy)                                                                                   |
-| `--parallel-workers`   | `auto`                   | Max parallel local workers for prep / analysis+reporter (`auto` or integer; `1`=sequential)                |
-| `--parallel-mem-gb`    | phase default              | Estimated GiB RAM per parallel worker                                                                          |
-| `--parallel-cpus`      | phase default              | Estimated CPU cores per parallel worker                                                                        |
-| `--llm-concurrency`    | `auto` (4)               | Cap parallel workers to match Ollama`OLLAMA_NUM_PARALLEL` slots                                              |
-| `--allowed-hpc-jobs`   | auto                       | Max concurrent SLURM jobs in cross-sim HPC pool                                                                |
-| `--hpc-check-interval` | `2h`                     | SLURM poll interval during HPC pool wait (`2h`, `30m`, `7200`)                                              |
-| `--resume`             | off                        | Re-run only failed/incomplete multi-sim jobs                                                                   |
-| `--retry-labels`       | —                         | Force-retry specific simulation labels                                                                         |
+| Flag                     | Default                    | Description                                                                                                   |
+| ------------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `--goal`               | *(required)*             | Natural-language simulation goal                                                                              |
+| `--working-dir`        | `.`                      | Campaign base; each sim under`{dir}/{label}/`                                                               |
+| `--pdb-list`           | —                         | Explicit PDB list                                                                                             |
+| `--sim-dirs`           | —                         | Existing sim directories for analysis-only                                                                    |
+| `--subtask`            | all agents                 | `preprocess simsetup hpcjob analysis reporter`                                                              |
+| `--no-llm`             | off                        | Disable LLM planning (deterministic fallback)                                                                 |
+| `--llm-model`          | `gpt-oss:20b`            | Model name                                                                                                    |
+| `--llm-base-url`       | `http://localhost:11434` | LLM API base URL                                                                                              |
+| `--HITL`               | off                        | `error` or `all` — enable human-in-the-loop (default: off)                                               |
+| `--force-field`        | `amber99sb-ildn`         | GROMACS force field (e.g.`charmm36-jul2022`)                                                                |
+| `--water-model`        | `tip3p`                  | Water model                                                                                                   |
+| `--max-concurrent`     | `4`                      | Max concurrent sims (legacy)                                                                                  |
+| `--parallel-workers`   | `auto`                   | Max parallel local workers for prep / analysis+reporter (`auto` or integer; `1`=sequential)               |
+| `--parallel-mem-gb`    | phase default              | Estimated GiB RAM per parallel worker                                                                         |
+| `--parallel-cpus`      | phase default              | Estimated CPU cores per parallel worker                                                                       |
+| `--llm-concurrency`    | `auto` (4)               | Cap parallel workers to match Ollama`OLLAMA_NUM_PARALLEL` slots                                             |
+| `--allowed-hpc-jobs`   | auto                       | Max concurrent SLURM jobs in cross-sim HPC pool                                                               |
+| `--hpc-check-interval` | `2h`                     | SLURM poll interval during HPC pool wait (`2h`, `30m`, `7200`)                                          |
+| `--resume`             | off                        | Re-run only failed/incomplete multi-sim jobs                                                                  |
+| `--retry-labels`       | —                         | Force-retry specific simulation labels                                                                        |
 | `--combined-only`      | off                        | Only when N>1: combined analysis + report at`{base}/analysis/` and `{base}/reporter/combined_report.html` |
+| `--rep-num`            | `1`                      | Independent production replicates per label (`hpc/repXX/` + `analysis/avg/`) |
 
 ---
 
@@ -272,12 +285,13 @@ Multi-sim run under `--working-dir /work/pseudo`:
   p21860/
     preprocess/       # protein.pdb, protein_h.pdb, ...
     simsetup/         # topol.top, *.gro, *.mdp
-    hpc/              # SLURM script, trajectories
-    analysis/         # RMSD, RMSF, DCCM plots, analysis_summary.jsonl
+    hpc/              # SLURM script, trajectories (or hpc/rep01, rep02 with --rep-num)
+    analysis/         # RMSD, RMSF, DCCM; optional consensus_*/ and avg/
     reporter/         # report.html (fixed name — every per-sim report)
     agent_conversation.log
   p21860_ATP_MG/      # or skipped with reason in run_summary
-  analysis/           # combined plots when requested by user intent or --combined-only
+  cross_sim/          # optional pre_combined MSA / pocket-map artifacts
+  analysis/           # combined overlays; classification_* when requested
   reporter/
     combined_report.html   # fixed name — cross-simulation HTML report
   run_summary.md      # human-readable outcome
@@ -291,10 +305,11 @@ Multi-sim run under `--working-dir /work/pseudo`:
 (e.g. `kinase_report.html`) — the framework normalizes to these paths.
 
 **Multi-sim reporting phases:** when the user goal requests combined analysis, the
-supervisor runs per-sim analysis → per-sim `report.html` → combined analysis at
-`{base}/analysis/` → combined `combined_report.html`. Use `--combined-only` to
-regenerate only the base-level combined analysis and report when per-sim work is
-already complete.
+supervisor runs optional `pre_combined` (MSA/pocket → `cross_sim/`) → per-sim
+analysis → per-sim `report.html` → `post_combined` at `{base}/analysis/`
+(overlays, optional classification) → combined `combined_report.html`. Use
+`--combined-only` to regenerate only the base-level combined analysis and report
+when per-sim work is already complete.
 
 ---
 
@@ -342,34 +357,50 @@ docs/
 | [docs/TOOLS.md](docs/TOOLS.md)                         | External dependencies and GROMACS/analysis mechanisms    |
 | [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md)       | Analysis tool calculations, theory, and standard outputs |
 | [docs/POOLS.md](docs/POOLS.md)                         | Local parallel workers and SLURM HPC pool                |
+| [docs/OLLAMA_SETUP.md](docs/OLLAMA_SETUP.md)           | Install Ollama server + pull `gpt-oss:20b` (not in conda) |
 
 ---
 
-## Example: unsupervised classification (35 protein–ATP systems)
+## Example: unsupervised classification (protein–ATP panel)
 
-Use when trajectories already exist (~200 ns each) and you want a **feature matrix**
-for clustering — **without** manual labels.
+Use when trajectories already exist and you want a **feature matrix** for
+clustering — **without** manual labels. Two common styles:
+
+**A. Classic binding + Cartesian FEL features**
 
 ```bash
 python SimAgent.py \
-  --goal "Simulations are complete for 35 protein–ATP holo systems (~200 ns each) under ./agenticB5R1/<label>/. For each trajectory run: ligand pocket distance, protein–ATP contacts, pocket SASA, ligand residence/unbinding analysis, pocket RMSF, ligand RMSF, PCA on Cα, free-energy landscape at 310 K, and FEL basin features. After all per-simulation analyses, build an unsupervised classification feature table (raw CSV + z-score CSV) across all systems. In combined analysis, overlay ligand pocket distance and protein RMSF across simulations. Generate a combined HTML report. No manual class labels." \
+  --goal "Simulations are complete for 35 protein–ATP holo systems under ./agenticB5R1/<label>/. For each trajectory run: ligand pocket distance, protein–ATP contacts, pocket SASA, ligand residence/unbinding analysis, pocket RMSF, ligand RMSF, PCA on Cα, free-energy landscape at 310 K, and FEL basin features. After all per-simulation analyses, build an unsupervised classification feature table (raw CSV + z-score CSV) across all systems. In combined analysis, overlay ligand pocket distance and protein RMSF. Generate a combined HTML report." \
   --working-dir ./agenticB5R1 \
   --subtask analysis reporter
 ```
 
-**Subset of features only** (framework runs and featurizes only what you name):
+**B. Family modular comparative dynamics** (scientific descriptors; LLM selects columns)
 
 ```bash
 python SimAgent.py \
-  --goal "Trajectories exist for all systems in ./agenticB5R1/. Per simulation compute RMSF and ligand pocket distance only. Then run unsupervised classification using those two features across all simulations (feature matrix + z-score normalization). Combined analysis: RMSF overlay only." \
-  --working-dir ./agenticB5R1 \
-  --subtask analysis reporter
+  --goal "Five protein–ATP holo systems under ./pseudokin_5x2/run_01/. Use KAPCA (p17612) as the reference pocket (residues within 15 Å of ATP), map via global MSA. From replicates (average across reps): ATP–pocket COM distance mean/std, pocket axis orientation mean/std, consensus Cα RMSF mean/std, pocket χ₁ circular mean, N↔C DCCM correlation, independent dihedral PCA landscape entropy. Assemble a feature table, hierarchical clustering dendrogram with feature heatmap (robust scaling OK; do not fix k), and a combined HTML report." \
+  --working-dir ./pseudokin_5x2/run_01 \
+  --rep-num 2 \
+  --subtask analysis reporter \
+  --combined-only
 ```
 
-The classification table is created **only** when the goal mentions classification,
-clustering, unsupervised grouping, or a feature matrix — not during ordinary combined analysis.
+Classification runs **only** when the goal asks for classification / clustering /
+a feature matrix / family modular comparative descriptors — not during ordinary
+overlay-only combined analysis.
 
-See [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md) for metrics, normalization, and clustering workflow.
+**Typical outputs** under `{base}/analysis/`:
+
+| File | Role |
+|------|------|
+| `classification_features.csv` | Raw scalars (one row per system) |
+| `classification_features_zscore.csv` | Robust/IQR or classic z-scores — clustering input |
+| `classification_feature_selection.json` | LLM-chosen columns + scientific reasoning |
+| `classification_dendrogram_heatmap.png` | Dendrogram + feature heatmap panel |
+
+See [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md) for metric groups, modular
+tools, normalization, and clustering.
 
 ---
 

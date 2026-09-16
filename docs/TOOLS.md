@@ -10,8 +10,10 @@ names) and not the execution pools.
 acquisition, trajectory-analysis libraries, chain-residue map, LLM stack,
 plotting/HTML report, HPC clients, literature APIs, run summary, test tools.
 
-Packages are pinned in `environment.yml` (conda environment `ollama_env`,
-Python 3.11). Per-tool observables and output filenames:
+Packages are pinned loosely in `environment.yml` (conda environment `ollama_env`,
+Python 3.11). That env includes the **Ollama Python client**, not the Ollama
+daemon or model weights — see [OLLAMA_SETUP.md](OLLAMA_SETUP.md).
+Per-tool observables and output filenames:
 [ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md). Parallel / HPC execution:
 [POOLS.md](POOLS.md). System wiring: [ARCHITECTURE.md](ARCHITECTURE.md).
 When agents run and which folders they fill:
@@ -115,6 +117,13 @@ Primary library: **MDAnalysis v2.10.0**
 
 ### Combined (multi-simulation) tools
 
+Exposed only in **combined** phases (`pre_combined`, `post_combined` /
+`combined_analysis`) or HITL combined view — not during per-sim traj analysis.
+**Pre** stage: prefer MSA / consensus pocket tools; outputs harvested into
+`{base}/cross_sim/`. **Post** stage: overlays, collectors, LLM feature
+selection, Ward / dendrogram+heatmap. Timing details:
+[ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md#two-tool-domains-per-sim-vs-combined).
+
 | Tool | Function |
 |------|----------|
 | `collect_metric_files` | Gather matching metric files across simulation directories |
@@ -126,14 +135,22 @@ Primary library: **MDAnalysis v2.10.0**
 | `run_combined_rmsf_segment_analysis` | RMSF bar chart for user-defined residue window |
 | `run_combined_com_distance_analysis` | COM distance overlay across simulations |
 | `collect_fel_features_table` | Aggregate `fel_features.json` from all sims into one classification CSV |
-| `collect_classification_features_table` | Full binding + FEL feature matrix (raw + z-score) for ML/clustering |
+| `collect_classification_features_table` | Full binding + modular + pocket feature matrix (raw + robust z-score) |
+| `cluster_classification_features` | Hierarchical / k-means; dendrogram+heatmap panel |
 | `build_consensus_sequence_alignment` | Star MSA to reference; consensus residue map for cross-sim PCA |
+| `define_reference_consensus_pocket` / `run_consensus_pocket_metrics_batch` | Reference pocket + mapped COM/orientation metrics |
 | `fit_reference_pca_model` | Reference PCA on consensus Cα |
 | `project_simulations_reference_pca` | Project trajectories onto reference PCA |
 | `build_shared_reference_fel_landscapes` | Shared-grid FEL from reference-projected PCA |
 | `cluster_reference_fel_landscapes` | Cluster shared-reference FEL features |
 | `run_reference_landscape_pipeline` | End-to-end reference landscape workflow |
 | `plot_combined_rmsf_segment_bars` | Stacked segment RMSF bar chart |
+
+**Per-sim modular family tools** (also exposed during traj analysis when the
+goal requests them): `calculate_consensus_torsions`,
+`calculate_consensus_rmsf_features`, `calculate_consensus_dccm_features`,
+`run_independent_dynamics_fel`. See
+[ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md#modular-family-dynamics-torsions--pca--tica).
 
 ### Additional analysis libraries
 
@@ -387,7 +404,8 @@ The residue map is built **after** that cleanup, from the same PDB
 |------|---------|------|
 | **LangGraph** | 1.0.7 | StateGraph-based workflow orchestration — nodes, edges, conditional routing |
 | **LangChain** | 1.2.8 | Chain and prompt utilities; `@tool` decorator for agent tools |
-| **Ollama** | 0.6.1 | Local LLM inference server; default model `gpt-oss:20b` |
+| **Ollama server** | (install separately) | Local LLM daemon on `:11434`; pull `gpt-oss:20b` — [OLLAMA_SETUP.md](OLLAMA_SETUP.md) |
+| **ollama (Python)** | ≥0.4 | Client library in conda env; talks to the server |
 | **LangSmith** | — | Optional tracing / observability |
 
 ### LLM integration pattern

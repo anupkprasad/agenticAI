@@ -96,7 +96,7 @@ def _is_post_simulation_subtask(state: Dict[str, Any]) -> bool:
 
 
 def _goal_requests_combined_analysis(goal: str, agent_list: List[str], subtask_type: Optional[str]) -> bool:
-    """Conservative intent detector for cross-simulation analysis."""
+    """Conservative intent detector for *post* cross-simulation analysis."""
     if subtask_type == "multi_agent" and not (set(agent_list or []) & {"analysis", "reporter"}):
         return False
 
@@ -135,8 +135,108 @@ def _goal_requests_combined_analysis(goal: str, agent_list: List[str], subtask_t
         r"\bconserved\s+(flexible regions|motions|dynamic patterns)\b",
         r"\bapo\s*(/|vs|versus|and)\s*holo\b",
         r"\bcase\s*(comparison|vs|versus)\b",
+        r"\bward\b",
+        r"\bfeature\s+table\b",
+        r"\bdendrogram\b",
+        r"\bheatmap\b",
     ]
     return any(re.search(p, text) for p in positive_patterns)
+
+
+def _goal_requests_pre_combined(goal: str, agent_list: List[str], subtask_type: Optional[str]) -> bool:
+    """True when the goal needs shared pre-traj cross-sim setup (pocket/MSA/consensus)."""
+    if subtask_type == "multi_agent" and not (set(agent_list or []) & {"analysis", "reporter"}):
+        return False
+
+    text = (goal or "").lower()
+    text = (
+        text.replace("\u2011", "-")
+        .replace("\u2012", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+    )
+    if re.search(r"\bno\s+(pocket\s+map|consensus|msa|pre[-\s]?combined)\b", text):
+        return False
+
+    positive_patterns = [
+        r"\bpocket\b",
+        r"\bconsensus\b",
+        r"\bmsa\b",
+        r"\bsequence\s+alignment\b",
+        r"\bglobal\s+sequence\s+alignment\b",
+        r"\breference.*(pocket|map|align)",
+        r"\bmap(ped)?\s+(that\s+)?pocket\b",
+        r"\bdefine\s+(the\s+)?(atp\s+)?pocket\b",
+        r"\bshared\s+reference\b",
+        r"\bc[-\s]?alpha\b.*\b(consensus|align)",
+        r"\bconsensus\s+c",
+    ]
+    return any(re.search(p, text) for p in positive_patterns)
+
+
+def _build_pre_combined_plan_fallback(
+    state: Dict[str, Any],
+    expanded_entries: List[Dict[str, Any]],
+) -> str:
+    """Fallback pre-combined plan: pocket/MSA/consensus → base/cross_sim/."""
+    original = (state.get("user_goal_original") or state.get("user_goal") or "").strip()
+    labels = ", ".join(e.get("label", "") for e in expanded_entries)
+    parts = [
+        "Before any per-simulation trajectory analysis, run pre-combined "
+        f"(cross-simulation) setup across: {labels}.",
+        "Build a consensus sequence alignment (MSA) across systems when needed, "
+        "define a reference consensus pocket (or reference-system pocket), and "
+        "map pocket / consensus residues onto each simulation. "
+        "Also plot the global MSA and the pocket/high-consensus MSA panels "
+        "(``plot_reference_msa_alignment`` → reference_msa_full.png + "
+        "reference_msa_pocket.png).",
+        "Write artifacts under `{base}/cross_sim/` including at least "
+        "`pocket_map.json` (reference label + per-sim mapped residues/selections) "
+        "and consensus residue / MSA files so per-sim analysis can auto-discover them.",
+        "Do not run per-sim RMSD/RMSF/DCCM overlays here — only shared mapping "
+        "inputs for later traj analysis.",
+    ]
+    if original:
+        return f"{' '.join(parts)}\n\nOriginal study goal for reference:\n{original}"
+    return " ".join(parts)
+
+
+def sync_combined_planner_flags(state: Dict[str, Any]) -> None:
+    """Keep legacy ``run_combined_analysis`` in sync with ``run_post_combined``."""
+    n = len(state.get("sim_prompts") or [])
+    if n <= 1:
+        state["run_pre_combined"] = False
+        state["pre_combined_plan"] = ""
+        state["run_post_combined"] = False
+        state["post_combined_plan"] = ""
+        state["run_combined_analysis"] = False
+        state["combined_analysis_plan"] = ""
+        return
+
+    # Prefer explicit post flags; fall back to legacy combined_*
+    if state.get("run_post_combined") is None and state.get("run_combined_analysis") is not None:
+        state["run_post_combined"] = bool(state.get("run_combined_analysis"))
+    if not (state.get("post_combined_plan") or "").strip() and (
+        state.get("combined_analysis_plan") or ""
+    ).strip():
+        state["post_combined_plan"] = state.get("combined_analysis_plan")
+
+    if state.get("run_post_combined") is None:
+        state["run_post_combined"] = False
+    if state.get("run_pre_combined") is None:
+        state["run_pre_combined"] = False
+
+    state["run_combined_analysis"] = bool(state.get("run_post_combined"))
+    state["combined_analysis_plan"] = (
+        state.get("post_combined_plan") or state.get("combined_analysis_plan") or ""
+    )
+    if not state.get("run_pre_combined"):
+        state["pre_combined_plan"] = state.get("pre_combined_plan") or ""
+    if not state.get("run_post_combined"):
+        state["post_combined_plan"] = ""
+        state["combined_analysis_plan"] = ""
+
 
 
 def _llm_sim_prompts_collapsed_per_pdb(
@@ -417,8 +517,14 @@ class MDPlanner:
                    f"{len(self.knowledge_loader.knowledge_docs)} knowledge documents")
     
     def _should_exclude_combined_tools(self, state: MDState) -> bool:
-        """Combined-analysis tools are only relevant after all per-sim runs finish."""
-        if state.get("multi_sim_phase") == "combined_analysis":
+        """Exclude combined tools unless we are in a combined (pre/post) phase."""
+        phase = state.get("multi_sim_phase")
+        if phase in (
+            "combined_analysis",
+            "post_combined",
+            "pre_combined",
+            "combined_reporter",
+        ):
             return False
         return True
 
@@ -716,6 +822,7 @@ class MDPlanner:
             )
 
         default_combined = _goal_requests_combined_analysis(original_goal, agent_list, subtask_type)
+        default_pre = _goal_requests_pre_combined(original_goal, agent_list, subtask_type)
         decomposition_prompt = (
             "You are the MD workflow Planner. Create the multi-simulation master plan using the "
             "available per-simulation and combined-analysis tools below.\n\n"
@@ -738,8 +845,15 @@ class MDPlanner:
             + f"{get_family_scale_planning_guide()}\n\n"
             "TASK: Return only valid JSON with keys:\n"
             f"1) sim_prompts: list of {len(expanded_entries)} complete natural-language prompts, same order as entries.\n"
-            "2) run_combined_analysis: boolean; true only when the user explicitly or clearly asks for comparison, aggregation, cross-simulation trends, combined plots, or a combined report.\n"
-            "3) combined_analysis_plan: natural-language plan when run_combined_analysis is true; otherwise an empty string.\n\n"
+            "2) run_pre_combined: boolean; true only when shared cross-sim setup is needed BEFORE "
+            "per-sim trajectory analysis (pocket mapping, MSA, consensus residues, reference "
+            "alignment). Requires multiple simulations. Write artifacts to base/cross_sim/.\n"
+            "3) pre_combined_plan: natural-language plan when run_pre_combined is true; else \"\".\n"
+            "4) run_post_combined: boolean; true when comparison/aggregation/Ward/overlays/combined "
+            "report is needed AFTER all per-sim analysis+reporter finish. Requires multiple simulations.\n"
+            "5) post_combined_plan: natural-language plan when run_post_combined is true; else \"\".\n"
+            "Legacy aliases (optional): run_combined_analysis / combined_analysis_plan map to "
+            "run_post_combined / post_combined_plan.\n\n"
             "CRITICAL prompt requirements for sim_prompts:\n"
             "- Each prompt must target exactly ONE simulation entry (one label, one case). Never merge apo and holo (or multiple component cases) into a single sim_prompt.\n"
             "- Prefer a short identity stanza (label, protein, source, working directory, case) plus the shared scientific intent — do NOT write eight near-identical essay prompts that only swap the accession/path.\n"
@@ -750,33 +864,31 @@ class MDPlanner:
             "- Do not copy and paste the same prompt for every entry. If the protocol is shared, keep the science wording identical and only change identity fields (label/path/protein).\n"
             f"- Mention only these workflow steps: {agents_desc}.\n"
             "- Keep each sim_prompt concise (under ~80 words) so all entries and combined fields fit in one JSON response.\n\n"
-            "For run_combined_analysis, use the user goal as the source of truth. "
-            f"The conservative heuristic before this LLM call is {default_combined}; override it only if the goal text clearly supports a different choice.\n"
+            "For run_pre_combined / run_post_combined, use the user goal as the source of truth. "
+            f"Heuristics before this call: pre={default_pre}, post={default_combined}; "
+            "override only if the goal text clearly supports a different choice.\n"
             "Return only valid JSON."
         )
 
         sim_prompts_list = None
         prompt_source = "deterministic_fallback"
         combined_plan = ""
+        pre_combined_plan = ""
+        post_combined_plan = ""
         run_combined_analysis = default_combined
+        run_pre_combined = default_pre
+        run_post_combined = default_combined
         decomposition_complete = False
         parsed = None
-        # Prefer compact deterministic prompts whenever several systems share one
-        # scientific protocol (robustness / family campaigns). LLM JSON dumps of
-        # N near-copy prompts look human-authored and often truncate combined plan.
-        _homogeneous_campaign = len(expanded_entries) >= 4 and len(component_cases) <= 1
-        _use_llm_decomp = len(expanded_entries) <= 24 and not _homogeneous_campaign
+        # Always ask the LLM for the master plan (incl. pre/post flags + plans).
+        # Deterministic prompts are only a fallback when the LLM fails or returns
+        # unusable copy-paste sim_prompts.
+        _use_llm_decomp = True
         try:
             if not _use_llm_decomp:
-                logger.info(
-                    "PLANNER [multi-sim]: %d entries (homogeneous=%s) — using "
-                    "compact deterministic per-sim prompts (skip LLM sim_prompts JSON)",
-                    len(expanded_entries),
-                    _homogeneous_campaign,
-                )
-                raise RuntimeError("skip_llm_decomp_large_campaign")
+                raise RuntimeError("skip_llm_decomp_disabled")
             response = self.llm.prompt_raw(
-                decomposition_prompt, temperature=0.35, max_tokens=8192, format="json"
+                decomposition_prompt, temperature=0.35, max_tokens=12288, format="json"
             )
             log_llm_interaction("planner.multi_sim_master", decomposition_prompt, response)
             if _is_mock_or_error_llm_response(response):
@@ -793,17 +905,32 @@ class MDPlanner:
                     for item in parsed["sim_prompts"]
                 ]
                 prompt_source = "llm"
-                run_combined_analysis = _coerce_bool(
-                    parsed.get("run_combined_analysis"),
+                # Prefer explicit pre/post; legacy combined_* → post
+                run_post_combined = _coerce_bool(
+                    parsed.get("run_post_combined", parsed.get("run_combined_analysis")),
                     default=default_combined,
                 )
-                combined_plan = _coerce_plan_text(
-                    parsed.get("combined_analysis_plan", ""),
+                post_combined_plan = _coerce_plan_text(
+                    parsed.get(
+                        "post_combined_plan",
+                        parsed.get("combined_analysis_plan", ""),
+                    ),
                     default="",
                 )
+                run_pre_combined = _coerce_bool(
+                    parsed.get("run_pre_combined"),
+                    default=default_pre,
+                )
+                pre_combined_plan = _coerce_plan_text(
+                    parsed.get("pre_combined_plan", ""),
+                    default="",
+                )
+                run_combined_analysis = run_post_combined
+                combined_plan = post_combined_plan
                 logger.info(
                     f"PLANNER [multi-sim]: LLM generated {len(sim_prompts_list)} per-sim prompts; "
-                    f"run_combined_analysis={run_combined_analysis}"
+                    f"run_pre_combined={run_pre_combined} "
+                    f"run_post_combined={run_post_combined}"
                 )
 
                 if len(sim_prompts_list) > 1:
@@ -817,10 +944,11 @@ class MDPlanner:
                         logger.warning(
                             "PLANNER [multi-sim]: LLM sim_prompts are copy-paste "
                             "templates (identical or label/path-only variants); "
-                            "switching to compact deterministic prompts"
+                            "using compact deterministic per-sim prompts but "
+                            "keeping LLM pre/post combined flags and plans"
                         )
                         sim_prompts_list = None
-                        prompt_source = "deterministic_fallback"
+                        prompt_source = "llm_pre_post_deterministic_prompts"
 
                 if sim_prompts_list and len(sim_prompts_list) != len(expanded_entries):
                     if _llm_sim_prompts_collapsed_per_pdb(
@@ -828,42 +956,69 @@ class MDPlanner:
                     ):
                         logger.warning(
                             "PLANNER [multi-sim]: LLM merged multiple cases into one prompt "
-                            "per PDB; switching to deterministic per-entry prompts"
+                            "per PDB; using deterministic per-entry prompts "
+                            "(keeping LLM pre/post plans)"
                         )
                     else:
                         logger.warning(
                             "PLANNER [multi-sim]: LLM returned %d/%d sim_prompts; "
-                            "switching to deterministic per-entry prompts",
+                            "using deterministic per-entry prompts "
+                            "(keeping LLM pre/post plans)",
                             len(sim_prompts_list),
                             len(expanded_entries),
                         )
                     sim_prompts_list = None
-                    prompt_source = "deterministic_fallback"
+                    prompt_source = "llm_pre_post_deterministic_prompts"
 
-                decomposition_complete = (
-                    prompt_source == "llm"
-                    and len(sim_prompts_list or []) == len(expanded_entries)
-                    and _strip_markdown_json_fence(response).rstrip().endswith("}")
-                )
+                decomposition_complete = False
+                if parsed and prompt_source == "llm":
+                    decomposition_complete = (
+                        len(sim_prompts_list or []) == len(expanded_entries)
+                        and _strip_markdown_json_fence(response).rstrip().endswith("}")
+                    )
+                elif parsed and prompt_source == "llm_pre_post_deterministic_prompts":
+                    # LLM supplied pre/post fields; per-sim prompts use compact fallback.
+                    decomposition_complete = True
         except Exception as exc:
-            if str(exc) != "skip_llm_decomp_large_campaign":
-                logger.warning(f"PLANNER [multi-sim]: LLM decomposition failed: {exc}")
-            else:
-                logger.debug("PLANNER [multi-sim]: %s", exc)
+            logger.warning(f"PLANNER [multi-sim]: LLM decomposition failed: {exc}")
 
         # Truncated JSON often omits combined fields; never drop combined work when
         # the user goal clearly requested it unless a complete JSON says otherwise.
         if default_combined:
-            if decomposition_complete and parsed and parsed.get("run_combined_analysis") is False:
+            if decomposition_complete and parsed and (
+                parsed.get("run_post_combined") is False
+                or (
+                    parsed.get("run_post_combined") is None
+                    and parsed.get("run_combined_analysis") is False
+                )
+            ):
+                run_post_combined = False
                 run_combined_analysis = False
             else:
+                run_post_combined = True
                 run_combined_analysis = True
-                if not combined_plan:
-                    combined_plan = _build_combined_analysis_plan_fallback(
+                if not post_combined_plan and not combined_plan:
+                    post_combined_plan = _build_combined_analysis_plan_fallback(
+                        state, expanded_entries
+                    )
+                    combined_plan = post_combined_plan
+                    logger.info(
+                        "PLANNER [multi-sim]: using post_combined fallback plan "
+                        "(decomposition_complete=%s)",
+                        decomposition_complete,
+                    )
+
+        if default_pre:
+            if decomposition_complete and parsed and parsed.get("run_pre_combined") is False:
+                run_pre_combined = False
+            else:
+                run_pre_combined = True
+                if not pre_combined_plan:
+                    pre_combined_plan = _build_pre_combined_plan_fallback(
                         state, expanded_entries
                     )
                     logger.info(
-                        "PLANNER [multi-sim]: using combined analysis fallback plan "
+                        "PLANNER [multi-sim]: using pre_combined fallback plan "
                         "(decomposition_complete=%s)",
                         decomposition_complete,
                     )
@@ -911,10 +1066,20 @@ class MDPlanner:
                         ).strip()
                     )
 
-        if run_combined_analysis and not combined_plan:
-            combined_plan = _build_combined_analysis_plan_fallback(state, expanded_entries)
-        if not run_combined_analysis:
-            combined_plan = ""
+        if run_post_combined and not post_combined_plan:
+            post_combined_plan = _build_combined_analysis_plan_fallback(
+                state, expanded_entries
+            )
+        if run_pre_combined and not pre_combined_plan:
+            pre_combined_plan = _build_pre_combined_plan_fallback(
+                state, expanded_entries
+            )
+        if not run_post_combined:
+            post_combined_plan = ""
+        if not run_pre_combined:
+            pre_combined_plan = ""
+        combined_plan = post_combined_plan
+        run_combined_analysis = run_post_combined
 
         sim_prompts = []
         for entry, prompt_text in zip(expanded_entries, sim_prompts_list):
@@ -947,42 +1112,57 @@ class MDPlanner:
         # One simulation cannot have a meaningful cross-sim combined stage.
         if len(sim_prompts) <= 1:
             run_combined_analysis = False
+            run_pre_combined = False
+            run_post_combined = False
             combined_plan = ""
-        state["run_combined_analysis"] = run_combined_analysis
-        state["combined_analysis_plan"] = _coerce_plan_text(combined_plan, default="")
+            pre_combined_plan = ""
+            post_combined_plan = ""
+        state["run_pre_combined"] = bool(run_pre_combined)
+        state["pre_combined_plan"] = _coerce_plan_text(pre_combined_plan, default="")
+        state["run_post_combined"] = bool(run_post_combined)
+        state["post_combined_plan"] = _coerce_plan_text(post_combined_plan, default="")
+        state["run_combined_analysis"] = bool(run_post_combined)
+        state["combined_analysis_plan"] = _coerce_plan_text(post_combined_plan, default="")
+        sync_combined_planner_flags(state)
 
         logger.info(
             f"PLANNER [multi-sim]: Master plan ready - {len(sim_prompts)} simulations, "
             f"labels: {[s['label'] for s in sim_prompts]}, "
-            f"run_combined_analysis={run_combined_analysis}"
+            f"run_pre_combined={state.get('run_pre_combined')} "
+            f"run_post_combined={state.get('run_post_combined')}"
         )
         log_agent_action(
             agent_name="planner",
             action="Generated Multi-Simulation Master Plan",
             details={
                 "num_simulations": len(sim_prompts),
-                "num_combined_prompts": 1 if run_combined_analysis else 0,
+                "num_combined_prompts": 1 if state.get("run_post_combined") else 0,
                 "labels": [s["label"] for s in sim_prompts],
                 "prompt_source": prompt_source,
-                # Full per-sim goals live in planner/master_plan.json and each
-                # sim's own agent_conversation.log — do not dump them here.
                 "master_plan_path": str(
                     Path(base_working_dir) / "planner" / "master_plan.json"
                 ),
                 "component_cases": [c.get("description") for c in component_cases],
                 "agents": agents_desc,
-                "run_combined_analysis": run_combined_analysis,
-                "combined_plan_chars": len(combined_plan or ""),
-                "combined_plan_preview": (combined_plan or "")[:500],
+                "run_pre_combined": state.get("run_pre_combined"),
+                "run_post_combined": state.get("run_post_combined"),
+                "run_combined_analysis": state.get("run_combined_analysis"),
+                "pre_combined_plan_chars": len(state.get("pre_combined_plan") or ""),
+                "post_combined_plan_chars": len(state.get("post_combined_plan") or ""),
+                "combined_plan_preview": (state.get("post_combined_plan") or "")[:500],
             },
         )
         self._save_multi_sim_master_plan(
             base_working_dir=base_working_dir,
             sim_prompts=sim_prompts,
-            combined_plan=combined_plan or "",
+            combined_plan=state.get("post_combined_plan") or "",
             enriched_prompt=enriched_prompt,
             agents_desc=agents_desc,
-            run_combined_analysis=run_combined_analysis,
+            run_combined_analysis=bool(state.get("run_post_combined")),
+            run_pre_combined=bool(state.get("run_pre_combined")),
+            pre_combined_plan=state.get("pre_combined_plan") or "",
+            run_post_combined=bool(state.get("run_post_combined")),
+            post_combined_plan=state.get("post_combined_plan") or "",
         )
         return state
 
@@ -995,8 +1175,16 @@ class MDPlanner:
         enriched_prompt: str,
         agents_desc: str,
         run_combined_analysis: bool,
+        run_pre_combined: bool = False,
+        pre_combined_plan: str = "",
+        run_post_combined: Optional[bool] = None,
+        post_combined_plan: str = "",
     ) -> None:
         """Persist overall multi-simulation master plan to {base}/planner/."""
+        if run_post_combined is None:
+            run_post_combined = run_combined_analysis
+        if not post_combined_plan:
+            post_combined_plan = combined_plan or ""
         plan_data = {
             "title": "Multi-Simulation Master Plan",
             "format": "master_plan",
@@ -1008,7 +1196,6 @@ class MDPlanner:
                 else "full_pipeline"
             ),
             "enriched_prompt": enriched_prompt,
-            # Compact identity + shared intent (not N copy-paste essays).
             "shared_per_sim_intent": (
                 (sim_prompts[0].get("prompt") or "").split("Shared per-simulation", 1)[-1]
                 if sim_prompts and "Shared per-simulation" in (sim_prompts[0].get("prompt") or "")
@@ -1026,10 +1213,14 @@ class MDPlanner:
                 for s in sim_prompts
             ],
             "sim_prompts": sim_prompts,
-            "run_combined_analysis": run_combined_analysis,
-            "num_combined_prompts": 1 if run_combined_analysis else 0,
-            "combined_prompt": combined_plan,
-            "combined_analysis_plan": combined_plan,
+            "run_pre_combined": bool(run_pre_combined),
+            "pre_combined_plan": pre_combined_plan or "",
+            "run_post_combined": bool(run_post_combined),
+            "post_combined_plan": post_combined_plan or "",
+            "run_combined_analysis": bool(run_post_combined),
+            "num_combined_prompts": 1 if run_post_combined else 0,
+            "combined_prompt": post_combined_plan or "",
+            "combined_analysis_plan": post_combined_plan or "",
             "num_simulations": len(sim_prompts),
             "labels": [s.get("label") for s in sim_prompts],
         }
@@ -1061,8 +1252,9 @@ class MDPlanner:
             f"**Simulations:** {len(sim_prompts)}",
             f"**Pipeline:** {agents_desc}",
             f"**Task scope:** {plan_data.get('task_scope', 'full_pipeline')}",
-            f"**Combined analysis requested:** {'yes' if run_combined_analysis else 'no'}",
-            f"**Combined prompts:** {1 if run_combined_analysis else 0}",
+            f"**Pre-combined (before traj):** {'yes' if run_pre_combined else 'no'}",
+            f"**Post-combined (after all sims):** {'yes' if run_post_combined else 'no'}",
+            f"**Combined analysis requested (legacy=post):** {'yes' if run_post_combined else 'no'}",
             "",
             "## Overall Goal",
             "",
@@ -1091,10 +1283,17 @@ class MDPlanner:
             )
         md_lines += [
             "",
-            "## Combined Analysis Plan",
+            "## Pre-Combined Plan (before per-sim traj analysis)",
             "",
             _coerce_plan_text(
-                combined_plan,
+                pre_combined_plan,
+                default="_Not requested — skip pre_combined stage._",
+            ),
+            "",
+            "## Post-Combined Plan (after all per-sim analysis+reporter)",
+            "",
+            _coerce_plan_text(
+                post_combined_plan or combined_plan,
                 default="_Not requested by the user goal._",
             ),
         ]
@@ -1313,11 +1512,16 @@ class MDPlanner:
         if not state.get("is_multi_simulation"):
             return "single"
         multi_phase = state.get("multi_sim_phase")
-        if multi_phase == "combined_analysis":
+        if multi_phase == "pre_combined":
+            return "pre_combined"
+        if multi_phase in ("combined_analysis", "post_combined"):
             return "combined_analysis"
         if multi_phase == "executing_sims":
             return "per_simulation"
-        if state.get("combined_analysis_plan") and not state.get("execution_plan"):
+        if (
+            state.get("post_combined_plan")
+            or state.get("combined_analysis_plan")
+        ) and not state.get("execution_plan"):
             return "combined_analysis"
         return "per_simulation"
 
@@ -1325,7 +1529,8 @@ class MDPlanner:
         """Return per-simulation label when running inside the multi-sim loop."""
         if not state.get("is_multi_simulation"):
             return None
-        if state.get("multi_sim_phase") == "combined_analysis":
+        phase = state.get("multi_sim_phase")
+        if phase in ("combined_analysis", "post_combined", "pre_combined", "combined_reporter"):
             return "combined"
         sim_prompts = state.get("sim_prompts") or []
         current_idx = state.get("current_sim_index", 0)

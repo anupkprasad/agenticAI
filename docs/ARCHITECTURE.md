@@ -85,6 +85,8 @@ SimAgent.py --working-dir ./study
             ├─ overlay plots (RMSD, RMSF, Rg, energy, COM distance)
             ├─ DCCM panels + apo–holo DCCM difference
             ├─ segment RMSF bars (user-defined residue windows)
+            ├─ consensus pocket metrics batch (COM + axis angle) when requested
+            ├─ classification feature table → LLM feature selection → Ward dendrogram
             ├─ statistical_summary.json
             └─ combined_report.html  (Reporter)
 ```
@@ -106,12 +108,13 @@ base_dir/
         agent_conversation.log
     p21860_ATP_MG/
         ...                     # (or skip reason if feasibility failed)
-    analysis/                   # combined analysis outputs
+    analysis/                   # post_combined overlays (when n_sims>1)
+    cross_sim/                  # pre_combined pocket/MSA/consensus artifacts
     combinedAnalysis/           # alternate combined output location
     reporter/
         combined_report.html    # cross-simulation comparison report
     planner/
-        master_plan.md          # multi-sim plan with per-case prompts
+        master_plan.md          # multi-sim plan with per-case + pre/post plans
         master_plan.json
     supervisor/
         state.jsonl
@@ -175,7 +178,7 @@ The LangGraph registers **12 nodes**:
 | `preprocess` | `PreprocessingAgent` | Download/extract domain, clean PDB, add H, separate components |
 | `setup` | `SimulationSetupAgent` | Topology, solvation, ions, MDP files, ACPYPE for ligands |
 | `hpc` | `MDHPCAgent` | SLURM script, SSH submit, job monitor, result download |
-| `analysis` | `MDAnalysisAgent` | RMSD/RMSF/Rg/DCCM/DSSP + combined overlays + DCCM diff |
+| `analysis` | `MDAnalysisAgent` | Traj metrics, modular family tools, combined overlays, classification |
 | `reporter` | `ReporterAgent` | HTML report, literature, 3D viewer, LLM narrative |
 | `human_preprocess_check` | `human_checkpoints.py` | Optional approval after preprocessing |
 | `human_setup_check` | (same) | Optional approval after setup |
@@ -217,7 +220,9 @@ Fields follow the pattern `{stage}_{artifact}`:
 | `human_feedback` | Response from human checkpoint |
 | `is_multi_simulation` | True when sim_prompts has >1 entry |
 | `sim_prompts` | List of per-simulation goal dicts |
-| `multi_sim_phase` | `per_sim` → `combined_analysis` → `combined_reporter` |
+| `multi_sim_phase` | `pre_combined` → `executing_sims` / `hpc_pool` → `combined_analysis` (`post_combined`) → `combined_reporter` |
+| `run_pre_combined` / `pre_combined_plan` | Optional combined tools before per-sim traj (`n_sims>1`) |
+| `run_post_combined` / `post_combined_plan` | Optional combined tools after all sims; legacy `run_combined_analysis` → post |
 
 ### Per-Agent Directories and File Management
 
@@ -320,21 +325,30 @@ Key mechanisms:
 ### Analysis Agent (`MDAnalysisAgent`)
 
 Operates in two modes:
-- **Per-sim**: LLM selects tool subset from `analysis_instructions`
-- **Combined**: auto-triggered after all sims; runs cross-sim tools
+- **Per-sim**: LLM selects tool subset from `analysis_instructions`; family
+  modular goals also force consensus torsions / RMSF / DCCM / dihedral PCA
+- **Combined**: auto-triggered after all sims (`pre_combined` then
+  `post_combined`); runs cross-sim tools and optional classification
 
 Key analysis tools:
 - `calculate_rmsd`, `calculate_rmsf`, `calculate_radius_of_gyration`
 - `calculate_dccm`, `plot_dccm_difference` (apo–holo)
-- `run_combined_rmsf_segment_analysis` (user residue window)
-- `run_combined_com_distance_analysis` (ATP pocket stability)
-- `analyze_secondary_structure` (DSSP whole + segments)
+- `calculate_ligand_pocket_distance`, consensus pocket batch (COM + axis angle)
+- Modular family: `calculate_consensus_torsions`,
+  `calculate_consensus_rmsf_features`, `calculate_consensus_dccm_features`,
+  `run_independent_dynamics_fel` (dihedral PCA landscape entropy)
+- `run_combined_rmsf_segment_analysis`, `run_combined_com_distance_analysis`
+- `collect_classification_features_table` → **LLM feature subset selection
+  (with reasoning)** → `cluster_classification_features` (dendrogram+heatmap)
 - `compute_comparison_table` → `statistical_summary.json`
 
 **Multi-chain selections:** the LLM still writes PDB-style `chainID` /
 `resid` strings. A translator in `TrajectorySession` / `AnalysisToolExecutor`
 rewrites them to `resindex` using `simsetup/chain_residue_map.json`. Details:
 [TOOLS.md](TOOLS.md#multi-chain-residue-map).
+
+Classification theory, metric groups, and outputs:
+[ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md#classification-how-to-use-the-data-together).
 
 ### Reporter Agent (`ReporterAgent`)
 
@@ -425,4 +439,8 @@ When one or more PDB paths (or UniProt IDs) are resolved from `--goal` /
 
 ## Recursion Limit
 
-The LangGraph is compiled with `recursion_limit=25` to prevent infinite loops.
+The LangGraph `recursion_limit` is **computed per run** (not a fixed 25).
+It scales with campaign size and HPC pool poll count so large multi-sim /
+long-wait jobs (family-scale ≥50 systems, short `--hpc-check-interval`) do
+not hit `GraphRecursionError`. See
+`MDWorkflow._compute_recursion_limit` in `agentic/workflow.py`.

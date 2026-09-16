@@ -64,6 +64,49 @@ STRUCTURE_PHYLO_PLOT = "structure_phylo_tree.png"
 
 # ── Structure / sequence extraction ──────────────────────────────────────────
 
+def _structure_pdb_stems(label: str) -> List[str]:
+    """Candidate basename stems for ``{stem}.pdb`` lookup.
+
+    Campaign labels are often ``{uniprot}_ATP`` while the deposited structure is
+    ``{uniprot}.pdb`` at the multi-sim base. Try the full label first, then
+    peel common holo / ion suffixes.
+    """
+    stem = Path(str(label)).stem
+    stems: List[str] = []
+    seen: set = set()
+
+    def _add(s: str) -> None:
+        s = (s or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            stems.append(s)
+
+    _add(stem)
+    # Peel trailing case suffixes one at a time (order matters).
+    suffixes = (
+        "_ATP_MG",
+        "_ATP_2MG",
+        "_2MG",
+        "_MG",
+        "_ATP",
+        "_holo",
+        "_apo",
+    )
+    cur = stem
+    changed = True
+    while changed:
+        changed = False
+        lower = cur.lower()
+        for suf in suffixes:
+            if lower.endswith(suf.lower()) and len(cur) > len(suf):
+                cur = cur[: -len(suf)]
+                _add(cur)
+                changed = True
+                break
+    # Also try the sim folder name when label differs (caller may pass either).
+    return stems
+
+
 def resolve_structure_pdb(
     label: str,
     sim_dir: Optional[str],
@@ -72,16 +115,25 @@ def resolve_structure_pdb(
     """
     Locate a PDB structure for *label*.
 
-    Priority: user-provided base-level ``{base}/{label}.pdb`` → per-sim
-    ``{sim}/{label}.pdb`` → a representative reporter frame → a FEL basin PDB.
+    Priority: user-provided base-level ``{base}/{stem}.pdb`` (including bare
+    UniProt stems for ``*_ATP`` labels) → per-sim ``{sim}/{stem}.pdb`` → a
+    representative reporter frame → a FEL basin PDB.
     """
     candidates: List[Path] = []
-    stem = Path(label).stem
+    stems = _structure_pdb_stems(label)
+    if sim_dir:
+        sd_name = Path(sim_dir).name
+        for s in _structure_pdb_stems(sd_name):
+            if s not in stems:
+                stems.append(s)
     if base_dir:
-        candidates.append(Path(base_dir) / f"{stem}.pdb")
+        base = Path(base_dir)
+        for stem in stems:
+            candidates.append(base / f"{stem}.pdb")
     if sim_dir:
         sd = Path(sim_dir)
-        candidates.append(sd / f"{stem}.pdb")
+        for stem in stems:
+            candidates.append(sd / f"{stem}.pdb")
         candidates.extend(sorted(sd.glob("reporter/*.pdb")))
         candidates.extend(sorted(sd.glob("analysis/basin_*.pdb")))
         candidates.extend(sorted(sd.glob("analysis/analysis/basin_*.pdb")))

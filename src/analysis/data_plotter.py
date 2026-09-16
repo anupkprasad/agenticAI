@@ -390,6 +390,48 @@ def _series_label(column_names: List[str], y_idx: int, file_label: str) -> str:
     return file_label
 
 
+def _time_axis_is_picoseconds(column_name: str) -> bool:
+    """True when a time column header indicates picoseconds."""
+    low = (column_name or "").strip().lower()
+    if not low:
+        return False
+    compact = low.replace(" ", "").replace("_", "")
+    if "(ps)" in low or "time(ps)" in compact:
+        return True
+    if compact in {"timeps", "tps"} or compact.endswith("timeps"):
+        return True
+    return False
+
+
+def _normalize_time_x_to_ns(
+    x_data: List[float],
+    column_names: List[str],
+    xi: int,
+    xlabel: Optional[str] = None,
+) -> Tuple[List[float], Optional[str]]:
+    """Convert picosecond time axes to nanoseconds for consistent ``Time (ns)`` plots.
+
+    Triggers when the file header is ``Time(ps)`` / ``time_ps``, or when the
+    caller requested an ns label while the column is clearly time-in-ps
+    (large values, no ``ns`` in the column name).
+    """
+    if not x_data:
+        return x_data, xlabel
+    col = column_names[xi] if xi < len(column_names) else ""
+    col_low = col.lower()
+    want_ns = bool(xlabel) and "ns" in xlabel.lower() and "(ps)" not in xlabel.lower()
+    is_ps_header = _time_axis_is_picoseconds(col)
+    looks_like_ps = (
+        want_ns
+        and "time" in col_low
+        and "ns" not in col_low
+        and max(x_data) > 500.0
+    )
+    if is_ps_header or looks_like_ps:
+        return [float(v) / 1000.0 for v in x_data], "Time (ns)"
+    return x_data, xlabel
+
+
 def _detect_plot_columns(
     column_names: List[str],
     data_columns: List[List[float]],
@@ -643,6 +685,32 @@ def plot_data(
         # Auto-detect geometric (x, y, z) data → delegate to plot_3d
         # -------------------------------------------------------------------
         first_cols, first_names = parse_data_file(abs_data_files[0])
+        lower_names = [n.strip().lower() for n in first_names]
+        # FEL grids / feature tables are not 1D XY series — refuse line plots.
+        if (
+            "free_energy_kj_mol" in lower_names
+            or (
+                any(n.startswith("pc") for n in lower_names)
+                and any("free_energy" in n or n == "probability" for n in lower_names)
+            )
+            or Path(abs_data_files[0]).name.lower() in {
+                "fel_features.csv",
+                "fel_basins.csv",
+                "fel_pc1_pc2_grid.csv",
+            }
+            or (
+                "fel" in Path(abs_data_files[0]).name.lower()
+                and "grid" in Path(abs_data_files[0]).name.lower()
+            )
+        ):
+            return {
+                "success": False,
+                "error": (
+                    "Refusing plot_md_data on FEL grid/feature tables. "
+                    "Use fel_basins.png from analyze_fel_landscape_features; "
+                    "feature info is in fel_features.json/csv only."
+                ),
+            }
         detected_xyz = _detect_xyz_columns(first_names, first_cols)
         if detected_xyz is not None:
             logger.info("Detected geometric (x,y,z) columns – switching to 3D plot")
@@ -720,6 +788,10 @@ def plot_data(
             if not x_data:
                 logger.warning(f"No plottable numeric data in {rel_file}, skipping")
                 continue
+
+            x_data, xlabel = _normalize_time_x_to_ns(
+                x_data, column_names, xi, xlabel=xlabel
+            )
             
             # Determine label base for this file
             if labels is not None and idx < len(labels):
@@ -767,9 +839,11 @@ def plot_data(
                 continue
             n_plotted += 1
             
-            # Auto-detect axis labels from first file
+            # Auto-detect axis labels from first file (after time-unit normalize)
             if idx == 0 and not xlabel and xi < len(column_names):
                 xlabel = column_names[xi]
+                if _time_axis_is_picoseconds(xlabel):
+                    xlabel = "Time (ns)"
             if idx == 0 and not ylabel and len(y_indices) == 1 and y_indices[0] < len(column_names):
                 ylabel = column_names[y_indices[0]]
 

@@ -38,6 +38,7 @@ from ..planner.planning_guidelines import (
     detect_requested_metrics_union,
     detect_requested_metrics_for_sim,
     detect_classification_requested,
+    detect_family_modular_dynamics_requested,
     classification_metric_groups_for_goal,
     get_classification_tool_guide,
     get_classification_per_sim_tool_guide,
@@ -78,6 +79,10 @@ _CALC_TOOL_TO_METRIC: Dict[str, str] = {
     "calculate_min_heavy_atom_distance": "min_distance",
     "calculate_hbond_occupancy": "hbond_occupancy",
     "calculate_salt_bridge_distances": "salt_bridge",
+    "calculate_consensus_torsions": "consensus_torsions",
+    "calculate_consensus_rmsf_features": "consensus_rmsf",
+    "calculate_consensus_dccm_features": "consensus_dccm",
+    "run_independent_dynamics_fel": "dihedral_pca",
 }
 
 _PREP_TOOLS = frozenset({"wrap_trajectory", "run_complete_analysis"})
@@ -120,6 +125,19 @@ class MDAnalysisAgent:
             "use_mdanalysis": True,
         }
 
+    def _is_combined_analysis_phase(self, state: Optional[MDState] = None) -> bool:
+        """True for pre/post combined multi-sim analysis phases."""
+        if not state:
+            return False
+        return state.get("multi_sim_phase") in (
+            "combined_analysis",
+            "post_combined",
+            "pre_combined",
+        )
+
+    def _is_pre_combined_phase(self, state: Optional[MDState] = None) -> bool:
+        return bool(state and state.get("multi_sim_phase") == "pre_combined")
+
     def _is_combined_hitl_context(self, state: Optional[MDState] = None) -> bool:
         """True when HITL or workflow is at project-base cross-simulation scope."""
         if not state:
@@ -127,7 +145,8 @@ class MDAnalysisAgent:
         return bool(
             state.get("hitl_view_combined")
             or state.get("hitl_combined_execute")
-            or state.get("multi_sim_phase") in ("combined_analysis", "combined_reporter")
+            or self._is_combined_analysis_phase(state)
+            or state.get("multi_sim_phase") == "combined_reporter"
         )
 
     def _get_analysis_tool_metadata(self, state: Optional[MDState] = None) -> Dict[str, Dict[str, Any]]:
@@ -207,16 +226,45 @@ class MDAnalysisAgent:
             f"- trajectory_file: \"{traj_name}\"\n"
         )
 
+    def _discover_cross_sim_prompt_block(self, state: Optional[MDState] = None) -> str:
+        """Auto-discover ``base/cross_sim/`` artifacts for per-sim planning."""
+        if not state or self._is_combined_hitl_context(state):
+            return ""
+        try:
+            from agentic.multi_sim_paths import resolve_multi_sim_base_dir
+            from src.analysis.cross_sim_artifacts import (
+                discover_cross_sim_artifacts,
+                format_cross_sim_context_for_prompt,
+            )
+
+            base = resolve_multi_sim_base_dir(state)
+            artifacts = discover_cross_sim_artifacts(base)
+            if artifacts.get("artifacts") or artifacts.get("pocket_map_path"):
+                state["cross_sim_artifacts"] = {
+                    k: v
+                    for k, v in artifacts.items()
+                    if k not in ("pocket_map", "consensus_residues")
+                }
+                logger.info(
+                    "Analysis: auto-discovered cross_sim artifacts under %s (%s files)",
+                    artifacts.get("cross_sim_dir"),
+                    len(artifacts.get("artifacts") or []),
+                )
+            return format_cross_sim_context_for_prompt(artifacts)
+        except Exception as exc:
+            logger.warning("cross_sim discovery failed: %s", exc)
+            return ""
+
     def _get_per_sim_tool_scope_note(self, state: Optional[MDState] = None) -> str:
         """Tell the analysis LLM to stay within this simulation's scope."""
         if state and self._is_combined_hitl_context(state):
-            return self._get_combined_hitl_scope_note()
+            return self._get_combined_hitl_scope_note(state)
         note = (
             "**SCOPE — THIS SIMULATION ONLY:**\n"
             "- Use only per-trajectory analysis tools listed below.\n"
             "- Do NOT call run_combined_*, plot_combined_overlay, collect_metric_files, "
             "or other cross-simulation tools.\n"
-            "- Cross-simulation comparison runs automatically after all simulations finish.\n"
+            "- Cross-simulation comparison (post_combined) runs after all simulations finish.\n"
         )
         if state and state.get("is_multi_simulation"):
             idx = state.get("current_sim_index", 0)
@@ -225,11 +273,23 @@ class MDAnalysisAgent:
                 label = sim_prompts[idx].get("label")
                 if label:
                     note += f"- Current simulation: {label}\n"
+        note += self._discover_cross_sim_prompt_block(state)
         return note
 
-    def _get_combined_hitl_scope_note(self) -> str:
+    def _get_combined_hitl_scope_note(self, state: Optional[MDState] = None) -> str:
+        if state and self._is_pre_combined_phase(state):
+            return (
+                "**SCOPE — PRE-COMBINED (before per-sim traj analysis):**\n"
+                "- Use combined tools for pocket / MSA / consensus / reference maps.\n"
+                "- Write shared artifacts under ``cross_sim/`` (or ``analysis/``; the "
+                "framework harvests them into ``{base}/cross_sim/``).\n"
+                "- Prefer build_consensus_sequence_alignment, define_reference_consensus_pocket, "
+                "map_consensus_pocket_residues.\n"
+                "- Do NOT run per-sim calculate_rmsd/rmsf overlays or Ward clustering here.\n"
+                "- Plan ONLY pre-shared deliverables requested in the pre_combined plan.\n"
+            )
         return (
-            "**SCOPE — COMBINED CROSS-SIMULATION (project base):**\n"
+            "**SCOPE — POST-COMBINED CROSS-SIMULATION (project base):**\n"
             "- Use cross-simulation tools: run_combined_*, plot_combined_overlay, "
             "collect_metric_files, compute_comparison_table.\n"
             "- When the user names specific proteins or simulations (e.g. JAK1 and TYK2 only), "
@@ -245,6 +305,7 @@ class MDAnalysisAgent:
         """List simulation paths and display labels for combined HITL planning."""
         from agentic.reporter.reporter_agent import resolve_combined_sim_context
         from src.reporter.combined_reporter import _parse_label_name_map, apply_label_name_map
+        from src.analysis.phylo_tree import resolve_structure_pdb
 
         sim_dirs, labels = resolve_combined_sim_context(state)
         if not sim_dirs:
@@ -262,13 +323,39 @@ class MDAnalysisAgent:
         name_map = _parse_label_name_map(text)
         if name_map:
             labels = apply_label_name_map(labels, name_map)
-        lines = ["**Available simulations (use these exact paths in sim_dirs):**"]
-        for sim_dir, label in zip(sim_dirs, labels):
-            lines.append(f"  - {label}: {sim_dir}")
         base = state.get("multi_sim_base_dir") or state.get("working_directory", ".")
+        pdb_by_label = {
+            str(sp.get("label")): sp.get("pdb")
+            for sp in (state.get("sim_prompts") or [])
+            if sp.get("label") and sp.get("pdb")
+        }
+        lines = [
+            "**Available simulations (use these exact labels / paths — do not invent):**",
+            f"**PDB files (copy into pdb_files exactly):**",
+        ]
+        pdb_list_for_prompt: List[str] = []
+        for sim_dir, label in zip(sim_dirs, labels):
+            pdb = pdb_by_label.get(str(label)) or resolve_structure_pdb(
+                str(label), str(sim_dir), str(base)
+            )
+            if pdb:
+                pdb_list_for_prompt.append(str(pdb))
+            lines.append(
+                f"  - label=`{label}` sim_dir=`{sim_dir}` pdb=`{pdb or 'MISSING'}`"
+            )
+        if pdb_list_for_prompt:
+            lines.append(
+                "Use labels="
+                + str(list(labels))
+                + " and the pdb paths above (base-level .pdb, not {sim}/{label}.pdb)."
+            )
         lines.append(
             f"**Combined output directory:** {Path(base) / 'analysis'} "
             "(use working_dir='.' in combined tool_params)"
+        )
+        lines.append(
+            "Use alignment_json/consensus_json='reference_msa_alignment.json' "
+            "(do not invent consensus_alignment.json)."
         )
         return "\n".join(lines)
 
@@ -346,9 +433,10 @@ class MDAnalysisAgent:
         task: str,
         tool_params: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Fix sim_dirs/labels/working_dir for combined tools (ignore hallucinated paths)."""
+        """Fix sim_dirs/labels/pdb_files/working_dir for combined tools (ignore hallucinated paths)."""
         from agentic.reporter.reporter_agent import resolve_combined_sim_context
-        from src.reporter.combined_reporter import _parse_label_name_map, apply_label_name_map
+        from src.reporter.combined_reporter import _parse_label_name_map
+        from src.analysis.phylo_tree import resolve_structure_pdb
 
         sim_dirs, labels = resolve_combined_sim_context(state)
         text = " ".join(
@@ -358,8 +446,8 @@ class MDAnalysisAgent:
             )
         )
         name_map = _parse_label_name_map(text)
-        if name_map:
-            labels = apply_label_name_map(labels, name_map)
+        # Do NOT rewrite tool labels to display names (KAPCA_ATP). Campaign
+        # folder labels (p17612_ATP) must stay so sim_dirs / pocket_map keys match.
         # HITL chat may name a subset; workflow combined always uses full campaign.
         allow_subset = bool(state.get("hitl_chat_task"))
         sim_dirs, labels = self._filter_sims_for_hitl_task(
@@ -369,6 +457,102 @@ class MDAnalysisAgent:
         params["sim_dirs"] = sim_dirs
         params["labels"] = labels
         params["working_dir"] = self.file_manager.agent_dir if self.file_manager else "."
+
+        base = state.get("multi_sim_base_dir") or state.get("working_directory") or ""
+        if base:
+            params["base_dir"] = str(base)
+
+        # Inject real PDB paths from sim_prompts / resolve_structure_pdb so the
+        # LLM cannot point at {sim}/{label}.pdb when only {base}/{uniprot}.pdb exists.
+        pdb_by_label = {
+            str(sp.get("label")): sp.get("pdb")
+            for sp in (state.get("sim_prompts") or [])
+            if sp.get("label") and sp.get("pdb")
+        }
+        resolved_pdbs: List[str] = []
+        for sim_dir, label in zip(sim_dirs, labels):
+            pdb = pdb_by_label.get(str(label))
+            if not pdb or not Path(pdb).is_file():
+                pdb = resolve_structure_pdb(str(label), str(sim_dir), str(base) if base else None)
+            if pdb and Path(pdb).is_file():
+                resolved_pdbs.append(str(Path(pdb).resolve()))
+        if resolved_pdbs and len(resolved_pdbs) == len(labels):
+            params["pdb_files"] = resolved_pdbs
+        else:
+            # Prefer sim_dirs resolution over hallucinated pdb_files.
+            params.pop("pdb_files", None)
+
+        # Normalize reference_label to an actual campaign label.
+        ref = params.get("reference_label")
+        if ref and labels and str(ref) not in labels:
+            ref_l = str(ref).lower()
+            matches = [
+                lab
+                for lab in labels
+                if str(lab).lower() == ref_l
+                or str(lab).lower().startswith(ref_l + "_")
+                or ref_l.startswith(str(lab).lower() + "_")
+            ]
+            # Also match protein display names from sim_prompts (KAPCA → p17612_ATP).
+            if not matches:
+                for sp in state.get("sim_prompts") or []:
+                    lab = str(sp.get("label") or "")
+                    pname = str(sp.get("protein_name") or "").lower()
+                    if lab in labels and (
+                        pname == ref_l
+                        or pname.startswith(ref_l)
+                        or ref_l.startswith(pname)
+                        or ref_l in pname
+                    ):
+                        matches.append(lab)
+            if matches:
+                params["reference_label"] = matches[0]
+
+        # Keep MSA / pocket tools on the same consensus JSON basename.
+        # LLM plans often invent consensus_alignment.json while tools default to
+        # reference_msa_alignment.json.
+        from src.analysis.consensus_alignment import DEFAULT_ALIGNMENT_JSON
+
+        cjson = params.get("consensus_json") or params.get("alignment_json")
+        if cjson and Path(str(cjson)).name in (
+            "consensus_alignment.json",
+            "consensus_json.json",
+            DEFAULT_ALIGNMENT_JSON,
+        ):
+            params["consensus_json"] = DEFAULT_ALIGNMENT_JSON
+            params["alignment_json"] = DEFAULT_ALIGNMENT_JSON
+        elif params.get("consensus_json") and not params.get("alignment_json"):
+            params["alignment_json"] = params["consensus_json"]
+        elif params.get("alignment_json") and not params.get("consensus_json"):
+            params["consensus_json"] = params["alignment_json"]
+
+        # Flatten hallucinated nested cross_sim/ under analysis working_dir.
+        # Also strip ``analysis/`` prefixes LLMs add when working_dir is already analysis/.
+        for key in (
+            "residue_map_csv",
+            "output_json",
+            "definition_json",
+            "alignment_fasta",
+            "alignment_json",
+            "consensus_json",
+            "pocket_definition_json",
+            "pocket_map_csv",
+            "full_plot_file",
+            "focused_plot_file",
+        ):
+            val = params.get(key)
+            if not val:
+                continue
+            p = Path(str(val))
+            parts = list(p.parts)
+            if "cross_sim" in parts and not p.is_absolute():
+                # Write basename into analysis/; harvest copies into base/cross_sim/.
+                params[key] = p.name
+            elif not p.is_absolute() and (
+                "analysis" in parts or str(val).startswith("./")
+            ):
+                params[key] = p.name
+
         return params
 
     def _task_prefers_existing_combined_data(self, task: str) -> bool:
@@ -420,8 +604,7 @@ class MDAnalysisAgent:
             )
         )
         name_map = _parse_label_name_map(text)
-        if name_map:
-            labels = apply_label_name_map(labels, name_map)
+        # Keep campaign folder labels for tool params (display names break paths).
         allow_subset = bool(state.get("hitl_chat_task"))
         sim_dirs, labels = self._filter_sims_for_hitl_task(
             task, sim_dirs, labels, name_map, allow_subset=allow_subset
@@ -451,6 +634,16 @@ class MDAnalysisAgent:
             "build_consensus_sequence_alignment",
             "plot_reference_msa_alignment",
         }
+        # Pre-combined must not run traj-dependent shared PCA/FEL tools.
+        _PRE_COMBINED_ALLOW = {
+            "build_consensus_sequence_alignment",
+            "define_reference_consensus_pocket",
+            "map_consensus_pocket_residues",
+            "plot_reference_msa_alignment",
+            "build_sequence_phylo_tree",
+            "build_structure_phylo_tree",
+        }
+        is_pre = self._is_pre_combined_phase(state)
 
         recalc = any(
             kw in task.lower()
@@ -468,11 +661,16 @@ class MDAnalysisAgent:
         new_steps: List[Dict[str, Any]] = []
         for step in plan_dict.get("steps") or []:
             tool = step.get("tool_name") or ""
+            if is_pre and tool and tool not in _PRE_COMBINED_ALLOW:
+                logger.info(
+                    "sanitize pre_combined: dropping traj/post tool %s", tool
+                )
+                continue
             if prefer_existing and tool.startswith("calculate_"):
                 continue
             if tool in _CLASSIFICATION_TOOLS and not class_ok:
                 continue
-            if tool in _PHYLO_TOOLS and not phylo_ok:
+            if tool in _PHYLO_TOOLS and not phylo_ok and not is_pre:
                 continue
             if is_combined_analysis_tool(tool):
                 params = dict(step.get("tool_params") or {})
@@ -488,8 +686,114 @@ class MDAnalysisAgent:
             elif not tool.startswith("calculate_"):
                 new_steps.append(step)
 
+        # Ensure pre_combined always has the core pocket/MSA chain when empty.
+        if is_pre and not any(
+            (s.get("tool_name") or "") in _PRE_COMBINED_ALLOW for s in new_steps
+        ):
+            new_steps = [
+                {
+                    "name": "Build consensus sequence alignment",
+                    "description": "Star MSA with reference pocket mapping basis.",
+                    "tool_name": "build_consensus_sequence_alignment",
+                    "tool_params": {
+                        "working_dir": ".",
+                        "reference_label": labels[0] if labels else "reference",
+                        "labels": labels,
+                        "sim_dirs": sim_dirs,
+                        "alignment_json": "reference_msa_alignment.json",
+                        "consensus_json": "reference_msa_alignment.json",
+                    },
+                    "reason": "Pre-combined requires consensus MSA before pocket map.",
+                },
+                {
+                    "name": "Define reference consensus pocket",
+                    "description": "Map reference ligand pocket onto aligned sequences.",
+                    "tool_name": "define_reference_consensus_pocket",
+                    "tool_params": {
+                        "working_dir": ".",
+                        "reference_label": labels[0] if labels else "reference",
+                        "sim_dir": sim_dirs[0] if sim_dirs else ".",
+                        "consensus_json": "reference_msa_alignment.json",
+                        "ligand_selection": "resname ATP",
+                        "labels": labels,
+                        "sim_dirs": sim_dirs,
+                    },
+                    "reason": "Shared pocket definition for per-sim traj metrics.",
+                },
+                {
+                    "name": "Map consensus pocket residues",
+                    "description": "Export per-label pocket residue lists.",
+                    "tool_name": "map_consensus_pocket_residues",
+                    "tool_params": {
+                        "working_dir": ".",
+                        "definition_json": "reference_pocket_definition.json",
+                        "labels": labels,
+                    },
+                    "reason": "Produces pocket_map inputs harvested into cross_sim/.",
+                },
+                {
+                    "name": "Plot global and pocket MSA",
+                    "description": "Paper-style global MSA + pocket/high-consensus MSA panels.",
+                    "tool_name": "plot_reference_msa_alignment",
+                    "tool_params": {
+                        "working_dir": ".",
+                        "alignment_fasta": "reference_msa_alignment.fasta",
+                        "pocket_definition_json": "reference_pocket_definition.json",
+                        "full_plot_file": "reference_msa_full.png",
+                        "focused_plot_file": "reference_msa_pocket.png",
+                    },
+                    "reason": "User requested global + pocket MSA plots.",
+                },
+            ]
+
+        # Always ensure MSA plots exist when pre_combined (LLM often omits them).
+        if is_pre and not any(
+            (s.get("tool_name") or "") == "plot_reference_msa_alignment" for s in new_steps
+        ):
+            new_steps.append(
+                {
+                    "name": "Plot global and pocket MSA",
+                    "description": "Paper-style global MSA + pocket/high-consensus MSA panels.",
+                    "tool_name": "plot_reference_msa_alignment",
+                    "tool_params": {
+                        "working_dir": ".",
+                        "alignment_fasta": "reference_msa_alignment.fasta",
+                        "pocket_definition_json": "reference_pocket_definition.json",
+                        "full_plot_file": "reference_msa_full.png",
+                        "focused_plot_file": "reference_msa_pocket.png",
+                    },
+                    "reason": "User requested global + pocket MSA plots.",
+                }
+            )
+
+        # Force basenames so LLM ``./analysis/foo.json`` does not become
+        # ``analysis/analysis/foo.json`` under the combined working_dir.
+        for step in new_steps:
+            params = dict(step.get("tool_params") or {})
+            changed = False
+            for key in (
+                "definition_json",
+                "consensus_json",
+                "alignment_json",
+                "alignment_fasta",
+                "output_json",
+                "residue_map_csv",
+                "pocket_definition_json",
+                "full_plot_file",
+                "focused_plot_file",
+            ):
+                val = params.get(key)
+                if not val:
+                    continue
+                p = Path(str(val))
+                if not p.is_absolute() and p.name != str(val):
+                    params[key] = p.name
+                    changed = True
+            if changed:
+                step["tool_params"] = params
+
         has_combined = any(is_combined_analysis_tool(s.get("tool_name", "")) for s in new_steps)
-        if not has_combined and metrics:
+        if not has_combined and metrics and not is_pre:
             new_steps.append({
                 "name": f"Combined {'/'.join(metrics)} overlay",
                 "description": (
@@ -563,8 +867,30 @@ class MDAnalysisAgent:
         exposed, then executes (deterministic pipeline is the fallback).
         Otherwise: runs the regular per-simulation LLM-guided analysis.
         """
-        # ── Combined multi-sim analysis ───────────────────────────────────
-        if state.get("multi_sim_phase") == "combined_analysis":
+        # ── Combined multi-sim analysis (pre or post) ─────────────────────
+        if self._is_combined_analysis_phase(state):
+            # Post-combined with Ward/feature-table intent: prefer deterministic
+            # collect→cluster path (LLM often invents wrong tools/paths).
+            if not self._is_pre_combined_phase(state):
+                from agentic.planner.planning_guidelines import (
+                    detect_classification_requested,
+                    classification_metric_groups_for_goal,
+                )
+
+                texts = (
+                    state.get("user_goal_original") or "",
+                    state.get("post_combined_plan") or "",
+                    state.get("combined_analysis_plan") or "",
+                    state.get("master_enriched_prompt") or "",
+                )
+                if detect_classification_requested(*texts) or (
+                    classification_metric_groups_for_goal(*texts) is not None
+                ):
+                    logger.info(
+                        "Post-combined: classification/Ward requested — "
+                        "using deterministic feature table + clustering"
+                    )
+                    return self._run_combined_analysis(state)
             return self._run_combined_analysis_via_llm(state)
 
         # ── Regular per-sim analysis ──────────────────────────────────────
@@ -700,7 +1026,7 @@ class MDAnalysisAgent:
                 "working_directory": analysis_dir,
                 "include_combined_tools": bool(
                     state.get("hitl_view_combined")
-                    or state.get("multi_sim_phase") == "combined_analysis"
+                    or self._is_combined_analysis_phase(state)
                     or state.get("hitl_combined_execute")
                 ),
                 "user_goal": state.get("user_goal_original") or state.get("user_goal", ""),
@@ -989,26 +1315,52 @@ Output as JSON:
     # ── Combined multi-sim analysis ───────────────────────────────────────
 
     def _build_combined_analysis_task(self, state: MDState) -> str:
-        """Compose the sole planning intent for combined LLM analysis."""
+        """Compose the sole planning intent for combined LLM analysis (pre or post)."""
         parts = []
         original = (state.get("user_goal_original") or "").strip()
-        combined_plan = (state.get("combined_analysis_plan") or "").strip()
+        is_pre = self._is_pre_combined_phase(state)
+        if is_pre:
+            stage_plan = (
+                state.get("pre_combined_plan")
+                or state.get("combined_analysis_plan")
+                or ""
+            ).strip()
+            stage_label = "Pre-combined (pocket / MSA / consensus before per-sim traj)"
+        else:
+            stage_plan = (
+                state.get("post_combined_plan")
+                or state.get("combined_analysis_plan")
+                or ""
+            ).strip()
+            stage_label = "Post-combined (compare / overlay / family report after all sims)"
         if original:
             parts.append(f"Original study goal:\n{original}")
-        if combined_plan:
-            parts.append(f"Combined analysis plan from master planner:\n{combined_plan}")
+        if stage_plan:
+            parts.append(f"{stage_label} plan from master planner:\n{stage_plan}")
         if not parts:
             parts.append(
                 (state.get("user_goal") or state.get("analysis_instructions") or "").strip()
-                or "Compare simulations with combined overlay plots of requested metrics."
+                or (
+                    "Build shared pocket/MSA/consensus artifacts under cross_sim/."
+                    if is_pre
+                    else "Compare simulations with combined overlay plots of requested metrics."
+                )
             )
-        parts.append(
-            "Use existing per-simulation analysis outputs under each sim's analysis/ "
-            "directory. Prefer run_combined_analysis / plot_combined_overlay over "
-            "recalculating metrics from trajectories. Plan ONLY metrics and deliverables "
-            "explicitly requested — do not add classification, clustering, ligand RMSF, "
-            "DCCM, or other extras unless the goal asks for them."
-        )
+        if is_pre:
+            parts.append(
+                "Write shared artifacts under cross_sim/ (pocket_map.json, MSA, consensus "
+                "residues). Prefer build_consensus_sequence_alignment, "
+                "define_reference_consensus_pocket, map_consensus_pocket_residues. "
+                "Do not run Ward clustering, feature tables, or per-sim trajectory metrics here."
+            )
+        else:
+            parts.append(
+                "Use existing per-simulation analysis outputs under each sim's analysis/ "
+                "directory (prefer analysis/avg/ when multi-rep). Prefer run_combined_analysis "
+                "/ plot_combined_overlay over recalculating metrics from trajectories. Plan ONLY "
+                "metrics and deliverables explicitly requested — do not add classification, "
+                "clustering, ligand RMSF, DCCM, or other extras unless the goal asks for them."
+            )
         return "\n\n".join(parts)
 
     def _build_combined_analysis_planning_prompt(
@@ -1020,17 +1372,24 @@ Output as JSON:
         """LLM planning prompt for workflow combined analysis (tools + sim context)."""
         tool_metadata = self._get_analysis_tool_metadata(state)
         tools_list_str = self._format_tools_list_detailed(tool_metadata)
-        scope_note = self._get_combined_hitl_scope_note()
+        scope_note = self._get_combined_hitl_scope_note(state)
         combined_context = self._format_combined_sim_context_for_hitl(state)
         class_guide = ""
         if detect_classification_requested(
             task,
             state.get("user_goal_original") or "",
-            state.get("combined_analysis_plan") or "",
+            state.get("post_combined_plan")
+            or state.get("combined_analysis_plan")
+            or "",
         ):
             class_guide = "\n" + get_classification_tool_guide()
 
-        return f"""You are the Analysis Agent in COMBINED multi-simulation mode.
+        mode_title = (
+            "PRE-COMBINED (pocket/MSA/consensus)"
+            if self._is_pre_combined_phase(state)
+            else "POST-COMBINED multi-simulation"
+        )
+        return f"""You are the Analysis Agent in {mode_title} mode.
 
 **OBJECTIVE (plan and execute only this):**
 {task}
@@ -1042,10 +1401,8 @@ Output as JSON:
 {tools_list_str}
 
 **COMBINED PLANNING RULES:**
-- Prefer cross-simulation tools (run_combined_*, plot_combined_overlay, collect_metric_files,
-  compute_comparison_table). Do NOT call per-sim calculate_* unless the user asked to recompute
-  from trajectories.
-- For overlay plots use run_combined_analysis with metrics limited to what was requested
+- Prefer cross-simulation tools appropriate to this stage.
+- For post overlays use run_combined_analysis with metrics limited to what was requested
   (e.g. metrics=["rmsd","rmsf"] only) and the exact sim_dirs/labels listed above.
 - Classification / clustering tools are allowed ONLY when the objective explicitly asks to
   classify or cluster simulations — never because the goal mentions an HPC cluster.
@@ -1129,11 +1486,17 @@ Output as JSON:
         labels: List[str],
         success: bool,
     ) -> None:
-        """Persist a disk marker and advance multi-sim phase to combined reporter."""
+        """Persist disk markers and advance multi-sim phase (pre → sims, post → reporter)."""
         import json as _json
         from datetime import datetime as _dt
 
-        marker = Path(analysis_dir) / "combined_analysis_complete.json"
+        is_pre = self._is_pre_combined_phase(state)
+        marker_name = (
+            "pre_combined_analysis_complete.json"
+            if is_pre
+            else "combined_analysis_complete.json"
+        )
+        marker = Path(analysis_dir) / marker_name
         try:
             marker.write_text(
                 _json.dumps(
@@ -1143,6 +1506,7 @@ Output as JSON:
                         "labels": labels,
                         "sim_dirs": sim_dirs,
                         "planning_mode": "llm",
+                        "stage": "pre_combined" if is_pre else "post_combined",
                     },
                     indent=2,
                 )
@@ -1150,9 +1514,83 @@ Output as JSON:
                 encoding="utf-8",
             )
         except Exception as exc:
-            logger.warning("Could not write combined_analysis_complete.json: %s", exc)
+            logger.warning("Could not write %s: %s", marker_name, exc)
 
         progress = state.get("multi_sim_progress") or {}
+
+        if is_pre:
+            from agentic.multi_sim_paths import resolve_multi_sim_base_dir
+            from src.analysis.cross_sim_artifacts import (
+                harvest_pre_artifacts_into_cross_sim,
+                mark_pre_combined_complete,
+                normalize_pre_artifacts_to_contract,
+            )
+
+            base = resolve_multi_sim_base_dir(state)
+            try:
+                copied = harvest_pre_artifacts_into_cross_sim(
+                    base, search_roots=[analysis_dir, base]
+                )
+                normalize_pre_artifacts_to_contract(base)
+                from src.analysis.cross_sim_artifacts import (
+                    discover_cross_sim_artifacts,
+                    pre_combined_done_on_disk,
+                )
+
+                artifacts = discover_cross_sim_artifacts(base)
+                artifact_ok = bool(
+                    artifacts.get("pocket_map_path")
+                    or artifacts.get("msa_fasta_path")
+                    or artifacts.get("consensus_residues_path")
+                    or copied
+                )
+                # Prefer on-disk contract over step-level success (LLM may include
+                # optional traj steps that fail while MSA/pocket succeeded).
+                effective_success = bool(success) or artifact_ok
+                # If nothing useful was produced, keep success=False so the
+                # supervisor does not advance past pre_combined.
+                if not artifact_ok:
+                    effective_success = False
+                mark_pre_combined_complete(
+                    base,
+                    labels=labels,
+                    extra={
+                        "success": effective_success,
+                        "harvested": copied,
+                        "analysis_dir": analysis_dir,
+                        "step_success": bool(success),
+                    },
+                )
+                success = effective_success
+                logger.info(
+                    "Pre-combined complete: harvested %s artifact(s) into cross_sim/ "
+                    "(success=%s, done_on_disk=%s)",
+                    len(copied),
+                    effective_success,
+                    pre_combined_done_on_disk(base),
+                )
+            except Exception as exc:
+                logger.warning("Pre-combined harvest/mark failed: %s", exc)
+                try:
+                    mark_pre_combined_complete(
+                        base, labels=labels, extra={"success": False, "error": str(exc)}
+                    )
+                except Exception:
+                    pass
+                success = False
+
+            pre = progress.setdefault("pre_combined", {})
+            pre["analysis"] = "done" if success else "failed"
+            if success:
+                progress["phase"] = "executing_sims"
+                progress["active_agent"] = None
+                progress["active_sim_label"] = None
+            state["multi_sim_progress"] = progress
+            # Keep multi_sim_phase=pre_combined until supervisor advances so
+            # the supervisor branch that checks pre_combined_done_on_disk runs.
+            state["run_pre_combined"] = True
+            return
+
         combined = progress.setdefault("combined", {})
         combined["analysis"] = "done"
         combined["reporter"] = combined.get("reporter") or "pending"
@@ -1163,6 +1601,7 @@ Output as JSON:
         state["multi_sim_phase"] = "combined_reporter"
         state["current_agent_idx"] = 1
         state["run_combined_analysis"] = True
+        state["run_post_combined"] = True
 
     def _populate_combined_results_from_execution(
         self,
@@ -1233,35 +1672,46 @@ Output as JSON:
         """
         Combined analysis via LLM planning with combined tools exposed.
 
-        Falls back to the deterministic pipeline if planning/execution fails.
+        Used for both ``pre_combined`` and ``post_combined`` / ``combined_analysis``.
+        Falls back to the deterministic pipeline if planning/execution fails (post only).
         """
         from agentic.multi_sim_paths import resolve_multi_sim_base_dir
         from agentic.utils.conversation_logger import set_log_file
         from agentic.reporter.reporter_agent import resolve_combined_sim_context
+        from src.analysis.cross_sim_artifacts import ensure_cross_sim_dir
 
         working_dir = resolve_multi_sim_base_dir(state)
         if state.get("is_multi_simulation"):
             state["multi_sim_base_dir"] = working_dir
             state["working_directory"] = working_dir
         set_log_file(str(Path(working_dir) / "agent_conversation.log"))
+        ensure_cross_sim_dir(working_dir)
 
         analysis_dir = str(Path(working_dir) / "analysis")
         Path(analysis_dir).mkdir(parents=True, exist_ok=True)
         state["analysis_dir"] = analysis_dir
         state["analysis_directory"] = analysis_dir
         state["skip_pbc_wrap"] = True
+        state["hitl_view_combined"] = True  # expose combined tools to executor
 
+        is_pre = self._is_pre_combined_phase(state)
         sim_dirs, labels = resolve_combined_sim_context(state)
         task = self._build_combined_analysis_task(state)
+        stage_name = (
+            "Pre-Combined Analysis (LLM)"
+            if is_pre
+            else "Combined Multi-Simulation Analysis (LLM)"
+        )
 
         log_agent_start(
             "analysis",
-            "Combined Multi-Simulation Analysis (LLM)",
+            stage_name,
             {
                 "sim_dirs": sim_dirs,
                 "labels": labels,
                 "output_dir": analysis_dir,
                 "planning": "llm",
+                "stage": "pre_combined" if is_pre else "post_combined",
             },
         )
 
@@ -1272,7 +1722,7 @@ Output as JSON:
 
             log_agent_action(
                 "analysis",
-                "Generated combined analysis plan",
+                f"Generated {'pre-' if is_pre else ''}combined analysis plan",
                 {
                     "steps": len(plan.steps),
                     "tools": [s.tool_name for s in plan.steps],
@@ -1283,22 +1733,35 @@ Output as JSON:
 
             exec_plan = state.get("execution_plan") or {}
             exec_plan.setdefault("structured_plans", {})["analysis"] = plan.model_dump()
-            exec_plan["format"] = "combined_analysis_llm"
+            exec_plan["format"] = (
+                "pre_combined_analysis_llm" if is_pre else "combined_analysis_llm"
+            )
             state["execution_plan"] = exec_plan
 
             if not plan.steps:
+                if is_pre:
+                    logger.warning(
+                        "Pre-combined LLM plan has no steps — trying deterministic fallback"
+                    )
+                    return self._run_pre_combined_deterministic(
+                        state,
+                        analysis_dir=analysis_dir,
+                        sim_dirs=sim_dirs,
+                        labels=labels,
+                    )
                 logger.warning("Combined LLM plan has no steps — deterministic fallback")
                 return self._run_combined_analysis(state)
 
             result = self._execute_analysis_plan(agent_input, plan, state)
             self._save_hitl_execution_artifacts(plan, result, task)
-            self._populate_combined_results_from_execution(
-                state,
-                sim_dirs=sim_dirs,
-                labels=labels,
-                analysis_dir=analysis_dir,
-                result=result,
-            )
+            if not is_pre:
+                self._populate_combined_results_from_execution(
+                    state,
+                    sim_dirs=sim_dirs,
+                    labels=labels,
+                    analysis_dir=analysis_dir,
+                    result=result,
+                )
 
             state["errors"] = [
                 e
@@ -1308,25 +1771,47 @@ Output as JSON:
                 )
             ]
             for issue in result.issues or []:
-                state.setdefault("warnings", []).append(f"Combined analysis: {issue}")
+                prefix = "Pre-combined" if is_pre else "Combined analysis"
+                state.setdefault("warnings", []).append(f"{prefix}: {issue}")
 
             success = bool(result.success)
-            # Always mark complete after a full LLM plan attempt so the supervisor
-            # advances to combined reporter instead of re-planning forever.
-            self._mark_combined_analysis_complete(
-                state,
-                analysis_dir=analysis_dir,
-                sim_dirs=sim_dirs,
-                labels=labels,
-                success=success,
-            )
-            log_agent_completion(
-                "analysis", "Combined Multi-Simulation Analysis (LLM)", state, success
-            )
+            if is_pre:
+                self._mark_combined_analysis_complete(
+                    state,
+                    analysis_dir=analysis_dir,
+                    sim_dirs=sim_dirs,
+                    labels=labels,
+                    success=success,
+                )
+                from src.analysis.cross_sim_artifacts import pre_combined_done_on_disk
+                from agentic.multi_sim_paths import resolve_multi_sim_base_dir as _base
+
+                if not pre_combined_done_on_disk(_base(state)):
+                    logger.warning(
+                        "Pre-combined LLM left no usable artifacts — "
+                        "running deterministic pocket/MSA fallback"
+                    )
+                    return self._run_pre_combined_deterministic(
+                        state,
+                        analysis_dir=analysis_dir,
+                        sim_dirs=sim_dirs,
+                        labels=labels,
+                    )
+            else:
+                self._mark_combined_analysis_complete(
+                    state,
+                    analysis_dir=analysis_dir,
+                    sim_dirs=sim_dirs,
+                    labels=labels,
+                    success=success,
+                )
+            log_agent_completion("analysis", stage_name, state, success)
             if hitl_should_interact(state):
                 state["next_node"] = "human_analysis_check"
+            elif is_pre:
+                # Supervisor advances to per-sim execution after disk marker.
+                state["next_node"] = "supervisor"
             else:
-                # Go straight to reporter — avoid another supervisor activate cycle.
                 state["next_node"] = "reporter"
             return state
 
@@ -1334,14 +1819,350 @@ Output as JSON:
             import traceback
 
             logger.error(
-                "Combined LLM analysis failed (%s) — falling back to deterministic pipeline\n%s",
+                "%s failed (%s) — %s\n%s",
+                stage_name,
                 exc,
+                "deterministic pre fallback" if is_pre else "falling back to deterministic pipeline",
                 traceback.format_exc(),
             )
+            if is_pre:
+                state.setdefault("warnings", []).append(
+                    f"Pre-combined analysis failed ({exc}); trying deterministic fallback"
+                )
+                return self._run_pre_combined_deterministic(
+                    state,
+                    analysis_dir=analysis_dir,
+                    sim_dirs=sim_dirs,
+                    labels=labels,
+                )
             state.setdefault("warnings", []).append(
                 f"Combined LLM analysis failed ({exc}); using deterministic fallback"
             )
             return self._run_combined_analysis(state)
+
+    def _llm_select_classification_features(
+        self,
+        *,
+        analysis_dir: str,
+        class_result: Dict[str, Any],
+        user_goal: str,
+        metric_groups: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Ask the LLM to choose clustering features with written scientific reasoning.
+
+        Uses the collected raw feature CSV + column definitions. Prefers
+        dynamics descriptors similar to comparative kinase studies (pocket COM /
+        orientation, consensus RMSF, pocket χ₁, N↔C DCCM, dihedral landscape
+        entropy) but may add/drop columns when justified. Writes
+        ``classification_feature_selection.json``.
+        """
+        if not (self.llm and getattr(self.llm, "available", True)):
+            return None
+
+        raw_path = Path(class_result.get("output_file") or "")
+        if not raw_path.is_file():
+            raw_path = Path(analysis_dir) / "classification_features.csv"
+        if not raw_path.is_file():
+            return None
+
+        from src.analysis.classification_collector import (
+            CLASSIFICATION_FEATURE_DEFINITIONS,
+            PAPER_WARD4_FEATURE_COLUMNS,
+        )
+
+        # Presence stats per column
+        import csv as _csv
+        import numpy as np
+
+        with open(raw_path, newline="", encoding="utf-8") as fh:
+            reader = _csv.DictReader(fh)
+            rows = list(reader)
+            fieldnames = list(reader.fieldnames or [])
+        meta = {"label", "sim_directory", "n_features_present"}
+        candidates: List[Dict[str, Any]] = []
+        for col in fieldnames:
+            if col in meta:
+                continue
+            present = 0
+            for r in rows:
+                v = (r.get(col) or "").strip()
+                if not v or v.lower() in {"nan", "none", "null"}:
+                    continue
+                try:
+                    if np.isfinite(float(v)):
+                        present += 1
+                except (TypeError, ValueError):
+                    continue
+            if present < 2:
+                continue
+            meta_def = CLASSIFICATION_FEATURE_DEFINITIONS.get(col, {})
+            candidates.append(
+                {
+                    "column": col,
+                    "n_present": present,
+                    "n_sims": len(rows),
+                    "description": meta_def.get("description", ""),
+                    "metric_group": meta_def.get("metric_group", ""),
+                    "unit": meta_def.get("unit", ""),
+                    "paper_ward4_like": col in PAPER_WARD4_FEATURE_COLUMNS
+                    or col.replace(
+                        "mean_ligand_axis_angle", "ligand_axis_angle_mean"
+                    )
+                    in PAPER_WARD4_FEATURE_COLUMNS,
+                }
+            )
+        if len(candidates) < 2:
+            return None
+
+        paper_hint = ", ".join(PAPER_WARD4_FEATURE_COLUMNS)
+        prompt = f"""You are selecting features for unsupervised hierarchical clustering of protein–ATP MD simulations.
+
+USER GOAL (excerpt):
+{(user_goal or "")[:2500]}
+
+REQUESTED METRIC GROUPS: {sorted(metric_groups or [])}
+
+AVAILABLE FEATURE COLUMNS (only those with ≥2 finite values):
+{json.dumps(candidates, indent=2)[:12000]}
+
+PAPER-STYLE REFERENCE SET (guidance only — do NOT require an exact match):
+{paper_hint}
+
+Rules:
+1. Prefer comparative dynamics descriptors: pocket–ligand COM mean/std, axis-angle mean/std,
+   consensus RMSF mean/std, pocket χ₁, N↔C DCCM correlation, dihedral PCA grid entropy.
+2. You may include closely related extras (e.g. mean_abs_dccm, major_basin_population) or
+   drop redundant/static columns (residue_count, net_charge, SASA/hbonds unless clearly useful).
+3. Prefer reference_pocket_* COM/angle columns over plain ligand_pocket_* when both exist.
+4. Prefer chi1_pocket_circ_mean_deg over domain-wide chi1_circ_mean_deg when both exist.
+5. Select typically 6–12 columns; never invent column names not in AVAILABLE.
+6. Write concise scientific reasoning for the selection.
+
+Return ONLY JSON:
+{{
+  "reasoning": "2–6 sentences explaining the scientific rationale",
+  "feature_columns": ["col_a", "col_b", "..."],
+  "dropped_rationale": "optional brief note on what was left out"
+}}
+"""
+        try:
+            content = self.llm.prompt_raw(
+                prompt, temperature=0.2, max_tokens=4096, format="json"
+            )
+        except Exception as exc:
+            logger.warning("LLM feature selection prompt failed: %s", exc)
+            return None
+
+        plan = self._extract_plan_json(content) if content else {}
+        if not isinstance(plan, dict):
+            return None
+        cols = plan.get("feature_columns") or plan.get("selected_features") or []
+        if not isinstance(cols, list):
+            return None
+        allowed = {c["column"] for c in candidates}
+        selected = [str(c) for c in cols if str(c) in allowed]
+        # Heuristic fallback if LLM returned nothing usable
+        if len(selected) < 2:
+            preferred = [
+                "reference_pocket_ligand_distance_mean_A",
+                "reference_pocket_ligand_distance_std_A",
+                "reference_pocket_ligand_axis_angle_mean_deg",
+                "reference_pocket_mean_ligand_axis_angle_deg",
+                "reference_pocket_std_ligand_axis_angle_deg",
+                "consensus_rmsf_mean_A",
+                "consensus_rmsf_std_A",
+                "chi1_pocket_circ_mean_deg",
+                "dccm_N_C_mean_corr",
+                "pca_grid_entropy",
+                "ligand_pocket_distance_mean_A",
+                "ligand_pocket_distance_std_A",
+            ]
+            selected = [c for c in preferred if c in allowed]
+            if len(selected) < 2:
+                selected = [c["column"] for c in candidates[:8]]
+            plan["reasoning"] = (
+                (plan.get("reasoning") or "")
+                + " [fallback: preferred dynamics columns applied after invalid LLM list]"
+            ).strip()
+
+        out = {
+            "reasoning": str(plan.get("reasoning") or "").strip(),
+            "feature_columns": selected,
+            "dropped_rationale": str(plan.get("dropped_rationale") or "").strip(),
+            "n_candidates": len(candidates),
+            "n_selected": len(selected),
+            "metric_groups": sorted(metric_groups or []),
+            "source_features_csv": str(raw_path),
+        }
+        try:
+            out_path = Path(analysis_dir) / "classification_feature_selection.json"
+            out_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
+            out["selection_file"] = str(out_path)
+        except Exception as exc:
+            logger.debug("Could not write feature selection JSON: %s", exc)
+        return out
+
+    def _run_pre_combined_deterministic(
+        self,
+        state: MDState,
+        *,
+        analysis_dir: str,
+        sim_dirs: List[str],
+        labels: List[str],
+    ) -> MDState:
+        """Deterministic MSA + pocket map when LLM pre_combined fails or is empty."""
+        from src.analysis.consensus_alignment import build_consensus_sequence_alignment
+        from src.analysis.consensus_pocket import (
+            define_reference_consensus_pocket,
+            map_consensus_pocket_residues,
+        )
+        from src.analysis.cross_sim_artifacts import pre_combined_done_on_disk
+        from src.analysis.phylo_tree import resolve_structure_pdb
+        from agentic.multi_sim_paths import resolve_multi_sim_base_dir
+
+        base = resolve_multi_sim_base_dir(state)
+        Path(analysis_dir).mkdir(parents=True, exist_ok=True)
+
+        ref_label = labels[0] if labels else "reference"
+        for sp in state.get("sim_prompts") or []:
+            # Prefer KAPCA / p17612-style reference when present in the goal.
+            lab = str(sp.get("label") or "")
+            if lab.lower().startswith("p17612") or "kapca" in str(
+                sp.get("protein_name") or ""
+            ).lower():
+                ref_label = lab
+                break
+
+        pdb_by_label = {
+            str(sp.get("label")): sp.get("pdb")
+            for sp in (state.get("sim_prompts") or [])
+            if sp.get("label") and sp.get("pdb")
+        }
+        pdb_files: List[str] = []
+        for sim_dir, label in zip(sim_dirs, labels):
+            pdb = pdb_by_label.get(str(label))
+            if not pdb or not Path(str(pdb)).is_file():
+                pdb = resolve_structure_pdb(str(label), str(sim_dir), str(base))
+            if pdb and Path(pdb).is_file():
+                pdb_files.append(str(Path(pdb).resolve()))
+
+        issues: List[str] = []
+        try:
+            align_kwargs: Dict[str, Any] = {
+                "working_dir": analysis_dir,
+                "reference_label": ref_label,
+                "labels": labels,
+                "sim_dirs": sim_dirs,
+                "base_dir": str(base),
+                "alignment_json": "reference_msa_alignment.json",
+                "consensus_json": "reference_msa_alignment.json",
+            }
+            if len(pdb_files) == len(labels) and labels:
+                align_kwargs["pdb_files"] = pdb_files
+            align_res = build_consensus_sequence_alignment.invoke(align_kwargs)
+            if not (align_res or {}).get("success"):
+                issues.append(
+                    f"build_consensus_sequence_alignment: "
+                    f"{(align_res or {}).get('error') or align_res}"
+                )
+            else:
+                ref_sim = sim_dirs[labels.index(ref_label)] if ref_label in labels else sim_dirs[0]
+                pocket_res = define_reference_consensus_pocket.invoke(
+                    {
+                        "working_dir": analysis_dir,
+                        "reference_label": ref_label,
+                        "sim_dir": ref_sim,
+                        "consensus_json": "reference_msa_alignment.json",
+                        "ligand_selection": "resname ATP",
+                    }
+                )
+                if not (pocket_res or {}).get("success"):
+                    issues.append(
+                        f"define_reference_consensus_pocket: "
+                        f"{(pocket_res or {}).get('error') or pocket_res}"
+                    )
+                else:
+                    map_res = map_consensus_pocket_residues.invoke(
+                        {
+                            "working_dir": analysis_dir,
+                            "definition_json": "reference_pocket_definition.json",
+                            "labels": labels,
+                        }
+                    )
+                    if not (map_res or {}).get("success"):
+                        issues.append(
+                            f"map_consensus_pocket_residues: "
+                            f"{(map_res or {}).get('error') or map_res}"
+                        )
+                    else:
+                        # Global MSA + pocket/high-consensus MSA panels (paper fig style).
+                        try:
+                            from src.analysis.msa_plotting import (
+                                plot_reference_msa_alignment,
+                            )
+
+                            plot_res = plot_reference_msa_alignment.invoke(
+                                {
+                                    "working_dir": analysis_dir,
+                                    "alignment_fasta": "reference_msa_alignment.fasta",
+                                    "pocket_definition_json": (
+                                        "reference_pocket_definition.json"
+                                    ),
+                                    "full_plot_file": "reference_msa_full.png",
+                                    "focused_plot_file": "reference_msa_pocket.png",
+                                }
+                            )
+                            if not (plot_res or {}).get("success"):
+                                issues.append(
+                                    f"plot_reference_msa_alignment: "
+                                    f"{(plot_res or {}).get('error') or plot_res}"
+                                )
+                        except Exception as plot_exc:
+                            issues.append(f"plot_reference_msa_alignment: {plot_exc}")
+        except Exception as exc:
+            issues.append(str(exc))
+            logger.exception("Deterministic pre_combined failed")
+
+        for issue in issues:
+            state.setdefault("warnings", []).append(f"Pre-combined deterministic: {issue}")
+
+        self._mark_combined_analysis_complete(
+            state,
+            analysis_dir=analysis_dir,
+            sim_dirs=sim_dirs,
+            labels=labels,
+            success=len(issues) == 0,
+        )
+
+        if not pre_combined_done_on_disk(base):
+            # Last resort: do not infinite-loop the supervisor — skip pre and continue.
+            logger.error(
+                "Deterministic pre_combined produced no artifacts — skipping pre phase"
+            )
+            state.setdefault("warnings", []).append(
+                "Pre-combined skipped after deterministic failure; continuing without pocket map"
+            )
+            from src.analysis.cross_sim_artifacts import mark_pre_combined_complete
+
+            mark_pre_combined_complete(
+                base,
+                labels=labels,
+                extra={
+                    "success": True,
+                    "skipped": True,
+                    "reason": "deterministic_failed",
+                    "issues": issues,
+                },
+            )
+
+        log_agent_completion(
+            "analysis",
+            "Pre-Combined Analysis (deterministic)",
+            state,
+            pre_combined_done_on_disk(base),
+        )
+        state["next_node"] = "supervisor"
+        return state
 
     def _run_combined_analysis(self, state: MDState) -> MDState:
         """
@@ -1962,6 +2783,16 @@ Output as JSON:
                     state.get("combined_analysis_plan") or "",
                     state.get("user_goal") or "",
                 )
+                # Consensus-mapped pocket COM/angle when modular / reference pocket asked.
+                if class_groups and (
+                    "reference_pocket" in class_groups
+                    or "consensus_rmsf" in class_groups
+                    or "consensus_torsions" in class_groups
+                    or "consensus_dccm" in class_groups
+                    or "dihedral_pca" in class_groups
+                ):
+                    cp_req = dict(cp_req)
+                    cp_req["requested"] = True
                 if cp_req.get("requested"):
                     from .tools import run_consensus_pocket_metrics_batch
 
@@ -1972,25 +2803,61 @@ Output as JSON:
                         labels=labels,
                         default=cp_req.get("reference_label") or "q8nb16",
                     )
+                    # Prefer reference_label from an existing pocket definition
+                    # (pre_combined may have written p17612_ATP while goal parse
+                    # returns bare UniProt p17612).
+                    def_json = Path(analysis_dir) / "reference_pocket_definition.json"
+                    if def_json.is_file():
+                        try:
+                            with open(def_json, encoding="utf-8") as _dfh:
+                                _def = json.load(_dfh)
+                            def_ref = str((_def or {}).get("reference_label") or "").strip()
+                            if def_ref:
+                                cp_ref = def_ref
+                        except Exception:
+                            pass
+
+                    def _match_ref_label(candidate: str, lab: str, sd: str) -> bool:
+                        c = str(candidate or "").lower().strip()
+                        if not c:
+                            return False
+                        l = str(lab or "").lower().strip()
+                        name = Path(sd).name.lower()
+                        if c in {l, name}:
+                            return True
+                        for other in (l, name):
+                            if other.startswith(c + "_") or c.startswith(other + "_"):
+                                return True
+                            for suf in ("_atp", "_adp", "_amp"):
+                                if other.endswith(suf) and other[: -len(suf)] == c:
+                                    return True
+                        return False
+
                     if cp_ref not in {str(l) for l in labels}:
                         from src.reporter.combined_reporter import resolve_display_label
 
-                        cp_ref = resolve_display_label(cp_ref, _name_map_a)
+                        mapped = resolve_display_label(cp_ref, _name_map_a)
+                        if mapped in {str(l) for l in labels}:
+                            cp_ref = mapped
                     ref_sim_dir = next(
-                        (sd for sd, lab in zip(sim_dirs, labels) if str(lab) == str(cp_ref)),
+                        (
+                            sd
+                            for sd, lab in zip(sim_dirs, labels)
+                            if _match_ref_label(cp_ref, lab, sd)
+                        ),
                         "",
                     )
                     if not ref_sim_dir:
-                        uid_ref = cp_req.get("reference_label") or "q8nb16"
+                        uid_ref = cp_req.get("reference_label") or cp_ref or "q8nb16"
                         ref_sim_dir = next(
                             (
                                 sd
-                                for sd in sim_dirs
-                                if Path(sd).name.lower() == str(uid_ref).lower()
+                                for sd, lab in zip(sim_dirs, labels)
+                                if _match_ref_label(uid_ref, lab, sd)
                             ),
                             "",
                         )
-                        if ref_sim_dir and cp_ref not in {str(l) for l in labels}:
+                        if ref_sim_dir:
                             idx = sim_dirs.index(ref_sim_dir)
                             cp_ref = labels[idx]
                     cp_batch = run_consensus_pocket_metrics_batch.func(
@@ -2047,6 +2914,9 @@ Output as JSON:
                         if ref_clustering
                         else sorted(class_groups)
                     )
+                    # Collect whatever modular groups the goal requested; do not
+                    # lock to a fixed paper feature schema.
+                    feature_columns = None
                     ref_outputs = REFERENCE_CLUSTERING_OUTPUT_FILES
                     allowed_labels = [Path(d).name for d in sim_dirs]
                     if ref_clustering:
@@ -2081,6 +2951,8 @@ Output as JSON:
                         "requested_metric_groups": collect_groups,
                         "allowed_labels": allowed_labels,
                     }
+                    if feature_columns:
+                        collect_kwargs["feature_columns"] = feature_columns
                     if ref_clustering:
                         collect_kwargs.update(
                             output_file=ref_outputs["features_csv"],
@@ -2093,6 +2965,58 @@ Output as JSON:
                         **collect_kwargs
                     )
                     if class_result.get("success"):
+                        user_goal_text = " ".join(
+                            t
+                            for t in (
+                                state.get("user_goal_original"),
+                                state.get("user_goal"),
+                                state.get("combined_analysis_plan"),
+                                state.get("master_enriched_prompt"),
+                                state.get("enriched_prompt"),
+                            )
+                            if t
+                        ).strip()
+                        # LLM selects a scientifically motivated feature subset
+                        # (with written reasoning) before clustering.
+                        try:
+                            selection = self._llm_select_classification_features(
+                                analysis_dir=analysis_dir,
+                                class_result=class_result,
+                                user_goal=user_goal_text,
+                                metric_groups=collect_groups,
+                            )
+                        except Exception as _sel_exc:
+                            logger.warning(
+                                "LLM feature selection failed (%s); using all collected columns",
+                                _sel_exc,
+                            )
+                            selection = None
+                        if selection and selection.get("feature_columns"):
+                            selected_cols = [
+                                c
+                                for c in selection["feature_columns"]
+                                if isinstance(c, str) and c.strip()
+                            ]
+                            if selected_cols:
+                                recollect_kwargs = dict(collect_kwargs)
+                                recollect_kwargs["feature_columns"] = selected_cols
+                                recollect_kwargs.pop("requested_metric_groups", None)
+                                re_result = collect_classification_features_table.func(
+                                    **recollect_kwargs
+                                )
+                                if re_result.get("success"):
+                                    class_result = re_result
+                                    log_agent_action(
+                                        "analysis",
+                                        "LLM classification feature selection applied",
+                                        {
+                                            "n_selected": len(selected_cols),
+                                            "features": selected_cols,
+                                            "reasoning": (selection.get("reasoning") or "")[
+                                                :400
+                                            ],
+                                        },
+                                    )
                         classification_table = class_result.get("output_file")
                         tables.append(classification_table)
                         zscore_path = class_result.get("zscore_output_file")
@@ -2108,17 +3032,6 @@ Output as JSON:
                             },
                         )
 
-                        user_goal_text = " ".join(
-                            t
-                            for t in (
-                                state.get("user_goal_original"),
-                                state.get("user_goal"),
-                                state.get("combined_analysis_plan"),
-                                state.get("master_enriched_prompt"),
-                                state.get("enriched_prompt"),
-                            )
-                            if t
-                        ).strip()
                         cluster_method = clustering_method_for_goal(
                             user_goal_text,
                             state.get("combined_analysis_plan") or "",
@@ -2145,6 +3058,25 @@ Output as JSON:
                             "label_name_map": _name_map_a or None,
                             "n_clusters": n_clusters,
                         }
+                        # Dendrogram + heatmap panel (plain tree; human interprets cuts).
+                        modular_groups = {
+                            "consensus_rmsf",
+                            "consensus_torsions",
+                            "consensus_dccm",
+                            "dihedral_pca",
+                            "reference_pocket",
+                            "com",
+                        }
+                        if modular_groups & set(class_groups or []):
+                            cluster_kwargs["feature_scale_label"] = "Robust Z score"
+                            cluster_kwargs["panel_file"] = (
+                                "classification_dendrogram_heatmap.png"
+                            )
+                            cluster_kwargs["simple_panel"] = True
+                            cluster_kwargs["cluster_archetype_names"] = {}
+                            # Allow a few missing cells (imputed) so pocket χ₁ /
+                            # orientation survive when one sim is incomplete.
+                            cluster_kwargs["max_column_missing_fraction"] = 0.5
                         if ref_clustering:
                             cluster_kwargs.update(
                                 assignments_file=ref_outputs["assignments_csv"],
@@ -2853,9 +3785,13 @@ Output as JSON:
             if local_hpc.is_dir():
                 if not hpc_dir or not _under_sim(hpc_dir, wd):
                     hpc_dir = str(local_hpc)
+        # Prefer production MD topology (matches mdWrap.xtc). Do not let fresh
+        # simsetup system.gro win under --reuse-hpc (atom-count mismatch).
         _MDA_TOPO_NAMES = (
             "md.tpr",
             "md.gro",
+            "npt.gro",
+            "nvt.gro",
             "system.gro",
             "solvated.gro",
             "complex.gro",
@@ -2869,32 +3805,56 @@ Output as JSON:
             "ligand_GMX.gro",
             "protein.gro",
             "protein_processed.gro",
+            "protein.pdb",
         }
         if hpc_dir:
             hpc_dir_path = Path(hpc_dir)
-            preferred: list[str] = []
+            # Nested multi-rep: search hpc/repXX before flat hpc/
+            search_roots: list[Path] = []
+            try:
+                from src.analysis.replicate_paths import discover_hpc_rep_dirs
+
+                nested_reps = discover_hpc_rep_dirs(wd) if wd else []
+            except Exception:
+                nested_reps = []
+            if nested_reps:
+                search_roots.extend(nested_reps)
+            search_roots.append(hpc_dir_path)
+            search_roots.append(hpc_dir_path / "results")
+
+            preferred: list[str] = list(_MDA_TOPO_NAMES)
             if topology_file:
                 name = Path(topology_file).name
-                # Ignore topology paths from another simulation directory.
+                # Ignore topology paths from another simulation directory
+                # or known non-production topologies.
                 if wd and not _under_sim(topology_file, wd):
                     topology_file = None
-                elif name not in _SKIP_TOPO_NAMES:
-                    preferred.append(name)
-            preferred.extend(_MDA_TOPO_NAMES)
-            for candidate_name in preferred:
-                candidate = hpc_dir_path / candidate_name
-                if candidate.is_file():
-                    topology_file = str(candidate)
-                    logger.info(f"analysis: resolved topology to hpc copy: {topology_file}")
-                    break
-            # Also check results sub-directory (download_results destination)
-            if not (topology_file and Path(topology_file).is_file()):
-                for candidate_name in _MDA_TOPO_NAMES:
-                    candidate = hpc_dir_path / "results" / candidate_name
-                    if candidate.is_file():
+                elif name in _SKIP_TOPO_NAMES:
+                    topology_file = None
+                elif name in ("system.gro", "solvated.gro", "complex.gro"):
+                    # Defer to md.tpr/md.gro first; keep as last-resort only.
+                    pass
+                elif name not in preferred:
+                    preferred.insert(0, name)
+
+            topology_file = None
+            for root in search_roots:
+                if not root.is_dir() and not any(
+                    (root / n).is_file() for n in preferred[:2]
+                ):
+                    # root may be a file-less path; still try preferred names
+                    pass
+                for candidate_name in preferred:
+                    candidate = root / candidate_name
+                    if candidate.is_file() and candidate.stat().st_size > 0:
                         topology_file = str(candidate)
-                        logger.info(f"analysis: resolved topology from hpc/results: {topology_file}")
+                        logger.info(
+                            "analysis: resolved topology to production copy: %s",
+                            topology_file,
+                        )
                         break
+                if topology_file:
+                    break
 
         return AnalysisAgentInput(
             working_directory=state.get("working_directory", "working_dir"),
@@ -3120,6 +4080,9 @@ Output as JSON:
             plan_dict = self._inject_mandatory_steps(plan_dict, agent_input, state)
             plan_dict = self._ensure_requested_metric_steps(plan_dict, agent_input, state)
             plan_dict = self._filter_plan_steps_by_intent(plan_dict, state, agent_input)
+            # Family modular tools MUST be last: intent filter can drop LLM-omitted
+            # tools that _ensure_requested_metric_steps just added; ensure must win.
+            plan_dict = self._ensure_family_modular_dynamics_steps(plan_dict, agent_input, state)
 
             final_step_count = len(plan_dict.get("steps", []))
             if final_step_count > llm_step_count:
@@ -3159,14 +4122,43 @@ Output as JSON:
         agent_input: Optional[AnalysisAgentInput] = None,
     ) -> Optional[FrozenSet[str]]:
         """Requested metrics for the current simulation (per-sim goal takes precedence)."""
+        from agentic.planner.planning_guidelines import (
+            detect_family_modular_dynamics_requested,
+        )
+
         base = detect_requested_metrics_for_sim(state, agent_input)
         enriched = self._resolve_enriched_goal_for_planning(state, agent_input)
         if not enriched:
-            return base
-        extra = detect_requested_metrics(enriched)
-        if base is None and extra is None:
+            merged = set(base or ())
+        else:
+            extra = detect_requested_metrics(enriched)
+            if base is None and extra is None:
+                merged = set()
+            else:
+                merged = set(base or ()) | set(extra or ())
+
+        # Master family-modular goal must reach every sim even when the per-sim
+        # prompt only names a subset of descriptors.
+        goal_texts = collect_goal_texts_for_intent(state, agent_input)
+        if detect_family_modular_dynamics_requested(*goal_texts):
+            merged.update(
+                {
+                    "consensus_rmsf",
+                    "consensus_torsions",
+                    "consensus_dccm",
+                    "dihedral_pca",
+                    "reference_pocket",
+                }
+            )
+            merged.discard("fel")
+            merged.discard("pca")  # Cartesian PCA; modular path uses dihedral_pca
+
+        if merged:
+            return frozenset(merged)
+        if base is None and not enriched:
             return None
-        merged = set(base or ()) | set(extra or ())
+        if base is None and enriched and detect_requested_metrics(enriched) is None:
+            return None
         return frozenset(merged) if merged else None
 
     def _sims_for_combined_metric(
@@ -3315,6 +4307,95 @@ Output as JSON:
 
         return "LIG"
 
+    def _resolve_sim_label(self, state: MDState) -> str:
+        """Current simulation folder / UniProt label for family tools."""
+        sim_prompts = state.get("sim_prompts") or []
+        idx = state.get("current_sim_index")
+        if idx is not None and 0 <= idx < len(sim_prompts):
+            lab = str(sim_prompts[idx].get("label") or "").strip()
+            if lab:
+                return lab
+        for key in ("active_sim_label", "current_sim_label", "sim_label", "label"):
+            lab = str(state.get(key) or "").strip()
+            if lab:
+                return lab
+        wd = state.get("working_directory") or ""
+        return Path(wd).name if wd else ""
+
+    def _resolve_family_alignment_paths(self, state: MDState) -> Dict[str, str]:
+        """Locate pre-combined MSA / pocket map for per-sim consensus tools."""
+        from agentic.multi_sim_paths import resolve_multi_sim_base_dir
+
+        out: Dict[str, str] = {}
+        try:
+            base = Path(resolve_multi_sim_base_dir(state))
+        except Exception:
+            base = Path(state.get("multi_sim_base_dir") or state.get("working_directory") or ".")
+            # If working_directory is a sim folder, climb to campaign root.
+            if (base / "analysis").is_dir() and (base.parent / "analysis").is_dir():
+                # sim-level: prefer parent campaign
+                if any(
+                    (base.parent / "analysis" / name).is_file()
+                    for name in (
+                        "reference_msa_alignment.json",
+                        "consensus_alignment.fasta",
+                    )
+                ) or (base.parent / "cross_sim").is_dir():
+                    base = base.parent
+
+        candidates = [
+            base / "analysis",
+            base / "cross_sim",
+            base,
+        ]
+        for root in candidates:
+            msa = root / "reference_msa_alignment.json"
+            if msa.is_file() and "alignment_json" not in out:
+                out["alignment_json"] = str(msa.resolve())
+            for pocket_name in (
+                "reference_pocket_residue_map.csv",
+                "pocket_residue_map.csv",
+                "reference_msa_residue_map.csv",
+            ):
+                p = root / pocket_name
+                if p.is_file() and "pocket_map_csv" not in out:
+                    out["pocket_map_csv"] = str(p.resolve())
+                    break
+        return out
+
+    def _inject_consensus_family_params(
+        self,
+        tool_name: str,
+        tool_params: Dict[str, Any],
+        state: MDState,
+    ) -> Dict[str, Any]:
+        """Fill label / alignment_json / pocket map for modular family tools."""
+        family_tools = {
+            "calculate_consensus_torsions",
+            "calculate_consensus_rmsf_features",
+            "calculate_consensus_dccm_features",
+            "run_independent_dynamics_fel",
+        }
+        if tool_name not in family_tools:
+            return tool_params
+        params = dict(tool_params or {})
+        label = self._resolve_sim_label(state)
+        if label and not params.get("label"):
+            params["label"] = label
+        paths = self._resolve_family_alignment_paths(state)
+        if paths.get("alignment_json") and not params.get("alignment_json"):
+            params["alignment_json"] = paths["alignment_json"]
+        if (
+            tool_name == "calculate_consensus_torsions"
+            and paths.get("pocket_map_csv")
+            and not params.get("pocket_map_csv")
+        ):
+            params["pocket_map_csv"] = paths["pocket_map_csv"]
+        sim_dir = state.get("working_directory") or ""
+        if sim_dir and not params.get("sim_directory"):
+            params["sim_directory"] = str(sim_dir)
+        return params
+
     def _is_holo_simulation(self, state: MDState, agent_input: AnalysisAgentInput) -> bool:
         """True when the current per-simulation run is a ligand-bound (holo) system."""
         from src.analysis.combined_analysis import is_holo_simulation
@@ -3437,6 +4518,148 @@ Output as JSON:
                 sorted(missing_metrics),
             )
             plan_dict["steps"] = merged
+        return plan_dict
+
+    def _ensure_family_modular_dynamics_steps(
+        self,
+        plan_dict: Dict[str, Any],
+        agent_input: AnalysisAgentInput,
+        state: MDState,
+    ) -> Dict[str, Any]:
+        """Force family modular tools with canonical output dirs.
+
+        LLMs often invent wrong ``output_dir`` (e.g. ``torsions/``, ``dccm_features/``)
+        or custom extractors. Collector expects ``consensus_dihedrals/``,
+        ``consensus_rmsf/``, ``consensus_DCCM/``, ``consensus_PCA/``.
+        """
+        from agentic.planner.planning_guidelines import (
+            detect_family_modular_dynamics_requested,
+        )
+
+        texts = collect_goal_texts_for_intent(state, agent_input)
+        if not detect_family_modular_dynamics_requested(*texts):
+            return plan_dict
+
+        topo_name = (
+            Path(agent_input.topology_file).name
+            if agent_input.topology_file
+            else "md.tpr"
+        )
+        traj_name = (
+            Path(agent_input.trajectory_file).name
+            if agent_input.trajectory_file
+            else "mdWrap.xtc"
+        )
+
+        canonical: Dict[str, Dict[str, Any]] = {
+            "calculate_consensus_torsions": {
+                "name": "Consensus dihedrals (φ/ψ/χ₁)",
+                "description": "Mapped φ/ψ/χ₁ circular means for domain and pocket",
+                "tool_params": {
+                    "topology_file": topo_name,
+                    "trajectory_file": traj_name,
+                    "output_dir": "consensus_dihedrals",
+                },
+                "reason": "Family modular: pocket χ₁ + dihedral PCA inputs",
+            },
+            "calculate_consensus_rmsf_features": {
+                "name": "Consensus Cα RMSF",
+                "description": "Mapped consensus Cα RMSF mean/std across the domain",
+                "tool_params": {
+                    "topology_file": topo_name,
+                    "trajectory_file": traj_name,
+                    "output_dir": "consensus_rmsf",
+                },
+                "reason": "Family modular: consensus RMSF features",
+            },
+            "calculate_consensus_dccm_features": {
+                "name": "Consensus DCCM N↔C",
+                "description": "Mapped DCCM mean absolute and N-lobe↔C-lobe correlation",
+                "tool_params": {
+                    "topology_file": topo_name,
+                    "trajectory_file": traj_name,
+                    "output_dir": "consensus_DCCM",
+                },
+                "reason": "Family modular: DCCM N↔C feature",
+            },
+            "run_independent_dynamics_fel": {
+                "name": "Independent dihedral PCA FEL",
+                "description": "Per-sim φ/ψ/χ₁ PCA → FEL grid entropy",
+                "tool_params": {
+                    "space": "dihedral",
+                    "method": "pca",
+                    "dihedral_dir": "consensus_dihedrals",
+                    "dihedral_angles": ["phi", "psi", "chi1"],
+                    "output_dir": "consensus_PCA",
+                },
+                "reason": "Family modular: dihedral landscape entropy",
+            },
+        }
+
+        drop_tools = {
+            "calculate_free_energy_landscape",
+            "analyze_fel_landscape_features",
+            "export_fel_basin_structures",
+            "extract_chi1_stats",
+            "extract_dccm_corr",
+            "extract_fel_entropy",
+            "perform_ward_clustering",
+            "assemble_feature_table",
+            "generate_html_report",
+        }
+        steps: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+        for step in plan_dict.get("steps", []) or []:
+            tool = str(step.get("tool_name") or "")
+            if tool in drop_tools:
+                continue
+            if tool in canonical:
+                spec = canonical[tool]
+                step = dict(step)
+                step["name"] = spec["name"]
+                step["description"] = spec["description"]
+                step["reason"] = spec["reason"]
+                params = dict(step.get("tool_params") or {})
+                params.update(spec["tool_params"])
+                step["tool_params"] = params
+                if tool not in seen:
+                    steps.append(step)
+                    seen.add(tool)
+                continue
+            steps.append(step)
+
+        for tool, spec in canonical.items():
+            if tool in seen:
+                continue
+            steps.append(
+                {
+                    "name": spec["name"],
+                    "description": spec["description"],
+                    "tool_name": tool,
+                    "tool_params": dict(spec["tool_params"]),
+                    "reason": spec["reason"],
+                }
+            )
+            seen.add(tool)
+
+        order = {
+            "calculate_consensus_torsions": 0,
+            "calculate_consensus_rmsf_features": 1,
+            "calculate_consensus_dccm_features": 2,
+            "run_independent_dynamics_fel": 3,
+        }
+        # Keep non-modular steps in original relative order; append modular block
+        # with torsions → RMSF → DCCM → dihedral PCA dependency order.
+        non_mod = [s for s in steps if s.get("tool_name") not in order]
+        modular = sorted(
+            [s for s in steps if s.get("tool_name") in order],
+            key=lambda s: order[str(s.get("tool_name"))],
+        )
+        plan_dict["steps"] = non_mod + modular
+        logger.info(
+            "_ensure_family_modular_dynamics_steps: canonical modular tools=%s",
+            [s.get("tool_name") for s in modular],
+        )
         return plan_dict
 
     def _inject_mandatory_steps(self, plan_dict: Dict[str, Any],
@@ -3748,6 +4971,14 @@ Output as JSON:
             suffix = Path(name).suffix.lower()
             if suffix not in {".dat", ".csv"}:
                 continue
+            stem_l = Path(name).stem.lower()
+            # Never auto-plot FEL grids / feature tables as XY line plots.
+            if (
+                stem_l.startswith("fel_")
+                or "fel" in stem_l and "grid" in stem_l
+                or stem_l in {"fel_features", "fel_basins", "fel_basin_structures"}
+            ):
+                continue
             stem = Path(name).stem
             ylabel = "Value"
             xlabel = "Time (ns)"
@@ -3812,7 +5043,12 @@ Output as JSON:
         )
         _classification_block = (
             get_classification_per_sim_tool_guide()
-            if detect_classification_requested(*collect_goal_texts_for_intent(state, agent_input))
+            if (
+                detect_classification_requested(*collect_goal_texts_for_intent(state, agent_input))
+                or detect_family_modular_dynamics_requested(
+                    *collect_goal_texts_for_intent(state, agent_input)
+                )
+            )
             else ""
         )
         
@@ -4070,6 +5306,14 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             else "md.xtc"
         )
         traj_prefixes = ("calculate_", "analyze_", "wrap_trajectory")
+        _SKIP_PLOT_DATA = frozenset({
+            "fel_pc1_pc2_grid.csv",
+            "fel_features.csv",
+            "fel_basins.csv",
+            "fel_basin_structures.csv",
+            "fel_features.json",
+        })
+        kept_steps: List[Dict[str, Any]] = []
 
         for step in plan_dict.get("steps") or []:
             if not isinstance(step, dict):
@@ -4082,6 +5326,27 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     if alias in params and "data_files" not in params:
                         val = params.pop(alias)
                         params["data_files"] = [val] if isinstance(val, str) else val
+                data_names = [
+                    Path(str(df)).name.lower()
+                    for df in (params.get("data_files") or [])
+                ]
+                out_name = Path(str(params.get("output_file") or "")).name.lower()
+                if (
+                    any(n in _SKIP_PLOT_DATA for n in data_names)
+                    or any("fel" in n and "grid" in n and n.endswith(".csv") for n in data_names)
+                    or out_name in {
+                        "fel_pc1_pc2_grid.png",
+                        "fel_features.png",
+                        "fel_pc1_pc2.png",
+                    }
+                ):
+                    logger.info(
+                        "_normalize_plan_steps: dropping plot_md_data for FEL "
+                        "grid/features (%s → %s)",
+                        data_names,
+                        out_name,
+                    )
+                    continue
 
             if tool == "plot_pca_projection":
                 for alias in ("pca_file", "input_file", "pca_projections"):
@@ -4090,6 +5355,12 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         if val in ("pca.csv", "pca.dat"):
                             val = "pca_projections.dat"
                         params["pca_projections_file"] = val
+                out = str(params.get("output_file") or "")
+                if not out or Path(out).name.lower() in {
+                    "pca_pc1_pc2.png",
+                    "pca.png",
+                }:
+                    params["output_file"] = "pca_pc1_pc2_time.png"
 
             if tool == "calculate_trajectory_pca":
                 params.pop("output_file", None)
@@ -4103,6 +5374,19 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         if val in ("pca.csv", "pca.dat"):
                             val = "pca_projections.dat"
                         params["pca_projections_file"] = val
+                # Prefer grid CSV only; annotated map comes from analyze_fel.
+                params["output_plot"] = ""
+                params.setdefault("output_grid", "fel_pc1_pc2_grid.csv")
+
+            if tool == "analyze_fel_landscape_features":
+                out_plot = str(params.get("output_plot") or "").strip()
+                bad_fel_plots = {
+                    "fel_features.png",
+                    "fel_pc1_pc2.png",
+                    "fel_pc1_pc2_grid.png",
+                }
+                if not out_plot or Path(out_plot).name.lower() in bad_fel_plots:
+                    params["output_plot"] = "fel_basins.png"
 
             needs_traj = any(tool.startswith(p) for p in traj_prefixes)
             if needs_traj:
@@ -4117,6 +5401,8 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     params["trajectory_file"] = traj
 
             step["tool_params"] = params
+            kept_steps.append(step)
+        plan_dict["steps"] = kept_steps
         return plan_dict
 
     def replan_with_guidance(self, human_recommendation: str, state: dict) -> Optional[dict]:
@@ -4504,7 +5790,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         tool_name="plot_pca_projection",
                         tool_params={
                             "pca_projections_file": "pca_projections.dat",
-                            "output_file": "pca_pc1_pc2.png",
+                            "output_file": "pca_pc1_pc2_time.png",
                         },
                         reason="Visualise PCA conformational sampling",
                     ),
@@ -4514,12 +5800,12 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 steps.extend([
                     AnalysisStep(
                         name="Free-Energy Landscape",
-                        description="Build FEL from PCA projections at 310 K",
+                        description="Build FEL grid from PCA projections at 310 K",
                         tool_name="calculate_free_energy_landscape",
                         tool_params={
                             "pca_projections_file": "pca_projections.dat",
                             "temperature_k": 310.0,
-                            "output_plot": "fel_pc1_pc2.png",
+                            "output_plot": "",
                             "output_grid": "fel_pc1_pc2_grid.csv",
                         },
                         reason="User requested free-energy landscape at 310 K",
@@ -4556,20 +5842,82 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     ),
                 ])
 
+            # Family modular dynamics features
+            if "consensus_torsions" in requested or "dihedral_pca" in requested:
+                steps.append(
+                    AnalysisStep(
+                        name="Consensus dihedrals (φ/ψ/χ₁)",
+                        description="Mapped φ/ψ/χ₁ circular means for domain and pocket",
+                        tool_name="calculate_consensus_torsions",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "output_dir": "consensus_dihedrals",
+                        },
+                        reason="Family modular: pocket χ₁ + dihedral PCA inputs",
+                    )
+                )
+            if "consensus_rmsf" in requested:
+                steps.append(
+                    AnalysisStep(
+                        name="Consensus Cα RMSF",
+                        description="Mapped consensus Cα RMSF mean/std across the domain",
+                        tool_name="calculate_consensus_rmsf_features",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "output_dir": "consensus_rmsf",
+                        },
+                        reason="Family modular: consensus RMSF features",
+                    )
+                )
+            if "consensus_dccm" in requested:
+                steps.append(
+                    AnalysisStep(
+                        name="Consensus DCCM N↔C",
+                        description="Mapped DCCM mean absolute and N-lobe↔C-lobe correlation",
+                        tool_name="calculate_consensus_dccm_features",
+                        tool_params={
+                            "topology_file": topo_name,
+                            "trajectory_file": traj_name,
+                            "output_dir": "consensus_DCCM",
+                        },
+                        reason="Family modular: DCCM N↔C feature",
+                    )
+                )
+            if "dihedral_pca" in requested:
+                steps.append(
+                    AnalysisStep(
+                        name="Independent dihedral PCA FEL",
+                        description=(
+                            "Per-sim φ/ψ/χ₁ PCA → FEL grid entropy"
+                        ),
+                        tool_name="run_independent_dynamics_fel",
+                        tool_params={
+                            "space": "dihedral",
+                            "method": "pca",
+                            "dihedral_dir": "consensus_dihedrals",
+                            "dihedral_angles": ["phi", "psi", "chi1"],
+                            "output_dir": "consensus_PCA",
+                        },
+                        reason="Family modular: dihedral landscape entropy",
+                    )
+                )
+
             if "nearby" in requested:
                 _qsel = "chainID B and resid 1:34" if (
                     "1 to 34" in _goal_lower or "1-34" in _goal_lower or "1–34" in _goal_lower
                 ) else "chainID B"
                 steps.append(AnalysisStep(
                     name="Identify nearby residues",
-                    description="Freeze neighbor residues within 10 Å of the query group at frame 0",
+                    description="Freeze neighbor residues within 15 Å of the query group at frame 0",
                     tool_name="identify_nearby_residues",
                     tool_params={
                         "topology_file": topo_name,
                         "trajectory_file": traj_name,
                         "query_selection": _qsel,
                         "neighbor_selection": "chainID A",
-                        "cutoff": 10.0,
+                        "cutoff": 15.0,
                         "frame": 0,
                         "output_file": "nearby_residues_A_near_B1to34.json" if "34" in _qsel else "nearby_residues.json",
                     },
@@ -4976,6 +6324,11 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 # LLMs may suggest workspace root, but tools must run in analysis subdirectory
                 tool_params["working_dir"] = self.file_manager.agent_dir
                 logger.debug(f"  Set working_dir to analysis agent directory: {self.file_manager.agent_dir}")
+
+                # Family modular tools need MSA + label from pre_combined.
+                tool_params = self._inject_consensus_family_params(
+                    step.tool_name, tool_params, state
+                )
 
                 # Resolve list-type file parameters (e.g. data_files for plot tools).
                 # LLMs often pass wrong absolute paths; normalise to agent_dir/<basename>.

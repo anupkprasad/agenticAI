@@ -100,15 +100,34 @@ REF_FEL_CLUSTERING_OUTPUT_FILES: Dict[str, str] = {
 def is_reference_structure_clustering(
     metric_groups: Optional[Sequence[str]],
 ) -> bool:
-    """True when clustering should use reference_* outputs only (not classification_*)."""
+    """True when clustering should use reference_* outputs only (not classification_*).
+
+    Modular family dynamics (``consensus_rmsf`` / torsions / DCCM / dihedral PCA)
+    is
+    **not** reference-structure clustering even though it uses mapped pocket
+    COM/angle columns from the consensus pocket batch.
+    """
     if not metric_groups:
         return False
-    groups = {g for g in metric_groups if g in REFERENCE_CLUSTER_METRIC_GROUPS}
-    return bool(groups) and (
-        "reference_pocket" in groups
-        or "reference_fel" in groups
-        or "reference_pocket_archetype" in groups
-        or "reference_fel_archetype" in groups
+    groups = set(metric_groups)
+    # Modular family dynamics → classification_* path (not reference archetype).
+    if groups & {
+        "paper_ward4",  # legacy tag; prefer consensus_* / dihedral_pca
+        "consensus_rmsf",
+        "consensus_torsions",
+        "consensus_dccm",
+        "dihedral_pca",
+        "dihedral_tica",
+        "cart_pca",
+        "cart_tica",
+    }:
+        return False
+    ref_groups = {g for g in groups if g in REFERENCE_CLUSTER_METRIC_GROUPS}
+    return bool(ref_groups) and (
+        "reference_pocket" in ref_groups
+        or "reference_fel" in ref_groups
+        or "reference_pocket_archetype" in ref_groups
+        or "reference_fel_archetype" in ref_groups
     )
 
 
@@ -121,6 +140,14 @@ def reference_archetype_metric_groups(
     if not metric_groups:
         return tuple()
     groups = set(metric_groups)
+    if groups & {
+        "paper_ward4",
+        "consensus_rmsf",
+        "consensus_torsions",
+        "consensus_dccm",
+        "dihedral_pca",
+    }:
+        return tuple(g for g in metric_groups if g)
     if groups & {
         "reference_pocket",
         "reference_fel",
@@ -207,12 +234,15 @@ def resolve_n_clusters_for_goal(
     *,
     reference_based: bool = False,
 ) -> int:
-    """Resolve k from goal text; reference workflows avoid sqrt(n) auto-k by default."""
+    """Resolve k from goal text only; otherwise use a gentle default.
+
+    Do **not** force a fixed cluster count (e.g. paper-style k=4). Humans
+    interpret dendrogram cuts; auto-k is only for optional coloring.
+    """
+    del reference_based  # retained for call-site compatibility
     parsed = _parse_n_clusters_from_text(user_goal_text)
     if parsed is not None:
         return max(1, min(parsed, n_samples))
-    if reference_based:
-        return max(1, min(4, n_samples))
     return _default_n_clusters(n_samples)
 
 
@@ -265,12 +295,14 @@ def _load_feature_matrix(
             present = 0
             for col in feature_cols:
                 raw = (row.get(col) or "").strip()
-                if raw == "":
+                if raw == "" or raw.lower() in {"nan", "none", "null", "inf", "-inf"}:
                     vals.append(np.nan)
                 else:
                     try:
-                        vals.append(float(raw))
-                        present += 1
+                        v = float(raw)
+                        vals.append(v)
+                        if np.isfinite(v):
+                            present += 1
                     except ValueError:
                         vals.append(np.nan)
             if present < min_features_present:
@@ -846,9 +878,10 @@ def _plot_dendrogram_heatmap_panel(
     dominant_min_abs: float = 0.65,
     legend_row_major: bool = False,
     layout_tight: bool = False,
+    simple_panel: bool = False,
 ) -> Optional[List[int]]:
     """
-    Single figure: dendrogram (branches right→left) + cluster label bar + feature heatmap.
+    Single figure: dendrogram (branches right→left) + label bar + feature heatmap.
 
     Rows share the same simulation order top→bottom. Protein names appear in black
     on the colored cluster bar; the heatmap has no y-axis labels.
@@ -861,6 +894,8 @@ def _plot_dendrogram_heatmap_panel(
     When ``legend_row_major`` is True, legend entries fill left→right then top→bottom
     (matplotlib's default is column-major).
     When ``layout_tight`` is True, reduce figure margins / whitespace around the legend.
+    When ``simple_panel`` is True, draw a plain gray dendrogram (no Ward-cut / cluster
+    branch colors), neutral name labels, no archetype legend, and no feature boxes.
     """
     if not HAS_MPL:
         return None
@@ -869,9 +904,18 @@ def _plot_dendrogram_heatmap_panel(
 
     n = len(display_names)
     clusters, cluster_colors = _cluster_color_map(cluster_ids)
-    link_colors = _link_color_func_for_clusters(
-        linkage_matrix, cluster_ids, cluster_colors
-    )
+    if simple_panel:
+        highlight_dominant_features = False
+        highlight_display_names = None
+        # Uniform gray: scipy still paints Ward cuts when color_threshold is
+        # omitted/None; force every link color explicitly.
+        link_colors = lambda _k: "#555555"
+        label_colors = {cid: "#E8E8E8" for cid in clusters}
+    else:
+        link_colors = _link_color_func_for_clusters(
+            linkage_matrix, cluster_ids, cluster_colors
+        )
+        label_colors = cluster_colors
 
     # Slightly taller landscape panel for readability.
     # Match original Fig. 3 panel footprint (≈15.75"×11.64" at 300 dpi after tight bbox).
@@ -886,22 +930,22 @@ def _plot_dendrogram_heatmap_panel(
         left=0.03,
         right=0.90,
         top=0.92 if layout_tight else 0.91,
-        bottom=0.16,
+        bottom=0.10 if simple_panel else 0.16,
     )
     ax_dend = fig.add_subplot(gs[0, 0])
     ax_bar = fig.add_subplot(gs[0, 1])
     ax_hm = fig.add_subplot(gs[0, 2])
 
-    ddata = hierarchy.dendrogram(
-        linkage_matrix,
-        labels=[""] * n,
-        orientation="left",
-        leaf_font_size=11,
-        ax=ax_dend,
-        link_color_func=link_colors,
-        above_threshold_color="#B0B0B0",
-        color_threshold=0,
-    )
+    dendro_kwargs: Dict[str, Any] = {
+        "labels": [""] * n,
+        "orientation": "left",
+        "leaf_font_size": 11,
+        "ax": ax_dend,
+        "above_threshold_color": "#555555",
+        "link_color_func": link_colors,
+        "color_threshold": 0,
+    }
+    ddata = hierarchy.dendrogram(linkage_matrix, **dendro_kwargs)
     ax_dend.invert_yaxis()
     leaf_order_tb = [int(i) for i in ddata["leaves"]]
 
@@ -923,7 +967,7 @@ def _plot_dendrogram_heatmap_panel(
         ax_bar,
         names_ord,
         cids_ord,
-        cluster_colors,
+        label_colors,
         fontsize=9.5,
         highlight_names=highlight_display_names,
     )
@@ -1031,64 +1075,65 @@ def _plot_dendrogram_heatmap_panel(
                     )
                 )
 
-    counts: Dict[int, int] = {}
-    for cid in cluster_ids:
-        counts[int(cid)] = counts.get(int(cid), 0) + 1
-    handles = [
-        Patch(
-            facecolor=cluster_colors[cid],
-            edgecolor="black",
-            label=_cluster_legend_label(
-                cid, counts.get(cid, 0), archetype_names=archetype_names
-            ),
-        )
-        for cid in clusters
-    ]
-    hi = _normalize_highlight_names(highlight_display_names)
-    if hi:
-        from matplotlib.lines import Line2D
-
-        handles.append(
-            Line2D(
-                [0],
-                [0],
-                marker="*",
-                color="black",
-                markerfacecolor="black",
-                markersize=9,
-                linestyle="None",
-                label="ground-truth kinase",
+    if not simple_panel:
+        counts: Dict[int, int] = {}
+        for cid in cluster_ids:
+            counts[int(cid)] = counts.get(int(cid), 0) + 1
+        handles = [
+            Patch(
+                facecolor=cluster_colors[cid],
+                edgecolor="black",
+                label=_cluster_legend_label(
+                    cid, counts.get(cid, 0), archetype_names=archetype_names
+                ),
             )
+            for cid in clusters
+        ]
+        hi = _normalize_highlight_names(highlight_display_names)
+        if hi:
+            from matplotlib.lines import Line2D
+
+            handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    marker="*",
+                    color="black",
+                    markerfacecolor="black",
+                    markersize=9,
+                    linestyle="None",
+                    label="ground-truth kinase",
+                )
+            )
+        ncol = int(legend_ncol) if legend_ncol is not None else 3
+        if legend_row_major and ncol > 1 and len(handles) > 1:
+            # Matplotlib fills legends column-major; permute so display is row-major
+            # (left→right, then next row): e.g. C1 C2 C3 / C4 *
+            n_h = len(handles)
+            nrow = (n_h + ncol - 1) // ncol
+            padded: List[Optional[object]] = list(handles) + [None] * (nrow * ncol - n_h)
+            grid = [padded[r * ncol : (r + 1) * ncol] for r in range(nrow)]
+            reordered = []
+            for c in range(ncol):
+                for r in range(nrow):
+                    h = grid[r][c]
+                    if h is not None:
+                        reordered.append(h)
+            handles = reordered
+        fig.legend(
+            handles=handles,
+            loc="lower center",
+            ncol=ncol,
+            fontsize=9.5 if layout_tight else 11,
+            framealpha=0.95,
+            bbox_to_anchor=(0.5, 0.02),
+            borderaxespad=0.0,
+            columnspacing=2.0 if layout_tight else 1.5,
+            handletextpad=0.7,
+            labelspacing=0.7 if layout_tight else 0.5,
+            borderpad=0.6,
+            markerscale=1.0,
         )
-    ncol = int(legend_ncol) if legend_ncol is not None else 3
-    if legend_row_major and ncol > 1 and len(handles) > 1:
-        # Matplotlib fills legends column-major; permute so display is row-major
-        # (left→right, then next row): e.g. C1 C2 C3 / C4 *
-        n_h = len(handles)
-        nrow = (n_h + ncol - 1) // ncol
-        padded: List[Optional[object]] = list(handles) + [None] * (nrow * ncol - n_h)
-        grid = [padded[r * ncol : (r + 1) * ncol] for r in range(nrow)]
-        reordered = []
-        for c in range(ncol):
-            for r in range(nrow):
-                h = grid[r][c]
-                if h is not None:
-                    reordered.append(h)
-        handles = reordered
-    fig.legend(
-        handles=handles,
-        loc="lower center",
-        ncol=ncol,
-        fontsize=9.5 if layout_tight else 11,
-        framealpha=0.95,
-        bbox_to_anchor=(0.5, 0.02),
-        borderaxespad=0.0,
-        columnspacing=2.0 if layout_tight else 1.5,
-        handletextpad=0.7,
-        labelspacing=0.7 if layout_tight else 0.5,
-        borderpad=0.6,
-        markerscale=1.0,
-    )
 
     # Explicit half-height colorbar (after legend so layout is final).
     fig.canvas.draw()
@@ -1417,6 +1462,7 @@ def cluster_classification_features(
     feature_scale_label: str = "z-score",
     highlight_display_names: Optional[List[str]] = None,
     colorbar_symmetric: bool = True,
+    simple_panel: bool = False,
 ) -> Dict[str, Any]:
     """
     Cluster simulations from a classification feature table (z-score CSV recommended).
@@ -1454,6 +1500,8 @@ def cluster_classification_features(
         cluster_archetype_names: Optional {cluster_id: short name} for dendrogram/
             panel legends (overrides REFERENCE_CLUSTER_ARCHETYPE_NAMES when set).
         legend_ncol: Optional legend column count.
+        simple_panel: If True with ``panel_file``, draw plain dendrogram+heatmap
+            (no cluster branch colors, archetype legend, or feature boxes).
     """
     original_dir = os.getcwd()
     try:
@@ -1574,6 +1622,7 @@ def cluster_classification_features(
                     ),
                     highlight_display_names=highlight_display_names,
                     colorbar_symmetric=colorbar_symmetric,
+                    simple_panel=simple_panel,
                 )
             else:
                 dendro_path = out_dir / dendrogram_file

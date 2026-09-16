@@ -1947,6 +1947,16 @@ def main(argv=None):
             "required)."
         ),
     )
+    parser.add_argument(
+        "--skip-hpc-submit",
+        action="store_true",
+        help=(
+            "Same skip-sbatch behavior as --reuse-hpc: run preprocess + simsetup + "
+            "staging + analysis normally, but never call sbatch. Prefer this flag for "
+            "seeded-trajectory campaigns. Existing hpc[/repXX]/md.tpr + mdWrap.xtc "
+            "are required (no md.log)."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -2042,6 +2052,7 @@ def main(argv=None):
         "retry_labels": list(getattr(args, "retry_labels", None) or []),
         "combined_only": getattr(args, "combined_only", False),
         "reuse_hpc": bool(getattr(args, "reuse_hpc", False)),
+        "skip_hpc_submit": bool(getattr(args, "skip_hpc_submit", False)),
         "allowed_hpc_jobs": getattr(args, "allowed_hpc_jobs", None),
         "_allowed_hpc_jobs_explicit": getattr(args, "allowed_hpc_jobs", None) is not None,
         "max_concurrent": getattr(args, "max_concurrent", 4),
@@ -2055,12 +2066,18 @@ def main(argv=None):
         "sim_max_attempts": getattr(args, "sim_max_attempts", None),
     }
 
-    if config["reuse_hpc"]:
+    if config["skip_hpc_submit"] and not config["reuse_hpc"]:
+        # Same runtime path as reuse-hpc (traj-ready without md.log; no sbatch).
+        config["reuse_hpc"] = True
+    if config["reuse_hpc"] or config["skip_hpc_submit"]:
         import os as _os_reuse
 
         _os_reuse.environ["AGENTIC_REUSE_HPC"] = "1"
+        if config.get("skip_hpc_submit"):
+            _os_reuse.environ["AGENTIC_SKIP_HPC_SUBMIT"] = "1"
+        flag = "--skip-hpc-submit" if config.get("skip_hpc_submit") else "--reuse-hpc"
         print(
-            "Note: --reuse-hpc active — full pipeline runs (preprocess/simsetup/HPC "
+            f"Note: {flag} active — full pipeline runs (preprocess/simsetup/HPC "
             "staging/analysis/reporter); existing md.tpr+mdWrap.xtc are kept; sbatch "
             "is blocked.",
             flush=True,

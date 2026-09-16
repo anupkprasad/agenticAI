@@ -7,7 +7,9 @@ lives in `src/analysis/*.py` and is registered in `agentic/analysis/tools.py`.
 
 **In this file:** multi-chain selection reminder, tool index, global and
 binding-site metrics, collective motion, plotting, combined/multi-sim
-tools, classification workflow, output names, reporter HTML, source map.
+tools (two domains; optional pre/post stages), multi-rep fan-out+avg,
+`cross_sim/` contract, modular family dynamics, classification workflow
+(including LLM feature selection), output names, reporter HTML, source map.
 
 **Not in this file:** GROMACS/MDAnalysis versions and the full chain-map
 mechanism ([TOOLS.md](TOOLS.md#multi-chain-residue-map)), agent routing
@@ -30,6 +32,77 @@ phospho/TER cleanup vs this map, what not to do):
 | `protein` / `resname ATP` | unchanged |
 
 Always include `chainID` when residue numbers overlap across chains.
+
+---
+
+## Two tool domains (per-sim vs combined)
+
+Analysis tools are gated into **two domains** (names unchanged):
+
+| Domain | When exposed | Examples |
+| ------ | ------------ | -------- |
+| **Per-sim** | Each simulation's traj analysis | `calculate_rmsd`, `calculate_rmsf`, `calculate_dccm`, `plot_md_data` |
+| **Combined (cross-sim)** | Multi-sim `pre_combined` / `post_combined` (and HITL combined view) | `run_combined_analysis`, `plot_combined_overlay`, `build_consensus_sequence_alignment`, `define_reference_consensus_pocket` |
+
+There is **no** third LLM-facing menu (no separate “cross-rep” tool list).
+
+### Multi-rep fan-out + per-tool avg
+
+When `--rep-num N` with N>1, each per-sim tool call fans out across
+`{label}/analysis/repXX/` (matched to `{label}/hpc/repXX/`), then
+`aggregate_replicate_metrics` writes mean±std under `{label}/analysis/avg/`.
+Aggregation runs **after each successful fan-out** (incremental):
+
+| Product | Avg behavior |
+| ------- | ------------ |
+| 1D series (RMSD/RMSF/Rg/…) | mean±std curve + line overlay |
+| DCCM (`dccm.csv` long-format) | element-wise mean matrix → heatmap (`dccm_mean.png`) |
+| PCA variance | mean bar chart ± std |
+| PCA projections / FEL grid / basins | **skipped** for independent per-rep PCAs (use `pre_combined` shared-reference PCA/FEL, then average) |
+
+Combined collectors prefer `analysis/avg/` so overlays stay one curve per
+chemical system.
+
+### Optional pre / post combined stages (`n_sims > 1`)
+
+Supervisor order:
+
+1. **`pre_combined`** (optional) — pocket / MSA / consensus / reference maps
+2. **Per-sim** traj analysis → reporter (with multi-rep fan-out+avg as above)
+3. **`post_combined`** (optional; legacy `run_combined_analysis` / `combined_analysis` phase) — overlays, consensus-pocket batch, classification collect → LLM feature selection → Ward dendrogram+heatmap, family report
+4. **`combined_reporter`** when post ran
+
+Planner fields: `run_pre_combined` / `pre_combined_plan`, `run_post_combined` /
+`post_combined_plan` (legacy `run_combined_analysis` → post only).
+
+### `base/cross_sim/` contract
+
+Pre-combined tools write shared artifacts under `{multi_sim_base}/cross_sim/`:
+
+| File | Role |
+| ---- | ---- |
+| `pocket_map.json` | Reference label + per-sim mapped residues / selections |
+| `consensus_residues.json` | Consensus / MSA residue map (when present) |
+| `consensus_msa.fasta` | Shared MSA FASTA |
+| `pre_combined_complete.json` | Stage completion marker |
+
+Schema (minimal) for `pocket_map.json`:
+
+```json
+{
+  "schema_version": "1.0",
+  "reference_label": "P23458_ATP",
+  "reference_selection": "resname ATP",
+  "per_sim": {
+    "Q8IV63_ATP": {"resids": [25, 28, 30], "selection": "resid 25 28 30"}
+  }
+}
+```
+
+Framework harvests known tool outputs (`reference_pocket_definition.json`,
+`reference_msa_alignment.fasta`, …) into this layout. Per-sim analysis
+**auto-discovers** these paths and injects them into the planning prompt so
+pocket RMSF / DCCM selections do not invent alternate files.
 
 ---
 
@@ -416,7 +489,11 @@ This is a combined-analysis tree; reference-pocket outputs are not written to
 
 **Classification:** use metric group ``reference_pocket`` in
 ``collect_classification_features_table`` (columns prefixed
-``reference_pocket_``).
+``reference_pocket_``). When batch metrics are missing, the collector copies
+local ``ligand_pocket_distance_*`` into the reference COM columns so clustering
+still sees pocket–ligand distance. Axis angle requires
+``reference_pocket_ligand_orientation.csv`` from the consensus-pocket batch
+(reference sim labels like ``p17612`` match folders ``p17612_ATP``).
 
 Requires prior ``build_consensus_sequence_alignment`` and holo trajectories with ATP.
 
@@ -489,8 +566,11 @@ report renders them in a dedicated **Phylogenetic Trees** section.
 
 ## Modular family dynamics (torsions / PCA / tICA)
 
-Atomic tools for family-level MD. The **planner schedules only tools named in the
-user goal** — there is no hard-wired mega feature list.
+Atomic tools for family-level MD. When the goal describes comparative dynamics
+in scientific terms (pocket–ligand COM/orientation, consensus flexibility,
+pocket χ₁, N↔C correlation, independent dihedral PCA entropy), the planner
+detects **family modular** intent and schedules matching tools — there is
+**no hard-wired mega feature list** and **no fixed cluster count**.
 
 | Tool | Scope | Role |
 | --- | --- | --- |
@@ -511,31 +591,40 @@ user goal** — there is no hard-wired mega feature list.
   `fit_dynamics_model` + `project_dynamics_model` (goal text: “independent” vs
   “shared reference / project onto …”).
 
-**Output dirs** (under `{label}/analysis/`): `consensus_dihedrals/`,
-`consensus_PCA/`, `consensus_TICA/`, `consensus_cart_PCA/`, `consensus_cart_TICA/`,
-and `*_ref` variants for shared-reference mode.
+**Output dirs** (under `{label}/analysis/` or `analysis/avg/` with `--rep-num`):
+`consensus_dihedrals/`, `consensus_PCA/`, `consensus_TICA/`,
+`consensus_cart_PCA/`, `consensus_cart_TICA/`, and `*_ref` variants for
+shared-reference mode.
 
-**Classification collection**
+**Classification collection (family modular goals)**
 
-- Pass `requested_metric_groups` such as `dihedral_pca`, `consensus_torsions`,
-  `consensus_rmsf`, `consensus_dccm`, `cart_tica`, …
-- Or exact `feature_columns=[...]`
+Default metric groups when modular + consensus pocket are detected:
+
+`consensus_rmsf`, `consensus_torsions`, `consensus_dccm`, `dihedral_pca`,
+`reference_pocket`, `com` (local COM as fallback).
+
+- Pass `requested_metric_groups` and/or exact `feature_columns=[...]`
 - Or `auto_discover=True` to include modular scalars found on disk
-- Do **not** assume a fixed ment-style 9/12-feature bundle
+- Paper Ward-4-style columns are **guidance only** (`PAPER_WARD4_FEATURE_COLUMNS`);
+  the LLM may select a similar subset (more or less) with written reasoning
+- Local `ligand_pocket_distance.csv` fills `reference_pocket_ligand_distance_*`
+  when the consensus-pocket batch is incomplete; pocket χ₁ falls back to
+  domain-wide χ₁ when needed
 
 Example goal:
 
 > For all systems: consensus φ/ψ/χ₁, independent dihedral PCA FEL entropy, pocket
 > χ₁ circular mean, reference pocket COM/angle, consensus RMSF mean/std, DCCM N–C;
-> then Ward-cluster on those columns.
+> then hierarchical clustering with a feature heatmap (do not fix k).
 
 ---
 
 ## Classification: how to use the data together
 
-### Step 1 — Per simulation (×35)
+### Step 1 — Per simulation
 
-Run the same pipeline in each `{base}/{label}/analysis/`:
+For **binding-site / Cartesian FEL** goals, run the classic pipeline in each
+`{base}/{label}/analysis/`:
 
 ```
 ligand_pocket_distance → protein_ligand_contacts → pocket_sasa →
@@ -544,45 +633,71 @@ calculate_trajectory_pca → calculate_free_energy_landscape →
 analyze_fel_landscape_features
 ```
 
-Each tool writes **scalar summaries** (JSON or CSV stats) plus time series where needed.
+For **family modular** goals, prefer consensus tools instead (or in addition):
+
+```
+calculate_consensus_torsions → calculate_consensus_rmsf_features →
+calculate_consensus_dccm_features → run_independent_dynamics_fel (dihedral/pca)
+```
+
+Each tool writes **scalar summaries** (JSON or CSV stats) plus time series /
+plots where needed. With `--rep-num N`, prefer `analysis/avg/` scalars.
 
 ### Step 2 — Consolidate (only if user requested classification)
 
 The framework runs `collect_classification_features_table` **only** when the goal
-explicitly mentions classification, clustering, unsupervised analysis, or a feature
-matrix. It is **not** part of default combined analysis.
+explicitly mentions classification, clustering, unsupervised analysis, a feature
+matrix, or family modular comparative descriptors. It is **not** part of default
+combined analysis for plain single-metric goals.
 
 **Which columns appear** depends on metrics named in the goal:
 
-| User says                                      | Metric groups featurized                                                      |
-| ---------------------------------------------- | ----------------------------------------------------------------------------- |
-| "unsupervised classification" (no list)        | Default: com, contacts, pocket_sasa, residence, pocket_rmsf, ligand_rmsf, fel |
-| "classify using RMSF and pocket distance only" | `pocket_rmsf`, `com` only                                                 |
-| "classification with FEL and contacts"         | `fel`, `contacts` (+ run PCA/FEL per sim first)                           |
+| User says | Metric groups featurized |
+| --------- | ------------------------ |
+| "unsupervised classification" (no list) | Default: com, contacts, pocket_sasa, residence, pocket_rmsf, ligand_rmsf, fel |
+| "classify using RMSF and pocket distance only" | `pocket_rmsf`, `com` only |
+| "classification with FEL and contacts" | `fel`, `contacts` (+ run PCA/FEL per sim first) |
+| Family modular + consensus pocket (COM/angle, χ₁, RMSF, DCCM, dihedral entropy) | `consensus_*`, `dihedral_pca`, `reference_pocket`, `com` |
 
 ```python
 from src.analysis.classification_collector import collect_classification_features_table
 collect_classification_features_table.func(
-    base_directory="/path/to/agenticB5R1",
-    working_dir="/path/to/agenticB5R1/analysis",
-    requested_metric_groups=["pocket_rmsf", "com"],  # optional; omit for default bundle
+    base_directory="/path/to/campaign",
+    working_dir="/path/to/campaign/analysis",
+    requested_metric_groups=["consensus_rmsf", "dihedral_pca", "reference_pocket"],
 )
 ```
 
 **Outputs:**
 
-| File                                   | Use                                                               |
-| -------------------------------------- | ----------------------------------------------------------------- |
-| `classification_features.csv`        | Raw values (Å, nm², fractions) — interpret physically          |
-| `classification_features_zscore.csv` | Z-scores across simulations —**input for clustering / ML** |
-| `classification_features.xlsx`       | Same data + feature dictionary (README, Raw, ZScore sheets)       |
-| `classification_features.json`       | Column list, definitions, normalization notes                     |
+| File | Use |
+| ---- | --- |
+| `classification_features.csv` | Raw values (Å, deg, nats, …) — interpret physically |
+| `classification_features_zscore.csv` | Robust/IQR or classic z-scores — **clustering input** |
+| `classification_features.xlsx` | Same data + feature dictionary |
+| `classification_features.json` | Column list, definitions, normalization notes |
+| `classification_feature_selection.json` | LLM-chosen subset + scientific reasoning (post_combined) |
 
 **Which file is used for classification?**
 
-`cluster_classification_features` reads **`classification_features_zscore.csv`** by default (`features_file` parameter). The raw CSV is never fed directly into hierarchical clustering or k-means — only z-scored columns are used so features on different scales (contacts ~50, entropy ~1.5, distance ~Å) contribute equally.
+`cluster_classification_features` reads **`classification_features_zscore.csv`**
+by default. The raw CSV is never fed directly into Ward / k-means.
 
-**One row = one protein–ATP system.** Which columns appear depends on `requested_metric_groups` in the user goal (default bundle below).
+**One row = one protein–ATP system** (folder label).
+
+### Step 2b — LLM feature selection (automatic in post_combined)
+
+After the full collected matrix exists, `MDAnalysisAgent` asks the LLM to
+select a scientifically motivated subset (typically 6–12 columns) with written
+reasoning. Preferences (not hard requirements):
+
+- Pocket–ligand COM mean/std and axis-angle mean/std (`reference_pocket_*`)
+- Consensus RMSF mean/std, pocket χ₁, N↔C DCCM, dihedral PCA grid entropy
+- Drop static/redundant columns (residue_count, net_charge, …) unless justified
+
+The selection is written to `classification_feature_selection.json`, the table
+is re-collected with those `feature_columns`, then clustering runs. If the LLM
+is unavailable, a preferred-column heuristic fallback is used.
 
 ---
 
@@ -605,10 +720,19 @@ All possible columns are defined in `CLASSIFICATION_FEATURE_DEFINITIONS` (`src/a
 | `sasa`        | `mean_protein_sasa_nm2`, `std_protein_sasa_nm2`                                                                         | `sasa.csv` / `sasa.dat`     | Mean / std whole-protein SASA (nm²)                                                       |
 | `energy`      | `mean_potential_energy_kJ_mol`                                                                                            | `energy.dat`                  | Mean potential energy (kJ/mol)                                                             |
 | `dccm`        | `mean_abs_dccm`                                                                                                           | `dccm_summary.json`           | Mean\|cross-correlation\| of Cα fluctuations (0–1)                                       |
+| `reference_pocket` | `reference_pocket_ligand_distance_{mean,std}_A`, axis-angle mean/std, SASA/RMSF/residence extras | `analysis/reference_pocket/{label}/` | MSA-mapped pocket COM + orientation (local COM fallback) |
+| `consensus_torsions` | `chi1_circ_mean_deg`, `chi1_pocket_circ_mean_deg` | `consensus_dihedrals/` | Domain / pocket χ₁ circular means |
+| `consensus_rmsf` | `consensus_rmsf_mean_A`, `consensus_rmsf_std_A` | `consensus_rmsf/` | Mapped Cα RMSF mean/std |
+| `consensus_dccm` | `dccm_N_C_mean_corr`, `mean_abs_dccm` | `consensus_DCCM/` | N↔C lobe mean correlation + mean \|corr\| |
+| `dihedral_pca` | `pca_grid_entropy`, `pca_major_basin_population` | `consensus_PCA/` | Independent dihedral PCA FEL grid entropy |
 
 **Default classification bundle** (when the goal says "classification" without naming metrics):
 
 `com`, `contacts`, `pocket_sasa`, `residence`, `pocket_rmsf`, `ligand_rmsf`, `fel` — **20 features**.
+
+Family modular + consensus pocket goals instead use
+`consensus_rmsf`, `consensus_torsions`, `consensus_dccm`, `dihedral_pca`,
+`reference_pocket`, `com` (see Step 2).
 
 Whole-protein RMSF (`rmsf` group: `mean_protein_rmsf_A`, `max_protein_rmsf_A`) is **not** used for classification. Pocket flexibility is captured by `pocket_rmsf` (`mean_pocket_rmsf_A`, `max_pocket_rmsf_A`). If the user goal mentions generic "RMSF", the collector maps that to `pocket_rmsf`, not whole-protein `rmsf`.
 
@@ -618,13 +742,17 @@ Each row also includes:
 | ---------------------- | ----------------------------------------------------- |
 | `label`              | Simulation folder name (e.g.`p23458`)               |
 | `sim_directory`      | Absolute path to`{base}/{label}/`                   |
-| `n_features_present` | Count of non-null feature columns for that simulation |
+| `n_features_present` | Count of **finite** feature columns for that simulation |
 
 ---
 
 ### Z-scores: definition and calculation
 
-A **z-score** expresses how many standard deviations a simulation's feature value is from the cohort mean for that feature:
+Family modular / paper-style runs use **robust IQR z-scores** by default
+(`method="robust"`): winzorize at 1.5×IQR, then
+\((x - \mathrm{median}) / (\mathrm{IQR}/1.349)\), clipped to ±3.
+
+Classic z-scores are also supported:
 
 \[
 z_i = \frac{x_i - \mu}{\sigma}
@@ -633,15 +761,15 @@ z_i = \frac{x_i - \mu}{\sigma}
 where:
 
 - \(x_i\) = raw scalar for simulation \(i\) and feature column \(j\)
-- \(\mu\) = mean of column \(j\) across **all simulations with a non-null value**
+- \(\mu\) = mean of column \(j\) across **all simulations with a finite value**
 - \(\sigma\) = standard deviation of column \(j\) across those same simulations (if \(\sigma < 10^{-12}\), use 1.0 to avoid division by zero)
 
 **Important rules:**
 
-1. Z-scoring is **across simulations**, one value per feature per sim — **not** within a single trajectory time series.
-2. Simulations with missing data for a column are **excluded from μ and σ** for that column but still get a z-score if their raw value exists.
-3. If fewer than two simulations have a value for a column, z-scores are left blank for that column.
-4. **`fraction_bound`**, **`n_unbinding_events`**, etc. are z-scored like any other numeric column when they vary across sims; when all sims share the same value (e.g. all `fraction_bound = 1.0`), σ ≈ 0 and z-scores become 0.
+1. Normalization is **across simulations**, one value per feature per sim — **not** within a single trajectory time series.
+2. Non-finite values (NaN/Inf) are treated as missing so one bad sim does not poison an entire column.
+3. If fewer than two simulations have a finite value for a column, z-scores are left blank for that column.
+4. Clustering may impute remaining NaNs with the column mean (`max_column_missing_fraction` up to 0.5 for modular panels).
 
 **Example** (`agenticB5R1`, default bundle, 8 holo systems):
 
@@ -674,8 +802,11 @@ After the feature table is built, run **`cluster_classification_features`** on t
 | ------------------ | ----------------------- | ------------------------------------------------------------- |
 | `method`         | `hierarchical`        | Set`kmeans` if the goal mentions k-means                    |
 | `linkage_method` | `ward`                | Ward, average, or complete (hierarchical only)                |
-| `n_clusters` (k) | auto (√n, capped 2–8) | Number of groups to cut the tree into; e.g. k=3 → 3 clusters |
+| `n_clusters` (k) | auto (√n, capped 2–8) | Optional cut for coloring; family modular often leaves cuts to the reader |
 | `user_goal`      | —                      | Parses`p23458:JAK1` style maps for plot labels              |
+| `panel_file`     | `classification_dendrogram_heatmap.png` | Combined dendrogram + heatmap (modular default) |
+| `simple_panel`   | `True` (modular)     | Plain dendrogram without forced archetype boxes             |
+| `feature_scale_label` | `Robust Z score` (modular) | Heatmap colorbar label |
 
 **Outputs** (under `{base}/analysis/`):
 
@@ -683,9 +814,11 @@ After the feature table is built, run **`cluster_classification_features`** on t
 | ------------------------------------------ | -------------------------------------------------------------------------- |
 | `classification_cluster_assignments.csv` | label, display_name, cluster_id, method                                    |
 | `classification_clusters_pca.png`        | 2D PCA scatter, colored by cluster,**protein name annotations**      |
-| `classification_dendrogram.png`          | Hierarchical dendrogram with protein names (hierarchical only)             |
+| `classification_dendrogram_heatmap.png`  | Dendrogram + feature heatmap panel (modular / family default)              |
+| `classification_dendrogram.png`          | Hierarchical dendrogram alone (when panel not requested)                   |
 | `classification_phylo_tree.png`          | Unrooted circular phylogenetic tree colored by cluster (hierarchical only) |
-| `classification_clusters.json`           | Parameters + assignment summary                                            |
+| `classification_clusters.json`           | Parameters, columns used, dropped columns, assignment summary              |
+| `classification_feature_selection.json`  | LLM feature subset + reasoning (when post_combined selection ran)          |
 
 **What does k mean on the dendrogram?**
 
@@ -757,7 +890,8 @@ cluster_classification_features.func(
 **Unsupervised (no labels yet):**
 
 - Load z-score matrix → sims with missing features are skipped automatically
-- `cluster_classification_features` (hierarchical default) → inspect cluster assignments and PCA/dendrogram/phylo-tree plots
+- Inspect `classification_feature_selection.json` for why columns were kept
+- `cluster_classification_features` (hierarchical default) → dendrogram/heatmap / PCA / phylo tree
 - Compare clusters to binding/residence/FEL metrics in the raw CSV
 
 **Supervised (when you have labels):**
@@ -831,7 +965,7 @@ See `agentic/planner/planning_guidelines.py` → `STANDARD_OUTPUT_FILES`.
 | Residence             | `ligand_residence.csv`                        |
 | Pocket RMSF           | `pocket_rmsf.dat`                             |
 | Ligand RMSF           | `ligand_rmsf.dat`, `ligand_rmsf.json`       |
-| Classification matrix | `{base}/analysis/classification_features.csv` |
+| Classification matrix | `{base}/analysis/classification_features.csv` (+ `_zscore`, selection JSON, dendrogram heatmap) |
 | PCA                   | `pca_projections.dat`                         |
 | FEL                   | `fel_pc1_pc2_grid.csv`                        |
 | FEL features          | `fel_features.json`                           |
@@ -853,10 +987,12 @@ Per-simulation and combined reports use **fixed filenames** so agents, resume lo
 The Reporter agent always writes per-sim reports as `report.html` (not protein-specific names
 like `kinase_report.html`). Combined mode writes `combined_report.html` at the project base.
 
-**Multi-sim phases:** after all per-sim analysis/reporter work, the supervisor advances
-`multi_sim_phase` to `combined_analysis` then `combined_reporter`. Combined reporter
-completeness is checked only against `{base}/reporter/combined_report.html` — not against
-per-sim `report.html` files in individual simulation directories.
+**Multi-sim phases:** optional `pre_combined` (pocket/MSA → `cross_sim/`) runs
+before the per-sim pool; after all per-sim analysis/reporter work, the supervisor
+may advance `multi_sim_phase` to `combined_analysis` / `post_combined` then
+`combined_reporter`. Combined reporter completeness is checked only against
+`{base}/reporter/combined_report.html` — not against per-sim `report.html`
+files in individual simulation directories.
 
 **Resume / skip:** parallel pool and `--resume` treat a per-sim reporter as done when
 `{label}/analysis/analysis_summary.jsonl` and `{label}/reporter/report.html` both exist.
@@ -901,8 +1037,14 @@ calculate_pocket_rmsf.func(
 | `binding_site_analyzer.py`     | Contacts, pocket SASA, residence, pocket/ligand RMSF |
 | `classification_collector.py`  | `collect_classification_features_table`            |
 | `classification_clustering.py` | `cluster_classification_features`                  |
+| `family_dynamics_core.py`      | Shared dihedral/cartesian PCA·tICA helpers         |
+| `consensus_structural_features.py` | Consensus RMSF / DCCM scalars                  |
+| `consensus_pocket.py`          | Reference pocket define/map/metrics/batch          |
+| `feature_matrix_plots.py`      | Mean±std line plots for modular matrices           |
+| `replicate_aggregate.py`       | Multi-rep `analysis/avg/` mean±std (+ matrices)      |
 | `dccm_calculator.py`           | DCCM                                                 |
 | `pca_analyzer.py`              | PCA, FEL, FEL features                               |
 | `dssp_analyzer.py`             | Secondary structure                                  |
 | `energy_analyzer.py`           | Energy, trajectory metrics                           |
 | `combined_analysis.py`         | Cross-simulation pipelines                           |
+| `cross_sim_artifacts.py`       | `base/cross_sim/` discover / harvest / pocket_map    |

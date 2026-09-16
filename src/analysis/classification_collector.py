@@ -111,6 +111,28 @@ CLASSIFICATION_FEATURE_GROUPS["reference_fel_archetype"] = (
     "ref_major_basin_population",
 )
 
+# Paper Ward k=4 feature set (mafft_0.5 / fig4): pocket×4 + RMSF×2 + χ₁ + DCCM + dihedral PCA.
+# Matches campaigns/ment/mafft_0.5_feature_analysis/repavg/output_ward4/ward4_meta.json.
+PAPER_WARD4_FEATURE_COLUMNS: Tuple[str, ...] = (
+    "reference_pocket_ligand_distance_mean_A",
+    "reference_pocket_ligand_distance_std_A",
+    "reference_pocket_ligand_axis_angle_mean_deg",
+    "reference_pocket_std_ligand_axis_angle_deg",
+    "consensus_rmsf_mean_A",
+    "consensus_rmsf_std_A",
+    "chi1_pocket_circ_mean_deg",
+    "dccm_N_C_mean_corr",
+    "pca_grid_entropy",
+)
+PAPER_WARD4_METRIC_GROUPS: Tuple[str, ...] = (
+    "reference_pocket",
+    "consensus_rmsf",
+    "consensus_torsions",
+    "consensus_dccm",
+    "dihedral_pca",
+)
+CLASSIFICATION_FEATURE_GROUPS["paper_ward4"] = PAPER_WARD4_FEATURE_COLUMNS
+
 # Optional modular family-dynamics groups (user/planner selects; never forced).
 CLASSIFICATION_FEATURE_GROUPS["consensus_torsions"] = (
     "chi1_circ_mean_deg",
@@ -208,8 +230,8 @@ def discover_modular_feature_columns(row: Dict[str, Any]) -> List[str]:
     return known
 
 
-def _ingest_modular_family_features(adir: Path, row: Dict[str, Any]) -> None:
-    """Pull scalars from modular torsion / RMSF / DCCM / dynamics FEL artifacts."""
+def _ingest_modular_scalars_from_dir(adir: Path, row: Dict[str, Any]) -> None:
+    """Ingest modular family scalars from one analysis directory root."""
     for rel, keys in _MODULAR_SCALAR_JSON:
         data = _load_json(adir / rel) or {}
         for k in keys:
@@ -226,7 +248,6 @@ def _ingest_modular_family_features(adir: Path, row: Dict[str, Any]) -> None:
             row[gkey] = fel.get("grid_entropy")
         if row.get(mkey) is None and fel.get("major_basin_population") is not None:
             row[mkey] = fel.get("major_basin_population")
-        # Optional extras when present
         for src, dst_suffix in (
             ("landscape_entropy", "_landscape_entropy"),
             ("n_basins", "_n_basins"),
@@ -234,6 +255,40 @@ def _ingest_modular_family_features(adir: Path, row: Dict[str, Any]) -> None:
             dkey = f"{prefix}{dst_suffix}"
             if row.get(dkey) is None and fel.get(src) is not None:
                 row[dkey] = fel.get(src)
+
+
+def _mean_modular_scalars_across_reps(adir: Path, row: Dict[str, Any]) -> None:
+    """Average modular JSON scalars across ``rep*/`` when avg/top-level missing."""
+    rep_dirs = sorted(p for p in adir.glob("rep*") if p.is_dir())
+    if len(rep_dirs) < 2:
+        return
+    # Collect per-key values from each rep, then write arithmetic means.
+    buckets: Dict[str, List[float]] = {}
+    for rep in rep_dirs:
+        tmp: Dict[str, Any] = {}
+        _ingest_modular_scalars_from_dir(rep, tmp)
+        for k, v in tmp.items():
+            if v is None:
+                continue
+            try:
+                buckets.setdefault(k, []).append(float(v))
+            except (TypeError, ValueError):
+                continue
+    for k, vals in buckets.items():
+        if row.get(k) is None and vals:
+            row[k] = float(np.mean(vals))
+
+
+def _ingest_modular_family_features(adir: Path, row: Dict[str, Any]) -> None:
+    """Pull scalars from modular torsion / RMSF / DCCM / dynamics FEL artifacts.
+
+    Prefers ``analysis/avg/`` then top-level ``analysis/``, then averages
+    across ``rep*/`` (paper repavg = mean of per-replicate scalars).
+    """
+    for d in (adir / "avg", adir):
+        if d.is_dir():
+            _ingest_modular_scalars_from_dir(d, row)
+    _mean_modular_scalars_across_reps(adir, row)
 
 
 # Local (per-simulation) FEL counterpart to reference_fel_archetype — same two
@@ -777,11 +832,54 @@ def _parse_pocket_rmsf_dat(path: Path) -> Dict[str, Optional[float]]:
     return {"mean": float(np.mean(arr)), "max": float(np.max(arr))}
 
 
+def _analysis_search_dirs(analysis_dir: Path) -> List[Path]:
+    """Prefer ``analysis/avg/`` then top-level analysis, then rep folders."""
+    dirs: List[Path] = []
+    avg = analysis_dir / "avg"
+    if avg.is_dir():
+        dirs.append(avg)
+    dirs.append(analysis_dir)
+    for rep in sorted(analysis_dir.glob("rep*")):
+        if rep.is_dir():
+            dirs.append(rep)
+    return dirs
+
+
+def _find_in_analysis(analysis_dir: Path, *names: str) -> Optional[Path]:
+    for d in _analysis_search_dirs(analysis_dir):
+        for name in names:
+            p = d / name
+            if p.is_file():
+                return p
+    return None
+
+
+def _looks_like_tabular_csv(path: Path, required_cols: Sequence[str]) -> bool:
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as fh:
+            for _ in range(8):
+                line = fh.readline()
+                if not line:
+                    break
+                if line.lstrip().startswith("#"):
+                    continue
+                header = {c.strip().lower() for c in line.strip().split(",")}
+                if any(c.lower() in header for c in required_cols):
+                    return True
+                break
+    except OSError:
+        return False
+    return False
+
+
 def _find_ligand_pocket_csv(analysis_dir: Path) -> Optional[Path]:
-    for name in ("ligand_pocket_distance.csv", "pocket_distance.csv"):
-        p = analysis_dir / name
-        if p.is_file():
-            return p
+    # Prefer real trajectory CSVs (frame,distance_…) over avg x/y mean dumps.
+    req = ("distance_a", "distance_angstrom", "distance")
+    for d in _analysis_search_dirs(analysis_dir):
+        for name in ("ligand_pocket_distance.csv", "pocket_distance.csv"):
+            p = d / name
+            if p.is_file() and _looks_like_tabular_csv(p, req):
+                return p
     return None
 
 
@@ -930,7 +1028,9 @@ def collect_features_for_sim(
     if local_fel_root is not None:
         fel = _load_json(Path(local_fel_root) / label / "fel_features.json") or {}
     else:
-        fel = _load_json(adir / "fel_features.json") or {}
+        fel_path = _find_in_analysis(adir, "fel_features.json")
+        fel = _load_json(fel_path) if fel_path else {}
+        fel = fel or {}
     row["n_basins"] = fel.get("n_basins", fel.get("n_minima"))
     row["landscape_entropy"] = fel.get("landscape_entropy")
     row["major_basin_population"] = fel.get("major_basin_population")
@@ -976,12 +1076,18 @@ def collect_features_for_sim(
         dccm_summary.get("mean_abs_correlation") if dccm_summary else None
     )
 
-    # Reference-mapped pocket metrics (combined-analysis output tree)
+    # Reference-mapped pocket metrics (combined-analysis output tree).
+    # Prefer MSA-mapped reference_pocket/{label}/ when usable; otherwise fall
+    # back to local ligand_pocket_distance / orientation so COM/angle still
+    # appear in the classification matrix.
     rp_metrics = (
         _load_json(reference_pocket_dir / "reference_pocket_metrics.json") or {}
         if reference_pocket_usable
         else {}
     )
+    if not rp_metrics and reference_pocket_dir.is_dir():
+        # Manifest missing/empty but metrics were written anyway.
+        rp_metrics = _load_json(reference_pocket_dir / "reference_pocket_metrics.json") or {}
     if rp_metrics:
         row["reference_pocket_ligand_distance_mean_A"] = rp_metrics.get(
             "ligand_pocket_distance_mean_A"
@@ -996,6 +1102,10 @@ def collect_features_for_sim(
         row["reference_pocket_mean_ligand_axis_angle_deg"] = rp_metrics.get(
             "mean_axis_angle_deg"
         )
+        # Paper Ward-4 / fig4 column name (alias of mean_ligand_axis_angle).
+        row["reference_pocket_ligand_axis_angle_mean_deg"] = row[
+            "reference_pocket_mean_ligand_axis_angle_deg"
+        ]
         row["reference_pocket_std_ligand_axis_angle_deg"] = rp_metrics.get(
             "std_axis_angle_deg"
         )
@@ -1013,11 +1123,7 @@ def collect_features_for_sim(
         )
         row["reference_pocket_residue_count"] = rp_metrics.get("pocket_residue_count")
         row["reference_pocket_net_charge"] = rp_metrics.get("pocket_net_charge")
-    rp_sasa = (
-        reference_pocket_dir / "reference_pocket_sasa.csv"
-        if reference_pocket_usable
-        else Path("__missing_reference_pocket_sasa__")
-    )
+    rp_sasa = reference_pocket_dir / "reference_pocket_sasa.csv"
     m, s = _csv_mean_std(rp_sasa, "pocket_sasa_nm2")
     if m is not None:
         row["reference_pocket_mean_sasa_nm2"] = m
@@ -1025,59 +1131,89 @@ def collect_features_for_sim(
     p95_sasa = _csv_percentile(rp_sasa, "pocket_sasa_nm2", 95.0)
     if p95_sasa is not None:
         row["reference_pocket_p95_sasa_nm2"] = p95_sasa
-    rp_rmsf = _parse_pocket_rmsf_dat(
-        reference_pocket_dir / "reference_pocket_rmsf.dat"
-        if reference_pocket_usable
-        else Path("__missing_reference_pocket_rmsf__")
-    )
+    rp_rmsf = _parse_pocket_rmsf_dat(reference_pocket_dir / "reference_pocket_rmsf.dat")
     if rp_rmsf["mean"] is not None:
         row["reference_pocket_mean_rmsf_A"] = rp_rmsf["mean"]
         row["reference_pocket_max_rmsf_A"] = rp_rmsf["max"]
-    if reference_pocket_usable:
-        orient_csv = reference_pocket_dir / "reference_pocket_ligand_orientation.csv"
-        orient_m, orient_s = _csv_mean_std(orient_csv, "axis_angle_deg")
-        if orient_m is not None:
-            row["reference_pocket_mean_ligand_axis_angle_deg"] = orient_m
-            row["reference_pocket_std_ligand_axis_angle_deg"] = orient_s
-        if orient_csv.is_file() and (
-            row.get("reference_pocket_ligand_distance_p95_A") is None
-            or row.get("reference_pocket_ligand_axis_angle_p95_deg") is None
+    orient_csv = reference_pocket_dir / "reference_pocket_ligand_orientation.csv"
+    if not orient_csv.is_file():
+        # Local per-sim orientation if a tool wrote it under analysis/.
+        for cand in (
+            adir / "reference_pocket_ligand_orientation.csv",
+            adir / "pocket_axis_angle.csv",
+            adir / "avg" / "reference_pocket_ligand_orientation.csv",
         ):
-            from src.analysis.consensus_pocket import summarize_ligand_orientation_csv
+            if cand.is_file():
+                orient_csv = cand
+                break
+    orient_m, orient_s = _csv_mean_std(orient_csv, "axis_angle_deg")
+    if orient_m is not None:
+        row["reference_pocket_mean_ligand_axis_angle_deg"] = orient_m
+        row["reference_pocket_std_ligand_axis_angle_deg"] = orient_s
+    if orient_csv.is_file() and (
+        row.get("reference_pocket_ligand_distance_p95_A") is None
+        or row.get("reference_pocket_ligand_axis_angle_p95_deg") is None
+    ):
+        from src.analysis.consensus_pocket import summarize_ligand_orientation_csv
 
-            derived = summarize_ligand_orientation_csv(orient_csv)
-            if derived.get("success"):
-                if row.get("reference_pocket_ligand_distance_p95_A") is None:
-                    row["reference_pocket_ligand_distance_p95_A"] = derived.get(
-                        "p95_distance_A"
-                    )
-                if row.get("reference_pocket_ligand_distance_max_A") is None:
-                    row["reference_pocket_ligand_distance_max_A"] = derived.get(
-                        "max_distance_A"
-                    )
-                if row.get("reference_pocket_fraction_stable_coupling") is None:
-                    row["reference_pocket_fraction_stable_coupling"] = derived.get(
-                        "fraction_stable_coupling"
-                    )
-                if row.get("reference_pocket_mean_ligand_axis_angle_deg") is None:
-                    row["reference_pocket_mean_ligand_axis_angle_deg"] = derived.get(
-                        "mean_axis_angle_deg"
-                    )
-                if row.get("reference_pocket_std_ligand_axis_angle_deg") is None:
-                    row["reference_pocket_std_ligand_axis_angle_deg"] = derived.get(
-                        "std_axis_angle_deg"
-                    )
-                if row.get("reference_pocket_ligand_axis_angle_p95_deg") is None:
-                    row["reference_pocket_ligand_axis_angle_p95_deg"] = derived.get(
-                        "p95_axis_angle_deg"
-                    )
-    rp_res = (
-        _load_json(reference_pocket_dir / "reference_pocket_residence.json") or {}
-        if reference_pocket_usable
-        else {}
-    )
+        derived = summarize_ligand_orientation_csv(orient_csv)
+        if derived.get("success"):
+            if row.get("reference_pocket_ligand_distance_p95_A") is None:
+                row["reference_pocket_ligand_distance_p95_A"] = derived.get(
+                    "p95_distance_A"
+                )
+            if row.get("reference_pocket_ligand_distance_max_A") is None:
+                row["reference_pocket_ligand_distance_max_A"] = derived.get(
+                    "max_distance_A"
+                )
+            if row.get("reference_pocket_fraction_stable_coupling") is None:
+                row["reference_pocket_fraction_stable_coupling"] = derived.get(
+                    "fraction_stable_coupling"
+                )
+            if row.get("reference_pocket_mean_ligand_axis_angle_deg") is None:
+                row["reference_pocket_mean_ligand_axis_angle_deg"] = derived.get(
+                    "mean_axis_angle_deg"
+                )
+            if row.get("reference_pocket_std_ligand_axis_angle_deg") is None:
+                row["reference_pocket_std_ligand_axis_angle_deg"] = derived.get(
+                    "std_axis_angle_deg"
+                )
+            if row.get("reference_pocket_ligand_axis_angle_p95_deg") is None:
+                row["reference_pocket_ligand_axis_angle_p95_deg"] = derived.get(
+                    "p95_axis_angle_deg"
+                )
+    # Keep paper Ward-4 alias in sync with collector column name.
+    if row.get("reference_pocket_ligand_axis_angle_mean_deg") is None:
+        row["reference_pocket_ligand_axis_angle_mean_deg"] = row.get(
+            "reference_pocket_mean_ligand_axis_angle_deg"
+        )
+    elif row.get("reference_pocket_mean_ligand_axis_angle_deg") is None:
+        row["reference_pocket_mean_ligand_axis_angle_deg"] = row.get(
+            "reference_pocket_ligand_axis_angle_mean_deg"
+        )
+    rp_res = _load_json(reference_pocket_dir / "reference_pocket_residence.json") or {}
     if rp_res.get("fraction_bound") is not None:
         row["reference_pocket_fraction_bound"] = rp_res.get("fraction_bound")
+
+    # Fallback: local ligand–pocket COM → reference_pocket distance columns.
+    if row.get("reference_pocket_ligand_distance_mean_A") is None and row.get(
+        "ligand_pocket_distance_mean_A"
+    ) is not None:
+        row["reference_pocket_ligand_distance_mean_A"] = row[
+            "ligand_pocket_distance_mean_A"
+        ]
+        row["reference_pocket_ligand_distance_std_A"] = row.get(
+            "ligand_pocket_distance_std_A"
+        )
+        if lp_csv is not None:
+            p95 = _csv_percentile(lp_csv, "distance_A", 95.0)
+            if p95 is None:
+                for col in ("distance_angstrom", "distance"):
+                    p95 = _csv_percentile(lp_csv, col, 95.0)
+                    if p95 is not None:
+                        break
+            if p95 is not None:
+                row.setdefault("reference_pocket_ligand_distance_p95_A", p95)
 
     # Reference-projected dynamics — combined ``reference_fel/{label}/`` only
     ref_fel = _resolve_reference_fel_json(label, adir, base_analysis)
@@ -1107,6 +1243,12 @@ def collect_features_for_sim(
 
     # Modular family dynamics (torsions / consensus RMSF-DCCM / PCA-tICA FELs)
     _ingest_modular_family_features(adir, row)
+
+    # Prefer pocket χ₁; if missing/NaN, copy domain-wide as a soft fallback.
+    if not _is_finite_number(row.get("chi1_pocket_circ_mean_deg")) and _is_finite_number(
+        row.get("chi1_circ_mean_deg")
+    ):
+        row["chi1_pocket_circ_mean_deg"] = row["chi1_circ_mean_deg"]
 
     # Summary fallbacks for missing fields
     if any(row.get(c) is None for c in FEATURE_COLUMNS):
@@ -1146,36 +1288,71 @@ def collect_features_for_sim(
     return row
 
 
+def _is_finite_number(value: Any) -> bool:
+    """True when ``value`` is a usable numeric scalar (rejects None / NaN / Inf)."""
+    if value is None:
+        return False
+    try:
+        return bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
+
+
 def _count_present(row: Dict[str, Any], columns: Sequence[str]) -> int:
-    return sum(1 for c in columns if row.get(c) is not None)
+    return sum(1 for c in columns if _is_finite_number(row.get(c)))
 
 
-def _zscore_table(rows: List[Dict[str, Any]], columns: Tuple[str, ...]) -> List[Dict[str, Any]]:
-    """Z-score normalize numeric columns across simulations.
+def _zscore_table(
+    rows: List[Dict[str, Any]],
+    columns: Tuple[str, ...],
+    method: str = "zscore",
+) -> List[Dict[str, Any]]:
+    """Normalize numeric columns across simulations for clustering.
 
-    For each feature column, mean (μ) and standard deviation (σ) are computed
-    from all simulations with a non-null value for that column. Simulations
-    with missing data do not contribute to μ/σ but still receive a z-score when
-    their raw value is present. If fewer than two values exist, z-scores are
-    left blank for that column.
+    ``method="zscore"`` (default): classic ``(x - μ) / σ``.
+
+    ``method="robust"``: paper Ward-4 / fig4 scaling — per-column IQR winsorize
+    at 1.5×IQR, then ``(x - median) / (IQR/1.349)``, clipped to ±3
+    (see ``campaigns/ment/mafft_0.5_feature_analysis/scripts/cluster_ward4.py``).
+
+    Non-finite values (NaN/Inf) are treated as missing so one bad sim does not
+    poison an entire column.
     """
     zrows: List[Dict[str, Any]] = []
     for row in rows:
         zrows.append({"label": row["label"], "sim_directory": row.get("sim_directory")})
 
+    use_robust = str(method or "zscore").lower() in {"robust", "iqr", "robust_z"}
     for col in columns:
-        vals = [row.get(col) for row in rows if row.get(col) is not None]
+        vals = [
+            float(row.get(col))
+            for row in rows
+            if _is_finite_number(row.get(col))
+        ]
         if len(vals) < 2:
             for zr in zrows:
                 zr[col] = None
             continue
         arr = np.asarray(vals, dtype=float)
+        if use_robust:
+            q1, median, q3 = np.percentile(arr, [25.0, 50.0, 75.0])
+            iqr = float(q3 - q1)
+            lower, upper = float(q1 - 1.5 * iqr), float(q3 + 1.5 * iqr)
+            scale = (iqr / 1.349) if iqr > 1e-12 else 1.0
+            for i, row in enumerate(rows):
+                v = row.get(col)
+                if not _is_finite_number(v):
+                    zrows[i][col] = None
+                else:
+                    wins = float(np.clip(float(v), lower, upper))
+                    zrows[i][col] = float(np.clip((wins - float(median)) / scale, -3.0, 3.0))
+            continue
         mu, sigma = float(np.mean(arr)), float(np.std(arr))
         if sigma < 1e-12:
             sigma = 1.0
         for i, row in enumerate(rows):
             v = row.get(col)
-            if v is None:
+            if not _is_finite_number(v):
                 zrows[i][col] = None
             else:
                 zrows[i][col] = (float(v) - mu) / sigma
@@ -1287,9 +1464,11 @@ def collect_classification_features_table(
     original_dir = None
     try:
         if working_dir:
-            os.makedirs(working_dir, exist_ok=True)
+            wd_abs = Path(working_dir).expanduser().resolve()
+            wd_abs.mkdir(parents=True, exist_ok=True)
             original_dir = os.getcwd()
-            os.chdir(working_dir)
+            os.chdir(wd_abs)
+            working_dir = str(wd_abs)
 
         base = Path(base_directory)
         if not base.is_absolute():
@@ -1362,11 +1541,15 @@ def collect_classification_features_table(
                 row.setdefault(col, None)
             row["n_features_present"] = _count_present(row, feature_cols)
 
-        out_dir = Path(working_dir) if working_dir else base / "analysis"
+        out_dir = Path(working_dir).resolve() if working_dir else (base / "analysis").resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        def _out_path(name: str) -> Path:
+            p = Path(name)
+            return p if p.is_absolute() else out_dir / p.name
+
         fieldnames = ["label", "sim_directory", *feature_cols, "n_features_present"]
-        raw_path = out_dir / output_file
+        raw_path = _out_path(output_file)
         with open(raw_path, "w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
@@ -1375,9 +1558,20 @@ def collect_classification_features_table(
 
         z_path = None
         zrows: List[Dict[str, Any]] = []
+        use_robust = bool(
+            "paper_ward4" in set(metric_groups or [])
+            or (
+                feature_columns
+                and list(feature_columns) == list(PAPER_WARD4_FEATURE_COLUMNS)
+            )
+        )
         if include_zscore:
-            zrows = _zscore_table(rows, feature_cols)
-            z_path = out_dir / zscore_output_file
+            zrows = _zscore_table(
+                rows,
+                feature_cols,
+                method="robust" if use_robust else "zscore",
+            )
+            z_path = _out_path(zscore_output_file)
             z_fieldnames = ["label", "sim_directory", *feature_cols]
             with open(z_path, "w", newline="", encoding="utf-8") as fh:
                 writer = csv.DictWriter(fh, fieldnames=z_fieldnames, extrasaction="ignore")
@@ -1400,10 +1594,18 @@ def collect_classification_features_table(
                 str(z_path.resolve()) if z_path else str(raw_path.resolve())
             ),
             "normalization": (
-                "z-score per column across all simulations in this table: "
-                "z = (x - mean) / std. Use zscore file for unsupervised clustering; "
-                "use raw file for physical interpretation."
+                (
+                    "robust IQR z-score (paper Ward-4 / fig4): winzorize at 1.5×IQR, "
+                    "z = (x - median) / (IQR/1.349), clipped to ±3"
+                )
+                if use_robust
+                else (
+                    "z-score per column across all simulations in this table: "
+                    "z = (x - mean) / std. Use zscore file for unsupervised clustering; "
+                    "use raw file for physical interpretation."
+                )
             ),
+            "normalization_method": "robust" if use_robust else "zscore",
             "unsupervised_recommended": [
                 "Load classification_features_zscore.csv (or ZScore_Features sheet in XLSX)",
                 "Drop columns with many NaNs",
@@ -1412,13 +1614,13 @@ def collect_classification_features_table(
                 "and classification_phylo_tree.png",
             ],
         }
-        manifest_path = out_dir / manifest_file
+        manifest_path = _out_path(manifest_file)
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
         xlsx_path = None
         if xlsx_output_file:
             xlsx_path = _write_classification_xlsx(
-                out_dir / xlsx_output_file,
+                _out_path(xlsx_output_file),
                 rows,
                 zrows if zrows else rows,
                 feature_cols,

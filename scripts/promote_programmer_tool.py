@@ -46,7 +46,7 @@ def main() -> int:
     print(f"  1. Review {dest}")
     print("  2. Import the @tool in agentic/analysis/tools.py")
     print("  3. Add the tool name to agentic/analysis/tool_buckets.py (per_sim/combined/shared)")
-    print("  4. Document in docs/CLEAN_AND_OPT.md / ANALYSIS_TOOLS.md")
+    print("  4. Document in docs/ANALYSIS_TOOLS.md")
     return 0
 
 

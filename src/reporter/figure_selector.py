@@ -141,7 +141,7 @@ CLUSTER_RMSF_ORDER: Tuple[str, ...] = (
 
 # Prefer one canonical plot per analysis type when multiple images exist.
 PREFERRED_PLOT_NAMES: Dict[str, Tuple[str, ...]] = {
-    "fel": ("fel_basins.png", "fel_pc1_pc2.png"),
+    "fel": ("fel_basins.png",),
     "pca": ("pca_projection.png", "pca.png"),
     "com": ("ligand_pocket_distance.png", "com_distance.png"),
     "contacts": ("protein_ligand_contacts.png",),

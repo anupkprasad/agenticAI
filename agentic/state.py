@@ -188,11 +188,15 @@ class MDState(TypedDict):
 
     # ── Multi-Simulation Mode ─────────────────────────────────────────────
     is_multi_simulation: Optional[bool]          # True when running multiple PDBs
-    multi_sim_phase: Optional[str]               # "planning" | "hpc_pool" | "executing_sims" | "combined_analysis" | "combined_reporter" | None
+    multi_sim_phase: Optional[str]               # "planning" | "pre_combined" | "hpc_pool" | "executing_sims" | "combined_analysis"/"post_combined" | "combined_reporter" | None
     pdb_list: Optional[List[str]]                # Original PDB file paths from CLI / goal extraction
     sim_prompts: Optional[List[Dict[str, Any]]]  # Per-sim prompts from master planner [{prompt, pdb, label, working_dir}, ...]
-    run_combined_analysis: Optional[bool]        # Planner decision: run base-level combined analysis/report after per-sim loop
-    combined_analysis_plan: Optional[str]        # LLM plan text for cross-simulation analysis
+    run_combined_analysis: Optional[bool]        # Legacy alias for run_post_combined (post per-sim loop)
+    combined_analysis_plan: Optional[str]        # Legacy alias for post_combined_plan
+    run_pre_combined: Optional[bool]             # Optional combined tools BEFORE per-sim traj analysis (n_sims>1)
+    pre_combined_plan: Optional[str]             # NL plan for pre_combined (pocket/MSA/consensus → base/cross_sim/)
+    run_post_combined: Optional[bool]            # Optional combined tools AFTER all per-sim work (n_sims>1)
+    post_combined_plan: Optional[str]            # NL plan for post_combined (compare/Ward/overlays)
     current_sim_index: Optional[int]             # Index into sim_prompts (which sim is next)
     completed_sim_states: Optional[List[Dict[str, Any]]]  # Saved state snapshots after each sim completes
     sim_working_dirs: Optional[List[str]]        # Per-sim working directories (e.g., base_dir/1abc/)

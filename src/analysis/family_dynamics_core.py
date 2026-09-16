@@ -78,9 +78,12 @@ def mapping_for_label(
     Per-consensus-position residue mapping for one simulation label.
 
     Supports:
+    - Compact v2: ``per_sim[label].resids``
     - Framework star MSA: ``consensus_positions[].mappings[label]``
     - Ment-style: ``proteins[label].mapping`` list aligned to consensus
     """
+    from src.analysis.cross_sim_artifacts import expand_consensus_positions
+
     lab = label.strip()
     # Ment / occupancy style
     proteins = alignment.get("proteins") or {}
@@ -89,14 +92,15 @@ def mapping_for_label(
             mapping = val.get("mapping") if isinstance(val, dict) else None
             if mapping is not None:
                 return list(mapping)
-    # Star MSA consensus_positions
+    # Compact / legacy positions
     positions = alignment.get("consensus_positions")
+    if not positions:
+        positions = expand_consensus_positions(alignment)
     if positions is None and "consensus" in alignment:
         positions = alignment["consensus"]
     if not positions:
-        # columns from write path sometimes nested under msa
         msa = alignment.get("msa") or alignment
-        positions = msa.get("consensus_positions") or []
+        positions = msa.get("consensus_positions") or expand_consensus_positions(msa)
     out: List[Optional[Dict[str, Any]]] = []
     for pos in positions:
         maps = (pos or {}).get("mappings") or {}
@@ -121,9 +125,14 @@ def mapping_for_label(
 
 
 def consensus_positions_list(alignment: Dict[str, Any]) -> List[Dict[str, Any]]:
+    from src.analysis.cross_sim_artifacts import expand_consensus_positions
+
     positions = alignment.get("consensus_positions")
     if positions:
         return list(positions)
+    expanded = expand_consensus_positions(alignment)
+    if expanded:
+        return expanded
     if "consensus" in alignment and isinstance(alignment["consensus"], list):
         return list(alignment["consensus"])
     n = alignment.get("n_consensus_positions")
@@ -384,12 +393,56 @@ def write_fel_outputs(
     (out_dir / "dynamics_features.json").write_text(
         json.dumps(meta, indent=2) + "\n", encoding="utf-8"
     )
-    return {
+    paths = {
         "projections": str(proj_path),
         "fel_grid": str(grid_path),
         "fel_features": str(out_dir / "fel_features.json"),
         "dynamics_features": str(out_dir / "dynamics_features.json"),
     }
+    try:
+        from src.analysis.feature_matrix_plots import save_feature_matrix_png
+
+        png = save_feature_matrix_png(
+            proj[:, :2] if proj.shape[1] >= 2 else proj,
+            out_dir / "projections.png",
+            title=f"{method.upper()} projections",
+            kind="projections",
+        )
+        if png:
+            paths["projections_plot"] = png
+            # Optional FEL surface from grid
+            try:
+                import matplotlib
+
+                matplotlib.use("Agg")
+                import matplotlib.pyplot as plt
+
+                F, xc, yc = desc["F"], desc["x_centers"], desc["y_centers"]
+                fig, ax = plt.subplots(figsize=(6, 5))
+                extent = [float(xc[0]), float(xc[-1]), float(yc[0]), float(yc[-1])]
+                im = ax.imshow(
+                    F,
+                    origin="lower",
+                    extent=extent,
+                    aspect="auto",
+                    cmap="inferno",
+                )
+                fig.colorbar(im, ax=ax, label="ΔG (kJ/mol)")
+                ax.set_xlabel("PC1" if method == "pca" else "IC1")
+                ax.set_ylabel("PC2" if method == "pca" else "IC2")
+                ax.set_title(f"{method.upper()} FEL")
+                fel_png = out_dir / (
+                    "fel_pc1_pc2.png" if method == "pca" else "fel_ic1_ic2.png"
+                )
+                fig.tight_layout()
+                fig.savefig(fel_png, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+                paths["fel_plot"] = str(fel_png)
+            except Exception:
+                logger.debug("FEL surface plot skipped", exc_info=True)
+    except Exception:
+        logger.debug("projection plot skipped", exc_info=True)
+    return paths
 
 
 def save_model_npz(path: Path, model: Dict[str, Any]) -> None:

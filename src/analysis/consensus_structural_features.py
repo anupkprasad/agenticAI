@@ -116,6 +116,19 @@ def calculate_consensus_rmsf_features(
             "profile_csv": str(profile.resolve()),
         }
         feat_path.write_text(json.dumps(feat, indent=2) + "\n", encoding="utf-8")
+        try:
+            from src.analysis.feature_matrix_plots import save_rmsf_profile_png
+
+            png = save_rmsf_profile_png(
+                profile,
+                out / "per_residue_rmsf.png",
+                title=f"Consensus Cα RMSF ({label})",
+            )
+            if png:
+                feat["plot"] = png
+                feat_path.write_text(json.dumps(feat, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            logger.debug("consensus RMSF plot skipped", exc_info=True)
         return feat
     except Exception as exc:
         logger.exception("calculate_consensus_rmsf_features failed")
@@ -231,6 +244,20 @@ def calculate_consensus_dccm_features(
             "C_LOBE_CI_MIN": int(c_lobe_ci_min),
         }
         feat_path.write_text(json.dumps(feat, indent=2) + "\n", encoding="utf-8")
+        try:
+            from src.analysis.feature_matrix_plots import save_feature_matrix_png
+
+            png = save_feature_matrix_png(
+                C,
+                out / "consensus_dccm.png",
+                title=f"Consensus DCCM ({label})",
+                kind="correlation",
+            )
+            if png:
+                feat["plot"] = png
+                feat_path.write_text(json.dumps(feat, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            logger.debug("consensus DCCM plot skipped", exc_info=True)
         return feat
     except Exception as exc:
         logger.exception("calculate_consensus_dccm_features failed")

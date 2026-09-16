@@ -113,10 +113,14 @@ def init_multi_sim_progress(state: Dict[str, Any]) -> Dict[str, Any]:
         "sims": sims,
         "hitl_paused_at": existing.get("hitl_paused_at"),
     }
-    if state.get("run_combined_analysis"):
+    if state.get("run_combined_analysis") or state.get("run_post_combined"):
         progress["combined"] = existing.get("combined") or {
             "analysis": "pending",
             "reporter": "pending",
+        }
+    if state.get("run_pre_combined"):
+        progress["pre_combined"] = existing.get("pre_combined") or {
+            "analysis": "pending",
         }
     state["multi_sim_progress"] = progress
     _apply_progress_indices(state, rebind=False)
@@ -235,7 +239,13 @@ def _apply_progress_indices(state: Dict[str, Any], *, rebind: bool) -> None:
     current = state.get("multi_sim_phase")
     if phase and current not in ("hpc_pool", "parallel_pool"):
         if phase == "executing_sims" and (
-            current in ("combined_analysis", "combined_reporter")
+            current
+            in (
+                "pre_combined",
+                "combined_analysis",
+                "post_combined",
+                "combined_reporter",
+            )
             or state.get("combined_only")
         ):
             if current is None and state.get("combined_only"):
@@ -246,7 +256,7 @@ def _apply_progress_indices(state: Dict[str, Any], *, rebind: bool) -> None:
                     state["multi_sim_phase"] = "combined_reporter"
                 else:
                     state["multi_sim_phase"] = "combined_analysis"
-            # else keep current combined_* phase
+            # else keep current pre/post combined phase
         elif not state.get("parallel_pool"):
             state["multi_sim_phase"] = phase
     apply_sim_pipeline_to_state(state)
@@ -337,6 +347,84 @@ def per_sim_post_hpc_artifacts_ready(working_dir: str) -> bool:
     return reporter_dir.is_dir() and any(reporter_dir.glob("*.html"))
 
 
+def per_sim_family_modular_done_on_disk(working_dir: str) -> bool:
+    """True when modular consensus_* dynamics outputs exist for a sim.
+
+    Collector expects ``consensus_dihedrals/``, ``consensus_rmsf/``,
+    ``consensus_DCCM/``, and ``consensus_PCA/`` under ``analysis/`` (or
+    ``analysis/avg/`` / ``analysis/repXX/`` for multi-rep fan-out).
+    """
+    analysis_dir = Path(working_dir) / "analysis"
+    if not analysis_dir.is_dir():
+        return False
+    needed = (
+        "consensus_dihedrals",
+        "consensus_rmsf",
+        "consensus_DCCM",
+        "consensus_PCA",
+    )
+    search_dirs = [analysis_dir]
+    avg = analysis_dir / "avg"
+    if avg.is_dir():
+        search_dirs.append(avg)
+    search_dirs.extend(sorted(analysis_dir.glob("rep*")))
+
+    def _dir_has_output(d: Path, name: str) -> bool:
+        target = d / name
+        if not target.is_dir():
+            return False
+        # Any json/csv/dat under the modular dir counts as produced output.
+        return any(target.glob("*.json")) or any(target.glob("*.csv")) or any(
+            target.glob("*.dat")
+        ) or any(target.glob("*.npz"))
+
+    # Prefer avg/ when present: multi-rep fan-out writes modular results there
+    # or under each rep. Accept if every needed dir exists in any search root
+    # (same root for all four is ideal; allow split across reps).
+    for d in search_dirs:
+        if all(_dir_has_output(d, name) for name in needed):
+            return True
+    # Also accept if each module exists somewhere under analysis/
+    return all(
+        any(_dir_has_output(d, name) for d in search_dirs) for name in needed
+    )
+
+
+def per_sim_paper_ward4_modular_done_on_disk(working_dir: str) -> bool:
+    """Deprecated alias for :func:`per_sim_family_modular_done_on_disk`."""
+    return per_sim_family_modular_done_on_disk(working_dir)
+
+
+def _working_dir_requests_family_modular(working_dir: str) -> bool:
+    """Best-effort: nearby ``goal.txt`` asks for family modular dynamics."""
+    try:
+        from agentic.planner.planning_guidelines import (
+            detect_family_modular_dynamics_requested,
+        )
+    except Exception:
+        return False
+    wd = Path(working_dir)
+    candidates = [
+        wd.parent / "goal.txt",
+        wd.parent.parent / "goal.txt",
+        wd.parent.parent.parent / "goal.txt",
+    ]
+    for g in candidates:
+        if not g.is_file():
+            continue
+        try:
+            if detect_family_modular_dynamics_requested(g.read_text(errors="ignore")):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _working_dir_requests_paper_ward4(working_dir: str) -> bool:
+    """Deprecated alias for :func:`_working_dir_requests_family_modular`."""
+    return _working_dir_requests_family_modular(working_dir)
+
+
 def per_sim_analysis_done_on_disk(working_dir: str) -> bool:
     """True when per-sim analysis produced real metric artifacts (not stub-only).
 
@@ -349,6 +437,10 @@ def per_sim_analysis_done_on_disk(working_dir: str) -> bool:
     "done", skipping PCA/FEL/contacts/residence and blocking combined analysis.
 
     Multi-rep campaigns may store metrics under ``analysis/avg/`` or ``analysis/rep01/``.
+
+    When the enclosing campaign ``goal.txt`` requests family modular dynamics,
+    also require the four modular ``consensus_*`` output directories — contacts
+    or RMSD alone must not short-circuit that analysis.
     """
     analysis_dir = Path(working_dir) / "analysis"
     summary_ok = (analysis_dir / "analysis_summary.jsonl").is_file()
@@ -366,8 +458,9 @@ def per_sim_analysis_done_on_disk(working_dir: str) -> bool:
         "rmsd.png",
         "rmsf.dat",
         "pca_projections.dat",
-        "fel_pc1_pc2.png",
+        "fel_basins.png",
         "fel_features.json",
+        "pca_pc1_pc2_time.png",
         "protein_ligand_contacts.csv",
         "ligand_residence.csv",
         "pocket_sasa.csv",
@@ -380,14 +473,23 @@ def per_sim_analysis_done_on_disk(working_dir: str) -> bool:
         if avg.is_dir():
             search_dirs.insert(0, avg)
         search_dirs.extend(sorted(analysis_dir.glob("rep*")))
+    base_ok = False
     for d in search_dirs:
         if any((d / name).is_file() for name in strong_markers):
-            return True
+            base_ok = True
+            break
         for pattern in ("rmsd*", "rmsf*", "pca_*", "fel_*", "*contacts*", "*residence*"):
             if any(d.glob(pattern)):
-                return True
+                base_ok = True
+                break
+        if base_ok:
+            break
     # Pocket COM alone is a mandatory inject, not a complete analysis.
-    return False
+    if not base_ok:
+        return False
+    if _working_dir_requests_family_modular(working_dir):
+        return per_sim_family_modular_done_on_disk(working_dir)
+    return True
 
 
 def per_sim_reporter_done_on_disk(working_dir: str) -> bool:
@@ -1219,8 +1321,11 @@ def reconcile_multisim_progress_from_disk(
             per_sim = _load_per_sim_checkpoint(wd)
             _reconcile_sim_record(rec, agents, per_sim=per_sim)
 
+    from src.analysis.cross_sim_artifacts import pre_combined_done_on_disk
+
     wants_combined = bool(
         state.get("run_combined_analysis")
+        or state.get("run_post_combined")
         or state.get("combined_only")
         or progress.get("combined")
         or _combined_analysis_done_on_disk(base, state=state)
@@ -1236,11 +1341,39 @@ def reconcile_multisim_progress_from_disk(
         if _combined_reporter_done_on_disk(base):
             combined["reporter"] = "done"
         state["run_combined_analysis"] = True
+        state["run_post_combined"] = True
+
+    # Preserve in-flight pre_combined
+    current_phase = state.get("multi_sim_phase")
+    if current_phase == "pre_combined" or (
+        state.get("run_pre_combined")
+        and not pre_combined_done_on_disk(base)
+        and not all_per_sim_agents_done(state)
+        and current_phase
+        not in (
+            "executing_sims",
+            "hpc_pool",
+            "parallel_pool",
+            "combined_analysis",
+            "post_combined",
+            "combined_reporter",
+            "complete",
+        )
+    ):
+        if not pre_combined_done_on_disk(base):
+            progress["phase"] = "pre_combined"
+            progress.setdefault("pre_combined", {"analysis": "pending"})
+            progress["active_sim_label"] = None
+            progress["active_agent"] = "analysis"
+            state["multi_sim_phase"] = "pre_combined"
+            state["multi_sim_progress"] = progress
+            _apply_progress_indices(state, rebind=False)
+            merge_completed_states_from_progress(state)
+            return
 
     # Preserve an in-flight combined phase set by the analysis agent even when
     # disk artifacts are not yet "done" (e.g. mid-transition to reporter).
-    current_phase = state.get("multi_sim_phase")
-    if current_phase in ("combined_analysis", "combined_reporter") and wants_combined:
+    if current_phase in ("combined_analysis", "post_combined", "combined_reporter") and wants_combined:
         combined = progress.setdefault(
             "combined",
             {"analysis": "pending", "reporter": "pending"},

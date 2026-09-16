@@ -64,14 +64,15 @@ PCA_TOOL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "plot_pca_projection": {
         "pc_x": 1,
         "pc_y": 2,
-        "output_file": "pca_pc1_pc2.png",
+        "output_file": "pca_pc1_pc2_time.png",
     },
     "calculate_free_energy_landscape": {
         "pc_x": 1,
         "pc_y": 2,
         "bins": 50,
         "temperature_k": 310.0,
-        "output_plot": "fel_pc1_pc2.png",
+        # No plain FEL PNG — annotated landscape is fel_basins.png only.
+        "output_plot": "",
         "output_grid": "fel_pc1_pc2_grid.csv",
     },
     "analyze_fel_landscape_features": {
@@ -86,6 +87,7 @@ PCA_TOOL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "output_json": "fel_features.json",
         "output_csv": "fel_features.csv",
         "output_basins_csv": "fel_basins.csv",
+        "output_plot": "fel_basins.png",
     },
 }
 
@@ -503,11 +505,12 @@ def plot_pca_projection(
         pca_projections_file: Path to projections table from ``calculate_trajectory_pca``.
         pc_x: First PC index (1-based, default 1).
         pc_y: Second PC index (1-based, default 2).
-        output_file: PNG path (default ``pca_pc{pc_x}_pc{pc_y}.png``).
+        output_file: PNG path (default ``pca_pc{pc_x}_pc{pc_y}_time.png`` when
+            coloured by time).
         working_dir: Directory for relative paths.
         color_by_time: Colour scatter by time (default True).
 
-    Standard output: ``pca_pc1_pc2.png`` when pc_x=1, pc_y=2.
+    Standard output: ``pca_pc1_pc2_time.png`` when pc_x=1, pc_y=2.
     """
     if not HAS_MATPLOTLIB:
         return {"success": False, "error": "matplotlib is required for PCA plots"}
@@ -531,7 +534,12 @@ def plot_pca_projection(
 
         x = projections[:, ix]
         y = projections[:, iy]
-        out = output_file or f"pca_pc{pc_x}_pc{pc_y}.png"
+        if output_file:
+            out = output_file
+        elif color_by_time:
+            out = f"pca_pc{pc_x}_pc{pc_y}_time.png"
+        else:
+            out = f"pca_pc{pc_x}_pc{pc_y}.png"
 
         fig, ax = plt.subplots(figsize=(7, 6))
         if color_by_time and len(times_ns) == len(x):
@@ -603,14 +611,17 @@ def calculate_free_energy_landscape(
         selection: Atom selection when running PCA inline.
         n_components: PCs to compute when running PCA inline.
         frame_interval: Frame stride when running PCA inline.
-        output_plot: FEL PNG (default ``fel_pc{pc_x}_pc{pc_y}.png``).
+        output_plot: Optional FEL contour PNG. Empty/None skips the plain
+            landscape plot (use ``analyze_fel_landscape_features`` →
+            ``fel_basins.png`` instead). Do not pass ``fel_pc*_grid.png``.
         output_grid: CSV grid export (default ``fel_pc{pc_x}_pc{pc_y}_grid.csv``).
         working_dir: Output directory.
 
     Returns:
         Dict with FEL output paths and summary free-energy statistics.
 
-    Standard outputs: ``fel_pc1_pc2.png``, ``fel_pc1_pc2_grid.csv``.
+    Standard outputs: ``fel_pc1_pc2_grid.csv`` (and optional contour PNG only
+    when ``output_plot`` is explicitly set). Annotated map: ``fel_basins.png``.
     """
     if not HAS_MATPLOTLIB:
         return {"success": False, "error": "matplotlib is required for FEL plots"}
@@ -666,7 +677,17 @@ def calculate_free_energy_landscape(
         if not fel.get("success"):
             return fel
 
-        plot_out = output_plot or f"fel_pc{pc_x}_pc{pc_y}.png"
+        # Skip redundant/wrong plots: plain FEL duplicates fel_basins; grid PNG
+        # must never be a line plot of the long-format CSV.
+        plot_out = (output_plot or "").strip() or None
+        if plot_out:
+            pname = Path(plot_out).name.lower()
+            if pname in {
+                "fel_pc1_pc2.png",
+                "fel_features.png",
+                "fel_pc1_pc2_grid.png",
+            } or pname.endswith("_grid.png"):
+                plot_out = None
         grid_out = output_grid or f"fel_pc{pc_x}_pc{pc_y}_grid.csv"
 
         F = fel["free_energy"]
@@ -685,32 +706,36 @@ def calculate_free_energy_landscape(
                         f"{fel['probability'][j, i]:.6e}",
                     ])
 
-        fig, ax = plt.subplots(figsize=(7.5, 6))
-        P = fel["probability"]
-        F_plot = F.astype(float).copy()
-        F_plot[P <= 0] = np.nan
-        finite = F_plot[np.isfinite(F_plot)]
-        if finite.size:
-            F_plot = F_plot - float(np.nanmin(finite))
-        levels, vmin, vmax = _fel_surface_levels(F_plot, P)
-        cf = ax.contourf(
-            X, Y, F_plot, levels=levels, cmap=FEL_BASIN_CMAP,
-            vmin=vmin, vmax=vmax, extend="max",
-        )
-        iso = [lv for lv in FEL_ENERGY_CONTOUR_KJ if vmin < lv < vmax]
-        if iso:
-            ax.contour(X, Y, F_plot, levels=iso, colors="0.15", linewidths=0.45, alpha=0.55)
-        ax.set_facecolor("white")
-        fig.colorbar(cf, ax=ax, label="Relative free energy (kJ/mol)")
-        ax.set_xlabel(f"PC{pc_x} (Å)")
-        ax.set_ylabel(f"PC{pc_y} (Å)")
-        ax.set_title(f"Free-energy landscape (T={temperature_k:.0f} K)")
-        fig.tight_layout()
-        fig.savefig(plot_out, dpi=150, bbox_inches="tight")
-        plt.close(fig)
+        if plot_out:
+            fig, ax = plt.subplots(figsize=(7.5, 6))
+            P = fel["probability"]
+            F_plot = F.astype(float).copy()
+            F_plot[P <= 0] = np.nan
+            finite = F_plot[np.isfinite(F_plot)]
+            if finite.size:
+                F_plot = F_plot - float(np.nanmin(finite))
+            levels, vmin, vmax = _fel_surface_levels(F_plot, P)
+            cf = ax.contourf(
+                X, Y, F_plot, levels=levels, cmap=FEL_BASIN_CMAP,
+                vmin=vmin, vmax=vmax, extend="max",
+            )
+            iso = [lv for lv in FEL_ENERGY_CONTOUR_KJ if vmin < lv < vmax]
+            if iso:
+                ax.contour(X, Y, F_plot, levels=iso, colors="0.15", linewidths=0.45, alpha=0.55)
+            ax.set_facecolor("white")
+            fig.colorbar(cf, ax=ax, label="Relative free energy (kJ/mol)")
+            ax.set_xlabel(f"PC{pc_x} (Å)")
+            ax.set_ylabel(f"PC{pc_y} (Å)")
+            ax.set_title(f"Free-energy landscape (T={temperature_k:.0f} K)")
+            fig.tight_layout()
+            fig.savefig(plot_out, dpi=150, bbox_inches="tight")
+            plt.close(fig)
 
         if working_dir:
             try:
+                files = {"grid": grid_out}
+                if plot_out:
+                    files["plot"] = plot_out
                 append_analysis_summary(
                     working_dir=working_dir,
                     analysis_type="FreeEnergyLandscape",
@@ -722,18 +747,21 @@ def calculate_free_energy_landscape(
                         "min_free_energy_kJ_mol": float(np.nanmin(F)),
                         "max_free_energy_kJ_mol": float(np.nanmax(F)),
                     },
-                    files={"plot": plot_out, "grid": grid_out},
+                    files=files,
                     metadata={"pca_projections_file": pca_projections_file},
                 )
             except Exception as exc:
                 logger.warning("Failed to write FEL summary: %s", exc)
 
+        msg = (
+            f"Free-energy landscape grid saved: {grid_out} "
+            f"(PC{pc_x} vs PC{pc_y}, T={temperature_k} K)"
+        )
+        if plot_out:
+            msg = f"Free-energy landscape saved: {plot_out} ({grid_out})"
         return {
             "success": True,
-            "message": (
-                f"Free-energy landscape saved: {plot_out} "
-                f"(PC{pc_x} vs PC{pc_y}, T={temperature_k} K)"
-            ),
+            "message": msg,
             "output_plot": plot_out,
             "output_grid": grid_out,
             "temperature_k": temperature_k,
@@ -1786,7 +1814,18 @@ def analyze_fel_landscape_features(
         json_out = output_json or "fel_features.json"
         csv_out = output_csv or "fel_features.csv"
         basins_out = output_basins_csv or "fel_basins.csv"
-        plot_out = output_plot if output_plot is not None else "fel_basins.png"
+        # Feature tables only need JSON/CSV; the sole landscape PNG is fel_basins.png.
+        if output_plot is None:
+            plot_out = "fel_basins.png"
+        else:
+            plot_out = str(output_plot).strip()
+            pname = Path(plot_out).name.lower() if plot_out else ""
+            if not plot_out or pname in {
+                "fel_features.png",
+                "fel_pc1_pc2.png",
+                "fel_pc1_pc2_grid.png",
+            } or pname.endswith("_grid.png"):
+                plot_out = "fel_basins.png" if plot_out != "" else ""
         _write_fel_feature_tables(
             features,
             output_json=json_out,
