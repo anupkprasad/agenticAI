@@ -149,6 +149,16 @@ def run_per_sim_workflow(job: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     try:
+        # Cap native thread pools in forked/spawned analysis workers so
+        # OpenMP/BLAS cannot hang waiting on threads that never exist here.
+        for _env in (
+            "OMP_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+        ):
+            os.environ.setdefault(_env, "1")
+
         try:
             from src.simsetup.md_env import ensure_md_toolchain
 

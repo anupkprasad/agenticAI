@@ -8,6 +8,7 @@ from host CPU and memory via ``parallel_resources.estimate_workers``.
 from __future__ import annotations
 
 import logging
+import multiprocessing as mp
 import os
 from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import datetime, timezone
@@ -84,7 +85,13 @@ class _PoolRunner:
     def __init__(self, pool_id: str, max_workers: int):
         self.pool_id = pool_id
         self.max_workers = max_workers
-        self.executor = ProcessPoolExecutor(max_workers=max_workers)
+        # Linux defaults to "fork", which deadlocks when workers later call
+        # OpenMP (MDAnalysis/libgomp) after the parent already used it.
+        # "spawn" starts a clean interpreter (same pattern as local FEL helpers).
+        self.executor = ProcessPoolExecutor(
+            max_workers=max_workers,
+            mp_context=mp.get_context("spawn"),
+        )
         self.futures: Dict[str, Future] = {}
 
     def shutdown(self) -> None:
