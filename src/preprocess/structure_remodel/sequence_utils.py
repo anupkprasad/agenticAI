@@ -44,35 +44,68 @@ def extract_chain_sequences(
 
     Uses CA atoms to define residue order; skips hetero residues (insertion codes
     with id[0] != ' ' are included when they have CA).
+
+    Blank / missing PDB chain IDs (common after ``gmx editconf``) are treated as
+    a single synthetic chain ``A`` — MDAnalysis cannot parse ``chainID`` with an
+    empty token.
     """
     import MDAnalysis as mda
+
+    # LLM / JSON often pass the literal strings "None" / "null".
+    if chain_id is not None and str(chain_id).strip().lower() in ("", "none", "null"):
+        chain_id = None
 
     u = mda.Universe(pdb_file)
     protein = u.select_atoms("protein")
     if len(protein) == 0:
         raise ValueError(f"No protein atoms found in {pdb_file}")
 
-    chains: Dict[str, ChainSequence] = {}
-    chain_ids = sorted(set(protein.chainIDs))
-    if chain_id:
-        if chain_id not in chain_ids:
-            raise ValueError(
-                f"Chain {chain_id} not found in {pdb_file}; available: {chain_ids}"
-            )
-        chain_ids = [chain_id]
+    raw_ids = sorted(set(protein.chainIDs))
+    # MDAnalysis may report blank chain as '' ; never feed that to chainID …
+    usable = [c for c in raw_ids if c is not None and str(c).strip() != ""]
 
-    for cid in chain_ids:
-        chain_atoms = protein.select_atoms(f"chainID {cid}")
-        ca = chain_atoms.select_atoms("name CA")
+    chains: Dict[str, ChainSequence] = {}
+
+    def _chain_from_atoms(atoms, key: str) -> Optional[ChainSequence]:
+        ca = atoms.select_atoms("name CA")
         if len(ca) == 0:
-            continue
+            return None
         ordered_residues = sorted(ca.residues, key=lambda r: r.resid)
         seq = "".join(three_to_one(r.resname) for r in ordered_residues)
         resids = [int(r.resid) for r in ordered_residues]
         resnames = [r.resname for r in ordered_residues]
-        chains[cid] = ChainSequence(
-            chain_id=cid, sequence=seq, resids=resids, resnames=resnames,
+        return ChainSequence(
+            chain_id=key, sequence=seq, resids=resids, resnames=resnames,
         )
+
+    if chain_id:
+        if usable and chain_id not in usable and chain_id != "A":
+            raise ValueError(
+                f"Chain {chain_id} not found in {pdb_file}; available: {usable or ['(blank)']}"
+            )
+        if not usable:
+            # Requested chain A (or any) on a blank-chain PDB → whole protein.
+            cs = _chain_from_atoms(protein, chain_id)
+            if cs is None:
+                raise ValueError(f"No protein CA atoms found in {pdb_file}")
+            return {chain_id: cs}
+        chain_atoms = protein.select_atoms(f"chainID {chain_id}")
+        cs = _chain_from_atoms(chain_atoms, chain_id)
+        if cs is None:
+            raise ValueError(f"No protein CA atoms for chain {chain_id} in {pdb_file}")
+        return {chain_id: cs}
+
+    if not usable:
+        cs = _chain_from_atoms(protein, "A")
+        if cs is None:
+            raise ValueError(f"No protein CA atoms found in {pdb_file}")
+        return {"A": cs}
+
+    for cid in usable:
+        chain_atoms = protein.select_atoms(f"chainID {cid}")
+        cs = _chain_from_atoms(chain_atoms, str(cid))
+        if cs is not None:
+            chains[str(cid)] = cs
 
     if not chains:
         raise ValueError(f"No protein CA atoms found in {pdb_file}")

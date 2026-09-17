@@ -206,7 +206,7 @@ def run_per_sim_workflow(job: Dict[str, Any]) -> Dict[str, Any]:
             "working_directory": working_dir,
             "is_multi_simulation": False,
             "subtask_type": subtask_type,
-            # Execute only this phase's agents…
+            # Active agents for this pool phase…
             "agent_list": agents,
             "active_agent_list": agents,
             # …but keep the full campaign pipeline visible in state/logs.
@@ -218,6 +218,13 @@ def run_per_sim_workflow(job: Dict[str, Any]) -> Dict[str, Any]:
             "human_in_loop": False,
             "md_engine": job.get("md_engine", "gromacs"),
             "reuse_hpc": bool(job.get("reuse_hpc", False)),
+            # Needed so analysis can discover cross_sim MSA / pocket maps and
+            # inject alignment_json + label into consensus family tools.
+            "multi_sim_base_dir": job.get("multi_sim_base_dir"),
+            "active_sim_label": label,
+            "current_sim_label": label,
+            "sim_label": label,
+            "label": label,
         }
         if phase == "analysis" or set(agents) <= {"analysis", "reporter"}:
             # Hard-disable HPC pool in analysis/reporter workers. Leftover

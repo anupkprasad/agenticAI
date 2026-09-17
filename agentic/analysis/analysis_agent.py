@@ -227,7 +227,7 @@ class MDAnalysisAgent:
         )
 
     def _discover_cross_sim_prompt_block(self, state: Optional[MDState] = None) -> str:
-        """Auto-discover ``base/cross_sim/`` artifacts for per-sim planning."""
+        """Auto-discover ``base/cross_sim/`` (+ analysis MSA) for per-sim planning."""
         if not state or self._is_combined_hitl_context(state):
             return ""
         try:
@@ -239,6 +239,31 @@ class MDAnalysisAgent:
 
             base = resolve_multi_sim_base_dir(state)
             artifacts = discover_cross_sim_artifacts(base)
+            # Also surface MSA / residue maps written under base/analysis/
+            # when harvest into cross_sim/ was incomplete.
+            analysis_dir = Path(base) / "analysis"
+            extra: list[str] = list(artifacts.get("artifacts") or [])
+            if analysis_dir.is_dir():
+                for name in (
+                    "reference_msa_alignment.json",
+                    "reference_consensus.json",
+                    "consensus_residues.json",
+                    "reference_msa_residue_map.csv",
+                    "reference_pocket_residue_map.csv",
+                    "reference_pocket_resid_map.csv",
+                    "reference_residue_map.csv",
+                    "pocket_resid_map_filtered.csv",
+                ):
+                    p = analysis_dir / name
+                    if p.is_file():
+                        sp = str(p.resolve())
+                        if sp not in extra:
+                            extra.append(sp)
+                        if name.endswith(".json") and not artifacts.get(
+                            "consensus_residues_path"
+                        ):
+                            artifacts["consensus_residues_path"] = sp
+            artifacts["artifacts"] = extra
             if artifacts.get("artifacts") or artifacts.get("pocket_map_path"):
                 state["cross_sim_artifacts"] = {
                     k: v
@@ -247,7 +272,7 @@ class MDAnalysisAgent:
                 }
                 logger.info(
                     "Analysis: auto-discovered cross_sim artifacts under %s (%s files)",
-                    artifacts.get("cross_sim_dir"),
+                    artifacts.get("cross_sim_dir") or base,
                     len(artifacts.get("artifacts") or []),
                 )
             return format_cross_sim_context_for_prompt(artifacts)
@@ -2056,16 +2081,31 @@ Return ONLY JSON:
                 "base_dir": str(base),
                 "alignment_json": "reference_msa_alignment.json",
                 "consensus_json": "reference_msa_alignment.json",
+                "alignment_fasta": "reference_msa_alignment.fasta",
+                "residue_map_csv": "reference_msa_residue_map.csv",
             }
+            # Prefer resolved PDBs; if that fails (blank chains / bad paths),
+            # retry with sim_dirs-only resolution.
+            attempts: List[Dict[str, Any]] = []
             if len(pdb_files) == len(labels) and labels:
-                align_kwargs["pdb_files"] = pdb_files
-            align_res = build_consensus_sequence_alignment.invoke(align_kwargs)
-            if not (align_res or {}).get("success"):
+                attempts.append({**align_kwargs, "pdb_files": pdb_files})
+            attempts.append(dict(align_kwargs))  # sim_dirs / base_dir only
+
+            align_res: Dict[str, Any] = {}
+            for kw in attempts:
+                align_res = build_consensus_sequence_alignment.invoke(kw) or {}
+                if align_res.get("success"):
+                    break
                 issues.append(
                     f"build_consensus_sequence_alignment: "
-                    f"{(align_res or {}).get('error') or align_res}"
+                    f"{align_res.get('error') or align_res}"
                 )
+
+            if not align_res.get("success"):
+                pass  # issues already recorded
             else:
+                # Clear transient align errors if a later attempt succeeded.
+                issues = [i for i in issues if "build_consensus_sequence_alignment" not in i]
                 ref_sim = sim_dirs[labels.index(ref_label)] if ref_label in labels else sim_dirs[0]
                 pocket_res = define_reference_consensus_pocket.invoke(
                     {
@@ -2126,6 +2166,33 @@ Return ONLY JSON:
         for issue in issues:
             state.setdefault("warnings", []).append(f"Pre-combined deterministic: {issue}")
 
+        # Always harvest whatever was written under analysis/ into cross_sim/.
+        try:
+            from src.analysis.cross_sim_artifacts import (
+                harvest_pre_artifacts_into_cross_sim,
+                normalize_pre_artifacts_to_contract,
+                cross_sim_artifacts_ready,
+            )
+
+            copied = harvest_pre_artifacts_into_cross_sim(
+                base, search_roots=[analysis_dir, base]
+            )
+            normalize_pre_artifacts_to_contract(base)
+            # Mirror MSA JSON as consensus_residues.json when only reference_* exists.
+            cross = Path(base) / "cross_sim"
+            msa = cross / "reference_msa_alignment.json"
+            cons = cross / "consensus_residues.json"
+            if msa.is_file() and not cons.is_file():
+                shutil.copy2(msa, cons)
+            logger.info(
+                "Deterministic pre_combined harvest: %s file(s), ready=%s",
+                len(copied),
+                cross_sim_artifacts_ready(base),
+            )
+        except Exception as harvest_exc:
+            issues.append(f"harvest: {harvest_exc}")
+            logger.warning("pre_combined harvest failed: %s", harvest_exc)
+
         self._mark_combined_analysis_complete(
             state,
             analysis_dir=analysis_dir,
@@ -2134,26 +2201,51 @@ Return ONLY JSON:
             success=len(issues) == 0,
         )
 
-        if not pre_combined_done_on_disk(base):
-            # Last resort: do not infinite-loop the supervisor — skip pre and continue.
-            logger.error(
-                "Deterministic pre_combined produced no artifacts — skipping pre phase"
-            )
-            state.setdefault("warnings", []).append(
-                "Pre-combined skipped after deterministic failure; continuing without pocket map"
-            )
-            from src.analysis.cross_sim_artifacts import mark_pre_combined_complete
+        from src.analysis.cross_sim_artifacts import (
+            cross_sim_artifacts_ready,
+            mark_pre_combined_complete,
+            pre_combined_done_on_disk,
+        )
 
+        if cross_sim_artifacts_ready(base):
+            mark_pre_combined_complete(
+                base,
+                labels=labels,
+                extra={"success": True, "mode": "deterministic"},
+            )
+        else:
+            # Do NOT mark skipped-as-done: leave marker as failed so supervisor
+            # can retry, but bump a counter to avoid infinite loops.
+            n_try = int(state.get("pre_combined_deterministic_attempts") or 0) + 1
+            state["pre_combined_deterministic_attempts"] = n_try
             mark_pre_combined_complete(
                 base,
                 labels=labels,
                 extra={
-                    "success": True,
-                    "skipped": True,
+                    "success": False,
+                    "skipped": n_try >= 3,
                     "reason": "deterministic_failed",
                     "issues": issues,
+                    "attempts": n_try,
                 },
             )
+            if n_try >= 3:
+                # Force-done escape: write a marker file that supervisor checks
+                # via attempts, while still exposing failure in JSON.
+                logger.error(
+                    "Deterministic pre_combined failed after %s attempts — "
+                    "continuing without full cross_sim (issues=%s)",
+                    n_try,
+                    issues,
+                )
+                state.setdefault("warnings", []).append(
+                    "Pre-combined failed after retries; consensus metrics may be unavailable"
+                )
+                # Write allow-continue sentinel so done_on_disk can pass once.
+                (Path(base) / "cross_sim" / "pre_combined_give_up.json").write_text(
+                    json.dumps({"attempts": n_try, "issues": issues}, indent=2),
+                    encoding="utf-8",
+                )
 
         log_agent_completion(
             "analysis",
@@ -4338,25 +4430,40 @@ Return ONLY JSON:
                     (base.parent / "analysis" / name).is_file()
                     for name in (
                         "reference_msa_alignment.json",
+                        "reference_consensus.json",
                         "consensus_alignment.fasta",
                     )
                 ) or (base.parent / "cross_sim").is_dir():
                     base = base.parent
 
         candidates = [
-            base / "analysis",
             base / "cross_sim",
+            base / "analysis",
             base,
         ]
+        msa_names = (
+            "reference_msa_alignment.json",
+            "consensus_residues.json",
+            "reference_consensus.json",
+            "consensus_alignment.json",
+        )
+        pocket_names = (
+            "reference_pocket_residue_map.csv",
+            "pocket_residue_map.csv",
+            "reference_msa_residue_map.csv",
+            "reference_pocket_resid_map.csv",
+            "reference_residue_map.csv",
+            "pocket_resid_map_filtered.csv",
+        )
         for root in candidates:
-            msa = root / "reference_msa_alignment.json"
-            if msa.is_file() and "alignment_json" not in out:
-                out["alignment_json"] = str(msa.resolve())
-            for pocket_name in (
-                "reference_pocket_residue_map.csv",
-                "pocket_residue_map.csv",
-                "reference_msa_residue_map.csv",
-            ):
+            if not root.is_dir():
+                continue
+            for msa_name in msa_names:
+                msa = root / msa_name
+                if msa.is_file() and "alignment_json" not in out:
+                    out["alignment_json"] = str(msa.resolve())
+                    break
+            for pocket_name in pocket_names:
                 p = root / pocket_name
                 if p.is_file() and "pocket_map_csv" not in out:
                     out["pocket_map_csv"] = str(p.resolve())
@@ -4380,20 +4487,40 @@ Return ONLY JSON:
             return tool_params
         params = dict(tool_params or {})
         label = self._resolve_sim_label(state)
-        if label and not params.get("label"):
+        if label:
+            # Always set — LLM often omits label; empty string must not win.
             params["label"] = label
         paths = self._resolve_family_alignment_paths(state)
-        if paths.get("alignment_json") and not params.get("alignment_json"):
+        # Prefer discovered absolute paths over missing / relative hallucinations.
+        existing_align = str(params.get("alignment_json") or "").strip()
+        if paths.get("alignment_json") and (
+            not existing_align
+            or existing_align in (
+                "alignment_json",
+                "consensus_alignment.json",
+                "reference_msa_alignment.json",
+                "consensus_residues.json",
+            )
+            or not Path(existing_align).is_file()
+        ):
             params["alignment_json"] = paths["alignment_json"]
         if (
             tool_name == "calculate_consensus_torsions"
             and paths.get("pocket_map_csv")
-            and not params.get("pocket_map_csv")
         ):
-            params["pocket_map_csv"] = paths["pocket_map_csv"]
+            existing_pocket = str(params.get("pocket_map_csv") or "").strip()
+            if not existing_pocket or not Path(existing_pocket).is_file():
+                params["pocket_map_csv"] = paths["pocket_map_csv"]
         sim_dir = state.get("working_directory") or ""
         if sim_dir and not params.get("sim_directory"):
             params["sim_directory"] = str(sim_dir)
+        if paths.get("alignment_json") or label:
+            logger.info(
+                "Injected family-tool params for %s: label=%s alignment_json=%s",
+                tool_name,
+                params.get("label"),
+                params.get("alignment_json"),
+            )
         return params
 
     def _is_holo_simulation(self, state: MDState, agent_input: AnalysisAgentInput) -> bool:

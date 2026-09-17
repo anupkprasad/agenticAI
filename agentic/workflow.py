@@ -1078,7 +1078,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "post_hpc_analysis_only": False,
             "hpc_pool_phase_complete": False,
             "parallel_pool": None,
-            "parallel_workers": "auto",
+            "parallel_workers": "4",
             "parallel_mem_gb_per_job": None,
             "parallel_cpus_per_job": None,
             "parallel_workers_resolved": None,

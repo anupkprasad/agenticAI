@@ -335,6 +335,17 @@ def discover_cross_sim_artifacts(base_dir: str | Path) -> Dict[str, Any]:
             logger.warning("Failed to parse %s: %s", pocket_path, exc)
 
     cons_path = root / CONSENSUS_RESIDUES_NAME
+    if not cons_path.is_file():
+        # Alternate names written by LLM / harvest paths.
+        for alt in (
+            "reference_msa_alignment.json",
+            "reference_consensus.json",
+            "consensus_alignment.json",
+        ):
+            cand = root / alt
+            if cand.is_file():
+                cons_path = cand
+                break
     if cons_path.is_file():
         out["consensus_residues_path"] = str(cons_path)
         out["artifacts"].append(str(cons_path))
@@ -387,6 +398,50 @@ def write_pocket_map(
     return path
 
 
+def pre_combined_done_on_disk(base_dir: str | Path) -> bool:
+    """True only when pre-combined produced usable MSA / pocket artifacts.
+
+    A ``skipped`` marker without artifacts is treated as **not done** so the
+    pipeline can retry deterministic MSA+pocket instead of running analysis
+    without ``alignment_json``. After repeated failures a give-up sentinel
+    allows the campaign to continue (consensus metrics will be unavailable).
+    """
+    root = cross_sim_dir(base_dir)
+    if (root / "pre_combined_give_up.json").is_file():
+        return True
+    marker = root / PRE_COMPLETE_NAME
+    if not marker.is_file():
+        return False
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if data.get("success") is False and not data.get("skipped"):
+        return False
+    return cross_sim_artifacts_ready(base_dir)
+
+
+def cross_sim_artifacts_ready(base_dir: str | Path) -> bool:
+    """True when MSA JSON (or consensus residues) exists for family tools."""
+    root = cross_sim_dir(base_dir)
+    if not root.is_dir():
+        return False
+    artifacts = discover_cross_sim_artifacts(base_dir)
+    has_msa = bool(
+        artifacts.get("consensus_residues_path")
+        or (root / "reference_msa_alignment.json").is_file()
+        or (root / "reference_consensus.json").is_file()
+        or artifacts.get("msa_fasta_path")
+    )
+    has_pocket = bool(
+        artifacts.get("pocket_map_path")
+        or (root / "reference_pocket_definition.json").is_file()
+        or (root / "reference_pocket_residue_map.csv").is_file()
+    )
+    # MSA is mandatory for consensus_* tools; pocket definition/map for χ1 / COM.
+    return bool(has_msa and has_pocket)
+
+
 def mark_pre_combined_complete(
     base_dir: str | Path,
     *,
@@ -402,32 +457,16 @@ def mark_pre_combined_complete(
     }
     if extra is not None and "success" in extra:
         payload["success"] = bool(extra["success"])
+    # Never claim success when required artifacts are missing.
+    if not cross_sim_artifacts_ready(base_dir):
+        payload["success"] = False
+        payload.setdefault("artifacts_ready", False)
+    else:
+        payload["artifacts_ready"] = True
+        payload["success"] = True
+        payload.pop("skipped", None)
     write_json_compact(path, payload)
     return path
-
-
-def pre_combined_done_on_disk(base_dir: str | Path) -> bool:
-    """True only when pre-combined succeeded and useful artifacts exist."""
-    root = cross_sim_dir(base_dir)
-    marker = root / PRE_COMPLETE_NAME
-    if not marker.is_file():
-        return False
-    try:
-        data = json.loads(marker.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    if data.get("success") is False:
-        return False
-    if data.get("skipped"):
-        return True
-    artifacts = discover_cross_sim_artifacts(base_dir)
-    return bool(
-        artifacts.get("pocket_map_path")
-        or artifacts.get("msa_fasta_path")
-        or artifacts.get("consensus_residues_path")
-        or (root / "reference_msa_alignment.json").is_file()
-        or (root / "reference_pocket_definition.json").is_file()
-    )
 
 
 def harvest_pre_artifacts_into_cross_sim(
@@ -602,10 +641,27 @@ def format_cross_sim_context_for_prompt(artifacts: Dict[str, Any]) -> str:
         if pm.get("reference_label"):
             lines.append(f"- Reference label: {pm['reference_label']}")
     if artifacts.get("consensus_residues_path"):
-        lines.append(f"- Consensus residues: `{artifacts['consensus_residues_path']}`")
+        lines.append(
+            f"- Consensus / MSA JSON (use as alignment_json): "
+            f"`{artifacts['consensus_residues_path']}`"
+        )
+    # Prefer explicit MSA alignment JSON when present among artifacts.
+    for path in artifacts.get("artifacts") or []:
+        name = Path(path).name
+        if name in (
+            "reference_msa_alignment.json",
+            "consensus_residues.json",
+            "reference_consensus.json",
+        ):
+            lines.append(f"- alignment_json path: `{path}`")
+        if name.endswith("_residue_map.csv") or name.endswith("pocket_residue_map.csv"):
+            lines.append(f"- pocket_map_csv path: `{path}`")
     if artifacts.get("msa_fasta_path"):
         lines.append(f"- MSA: `{artifacts['msa_fasta_path']}`")
     lines.append(
-        "Do not invent alternate pocket/MSA paths when these files exist."
+        "For calculate_consensus_* / run_independent_dynamics_fel, set "
+        "alignment_json to the MSA JSON above and label to this simulation's "
+        "folder name (e.g. p17612_ATP). Do not invent alternate pocket/MSA paths "
+        "when these files exist."
     )
     return "\n".join(lines) + "\n"

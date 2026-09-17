@@ -743,6 +743,10 @@ def build_consensus_sequence_alignment(
     ):
         alignment_json = consensus_json
 
+    # Sanitize chain_id from JSON null / "None" / blank.
+    if chain_id is not None and str(chain_id).strip().lower() in ("", "none", "null"):
+        chain_id = None
+
     out_dir = Path(working_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 

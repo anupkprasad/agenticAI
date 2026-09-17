@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Per-sim attempt budget for parallel prep/analysis workers. After this many
 # unfinished attempts the label is marked failed and the pool continues.
-DEFAULT_SIM_MAX_ATTEMPTS = int(os.environ.get("AGENTIC_SIM_MAX_ATTEMPTS", "5"))
+DEFAULT_SIM_MAX_ATTEMPTS = int(os.environ.get("AGENTIC_SIM_MAX_ATTEMPTS", "3"))
 
 
 def _max_sim_attempts(state: Optional[Dict[str, Any]] = None) -> int:

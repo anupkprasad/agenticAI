@@ -1886,10 +1886,11 @@ def main(argv=None):
             "and analysis fans out into analysis/rep01..repNN + analysis/avg/."
         ),
     )
-    parser.add_argument("--parallel-workers", default="auto",
+    parser.add_argument("--parallel-workers", default="4",
                        help=(
                            "Max parallel local workers for multi-sim prep and "
-                           "analysis/reporter: 'auto' (default) or integer (1=sequential)"
+                           "analysis/reporter: integer (default 4), 'auto' (CPU/mem), "
+                           "or 1=sequential"
                        ))
     parser.add_argument("--parallel-mem-gb", type=float, default=None,
                        help="Estimated GiB RAM per parallel worker (default: phase-specific)")
@@ -1908,7 +1909,7 @@ def main(argv=None):
         metavar="N",
         help=(
             "Max attempts per simulation for parallel prep/analysis before marking "
-            "that sim failed and continuing (default: 5, or AGENTIC_SIM_MAX_ATTEMPTS)."
+            "that sim failed and continuing (default: 3, or AGENTIC_SIM_MAX_ATTEMPTS)."
         ),
     )
     parser.add_argument("--hpc-check-interval", default="2h",
