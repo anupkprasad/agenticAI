@@ -15,10 +15,22 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 logger = logging.getLogger(__name__)
 
 CROSS_SIM_DIRNAME = "cross_sim"
-POCKET_MAP_NAME = "pocket_map.json"
-CONSENSUS_RESIDUES_NAME = "consensus_residues.json"
-MSA_FASTA_NAME = "consensus_msa.fasta"
+POCKET_MAP_NAME = "pocket_mapped.json"
+POCKET_MAP_LEGACY_NAME = "pocket_map.json"
+CONSENSUS_RESIDUES_NAME = "global_consensus_msa.json"
+CONSENSUS_RESIDUES_LEGACY_NAME = "consensus_residues.json"
+CONSENSUS_RESIDUES_ALIASES = (
+    "global_consensus_msa.json",
+    "global_mapped.json",
+    "consensus_residues.json",
+    "reference_msa_alignment.json",
+    "reference_consensus.json",
+    "consensus_alignment.json",
+)
+MSA_FASTA_NAME = "global_msa.fasta"
+MSA_FASTA_LEGACY_NAME = "consensus_msa.fasta"
 MSA_ALIGNMENT_NAME = "consensus_alignment.txt"
+GLOBAL_MSA_JSON_NAME = "global_msa.json"  # optional debug; not required
 PRE_COMPLETE_NAME = "pre_combined_complete.json"
 README_NAME = "README.md"
 CONSENSUS_SCHEMA_VERSION = "2.0"
@@ -238,6 +250,36 @@ def pocket_selection_for_label(
     return "resid " + " ".join(nums)
 
 
+def pocket_resids_for_label(
+    pocket_map: Dict[str, Any],
+    label: str,
+) -> List[int]:
+    """Return mapped PDB residue IDs for *label* from ``pocket_mapped.json``."""
+    per = (pocket_map or {}).get("per_sim") or {}
+    lab = str(label)
+    entry = per.get(lab)
+    if entry is None:
+        for k, v in per.items():
+            if str(k).lower() == lab.lower():
+                entry = v
+                break
+    if entry is None:
+        per_label = (pocket_map or {}).get("per_label_resids") or {}
+        raw = per_label.get(lab)
+        if raw is None:
+            for k, v in per_label.items():
+                if str(k).lower() == lab.lower():
+                    raw = v
+                    break
+        if isinstance(raw, (list, tuple)):
+            return [int(r) for r in raw if r is not None and str(r).strip() != ""]
+        return []
+    if not isinstance(entry, dict):
+        return []
+    resids = entry.get("resids") or []
+    return [int(r) for r in resids if r is not None and str(r).strip() != ""]
+
+
 def write_cross_sim_readme(base_dir: str | Path) -> Path:
     """Write ``cross_sim/README.md`` describing artifact contract."""
     root = ensure_cross_sim_dir(base_dir)
@@ -245,26 +287,34 @@ def write_cross_sim_readme(base_dir: str | Path) -> Path:
     text = """# cross_sim/ — shared pre-combined artifacts
 
 These files are produced **before** per-simulation trajectory analysis so every
-system can reuse the same pocket / MSA mapping.
+system can reuse the same **pocket_mapped** and **global_consensus_msa** residue lists.
+
+## Two maps (independent)
+
+| Map | Meaning |
+|-----|---------|
+| **pocket_mapped** | Residues of the ATP-binding pocket used for analysis: (reference residues within 15 Å of ligand ATP) **∩ global_consensus_msa**, transferred to every system via the MSA. |
+| **global_consensus_msa** | Consensus columns of the common sequence alignment: MAFFT columns with occupancy ≥ 0.25 and physicochemical-group **similarity ≥ 0.5** (paper default; identity / BLOSUM optional). Legacy filename: `global_mapped.json`. |
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `pocket_map.json` | Per-sim ATP-pocket residue lists + MDAnalysis `selection` strings. Primary lookup for pocket metrics. |
-| `consensus_residues.json` | Compact consensus MSA columns (v2). Use `expand_consensus_positions()` for legacy per-index access. |
-| `consensus_msa.fasta` / `reference_msa_alignment.fasta` | Gapped MSA (reference first). |
-| `reference_msa_alignment.json` | Same consensus content as `consensus_residues.json` (kept for tool defaults). |
-| `reference_pocket_definition.json` | Full pocket definition + audit from the reference ligand proximity filter. |
-| `reference_pocket_residue_map.csv` | Wide CSV of pocket consensus columns × labels. |
+| `pocket_mapped.json` (`pocket_map.json`) | Per-sim pocket residue lists + MDAnalysis `selection` strings. |
+| `global_consensus_msa.json` (`global_mapped.json`, `consensus_residues.json`) | Compact similarity-filtered MSA columns (v2). |
+| `global_msa.fasta` (`consensus_msa.fasta`) | Gapped MSA (reference first) — letter source for plots/transfer; plots show consensus/pocket columns only. |
+| `pocket_mapped.csv` / `reference_pocket_definition.json` | Full pocket definition + audit from the 15 Å ligand filter. |
 | `pre_combined_complete.json` | Gate marker (`success: true` required to advance). |
 
-## `pocket_map.json` (human-friendly)
+Optional debug (not required for the paper pipeline): `global_msa.json` = every MAFFT column.
+
+## `pocket_mapped.json` (human-friendly)
 
 ```json
 {
   "reference_label": "p17612_ATP",
   "reference_selection": "resname ATP",
+  "mapping_kind": "pocket_mapped",
   "per_sim": {
     "p17612_ATP": {
       "resids": [5, 6, 7, 8],
@@ -276,7 +326,7 @@ system can reuse the same pocket / MSA mapping.
 
 Python helper: `pocket_selection_for_label(pocket_map, label)`.
 
-## `consensus_residues.json` (compact v2)
+## `global_consensus_msa.json` (compact v2)
 
 Instead of one object per consensus index, arrays are stored together:
 
@@ -287,18 +337,19 @@ Expand to the legacy list-of-dicts form with:
 
 ```python
 from src.analysis.cross_sim_artifacts import expand_consensus_positions
-positions = expand_consensus_positions(json.load(open("consensus_residues.json")))
+positions = expand_consensus_positions(json.load(open("global_consensus_msa.json")))
 ```
 
-MSA defaults: **MAFFT** alignment, consensus columns kept when
-`conservation_metric` (**similarity** or **identity**) ≥ `min_conservation`
-(default **0.5** for similarity) and coverage ≥ `min_coverage`.
+MSA defaults: **MAFFT** alignment; consensus columns kept when
+physicochemical-group `similarity` (or `identity` / `blosum` if requested)
+≥ `min_conservation` (default **0.5**) and occupancy ≥ `min_coverage`
+(default **0.25**). `pocket_mapped` = 15 Å ligand shell ∩ those columns.
 
 ## Typical workflow
 
-1. `build_consensus_sequence_alignment` → MSA + consensus JSON
-2. `define_reference_consensus_pocket` → pocket definition
-3. Harvest / normalize → `pocket_map.json` + `consensus_residues.json` here
+1. `build_global_mapped_alignment` → `global_msa.fasta` + `global_consensus_msa.*`
+2. `define_pocket_mapped_residues` → 15 Å ATP ∩ consensus, transferred via MSA
+3. Harvest / normalize → `pocket_mapped.json` + `global_consensus_msa.json` here
 4. Per-sim analysis auto-discovers this directory for pocket selections
 """
     path.write_text(text, encoding="utf-8")
@@ -325,8 +376,13 @@ def discover_cross_sim_artifacts(base_dir: str | Path) -> Dict[str, Any]:
     if not root.is_dir():
         return out
 
-    pocket_path = root / POCKET_MAP_NAME
-    if pocket_path.is_file():
+    pocket_path = None
+    for name in (POCKET_MAP_NAME, POCKET_MAP_LEGACY_NAME):
+        cand = root / name
+        if cand.is_file():
+            pocket_path = cand
+            break
+    if pocket_path is not None:
         out["pocket_map_path"] = str(pocket_path)
         out["artifacts"].append(str(pocket_path))
         try:
@@ -334,19 +390,13 @@ def discover_cross_sim_artifacts(base_dir: str | Path) -> Dict[str, Any]:
         except Exception as exc:
             logger.warning("Failed to parse %s: %s", pocket_path, exc)
 
-    cons_path = root / CONSENSUS_RESIDUES_NAME
-    if not cons_path.is_file():
-        # Alternate names written by LLM / harvest paths.
-        for alt in (
-            "reference_msa_alignment.json",
-            "reference_consensus.json",
-            "consensus_alignment.json",
-        ):
-            cand = root / alt
-            if cand.is_file():
-                cons_path = cand
-                break
-    if cons_path.is_file():
+    cons_path = None
+    for alt in CONSENSUS_RESIDUES_ALIASES:
+        cand = root / alt
+        if cand.is_file():
+            cons_path = cand
+            break
+    if cons_path is not None:
         out["consensus_residues_path"] = str(cons_path)
         out["artifacts"].append(str(cons_path))
         try:
@@ -358,14 +408,16 @@ def discover_cross_sim_artifacts(base_dir: str | Path) -> Dict[str, Any]:
         except Exception as exc:
             logger.warning("Failed to parse %s: %s", cons_path, exc)
 
-    for name, key in (
-        (MSA_FASTA_NAME, "msa_fasta_path"),
-        (MSA_ALIGNMENT_NAME, "msa_alignment_path"),
+    for names, key in (
+        ((MSA_FASTA_NAME, MSA_FASTA_LEGACY_NAME, "reference_msa_alignment.fasta"), "msa_fasta_path"),
+        ((MSA_ALIGNMENT_NAME,), "msa_alignment_path"),
     ):
-        p = root / name
-        if p.is_file():
-            out[key] = str(p)
-            out["artifacts"].append(str(p))
+        for name in names:
+            p = root / name
+            if p.is_file():
+                out[key] = str(p)
+                out["artifacts"].append(str(p))
+                break
 
     for p in sorted(root.iterdir()):
         if p.is_file() and str(p) not in out["artifacts"]:
@@ -385,6 +437,7 @@ def write_pocket_map(
     path = root / POCKET_MAP_NAME
     data = {
         "schema_version": "1.0",
+        "mapping_kind": payload.get("mapping_kind") or "pocket_mapped",
         "reference_label": payload.get("reference_label"),
         "reference_selection": payload.get("reference_selection"),
         "per_sim": payload.get("per_sim") or {},
@@ -394,6 +447,9 @@ def write_pocket_map(
         if k not in data:
             data[k] = v
     write_json_compact(path, data)
+    legacy = root / POCKET_MAP_LEGACY_NAME
+    if legacy.resolve() != path.resolve():
+        shutil.copy2(path, legacy)
     write_cross_sim_readme(base_dir)
     return path
 
@@ -429,14 +485,20 @@ def cross_sim_artifacts_ready(base_dir: str | Path) -> bool:
     artifacts = discover_cross_sim_artifacts(base_dir)
     has_msa = bool(
         artifacts.get("consensus_residues_path")
+        or (root / "global_consensus_msa.json").is_file()
+        or (root / "global_mapped.json").is_file()
+        or (root / "global_msa.json").is_file()
         or (root / "reference_msa_alignment.json").is_file()
         or (root / "reference_consensus.json").is_file()
         or artifacts.get("msa_fasta_path")
     )
     has_pocket = bool(
         artifacts.get("pocket_map_path")
+        or (root / "pocket_mapped.json").is_file()
+        or (root / "pocket_map.json").is_file()
         or (root / "reference_pocket_definition.json").is_file()
         or (root / "reference_pocket_residue_map.csv").is_file()
+        or (root / "pocket_mapped.csv").is_file()
     )
     # MSA is mandatory for consensus_* tools; pocket definition/map for χ1 / COM.
     return bool(has_msa and has_pocket)
@@ -481,17 +543,26 @@ def harvest_pre_artifacts_into_cross_sim(
     copied: List[str] = []
 
     name_map = {
-        "pocket_map.json": POCKET_MAP_NAME,
+        "pocket_mapped.json": POCKET_MAP_NAME,
+        "pocket_map.json": POCKET_MAP_LEGACY_NAME,
         "consensus_pocket_map.json": POCKET_MAP_NAME,
         "mapped_pocket_residues.json": POCKET_MAP_NAME,
+        "pocket_mapped_definition.json": "pocket_mapped_definition.json",
+        "pocket_mapped.csv": "pocket_mapped.csv",
         "reference_pocket_definition.json": "reference_pocket_definition.json",
-        "consensus_residues.json": CONSENSUS_RESIDUES_NAME,
-        "consensus_msa.fasta": MSA_FASTA_NAME,
+        "global_consensus_msa.json": CONSENSUS_RESIDUES_NAME,
+        "global_mapped.json": CONSENSUS_RESIDUES_NAME,
+        "global_msa.json": GLOBAL_MSA_JSON_NAME,
+        "consensus_residues.json": CONSENSUS_RESIDUES_LEGACY_NAME,
+        "global_msa.fasta": MSA_FASTA_NAME,
+        "consensus_msa.fasta": MSA_FASTA_LEGACY_NAME,
         "msa.fasta": MSA_FASTA_NAME,
-        "reference_msa_alignment.fasta": MSA_FASTA_NAME,
+        "reference_msa_alignment.fasta": "reference_msa_alignment.fasta",
         "consensus_alignment.txt": MSA_ALIGNMENT_NAME,
         "alignment.fasta": MSA_FASTA_NAME,
         "reference_msa_alignment.json": "reference_msa_alignment.json",
+        "global_consensus_msa.csv": "global_consensus_msa.csv",
+        "global_mapped.csv": "global_mapped.csv",
         "reference_msa_residue_map.csv": "reference_msa_residue_map.csv",
         "reference_pocket_residue_map.csv": "reference_pocket_residue_map.csv",
     }
@@ -527,7 +598,20 @@ def normalize_pre_artifacts_to_contract(base_dir: str | Path) -> Optional[Path]:
     """Build ``pocket_map.json`` / compact consensus from harvested tool outputs."""
     root = ensure_cross_sim_dir(base_dir)
     pocket_path = root / POCKET_MAP_NAME
-    def_path = root / "reference_pocket_definition.json"
+    if not pocket_path.is_file():
+        pocket_path = root / POCKET_MAP_LEGACY_NAME
+    def_path = None
+    for name in (
+        "pocket_mapped_definition.json",
+        "reference_pocket_definition.json",
+        "pocket_mapped.json",
+    ):
+        cand = root / name
+        if cand.is_file():
+            def_path = cand
+            break
+    if def_path is None:
+        def_path = root / "reference_pocket_definition.json"
 
     if not pocket_path.is_file() and def_path.is_file():
         try:
@@ -554,7 +638,8 @@ def normalize_pre_artifacts_to_contract(base_dir: str | Path) -> Optional[Path]:
                     "reference_selection": definition.get("reference_selection")
                     or definition.get("ligand_selection"),
                     "per_sim": per_sim,
-                    "source": "reference_pocket_definition.json",
+                    "source": str(def_path.name),
+                    "mapping_kind": "pocket_mapped",
                     "usable_labels": definition.get("usable_labels"),
                     "per_label_coverage": definition.get("per_label_coverage"),
                 },
@@ -568,7 +653,11 @@ def normalize_pre_artifacts_to_contract(base_dir: str | Path) -> Optional[Path]:
 
     cons_path = root / CONSENSUS_RESIDUES_NAME
     msa_json = root / "reference_msa_alignment.json"
-    for src in (msa_json, cons_path):
+    for src in (
+        cons_path,
+        msa_json,
+        root / CONSENSUS_RESIDUES_LEGACY_NAME,
+    ):
         if not src.is_file():
             continue
         try:
@@ -607,6 +696,7 @@ def normalize_pre_artifacts_to_contract(base_dir: str | Path) -> Optional[Path]:
             continue
         write_json_compact(cons_path, compact)
         write_json_compact(msa_json, compact)
+        write_json_compact(root / CONSENSUS_RESIDUES_LEGACY_NAME, compact)
         break
 
     if def_path.is_file():
@@ -633,22 +723,23 @@ def format_cross_sim_context_for_prompt(artifacts: Dict[str, Any]) -> str:
         lines.append(f"- Directory: `{artifacts['cross_sim_dir']}`")
     if artifacts.get("pocket_map_path"):
         lines.append(
-            f"- Pocket map: `{artifacts['pocket_map_path']}` "
-            "(use mapped residues / selections for pocket RMSF, ligand–pocket "
-            "distance, χ1, etc.)"
+            f"- pocket_mapped (15 Å ATP pocket residues/selections): `{artifacts['pocket_map_path']}`"
         )
         pm = artifacts.get("pocket_map") or {}
         if pm.get("reference_label"):
             lines.append(f"- Reference label: {pm['reference_label']}")
     if artifacts.get("consensus_residues_path"):
         lines.append(
-            f"- Consensus / MSA JSON (use as alignment_json): "
+            f"- global_consensus_msa (MAFFT group-similarity ≥ 0.5; use as alignment_json): "
             f"`{artifacts['consensus_residues_path']}`"
         )
     # Prefer explicit MSA alignment JSON when present among artifacts.
     for path in artifacts.get("artifacts") or []:
         name = Path(path).name
         if name in (
+            "global_consensus_msa.json",
+            "global_mapped.json",
+            "global_msa.json",
             "reference_msa_alignment.json",
             "consensus_residues.json",
             "reference_consensus.json",

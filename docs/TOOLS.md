@@ -147,24 +147,32 @@ selection, Ward / dendrogram+heatmap. Timing details:
 | `plot_combined_rmsf_segment_bars` | Stacked segment RMSF bar chart |
 
 **Per-sim modular family tools** (also exposed during traj analysis when the
-goal requests them): `calculate_consensus_torsions`,
+goal requests them): `calculate_consensus_pocket_metrics` (COM + axis-angle;
+registered on the **per-sim** executor), `calculate_consensus_torsions`,
 `calculate_consensus_rmsf_features`, `calculate_consensus_dccm_features`,
-`run_independent_dynamics_fel`. See
-[ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md#modular-family-dynamics-torsions--pca--tica).
+`run_independent_dynamics_fel`. Batch helper
+`run_consensus_pocket_metrics_batch` is combined/shared only. See
+[ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md#modular-family-dynamics-torsions--pca--tica)
+and [CAMPAIGN_AND_RETRIEVAL.md](CAMPAIGN_AND_RETRIEVAL.md).
 
 ### Additional analysis libraries
 
 | Tool | Version | Role |
 |------|---------|------|
+| **MDAnalysis** | ≥2.9 | Trajectory I/O, atom selection, RMSD/RMSF/DCCM/PCA calculations |
+| **NumPy / SciPy / pandas** | — | Arrays, PCA/clustering math, feature tables |
 | **PyTraj** | 2.0.6 | AMBER cpptraj wrapper for trajectory analysis |
-| **scikit-learn** | 1.6.1 | Cross-simulation PCA on Cα coordinates |
+| **scikit-learn** | 1.6.1 | Cross-simulation PCA / hierarchical clustering |
 | **Matplotlib** | 3.10.8 | Publication-quality 2D plots |
 | **Seaborn** | — | Statistical plot styling |
+
+The Programmer agent also reads
+[`AVAILABLE_SOFTWARE.md`](../AVAILABLE_SOFTWARE.md) at the repo root when
+generating new tools (GROMACS, MDAnalysis, MAFFT, etc.).
 
 ---
 
 ## Multi-chain residue map
-
 GROMACS production files do not keep PDB chain IDs. Users and the Analysis
 agent can still say “chain B resid 50–75” after a multi-chain complex
 simulation: setup writes a JSON map, and analysis translates PDB-style
@@ -417,7 +425,7 @@ User Goal
 Supervisor: structured_prompt (single enrichment LLM call)
   │
   v
-Planner: tools + knowledge + goal ──► Ollama /api/generate
+Planner: retrieved tools + retrieved knowledge chunks + goal ──► Ollama /api/generate
                                               │
                                               v
                                       Execution plan

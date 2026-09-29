@@ -185,15 +185,18 @@ def _build_pre_combined_plan_fallback(
     parts = [
         "Before any per-simulation trajectory analysis, run pre-combined "
         f"(cross-simulation) setup across: {labels}.",
-        "Build a consensus sequence alignment (MSA) across systems when needed, "
-        "define a reference consensus pocket (or reference-system pocket), and "
-        "map pocket / consensus residues onto each simulation. "
-        "Also plot the global MSA and the pocket/high-consensus MSA panels "
-        "(``plot_reference_msa_alignment`` → reference_msa_full.png + "
-        "reference_msa_pocket.png).",
+        "Build a global sequence alignment (MAFFT) and export global_consensus_msa "
+        "columns (physicochemical-group similarity ≥ 0.5, occupancy ≥ 0.25), "
+        "define pocket_mapped residues (15 Å ligand shell ∩ global_consensus_msa), and "
+        "map those residues onto each simulation. "
+        "Also plot the global_consensus_msa and pocket_mapped MSA panels "
+        "(``plot_global_mapped_alignment`` → global_consensus_msa.png + "
+        "pocket_mapped_msa.png; columns from calculated consensus/pocket — "
+        "not the unfiltered MAFFT width).",
         "Write artifacts under `{base}/cross_sim/` including at least "
-        "`pocket_map.json` (reference label + per-sim mapped residues/selections) "
-        "and consensus residue / MSA files so per-sim analysis can auto-discover them.",
+        "`pocket_mapped.json` (15 Å ATP pocket residues/selections) "
+        "and `global_consensus_msa.json` / `global_msa.fasta` so per-sim analysis "
+        "can auto-discover them.",
         "Do not run per-sim RMSD/RMSF/DCCM overlays here — only shared mapping "
         "inputs for later traj analysis.",
     ]
@@ -312,11 +315,25 @@ def _build_shared_per_sim_intent(
         if post_sim_subtask
         else f"Workflow steps: {agents_desc}."
     )
+    from agentic.campaign.prompt_quality import shared_intent_excerpt
+    from agentic.planner.planning_guidelines import (
+        detect_family_modular_dynamics_requested,
+    )
+
+    science = ""
+    if detect_family_modular_dynamics_requested(original_goal, enriched_prompt):
+        science = (
+            " Family-modular descriptors required for every system: ATP COM "
+            "distance to the consensus pocket, pocket-axis orientation, consensus "
+            "Cα RMSF mean/std, pocket χ₁ circular mean, N-lobe vs C-lobe DCCM, "
+            "and dihedral PCA landscape entropy. "
+            + shared_intent_excerpt(original_goal, max_chars=900)
+        )
     return (
         f"Shared per-simulation workflow intent: {analyses_clause} {stage} "
         "Write outputs under {working_dir}/analysis/ using standard basenames "
         "(no label prefix). After analysis, prepare a concise HTML report for this "
-        "simulation under {working_dir}/reporter/."
+        f"simulation under {{working_dir}}/reporter/.{science}"
     )
 
 
@@ -558,17 +575,35 @@ class MDPlanner:
         self,
         agent_name: Optional[str] = None,
         exclude_combined_tools: bool = False,
+        query: Optional[str] = None,
+        pin_names: Optional[List[str]] = None,
     ) -> str:
         """
         Get formatted tools context for LLM.
-        
-        Args:
-            agent_name: If specified, only get tools for this agent
-            exclude_combined_tools: Omit cross-simulation combined-analysis tools
-            
-        Returns:
-            Formatted tools description string
+
+        When ``query`` is set, return a retrieved top-k subset (hybrid
+        embedding + lexical) instead of the full catalog.
         """
+        if query:
+            try:
+                from agentic.retrieval.retriever import retrieve_tools_for_prompt
+                from agentic.campaign.config import load_campaign_settings
+
+                top_k = int(load_campaign_settings().retrieval_k or 16)
+                return retrieve_tools_for_prompt(
+                    self.tools_registry,
+                    query,
+                    agent_name=agent_name,
+                    exclude_combined_tools=exclude_combined_tools,
+                    top_k=top_k,
+                    pin_names=pin_names,
+                    fallback_formatter=lambda: self.tools_registry.get_tools_for_planner(
+                        agent_name,
+                        exclude_combined_tools=exclude_combined_tools,
+                    ),
+                )
+            except Exception as exc:
+                logger.debug("Tool retrieval failed, using full catalog: %s", exc)
         return self.tools_registry.get_tools_for_planner(
             agent_name,
             exclude_combined_tools=exclude_combined_tools,
@@ -576,18 +611,34 @@ class MDPlanner:
     
     def _get_knowledge_context(self, 
                                category: Optional[str] = None,
-                               max_chars: int = 8000) -> str:
-        """
-        Get formatted knowledge context for LLM.
-        
-        Args:
-            category: If specified, only get knowledge from this category
-            max_chars: Maximum characters to include in context
-            
-        Returns:
-            Formatted knowledge string
-        """
-        return self.knowledge_loader.get_knowledge_for_planner(category, max_chars)
+                               max_chars: int = 8000,
+                               query: Optional[str] = None,
+                               state: Optional[Dict[str, Any]] = None) -> str:
+        """Retrieve top-k knowledge chunks (hybrid embedder), not a file dump."""
+        top_k = 8
+        persist_copy = None
+        try:
+            from agentic.campaign.config import settings_from_state
+
+            settings = settings_from_state(state)
+            top_k = max(4, int(settings.retrieval_k or 8) // 2)
+        except Exception:
+            pass
+        if state:
+            base = (
+                state.get("multi_sim_base_dir")
+                or state.get("working_directory")
+                or ""
+            )
+            if base:
+                persist_copy = str(Path(base) / "planner" / "knowledge_index.json")
+        return self.knowledge_loader.get_knowledge_for_planner(
+            category,
+            max_chars,
+            query=query,
+            top_k=top_k,
+            persist_copy=persist_copy,
+        )
     
     def _get_knowledge_summary(self) -> str:
         """Get knowledge files summary (for logging only, not full content)."""
@@ -597,6 +648,8 @@ class MDPlanner:
         self,
         agent_list: List[str],
         exclude_combined_tools: bool = False,
+        query: Optional[str] = None,
+        pin_names: Optional[List[str]] = None,
     ) -> str:
         """
         Get tools context for a list of agents combined, preserving workflow order.
@@ -637,6 +690,8 @@ class MDPlanner:
             ctx = self._get_tools_context(
                 agent_name=registry_name,
                 exclude_combined_tools=exclude_combined_tools,
+                query=query,
+                pin_names=pin_names if registry_name == "analysis" else None,
             )
             if ctx.strip():
                 logger.info(f"PLANNER: Added tools context for '{registry_name}' ({len(ctx)} chars)")
@@ -682,6 +737,13 @@ class MDPlanner:
         if not pdb_list:
             logger.warning("PLANNER [multi-sim]: No pdb_list - cannot create master plan")
             return state
+
+        try:
+            from agentic.campaign.compile import compile_campaign_spec
+
+            state["campaign_spec"] = compile_campaign_spec(state).to_dict()
+        except Exception as exc:
+            logger.debug("PLANNER [multi-sim]: early CampaignSpec compile skipped: %s", exc)
 
         base_working_dir = str(
             Path(state.get("multi_sim_base_dir") or state.get("working_directory", "working_dir")).resolve()
@@ -950,6 +1012,29 @@ class MDPlanner:
                         sim_prompts_list = None
                         prompt_source = "llm_pre_post_deterministic_prompts"
 
+                if sim_prompts_list:
+                    from agentic.campaign.prompt_quality import (
+                        llm_sim_prompts_lose_shared_intent,
+                    )
+                    from agentic.planner.planning_guidelines import (
+                        detect_family_modular_dynamics_requested,
+                    )
+
+                    if llm_sim_prompts_lose_shared_intent(
+                        sim_prompts_list,
+                        original_goal=original_goal,
+                        family_modular=detect_family_modular_dynamics_requested(
+                            original_goal, enriched_prompt
+                        ),
+                    ):
+                        logger.warning(
+                            "PLANNER [multi-sim]: LLM sim_prompts truncated or lost "
+                            "shared science intent (e.g. '(same as above)'); "
+                            "using compact deterministic per-sim prompts"
+                        )
+                        sim_prompts_list = None
+                        prompt_source = "llm_pre_post_deterministic_prompts"
+
                 if sim_prompts_list and len(sim_prompts_list) != len(expanded_entries):
                     if _llm_sim_prompts_collapsed_per_pdb(
                         sim_prompts_list, pdb_list, expanded_entries
@@ -1109,6 +1194,37 @@ class MDPlanner:
             )
 
         state["sim_prompts"] = sim_prompts
+        try:
+            from agentic.campaign.compile import compile_campaign_spec
+
+            spec = compile_campaign_spec(state)
+            state["campaign_spec"] = spec.to_dict()
+            if spec.family_modular and len(sim_prompts) > 1:
+                # Family campaigns always need MSA/pocket maps and Ward reduce.
+                state["run_pre_combined"] = True
+                state["run_post_combined"] = True
+                state["run_combined_analysis"] = True
+                if not (pre_combined_plan or "").strip():
+                    pre_combined_plan = _build_pre_combined_plan_fallback(
+                        state, expanded_entries
+                    )
+                if not (post_combined_plan or "").strip():
+                    post_combined_plan = _build_combined_analysis_plan_fallback(
+                        state, expanded_entries
+                    )
+                run_pre_combined = True
+                run_post_combined = True
+                run_combined_analysis = True
+            spec_path = Path(base_working_dir) / "planner" / "campaign_spec.json"
+            spec_path.parent.mkdir(parents=True, exist_ok=True)
+            spec_path.write_text(
+                json.dumps(state["campaign_spec"], indent=2), encoding="utf-8"
+            )
+            from agentic.campaign.hitl_campaign import request_compile_review
+
+            request_compile_review(state)
+        except Exception as exc:
+            logger.warning("PLANNER [multi-sim]: CampaignSpec compile failed: %s", exc)
         # One simulation cannot have a meaningful cross-sim combined stage.
         if len(sim_prompts) <= 1:
             run_combined_analysis = False
@@ -1163,6 +1279,7 @@ class MDPlanner:
             pre_combined_plan=state.get("pre_combined_plan") or "",
             run_post_combined=bool(state.get("run_post_combined")),
             post_combined_plan=state.get("post_combined_plan") or "",
+            prompt_source=prompt_source,
         )
         return state
 
@@ -1179,6 +1296,7 @@ class MDPlanner:
         pre_combined_plan: str = "",
         run_post_combined: Optional[bool] = None,
         post_combined_plan: str = "",
+        prompt_source: str = "",
     ) -> None:
         """Persist overall multi-simulation master plan to {base}/planner/."""
         if run_post_combined is None:
@@ -1223,6 +1341,7 @@ class MDPlanner:
             "combined_analysis_plan": post_combined_plan or "",
             "num_simulations": len(sim_prompts),
             "labels": [s.get("label") for s in sim_prompts],
+            "prompt_source": prompt_source or None,
         }
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1538,6 +1657,75 @@ class MDPlanner:
             return sim_prompts[current_idx].get("label")
         return Path(state.get("working_directory", "")).name or None
     
+    def _try_compiled_family_analysis_plan(
+        self,
+        state: MDState,
+        structured_prompt: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Skip per-sim LLM planning when CampaignSpec already compiled the recipe.
+
+        Supervisor still ticks preprocess → setup → hpc → analysis → reporter.
+        Only the analysis-phase planner call is replaced; HITL keeps the LLM.
+        """
+        if state.get("hitl_chat_task") or state.get("hpc_pool_prep_only"):
+            return None
+        spec = state.get("campaign_spec") or {}
+        if not spec.get("family_modular"):
+            return None
+        subtask = state.get("subtask_type")
+        agents = {
+            str(a).lower()
+            for a in (state.get("agent_list") or state.get("active_agent_list") or [])
+        }
+        analysis_phase = subtask == "analysis_only" or (
+            bool(agents) and agents <= {"analysis", "reporter"}
+        )
+        if not analysis_phase:
+            return None
+
+        from agentic.campaign.family_recipe import REQUIRED_CALCULATIONS
+
+        tools = ", ".join(REQUIRED_CALCULATIONS)
+        working_dir = state.get("working_directory") or "."
+        full_plan = (
+            "**GOAL**\n"
+            "Per-system analysis using the compiled shared analysis protocol. "
+            "This plan is deterministic (no per-sim LLM tool list).\n\n"
+            f"**USER GOAL**\n{structured_prompt}\n\n"
+            "**EXECUTION SEQUENCE**\n"
+            "The Analysis Agent wraps each `hpc/repXX` trajectory, then runs the required "
+            f"calculations ({tools}) with that replica's topology/trajectory. "
+            "Metrics are written to `analysis/repXX/` and averaged in `analysis/avg/`.\n\n"
+            "The Reporter Agent then writes the per-system HTML report.\n\n"
+            f"Working directory: {working_dir}\n"
+            "Do not re-run preprocess, setup, or HPC. Do not invent placeholder tools.\n"
+        )
+        agents_involved = ["analysis_agent"]
+        if "reporter" in agents or subtask == "analysis_only":
+            agents_involved.append("reporter_agent")
+        steps = [
+            {
+                "step_number": i,
+                "agent": name,
+                "type": "natural_language",
+                "dependencies": [i - 1] if i > 1 else [],
+            }
+            for i, name in enumerate(agents_involved, 1)
+        ]
+        logger.info(
+            "PLANNER: using compiled shared analysis protocol (skipping analysis LLM plan)"
+        )
+        return {
+            "title": "Compiled shared analysis protocol",
+            "format": "natural_language",
+            "full_plan": full_plan,
+            "agent_sequence": agents_involved,
+            "agent_plans": self._extract_agent_plans(full_plan, agents_involved),
+            "steps": steps,
+            "method": "campaign_spec_recipe",
+            "subtask_type": subtask or "analysis_only",
+        }
+
     def _create_plan_from_analysis(
         self,
         structured_prompt: str,
@@ -1566,24 +1754,45 @@ class MDPlanner:
             subtask_type = state.get("subtask_type")
         if subtask_type:
             logger.info(f"PLANNER: Planning for subtask type: {subtask_type}")
+
+        family_plan = self._try_compiled_family_analysis_plan(state, structured_prompt)
+        if family_plan:
+            return family_plan
         
         # Get available tools context - agent-specific for subtask workflows
         exclude_combined = self._should_exclude_combined_tools(state)
+        retrieve_query = (
+            state.get("user_goal_original")
+            or state.get("user_goal")
+            or ""
+        )
+        spec_dict = state.get("campaign_spec") or {}
+        required_calculations = list(
+            spec_dict.get("required_calculations") or spec_dict.get("pin_tools") or []
+        )
         if subtask_type == "analysis_only":
             logger.info("PLANNER: Getting analysis agent tools for analysis-only workflow")
             tools_context = self._get_tools_context(
                 agent_name="analysis",
                 exclude_combined_tools=exclude_combined,
+                query=retrieve_query,
+                pin_names=required_calculations,
             )
         elif subtask_type == "setup_only":
             logger.info("PLANNER: Getting setup agent tools for setup-only workflow")
-            tools_context = self._get_tools_context(agent_name="simsetup")
+            tools_context = self._get_tools_context(
+                agent_name="simsetup", query=retrieve_query
+            )
         elif subtask_type == "preprocess_only":
             logger.info("PLANNER: Getting preprocessing agent tools for preprocess-only workflow")
-            tools_context = self._get_tools_context(agent_name="preprocess")
+            tools_context = self._get_tools_context(
+                agent_name="preprocess", query=retrieve_query
+            )
         elif subtask_type == "reporter_only":
             logger.info("PLANNER: Getting reporter agent tools for reporter-only workflow")
-            tools_context = self._get_tools_context(agent_name="reporter")
+            tools_context = self._get_tools_context(
+                agent_name="reporter", query=retrieve_query
+            )
         elif subtask_type == "multi_agent":
             agent_list = state.get("agent_list") or []
             logger.info(f"PLANNER: Getting combined tools for multi-agent workflow: {agent_list}")
@@ -1591,17 +1800,51 @@ class MDPlanner:
             tools_context = self._get_combined_tools_context(
                 agent_list,
                 exclude_combined_tools=exclude_combined,
+                query=retrieve_query,
+                pin_names=required_calculations,
             )
             logger.info(f"PLANNER: DEBUG - tools_context length: {len(tools_context)} chars")
             # Log first few lines to see what agents are included
             tools_lines = tools_context.split('\n')[:10]
             logger.info(f"PLANNER: DEBUG - First 10 lines of tools_context:\n" + "\n".join(tools_lines))
         else:
-            # Full workflow - get all tools
-            tools_context = self._get_tools_context(exclude_combined_tools=exclude_combined)
+            # Full workflow — retrieve a goal-ranked subset, not the full catalog
+            tools_context = self._get_tools_context(
+                exclude_combined_tools=exclude_combined,
+                query=retrieve_query,
+                pin_names=required_calculations,
+            )
+
+        if retrieve_query and (tools_context or "").startswith("RETRIEVED TOOLS"):
+            try:
+                base = Path(
+                    state.get("multi_sim_base_dir")
+                    or state.get("working_directory")
+                    or "."
+                )
+                out = base / "planner" / "retrieved_tools.txt"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(tools_context, encoding="utf-8")
+            except Exception:
+                pass
         
-        # Get relevant knowledge (protocols and force fields)
-        knowledge_context = self._get_knowledge_context(max_chars=6000)
+        # Retrieve top-k knowledge chunks for this goal (not a full-file dump)
+        knowledge_context = self._get_knowledge_context(
+            max_chars=6000,
+            query=str(structured_prompt or state.get("user_goal") or ""),
+            state=state,
+        )
+        try:
+            from agentic.campaign.memory import retrieve_memory_for_prompt
+
+            mem = retrieve_memory_for_prompt(
+                state,
+                query=str(structured_prompt or " ".join(state.get("errors") or [])),
+            )
+            if mem:
+                knowledge_context = f"{knowledge_context}\n\n{mem}"
+        except Exception:
+            pass
         
         # Build LLM prompt with all context - INCLUDE subtask type info
         planning_prompt = self._build_planning_prompt(

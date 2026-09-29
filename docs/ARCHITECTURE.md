@@ -14,7 +14,9 @@ plan edits, run summary, utilities, a short CLI reminder, recursion limit.
 dependency versions and GROMACS workarounds ([TOOLS.md](TOOLS.md)), analysis
 observables ([ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md)), worker/SLURM
 concurrency ([POOLS.md](POOLS.md)), product overview ([PROJECT.md](PROJECT.md)),
-step-by-step run map with flag examples ([PIPELINE_WORKFLOW.md](PIPELINE_WORKFLOW.md)).
+step-by-step run map with flag examples ([PIPELINE_WORKFLOW.md](PIPELINE_WORKFLOW.md)),
+family-scale compile-once contracts and embedding tool search
+([CAMPAIGN_AND_RETRIEVAL.md](CAMPAIGN_AND_RETRIEVAL.md)).
 
 ---
 
@@ -101,21 +103,26 @@ base_dir/
         preprocess/             # cleaned PDB, domain-trimmed PDB
         simsetup/               # topology, coordinates, MDP files, chain_residue_map.json
         hpc/                    # SLURM script, trajectories
-        analysis/               # plots, CSVs, summary JSON
+        analysis/               # plots, CSVs, summary JSON, inventory.json
         reporter/               # per-sim HTML report
         planner/                # execution_plan.md/json
         supervisor/             # execution_report.md, state.jsonl
+        state.json              # versioned per-sim snapshot
         agent_conversation.log
     p21860_ATP_MG/
         ...                     # (or skip reason if feasibility failed)
     analysis/                   # post_combined overlays (when n_sims>1)
-    cross_sim/                  # pre_combined pocket/MSA/consensus artifacts
+    cross_sim/                  # pre_combined pocket/MSA/consensus + inventory.json
+    campaign/
+        state.json              # versioned campaign snapshot (spec hash, stages)
+        campaign.yaml           # optional local override of shipped defaults
     combinedAnalysis/           # alternate combined output location
     reporter/
         combined_report.html    # cross-simulation comparison report
     planner/
         master_plan.md          # multi-sim plan with per-case + pre/post plans
         master_plan.json
+        knowledge_index.json    # retrieved knowledge chunk cache
     supervisor/
         state.jsonl
         execution_report.md
@@ -262,8 +269,9 @@ Config: `agentic/supervisor/config.yaml`
 ### Planner (`MDPlanner`)
 
 1. Auto-discovers all `@tool` functions from every agent's `tools.py`
-2. Loads domain knowledge from `agentic/planner/knowledge/`
-3. Submits tools + knowledge + goal to LLM → execution plan
+2. Retrieves top-k tools and knowledge chunks (hybrid hashed n-gram + Jaccard;
+   optional Ollama). Knowledge is cited as `[kb:…]`, not dumped whole.
+3. Submits retrieved tools + knowledge + goal to LLM → execution plan
 4. Extracts per-agent instruction blocks into state fields:
    `preprocessing_instructions`, `setup_instructions`,
    `hpc_instructions`, `analysis_instructions`, `reporter_instructions`
@@ -276,9 +284,11 @@ Config: `agentic/supervisor/config.yaml`
 - Called internally by Planner only (never by Supervisor)
 - Generates Python `@tool` functions, TCL scripts, MDP files, SLURM scripts
 - Validates syntax before registering in the live tool library
+- Reads [`AVAILABLE_SOFTWARE.md`](../AVAILABLE_SOFTWARE.md) (repo root) for
+  engine / analysis library context; falls back to a short built-in list if
+  the file is missing
 
 ### Preprocessing Agent (`PreprocessingAgent`)
-
 Tools (auto-discovered by Planner):
 
 | Tool | Function |
@@ -326,14 +336,17 @@ Key mechanisms:
 
 Operates in two modes:
 - **Per-sim**: LLM selects tool subset from `analysis_instructions`; family
-  modular goals also force consensus torsions / RMSF / DCCM / dihedral PCA
+  modular goals run a compiled shared analysis protocol: consensus pocket
+  metrics (COM + axis-angle), torsions, RMSF, DCCM, dihedral PCA. Those
+  required calculations are registered on the **per-sim** tool executor
+  (science completeness checks their on-disk artifacts).
 - **Combined**: auto-triggered after all sims (`pre_combined` then
   `post_combined`); runs cross-sim tools and optional classification
-
 Key analysis tools:
 - `calculate_rmsd`, `calculate_rmsf`, `calculate_radius_of_gyration`
 - `calculate_dccm`, `plot_dccm_difference` (apo–holo)
-- `calculate_ligand_pocket_distance`, consensus pocket batch (COM + axis angle)
+- `calculate_consensus_pocket_metrics` (required per-protein calculation: COM + axis-angle);
+  `calculate_ligand_pocket_distance` remains the generic COM-only tool
 - Modular family: `calculate_consensus_torsions`,
   `calculate_consensus_rmsf_features`, `calculate_consensus_dccm_features`,
   `run_independent_dynamics_fel` (dihedral PCA landscape entropy)
@@ -398,11 +411,16 @@ The summary counts derive from `len(sim_prompts)` (not `len(pdb_list)`) so
 
 ### Chat Tools (`src/utils/chat_tools.py`)
 
+HITL built-ins: `read_file`, `list_dir`, `write_file`, `grep_file`,
+`read_inventory`. Field agents (autonomous) may list, search, and read the
+inventory only inside this study’s directories. `write_file` stays HITL-only.
+
 `read_file_tool` (up to 500 lines) with automatic FILE SUMMARY for large files:
 - PDB: ATOM + HETATM count, unique residue names
 - GRO: atom count; CSV/DAT: data row count
 
-Allows LLM to reason about large files without full token consumption.
+HITL `pwd` prints `{stage}/inventory.json` (absolute traj/topo/maps), not a
+guess. Allows the LLM to reason about large files without full token consumption.
 
 ### LLM Client (`agentic/llm.py`)
 
@@ -426,6 +444,7 @@ python SimAgent.py \
   --llm-base-url URL             # Ollama endpoint
   --llm-model gpt-oss:20b        # LLM model name
   --HITL error|all               # Human-in-the-loop (default: off)
+  --campaign-yaml PATH           # Override mapping / retrieval / HITL knobs
   --resume                       # Restore supervisor/state.jsonl and continue
   --allowed-hpc-jobs 5           # Cross-sim HPC pool concurrency
   --hpc-check-interval 2h      # SLURM poll interval during pool wait

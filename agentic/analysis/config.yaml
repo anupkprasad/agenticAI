@@ -241,12 +241,25 @@ tools:
     phase: combined_analysis
 
   build_consensus_sequence_alignment:
-    description: "Star MSA to a reference (pairwise vs reference, BLOSUM62); exports residue map for reference PCA and consensus pocket transfer"
+    description: "MAFFT global MSA; global_mapped = physicochemical-group similarity ≥ 0.5 (occupancy ≥ 0.25). Alias of build_global_mapped_alignment."
     defaults:
-      alignment_fasta: "reference_msa_alignment.fasta"
-      residue_map_csv: "reference_msa_residue_map.csv"
-      alignment_json: "reference_msa_alignment.json"
-      min_coverage: 0.85
+      alignment_fasta: "global_msa.fasta"
+      residue_map_csv: "global_mapped.csv"
+      alignment_json: "global_mapped.json"
+      min_coverage: 0.25
+      conservation_metric: "similarity"
+      min_conservation: 0.5
+    phase: combined_analysis
+
+  build_global_mapped_alignment:
+    description: "MAFFT global MSA; export global_msa (all columns) and global_mapped (group similarity ≥ 0.5). Metric selectable: similarity, identity, blosum."
+    defaults:
+      alignment_fasta: "global_msa.fasta"
+      residue_map_csv: "global_mapped.csv"
+      alignment_json: "global_mapped.json"
+      min_coverage: 0.25
+      conservation_metric: "similarity"
+      min_conservation: 0.5
     phase: combined_analysis
 
   plot_reference_msa_alignment:
@@ -340,13 +353,14 @@ tools:
     phase: combined_analysis
 
   define_reference_consensus_pocket:
-    description: "Define reference ligand pocket = star-MSA consensus positions within cutoff of ligand at frame 0; basis for all pocket feature transfer"
+    description: "pocket_mapped = (ligand 15 Å) ∩ global_mapped; alias of define_pocket_mapped_residues"
     defaults:
-      consensus_json: "reference_msa_alignment.json"
+      consensus_json: "global_mapped.json"
       ligand_selection: "resname ATP"
       pocket_cutoff_A: 15.0
-      output_json: "reference_pocket_definition.json"
-      residue_map_csv: "reference_pocket_residue_map.csv"
+      pocket_filter: "global_mapped"
+      output_json: "pocket_mapped_definition.json"
+      residue_map_csv: "pocket_mapped.csv"
     phase: combined_analysis
 
   map_consensus_pocket_residues:

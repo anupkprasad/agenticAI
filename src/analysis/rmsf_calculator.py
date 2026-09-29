@@ -143,36 +143,18 @@ def calculate_rmsf(
     selection_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Calculate RMSF (Root Mean Square Fluctuation) for a trajectory.
-    
-    RMSF measures per-residue flexibility. Higher RMSF indicates more flexible regions.
-    Useful for identifying flexible loops, rigid cores, and binding sites.
-    
-    IMPORTANT: Structural alignment is performed by default to remove translational
-    and rotational motions, giving meaningful RMSF values.
+    Calculate per-residue RMSF for **one** trajectory (local, non-mapped).
 
-    For a residue subset, use a qualified output name (e.g. rmsf_1to34.dat) and
-    optionally selection_from_file pointing at identify_nearby_residues JSON.
-    
-    Args:
-        topology_file: Topology file (.gro, .pdb, .tpr)
-        trajectory_file: Trajectory file (.xtc, .trr, .dcd)
-        selection: Atom selection for RMSF calculation (default: "protein and name CA")
-        output_file: Output file path for RMSF data (.dat, .csv). Overall: rmsf.dat; subset: rmsf_{qualifier}.dat
-        working_dir: Working directory for analysis
-        align_trajectory: Whether to align trajectory before RMSF calculation (default: True)
-        align_selection: Atom selection for alignment (default: same as selection)
-        selection_from_file: Optional nearby_residues JSON/CSV; overrides selection
-        selection_key: JSON key to read (default mda_selection_ca)
-        
-    Returns:
-        Dict with RMSF results and statistics
-    
-    Output file format (tab-separated, # comment header):
-        # Residue\tRMSF(Angstrom)
-        1\t0.5432
-        2\t0.6781
-        ...
+    RMSF measures per-residue flexibility after optional alignment.
+
+    **Family / comparative MD:** do **not** use this for cross-system feature
+    tables. Prefer ``calculate_consensus_rmsf_features``, which writes
+    MSA-mapped scalars (``consensus_rmsf_mean_A`` / ``_std_A``) that are
+    comparable across proteins. Local ``rmsf.dat`` values are not interchangeable
+    with consensus RMSF and will change clustering scale.
+
+    Use this tool for single-system inspection or when the user explicitly asks
+    for whole-protein (non-mapped) RMSF.
     """
     try:
         # Setup working directory

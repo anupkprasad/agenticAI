@@ -24,15 +24,20 @@ def _chi1_atomgroup(residue):
     return ag
 
 
-def _resolve_traj(topology_file: str, trajectory_file: str, sim_directory: Optional[str]):
-    from src.analysis.combined_analysis import _find_sim_traj_topology
+def _resolve_traj(
+    topology_file: str,
+    trajectory_file: str,
+    sim_directory: Optional[str],
+    hpc_dir: Optional[str] = None,
+):
+    from src.analysis.traj_resolve import resolve_topology_trajectory
 
-    top, traj = topology_file, trajectory_file
-    if (not top or not Path(top).is_file()) and sim_directory:
-        found = _find_sim_traj_topology(str(sim_directory))
-        if found[0] and found[1]:
-            top, traj = found
-    return top, traj
+    return resolve_topology_trajectory(
+        topology_file,
+        trajectory_file,
+        sim_directory=sim_directory,
+        hpc_dir=hpc_dir,
+    )
 
 
 @tool
@@ -47,6 +52,7 @@ def calculate_consensus_torsions(
     output_dir: str = "consensus_dihedrals",
     working_dir: Optional[str] = None,
     sim_directory: Optional[str] = None,
+    hpc_dir: Optional[str] = None,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -90,7 +96,9 @@ def calculate_consensus_torsions(
             original_dir = os.getcwd()
             os.chdir(working_dir)
 
-        top, traj = _resolve_traj(topology_file, trajectory_file, sim_directory)
+        top, traj = _resolve_traj(
+            topology_file, trajectory_file, sim_directory, hpc_dir=hpc_dir
+        )
         if not top or not traj or not Path(top).is_file() or not Path(traj).is_file():
             return {"success": False, "error": f"Missing trajectory: top={top} traj={traj}"}
 
@@ -264,6 +272,8 @@ def calculate_consensus_torsions(
             "angles": angles,
             "residue_scope": scope,
             "mode": "consensus_phi_psi_chi1",
+            "topology_file": str(Path(top).resolve()),
+            "trajectory_file": str(Path(traj).resolve()),
             **{k: summary[k] for k in summary if k.startswith("chi1_")},
         }
         meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")

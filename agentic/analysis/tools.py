@@ -89,7 +89,23 @@ from src.analysis.phylo_tree import (
     build_sequence_phylo_tree,
     build_structure_phylo_tree,
 )
-from src.analysis.consensus_alignment import build_consensus_sequence_alignment
+from src.analysis.consensus_alignment import (
+    build_consensus_sequence_alignment,
+    build_global_mapped_alignment,
+    build_global_consensus_msa,
+)
+from src.analysis.consensus_pocket import (
+    define_reference_consensus_pocket,
+    define_pocket_mapped_residues,
+    map_consensus_pocket_residues,
+    map_pocket_mapped_residues,
+    calculate_consensus_pocket_metrics,
+    run_consensus_pocket_metrics_batch,
+)
+from src.analysis.msa_plotting import (
+    plot_reference_msa_alignment,
+    plot_global_mapped_alignment,
+)
 from src.analysis.reference_landscape import (
     fit_reference_pca_model,
     project_simulations_reference_pca,
@@ -97,13 +113,10 @@ from src.analysis.reference_landscape import (
     cluster_reference_fel_landscapes,
     run_reference_landscape_pipeline,
 )
-from src.analysis.consensus_pocket import (
-    define_reference_consensus_pocket,
-    map_consensus_pocket_residues,
-    calculate_consensus_pocket_metrics,
-    run_consensus_pocket_metrics_batch,
+from src.analysis.msa_plotting import (
+    plot_reference_msa_alignment,
+    plot_global_mapped_alignment,
 )
-from src.analysis.msa_plotting import plot_reference_msa_alignment
 from src.analysis.ligand_rmsd import calculate_ligand_rmsd
 from src.analysis.trajectory_qc import run_trajectory_qc
 from src.analysis.md_basics import calculate_native_contacts, calculate_backbone_dihedrals
@@ -118,10 +131,17 @@ from src.analysis.family_dynamics import (
     fit_dynamics_model,
     project_dynamics_model,
     run_shared_dynamics_fel_batch,
+    compute_shared_pka_ref_dyn_features,
 )
 from src.analysis.consensus_structural_features import (
     calculate_consensus_rmsf_features,
     calculate_consensus_dccm_features,
+)
+from src.analysis.general_md_tools import (
+    calculate_ligand_axis_angle,
+    calculate_water_occupancy,
+    cluster_trajectory_frames,
+    calculate_hbond_lifetimes,
 )
 
 # Import dynamic tool loader for programmer-generated tools
@@ -178,6 +198,10 @@ __all__ = [
     "project_dynamics_model",
     "calculate_consensus_rmsf_features",
     "calculate_consensus_dccm_features",
+    "calculate_ligand_axis_angle",
+    "calculate_water_occupancy",
+    "cluster_trajectory_frames",
+    "calculate_hbond_lifetimes",
     # Combined (multi-sim) tools
     "collect_metric_files",
     "plot_combined_overlay",
@@ -197,20 +221,26 @@ __all__ = [
     "build_sequence_phylo_tree",
     "build_structure_phylo_tree",
     "build_consensus_sequence_alignment",
+    "build_global_mapped_alignment",
+    "build_global_consensus_msa",
     "fit_reference_pca_model",
     "project_simulations_reference_pca",
     "build_shared_reference_fel_landscapes",
     "cluster_reference_fel_landscapes",
     "run_reference_landscape_pipeline",
     "define_reference_consensus_pocket",
+    "define_pocket_mapped_residues",
     "map_consensus_pocket_residues",
+    "map_pocket_mapped_residues",
     "calculate_consensus_pocket_metrics",
     "run_consensus_pocket_metrics_batch",
     "plot_reference_msa_alignment",
+    "plot_global_mapped_alignment",
     "run_consensus_local_fel_batch",
     "run_consensus_torsions_batch",
     "fit_dynamics_model",
     "run_shared_dynamics_fel_batch",
+    "compute_shared_pka_ref_dyn_features",
     "AnalysisToolExecutor",
     "get_analysis_tools",
     "get_tool_metadata",
@@ -266,6 +296,11 @@ _PER_SIM_ANALYSIS_TOOLS = [
     project_dynamics_model,
     calculate_consensus_rmsf_features,
     calculate_consensus_dccm_features,
+    calculate_consensus_pocket_metrics,
+    calculate_ligand_axis_angle,
+    calculate_water_occupancy,
+    cluster_trajectory_frames,
+    calculate_hbond_lifetimes,
 ]
 
 _COMBINED_ANALYSIS_TOOLS = [
@@ -294,20 +329,25 @@ _COMBINED_ANALYSIS_TOOLS = [
 
 _SHARED_ANALYSIS_TOOLS = [
     build_consensus_sequence_alignment,
+    build_global_mapped_alignment,
+    build_global_consensus_msa,
     fit_reference_pca_model,
     project_simulations_reference_pca,
     build_shared_reference_fel_landscapes,
     cluster_reference_fel_landscapes,
     run_reference_landscape_pipeline,
     define_reference_consensus_pocket,
+    define_pocket_mapped_residues,
     map_consensus_pocket_residues,
-    calculate_consensus_pocket_metrics,
+    map_pocket_mapped_residues,
     run_consensus_pocket_metrics_batch,
     plot_reference_msa_alignment,
+    plot_global_mapped_alignment,
     run_consensus_local_fel_batch_tool,
     run_consensus_torsions_batch,
     fit_dynamics_model,
     run_shared_dynamics_fel_batch,
+    compute_shared_pka_ref_dyn_features,
 ]
 
 
@@ -479,11 +519,16 @@ class AnalysisToolExecutor:
             "calculate_native_contacts": calculate_native_contacts,
             "calculate_backbone_dihedrals": calculate_backbone_dihedrals,
             "aggregate_replicate_metrics": aggregate_replicate_metrics,
-            # Paper Ward-4 / family modular features (per-sim)
+            # Shared analysis protocol / general MD features (per-sim)
             "calculate_consensus_torsions": calculate_consensus_torsions,
             "calculate_consensus_rmsf_features": calculate_consensus_rmsf_features,
             "calculate_consensus_dccm_features": calculate_consensus_dccm_features,
+            "calculate_consensus_pocket_metrics": calculate_consensus_pocket_metrics,
             "run_independent_dynamics_fel": run_independent_dynamics_fel,
+            "calculate_ligand_axis_angle": calculate_ligand_axis_angle,
+            "calculate_water_occupancy": calculate_water_occupancy,
+            "cluster_trajectory_frames": cluster_trajectory_frames,
+            "calculate_hbond_lifetimes": calculate_hbond_lifetimes,
         }
         if include_combined:
             self.tools.update({
@@ -509,17 +554,24 @@ class AnalysisToolExecutor:
                 "build_sequence_phylo_tree": build_sequence_phylo_tree,
                 "build_structure_phylo_tree": build_structure_phylo_tree,
                 "build_consensus_sequence_alignment": build_consensus_sequence_alignment,
+                "build_global_mapped_alignment": build_global_mapped_alignment,
+                "build_global_consensus_msa": build_global_consensus_msa,
                 "fit_reference_pca_model": fit_reference_pca_model,
                 "project_simulations_reference_pca": project_simulations_reference_pca,
                 "build_shared_reference_fel_landscapes": build_shared_reference_fel_landscapes,
                 "cluster_reference_fel_landscapes": cluster_reference_fel_landscapes,
                 "run_reference_landscape_pipeline": run_reference_landscape_pipeline,
                 "define_reference_consensus_pocket": define_reference_consensus_pocket,
+                "define_pocket_mapped_residues": define_pocket_mapped_residues,
                 "map_consensus_pocket_residues": map_consensus_pocket_residues,
-                "calculate_consensus_pocket_metrics": calculate_consensus_pocket_metrics,
+                "map_pocket_mapped_residues": map_pocket_mapped_residues,
                 "run_consensus_pocket_metrics_batch": run_consensus_pocket_metrics_batch,
                 "plot_reference_msa_alignment": plot_reference_msa_alignment,
+                "plot_global_mapped_alignment": plot_global_mapped_alignment,
                 "run_consensus_local_fel_batch": run_consensus_local_fel_batch_tool,
+                "fit_dynamics_model": fit_dynamics_model,
+                "run_shared_dynamics_fel_batch": run_shared_dynamics_fel_batch,
+                "compute_shared_pka_ref_dyn_features": compute_shared_pka_ref_dyn_features,
             })
         
         # Record built-in tool names BEFORE loading programmer tools
@@ -670,6 +722,8 @@ class AnalysisToolExecutor:
             "calculate_consensus_rmsf_features",
             "calculate_consensus_dccm_features",
             "run_independent_dynamics_fel",
+            "calculate_ligand_pocket_distance",
+            "calculate_consensus_pocket_metrics",
         }
         if tool_name not in family:
             return kwargs
@@ -678,9 +732,44 @@ class AnalysisToolExecutor:
             out["label"] = Path(self.sim_root).name
         if not out.get("sim_directory"):
             out["sim_directory"] = str(self.sim_root)
+        if not out.get("sim_dir"):
+            out["sim_dir"] = str(self.sim_root)
+        if tool_name in {
+            "calculate_ligand_pocket_distance",
+            "calculate_consensus_pocket_metrics",
+        } and not out.get("pocket_map_json"):
+            try:
+                from src.analysis.inventory import discover_mapped_path
+
+                found = discover_mapped_path(
+                    Path(self.sim_root),
+                    ("pocket_mapped.json", "pocket_map.json"),
+                )
+                if found:
+                    out["pocket_map_json"] = found
+            except Exception:
+                found = ""
+            if not out.get("pocket_map_json"):
+                for name in ("pocket_mapped.json", "pocket_map.json"):
+                    for root in (
+                        Path(self.sim_root).parent / "analysis",
+                        Path(self.sim_root).parent / "cross_sim",
+                    ):
+                        cand = root / name
+                        if cand.is_file():
+                            out["pocket_map_json"] = str(cand.resolve())
+                            break
+                    if out.get("pocket_map_json"):
+                        break
         if not out.get("alignment_json"):
             for cand in (
+                Path(self.sim_root).parent / "analysis" / "global_consensus_msa.json",
+                Path(self.sim_root).parent / "cross_sim" / "global_consensus_msa.json",
+                Path(self.sim_root).parent / "analysis" / "global_mapped.json",
+                Path(self.sim_root).parent / "cross_sim" / "global_mapped.json",
                 Path(self.sim_root).parent / "analysis" / "reference_msa_alignment.json",
+                Path(self.working_dir).resolve().parents[1] / "analysis" / "global_consensus_msa.json",
+                Path(self.working_dir).resolve().parents[1] / "analysis" / "global_mapped.json",
                 Path(self.working_dir).resolve().parents[1] / "analysis" / "reference_msa_alignment.json",
             ):
                 if cand.is_file():
@@ -688,8 +777,12 @@ class AnalysisToolExecutor:
                     break
         if not out.get("pocket_map_csv"):
             for name in (
+                "pocket_mapped.csv",
+                "pocket_mapped.json",
                 "reference_pocket_residue_map.csv",
                 "reference_pocket_resid_map.csv",
+                "global_consensus_msa.csv",
+                "global_mapped.csv",
                 "reference_msa_residue_map.csv",
             ):
                 cand = Path(self.sim_root).parent / "analysis" / name
@@ -752,6 +845,10 @@ class AnalysisToolExecutor:
                 "definition_json",
                 "residue_map_csv",
                 "reference_msa_alignment",
+                "global_mapped",
+                "global_consensus_msa",
+                "global_msa",
+                "pocket_mapped",
             }
 
             def _remap_path(val: str, *, key: str = "") -> str:
@@ -791,28 +888,49 @@ class AnalysisToolExecutor:
                     call_kw[key] = [
                         _remap_path(v, key=key) if isinstance(v, str) else v for v in val
                     ]
-            for tkey in ("trajectory_file", "trajectory", "traj_file"):
-                if traj and (tkey not in call_kw or not Path(str(call_kw.get(tkey) or "")).is_file()):
-                    call_kw[tkey] = str(traj)
-            # Always force traj-matched topology when available. LLM / remapped
-            # paths often keep fresh simsetup system.gro, which mismatches
-            # reused mdWrap.xtc atom counts under --reuse-hpc.
-            for tkey in ("topology_file", "topology", "structure_file"):
-                if topo is not None and topo.is_file():
+            # Always bind this slot's production files. Relative mdWrap.xtc plus
+            # a valid md.tpr used to leave both replicas on hpc/rep01.
+            if traj is not None:
+                abs_traj = str(Path(traj).resolve())
+                for tkey in ("trajectory_file", "trajectory", "traj_file"):
+                    call_kw[tkey] = abs_traj
+            if topo is not None and topo.is_file():
+                abs_topo = str(Path(topo).resolve())
+                for tkey in ("topology_file", "topology", "structure_file"):
                     prev = call_kw.get(tkey)
-                    call_kw[tkey] = str(topo)
-                    if prev and Path(str(prev)).name != topo.name:
+                    call_kw[tkey] = abs_topo
+                    if prev and str(prev) != abs_topo:
                         logger.info(
                             "Replicate fan-out: override %s %s → %s (%s)",
                             tkey,
                             prev,
-                            topo,
+                            abs_topo,
                             rep_id,
                         )
-            logger.info("Replicate fan-out: %s → %s", tool_name, rep_id)
+            call_kw["hpc_dir"] = str(hpc_dir)
+            logger.info(
+                "Replicate fan-out: %s → %s traj=%s",
+                tool_name,
+                rep_id,
+                call_kw.get("trajectory_file"),
+            )
             call_kw = self._ensure_family_tool_kwargs(tool_name, call_kw)
             result = self._execute_once(tool_name, **call_kw)
             per_rep[rep_id] = result
+            try:
+                from src.analysis.inventory import write_rep_inventory
+
+                write_rep_inventory(
+                    analysis_dir=analysis_dir,
+                    hpc_dir=hpc_dir,
+                    sim_root=self.sim_root,
+                    label=Path(self.sim_root).name,
+                    topology=str(call_kw.get("topology_file") or ""),
+                    trajectory=str(call_kw.get("trajectory_file") or ""),
+                    extra={"outputs": {"last_tool": tool_name}},
+                )
+            except Exception as inv_exc:
+                logger.warning("inventory.json write failed for %s: %s", rep_id, inv_exc)
             if not result.get("success"):
                 all_ok = False
                 logger.error(
@@ -864,6 +982,13 @@ class AnalysisToolExecutor:
                         "ligand_pocket_distance.csv",
                         "ligand_pocket_distance.dat",
                     ],
+                    "calculate_consensus_pocket_metrics": [
+                        "ligand_pocket_distance.csv",
+                        "reference_pocket_ligand_distance.csv",
+                        "pocket_axis_angle.csv",
+                        "reference_pocket_ligand_orientation.csv",
+                        "reference_pocket_metrics.json",
+                    ],
                     "calculate_pocket_rmsf": ["pocket_rmsf.dat"],
                     "calculate_ligand_rmsf": ["ligand_rmsf.dat"],
                     "calculate_ligand_rmsd": ["ligand_rmsd.dat"],
@@ -880,13 +1005,55 @@ class AnalysisToolExecutor:
                 logger.warning("aggregate_replicate_metrics after %s failed: %s", tool_name, exc)
                 agg = {"success": False, "error": str(exc)}
 
-        return {
+        collapse = None
+        if all_ok and self.rep_num > 1:
+            try:
+                from src.analysis.replica_collapse import replica_science_collapsed
+
+                collapse = replica_science_collapsed(self.sim_root, self.rep_num)
+                if collapse.get("collapsed"):
+                    logger.error(
+                        "Replicate fan-out: science products identical across "
+                        "distinct trajectories: %s",
+                        collapse.get("identical_products"),
+                    )
+                    all_ok = False
+            except Exception as exc:
+                logger.debug("replica collapse check skipped: %s", exc)
+
+        from agentic.campaign.contracts import is_noncritical_analysis_tool
+
+        if is_noncritical_analysis_tool(tool_name):
+            any_ok = any(bool((r or {}).get("success")) for r in per_rep.values())
+            return {
+                "success": True,
+                "rep_num": self.rep_num,
+                "per_rep": per_rep,
+                "aggregate": agg,
+                "warning": None if all_ok else "one or more replicate plots failed",
+                "error": None,
+                "partial": not all_ok,
+                "any_ok": any_ok,
+            }
+        err = None
+        if not all_ok:
+            if collapse and collapse.get("collapsed"):
+                err = (
+                    "replica science collapsed: identical products on distinct "
+                    f"trajectories ({', '.join(collapse.get('identical_products') or [])})"
+                )
+            else:
+                err = "one or more replicates failed"
+        out = {
             "success": all_ok,
             "rep_num": self.rep_num,
             "per_rep": per_rep,
             "aggregate": agg,
-            "error": None if all_ok else "one or more replicates failed",
+            "error": err,
         }
+        if collapse:
+            out["replica_collapse"] = collapse
+        return out
 
     def _execute_once(self, tool_name: str, **kwargs) -> Dict[str, Any]:
         """
@@ -900,6 +1067,22 @@ class AnalysisToolExecutor:
             Dict with execution result
         """
         if tool_name not in self.tools:
+            try:
+                from agentic.utils.sandbox_files import execute_sandbox_tool
+
+                sand = execute_sandbox_tool(
+                    tool_name,
+                    kwargs,
+                    roots=[
+                        Path(self.sim_root).parent if getattr(self, "sim_root", None) else Path(self.working_dir),
+                        Path(getattr(self, "sim_root", None) or self.working_dir),
+                    ],
+                    sim_root=str(getattr(self, "sim_root", "") or self.working_dir),
+                )
+                if sand is not None:
+                    return sand
+            except Exception:
+                pass
             logger.error(
                 "Unknown analysis tool %s (available=%s)",
                 tool_name,

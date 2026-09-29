@@ -233,56 +233,31 @@ class KnowledgeLoader:
     
     def get_knowledge_for_planner(self, 
                                    category: Optional[str] = None,
-                                   max_chars: int = 10000) -> str:
+                                   max_chars: int = 10000,
+                                   query: Optional[str] = None,
+                                   top_k: int = 8,
+                                   index_path: Optional[str] = None,
+                                   persist_copy: Optional[str] = None) -> str:
         """
-        Get formatted knowledge content for planner LLM context.
-        
-        Args:
-            category: If specified, only include this category
-            max_chars: Maximum characters to include (to fit in LLM context)
-            
-        Returns:
-            Formatted knowledge string suitable for LLM prompts
+        Retrieve top-k knowledge chunks for planner LLM context.
+
+        Does not dump whole files. Citations use ``[kb:category.doc#heading]``.
         """
-        formatted = ["**Available Knowledge:**\n"]
-        total_chars = 0
-        
-        categories_to_include = [category] if category else sorted(self.knowledge_by_category.keys())
-        
-        for cat in categories_to_include:
-            if cat not in self.knowledge_by_category:
-                continue
-            
-            formatted.append(f"\n### {cat.upper()} ###")
-            
-            for doc_key in self.knowledge_by_category[cat]:
-                doc = self.knowledge_docs[doc_key]
-                
-                # Add document header
-                doc_header = f"\n**{doc['name']}** ({doc['type']})"
-                formatted.append(doc_header)
-                
-                # Add content (truncated if needed)
-                content = str(doc['content'])
-                remaining_chars = max_chars - total_chars - len(doc_header)
-                
-                if remaining_chars <= 0:
-                    formatted.append("...[Content truncated to fit context limit]...")
-                    break
-                
-                if len(content) > remaining_chars:
-                    content = content[:remaining_chars] + "...[truncated]"
-                
-                formatted.append(content)
-                total_chars += len(content) + len(doc_header)
-                
-                if total_chars >= max_chars:
-                    break
-            
-            if total_chars >= max_chars:
-                break
-        
-        return "\n".join(formatted)
+        try:
+            from agentic.retrieval.knowledge import retrieve_knowledge_for_prompt
+
+            return retrieve_knowledge_for_prompt(
+                self,
+                query or "molecular dynamics protein simulation protocol force field",
+                category=category,
+                top_k=top_k,
+                max_chars=max_chars,
+                index_path=index_path,
+                persist_copy=persist_copy,
+            )
+        except Exception as exc:
+            logger.warning("Knowledge RAG failed, using file summary: %s", exc)
+            return self.get_knowledge_files_summary(category)
     
     def get_knowledge_files_summary(self, category: Optional[str] = None) -> str:
         """

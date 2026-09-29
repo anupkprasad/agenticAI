@@ -164,6 +164,10 @@ uses the registry automatically.
 - **`--resume`** restores `sim_prompts`, `completed_sim_states`, and loop
   progress. A normal re-run without `--resume` regenerates the master plan and
   restarts the per-sim loop (see `docs/ARCHITECTURE.md` directory layout).
+- **`campaign.yaml`** is the source of truth for mapping / retrieval / gold
+  columns / HITL defaults. Agent `config.yaml` files stay for prompts. Env
+  `AGENTIC_*` and CLI `--HITL` / `--campaign-yaml` override. See
+  [CAMPAIGN_AND_RETRIEVAL.md](CAMPAIGN_AND_RETRIEVAL.md).
 
 ### Workflow state files (`state.jsonl`)
 

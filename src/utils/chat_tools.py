@@ -39,7 +39,9 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-BUILTIN_TOOL_NAMES: frozenset = frozenset({"read_file", "list_dir", "write_file", "grep_file"})
+BUILTIN_TOOL_NAMES: frozenset = frozenset(
+    {"read_file", "list_dir", "write_file", "grep_file", "read_inventory"}
+)
 
 # Pattern that matches a >>CALL: invocation anywhere in the LLM response.
 # Captures the full argument string (supports key=value and JSON objects).
@@ -102,6 +104,7 @@ You have access to the following built-in file tools (available in EVERY agent s
   - list_dir   : List files in a directory. Use "." for the working-directory root. Args: directory_path
   - write_file : Create or overwrite a file. Use ONLY when user explicitly asks to write/edit. Args: filepath | content
   - grep_file  : Search a regex pattern inside a file or all files (use "." to search all). Args: regex_pattern | filepath_or_dot_for_all
+  - read_inventory : Read {stage}/inventory.json (traj/topo/pocket_mapped). Args: stage (preprocess|simsetup|hpc|analysis|reporter)
 
 When asked "what tools do you have?" ALWAYS list BOTH these built-in tools AND any domain tools shown below.
 
@@ -110,6 +113,7 @@ To call any tool, output EXACTLY one line — no other text on that line:
   >>CALL: list_dir   | <directory_path>
   >>CALL: write_file | <filepath> | <content>
   >>CALL: grep_file  | <regex_pattern> | <filepath_or_dot_for_all>
+  >>CALL: read_inventory | <stage_or_dot>
 
 Rules:
 - Paths are relative to the working directory unless absolute.
@@ -548,6 +552,20 @@ def execute_tool_call(
         pattern = parts[0]
         filepath = parts[1] if len(parts) > 1 else "."
         result = grep_file_tool(pattern, filepath, working_dir, agent_dirs)
+
+    elif tool_name == "read_inventory":
+        try:
+            from agentic.utils.sandbox_files import execute_sandbox_tool
+
+            sand = execute_sandbox_tool(
+                "read_inventory",
+                {"stage": args_str if args_str not in (".", "") else ""},
+                roots=[Path(working_dir)],
+                sim_root=working_dir,
+            )
+            result = (sand or {}).get("message") or (sand or {}).get("error") or "(no inventory)"
+        except Exception as exc:
+            result = f"(read_inventory failed: {exc})"
 
     elif domain_tools and tool_name in domain_tools:
         result = execute_domain_tool(

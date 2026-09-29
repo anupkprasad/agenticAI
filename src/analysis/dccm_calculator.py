@@ -338,13 +338,15 @@ def calculate_dccm(
     working_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Compute the Dynamic Cross-Correlation Matrix (DCCM) of Cα fluctuations.
+    Compute a full-protein Dynamic Cross-Correlation Matrix (DCCM).
+
+    **Family / comparative MD:** prefer ``calculate_consensus_dccm_features``
+    for MSA-mapped scalars (including ``dccm_N_C_mean_corr``). A local full
+    DCCM is not the family clustering contract.
 
     The DCCM quantifies how pairs of residues move together (correlated,
     C_ij → +1) or in opposite directions (anti-correlated, C_ij → −1)
-    over the trajectory.  It is particularly informative for pseudokinase
-    comparisons because it reveals differences in allosteric communication
-    and activation-loop dynamics.
+    over the trajectory.
 
     Algorithm:
     1. Select Cα atoms (or user-defined selection) and trajectory-align

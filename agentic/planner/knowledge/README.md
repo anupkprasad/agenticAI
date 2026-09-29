@@ -35,7 +35,13 @@ Software tool manuals and command references:
 
 ## Usage
 
-The planner agent automatically loads all documents in this directory structure and uses them as context when creating execution plans. Documents can be in:
+The planner **retrieves** top-k chunks (hashed n-gram + Jaccard, optional
+Ollama embeddings) instead of dumping whole files. Citations look like
+`[kb:protocols.equilibration_protocol#nvt-temperature]`. The index is
+persisted at `planner/knowledge_index.json` (next to this tree, and copied
+into the campaign `planner/` folder).
+
+Documents can be in:
 - Markdown (.md)
 - Plain text (.txt)
 - JSON (.json) for structured data
@@ -53,17 +59,16 @@ The planner agent automatically loads all documents in this directory structure 
 ```
 knowledge/
 ├── md_fundamentals/
-│   ├── md_theory_basics.md
-│   └── integration_algorithms.txt
+│   └── md_theory_basics.md
 ├── force_fields/
 │   ├── amber99sb_ildn.md
-│   └── tip3p_water_model.md
+│   └── charmm36.md
 ├── protocols/
 │   ├── protein_preparation_workflow.md
-│   └── equilibration_protocol.md
+│   ├── equilibration_protocol.md
+│   └── ligand_binding_simulations.md
 └── tools_manuals/
-    ├── gromacs_pdb2gmx.md
-    └── vmd_selections.txt
+    └── gromacs_pdb2gmx.md
 ```
 
 ## Notes

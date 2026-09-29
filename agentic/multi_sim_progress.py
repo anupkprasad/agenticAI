@@ -453,6 +453,10 @@ def per_sim_analysis_done_on_disk(working_dir: str) -> bool:
             summary_ok = True
     if not summary_ok:
         return False
+    # Family campaigns execute a compiled recipe (consensus_* only). RMSD /
+    # contacts must not be required, or resume would re-run every system.
+    if _working_dir_requests_family_modular(working_dir):
+        return per_sim_family_modular_done_on_disk(working_dir)
     strong_markers = (
         "rmsd.dat",
         "rmsd.png",
@@ -487,8 +491,6 @@ def per_sim_analysis_done_on_disk(working_dir: str) -> bool:
     # Pocket COM alone is a mandatory inject, not a complete analysis.
     if not base_ok:
         return False
-    if _working_dir_requests_family_modular(working_dir):
-        return per_sim_family_modular_done_on_disk(working_dir)
     return True
 
 
@@ -1698,6 +1700,14 @@ def apply_hitl_continue(state: Dict[str, Any], checkpoint_type: str) -> None:
 
     Uses base-level ``multi_sim_progress`` — ignores HITL chat sim binding.
     """
+    try:
+        from agentic.campaign.hitl_campaign import continue_campaign_checkpoint
+
+        if continue_campaign_checkpoint(state, checkpoint_type):
+            return
+    except Exception:
+        logger.debug("campaign HITL continue hook skipped", exc_info=True)
+
     phase = state.get("multi_sim_phase")
     if phase == "combined_analysis" and checkpoint_type == "analysis":
         progress = ensure_multi_sim_progress(state) or {}

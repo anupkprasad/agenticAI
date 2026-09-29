@@ -77,12 +77,13 @@ class MDProgrammer:
         Returns:
             String containing available software list or empty string if not found
         """
-        # Look for AVAILABLE_SOFTWARE.md in workspace root
+        # Look for AVAILABLE_SOFTWARE.md near the package / workspace root
         software_doc_paths = [
             "AVAILABLE_SOFTWARE.md",
-            "../AVAILABLE_SOFTWARE.md", 
+            "../AVAILABLE_SOFTWARE.md",
             "../../AVAILABLE_SOFTWARE.md",
-            os.path.join(os.path.dirname(__file__), "..", "..", "AVAILABLE_SOFTWARE.md")
+            os.path.join(os.path.dirname(__file__), "..", "..", "AVAILABLE_SOFTWARE.md"),
+            os.path.join(os.path.dirname(__file__), "AVAILABLE_SOFTWARE.md"),
         ]
         
         for path in software_doc_paths:
@@ -96,8 +97,14 @@ class MDProgrammer:
             except Exception as e:
                 logger.debug(f"Could not load software doc from {path}: {e}")
         
-        logger.warning("AVAILABLE_SOFTWARE.md not found - programmer will have limited context")
-        return ""
+        logger.debug(
+            "AVAILABLE_SOFTWARE.md not found — using built-in minimal software list"
+        )
+        return (
+            "Built-in defaults: GROMACS (gmx), MDAnalysis, NumPy/SciPy, pandas, "
+            "MAFFT, scikit-learn/matplotlib when installed. Prefer registered "
+            "SimAgent tools before creating new programmer tools."
+        )
     
     def _default_config(self) -> Dict[str, Any]:
         """Default configuration"""
@@ -346,6 +353,12 @@ class MDProgrammer:
         import traceback
         
         try:
+            # Tag LLM usage for this agent (shared client across the workflow).
+            try:
+                if self.llm is not None and hasattr(self.llm, "set_agent"):
+                    self.llm.set_agent("programmer")
+            except Exception:
+                pass
             # DEBUG: Log entry point
             print(f"\n{'='*70}", file=sys.stderr)
             print(f"DEBUG: _run_programmer_workflow STARTED", file=sys.stderr)

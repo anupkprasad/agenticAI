@@ -798,3 +798,9 @@ def save_workflow_state_quiet(state: Dict[str, Any]) -> None:
     state_path.write_text(json.dumps(entry, indent=2, default=str) + "\n", encoding="utf-8")
 
     write_pool_status_json(state, supervisor_dir)
+    try:
+        from agentic.campaign.snapshots import persist_state_snapshots
+
+        persist_state_snapshots(state)
+    except Exception:
+        pass

@@ -35,20 +35,34 @@ def build_per_sim_job_spec(state: Dict[str, Any], sim_info: Dict[str, Any], *, p
             per_sim_reporter_done_on_disk,
         )
 
-        if wd and per_sim_analysis_done_on_disk(wd) and not per_sim_reporter_done_on_disk(wd):
+        science_ok = True
+        raw_spec = state.get("campaign_spec")
+        if isinstance(raw_spec, dict) and raw_spec.get("family_modular") and wd:
+            from agentic.campaign.contracts import per_sim_science_complete
+            from agentic.campaign.spec import CampaignSpec
+
+            science_ok = bool(
+                per_sim_science_complete(
+                    wd, spec=CampaignSpec.from_dict(raw_spec)
+                ).get("ok")
+            )
+        if (
+            wd
+            and science_ok
+            and per_sim_analysis_done_on_disk(wd)
+            and not per_sim_reporter_done_on_disk(wd)
+        ):
             agent_list = ["reporter"]
         else:
             agent_list = _agent_list_for_phase(state, default=["analysis", "reporter"])
-        user_goal = (
-            sim_info.get("analysis_prompt")
-            or sim_info.get("prompt")
-            or state.get("user_goal", "")
-        )
+        user_goal = _compose_analysis_goal(state, sim_info)
 
     return {
         "label": label,
         "working_dir": working_dir,
         "user_goal": user_goal,
+        "user_goal_original": state.get("user_goal_original") or state.get("user_goal") or "",
+        "campaign_spec": state.get("campaign_spec"),
         "raw_pdb": sim_pdb,
         "phase": phase,
         # Active agents for this pool phase (execution).
@@ -88,6 +102,21 @@ def build_per_sim_job_spec(state: Dict[str, Any], sim_info: Dict[str, Any], *, p
             "case_directive": sim_info.get("case_directive"),
         },
     }
+
+
+def _compose_analysis_goal(state: Dict[str, Any], sim_info: Dict[str, Any]) -> str:
+    """Per-sim analysis goal always carries the master scientific contract."""
+    per_sim = (
+        sim_info.get("analysis_prompt")
+        or sim_info.get("prompt")
+        or ""
+    ).strip()
+    original = (state.get("user_goal_original") or state.get("user_goal") or "").strip()
+    if original and original not in per_sim:
+        if per_sim:
+            return f"{per_sim}\n\nOriginal study goal (applies to every system):\n{original}"
+        return original
+    return per_sim or original
 
 
 def _agent_list_for_phase(state: Dict[str, Any], default: List[str]) -> List[str]:
@@ -225,6 +254,8 @@ def run_per_sim_workflow(job: Dict[str, Any]) -> Dict[str, Any]:
             "current_sim_label": label,
             "sim_label": label,
             "label": label,
+            "user_goal_original": job.get("user_goal_original") or job.get("user_goal", ""),
+            "campaign_spec": job.get("campaign_spec"),
         }
         if phase == "analysis" or set(agents) <= {"analysis", "reporter"}:
             # Hard-disable HPC pool in analysis/reporter workers. Leftover
@@ -250,6 +281,29 @@ def run_per_sim_workflow(job: Dict[str, Any]) -> Dict[str, Any]:
         failed = bool(errors) or str(status).startswith("failed")
         result["success"] = not failed
         result["workflow_status"] = status
+        if (
+            not failed
+            and (phase == "analysis" or set(agents) >= {"analysis", "reporter"})
+            and working_dir
+        ):
+            try:
+                from agentic.campaign.contracts import per_sim_science_complete
+                from agentic.campaign.spec import CampaignSpec
+
+                raw_spec = job.get("campaign_spec")
+                spec = CampaignSpec.from_dict(raw_spec) if isinstance(raw_spec, dict) else None
+                sci = per_sim_science_complete(working_dir, spec=spec)
+                result["science"] = sci
+                if spec and spec.family_modular and not sci.get("ok"):
+                    result["success"] = False
+                    result["error"] = sci.get("reason") or "family modular artifacts missing"
+                    logger.warning(
+                        "Parallel worker: %s science contract failed: %s",
+                        label,
+                        result["error"],
+                    )
+            except Exception as exc:
+                logger.debug("Science contract check skipped: %s", exc)
         if errors:
             result["error"] = "; ".join(str(e) for e in errors[:3])
     except Exception as exc:
@@ -274,6 +328,16 @@ def job_already_complete(job: Dict[str, Any]) -> bool:
         per_sim_reporter_done_on_disk,
     )
 
+    raw_spec = job.get("campaign_spec")
+    if isinstance(raw_spec, dict) and raw_spec.get("family_modular"):
+        from agentic.campaign.contracts import per_sim_science_complete
+        from agentic.campaign.spec import CampaignSpec
+
+        sci_ok = bool(
+            per_sim_science_complete(wd, spec=CampaignSpec.from_dict(raw_spec)).get("ok")
+        )
+        if not sci_ok:
+            return False
     agents = job.get("agent_list") or ["analysis", "reporter"]
     if agents == ["reporter"]:
         return per_sim_reporter_done_on_disk(wd)

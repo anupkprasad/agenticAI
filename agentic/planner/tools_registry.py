@@ -89,9 +89,29 @@ class ToolsRegistry:
         
         # Also scan programmer-generated tools in working_dir
         self._scan_programmer_generated_tools()
+        self._inject_sandbox_file_tools()
         
         logger.info(f"Tool discovery complete. Found {len(self.tools)} tools across {len(self.tools_by_agent)} agents")
         return self.tools
+
+    def _inject_sandbox_file_tools(self) -> None:
+        """Expose list_dir / grep_file / read_inventory on every field agent."""
+        try:
+            from agentic.utils.sandbox_files import sandbox_tool_records
+        except Exception:
+            return
+        field_agents = ("preprocess", "simsetup", "hpc", "analysis", "reporter")
+        for rec in sandbox_tool_records():
+            rec = dict(rec)
+            rec["agent"] = "files"
+            self.tools[rec["name"]] = rec
+            for agent in field_agents:
+                bucket = self.tools_by_agent.setdefault(agent, [])
+                if any(t.get("name") == rec["name"] for t in bucket):
+                    continue
+                item = dict(rec)
+                item["agent"] = agent
+                bucket.append(item)
     
     def _scan_programmer_generated_tools(self):
         """Scan {working_directory}/programmer for dynamically generated tools."""

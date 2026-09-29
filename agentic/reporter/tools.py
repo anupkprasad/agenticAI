@@ -4,6 +4,7 @@ Thin wrapper that exposes modular @tool functions from src/reporter/
 """
 import os
 import logging
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 # Import modular @tool functions from src/reporter/
@@ -122,6 +123,20 @@ class ReporterToolExecutor:
         }
         
         if tool_name not in tools_map:
+            try:
+                from agentic.utils.sandbox_files import execute_sandbox_tool
+
+                wd = Path(self.working_dir)
+                sand = execute_sandbox_tool(
+                    tool_name,
+                    tool_params,
+                    roots=[wd.parent, wd],
+                    sim_root=str(wd.parent),
+                )
+                if sand is not None:
+                    return sand
+            except Exception:
+                pass
             return {
                 "success": False,
                 "error": f"Unknown tool: {tool_name}",

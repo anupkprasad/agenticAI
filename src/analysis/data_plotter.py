@@ -852,11 +852,11 @@ def plot_data(
             if working_dir:
                 os.chdir(original_dir)
             return {
-                "success": False,
-                "error": (
-                    "No plottable numeric data found in input file(s). "
-                    "Check column format (mixed string/numeric RMSF .dat files "
-                    "need Residue/RMSF columns)."
+                "success": True,
+                "skipped": True,
+                "warning": (
+                    "No plottable numeric data found in input file(s); "
+                    "skipped empty/odd table (e.g. H-bond occupancy)."
                 ),
             }
         

@@ -10,6 +10,7 @@ Use cases:
   - Ligand–ion distance
   - Any two groups of atoms
 """
+import json
 import os
 import logging
 from typing import Dict, Any, Optional
@@ -422,37 +423,44 @@ def calculate_ligand_pocket_distance(
     output_file: Optional[str] = None,
     working_dir: Optional[str] = None,
     frame_interval: int = 1,
+    pocket_selection: str = "",
+    pocket_map_json: str = "",
+    label: str = "",
+    pocket_resids: Optional[list] = None,
+    hpc_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Track ligand displacement from its catalytic binding pocket over a trajectory.
+    Track ligand displacement from a **local** binding pocket (single sim).
 
-    **Use when** the user asks for ligand **pocket** distance, binding-site stability,
-    or "COM distance of ATP from the protein" in a holo kinase context without
-    specifying whole-protein COM. This is the standard metric for ligand binding studies.
+    **Family / comparative MD:** prefer ``calculate_consensus_pocket_metrics``
+    (uses pocket_mapped / reference-pocket residues and writes
+    ``reference_pocket_metrics.json``). Local pocket definition defaults to a
+    **5 Å** frame-0 shell — a different contract from the family 15 Å ∩
+    global_mapped pocket used for transferable COM / axis-angle features.
 
-    **Do NOT use for** arbitrary two-group COM distances — use ``calculate_com_distance``
-    with explicit ``selection1`` / ``selection2`` (e.g. whole protein vs ligand, or
-    domain–domain distances).
+    **Use when** the user asks for single-system ligand–pocket distance without
+    requesting MSA-mapped / consensus pocket metrics.
 
-    **Algorithm:**
-    1. At frame 0, collect protein atoms within ``cutoff`` Å of the ligand → pocket group.
-    2. Each frame: distance between pocket COM and ligand COM.
+    **Do NOT use for** family clustering feature tables, or for arbitrary
+    two-group COM — use ``calculate_com_distance`` with explicit selections.
 
     Args:
-        topology_file: Topology file (.gro, .pdb, .tpr) — full path.
-        trajectory_file: Trajectory file (.xtc, .trr, .dcd) — full path.
-        ligand_selection: MDAnalysis ligand selection (default: ``"resname LIG"``).
-            Examples: ``"resname ATP"``, ``"resname INH"``.
-        protein_selection: Protein atoms searched for pocket contacts (default: ``"protein"``).
-        cutoff: Å cutoff to define pocket atoms at frame 0 (default: 5.0).
+        topology_file: Topology file (.gro, .pdb, .tpr).
+        trajectory_file: Trajectory file (.xtc, .trr, .dcd).
+        ligand_selection: Ligand MDAnalysis selection (default: ``"resname LIG"``).
+        protein_selection: Protein atoms for pocket search (default: ``"protein"``).
+        cutoff: Å cutoff for frame-0 pocket when no mapped pocket is supplied (default 5.0).
         output_file: CSV filename (default: ``"ligand_pocket_distance.csv"``).
         working_dir: Output directory.
         frame_interval: Process every Nth frame (default: 1).
+        pocket_selection: Explicit MDAnalysis protein selection for the pocket.
+        pocket_map_json: Shared ``pocket_mapped.json`` from pre-combined mapping.
+        label: Simulation label used to look up ``pocket_map_json``.
+        pocket_resids: Residue numbers to use as the pocket (alternative to JSON).
+        hpc_dir: Optional HPC slot used when trajectory paths are relative.
 
     Returns:
         Dict with pocket atom count, distance statistics, and output path.
-
-    Standard outputs: ``ligand_pocket_distance.csv``, plot as ``ligand_pocket_distance.png``.
     """
     try:
         original_dir = None
@@ -467,19 +475,53 @@ def calculate_ligand_pocket_distance(
                 "error": "MDAnalysis and numpy are required for ligand pocket distance calculation",
             }
 
+        from src.analysis.traj_resolve import resolve_topology_trajectory
+
+        top, traj = resolve_topology_trajectory(
+            topology_file,
+            trajectory_file,
+            hpc_dir=hpc_dir,
+        )
+        topology_file = top or topology_file
+        trajectory_file = traj or trajectory_file
+
         if not os.path.exists(topology_file):
             return {"success": False, "error": f"Topology file not found: {topology_file}"}
         if not os.path.exists(trajectory_file):
             return {"success": False, "error": f"Trajectory file not found: {trajectory_file}"}
 
+        pocket_source = "local_cutoff"
+        pocket_sel_str = ""
+        if pocket_map_json and label:
+            try:
+                from src.analysis.cross_sim_artifacts import pocket_selection_for_label
+
+                payload = json.loads(Path(pocket_map_json).read_text(encoding="utf-8"))
+                mapped = pocket_selection_for_label(payload, label)
+                if mapped:
+                    pocket_sel_str = mapped
+                    pocket_source = "pocket_mapped"
+            except Exception as exc:
+                logger.warning("pocket_mapped lookup failed: %s", exc)
+        if not pocket_sel_str and pocket_selection:
+            pocket_sel_str = str(pocket_selection)
+            pocket_source = "pocket_selection"
+        if not pocket_sel_str and pocket_resids:
+            nums = [str(int(r)) for r in pocket_resids if r is not None]
+            if nums:
+                pocket_sel_str = f"({protein_selection}) and resid " + " ".join(nums)
+                pocket_source = "pocket_resids"
+
         logger.info(
-            f"Ligand pocket distance: ligand='{ligand_selection}', "
-            f"protein='{protein_selection}', cutoff={cutoff} Å"
+            "Ligand pocket distance: ligand=%r pocket_source=%s cutoff=%s Å",
+            ligand_selection,
+            pocket_source,
+            cutoff,
         )
 
         u = mda.Universe(topology_file, trajectory_file)
 
-        # ── Step 1: identify pocket atoms at frame 0 ──────────────────────
+        # ── Step 1: identify pocket atoms ────────────────────────────────
         u.trajectory[0]
         ligand = u.select_atoms(ligand_selection)
         if len(ligand) == 0:
@@ -495,11 +537,11 @@ def calculate_ligand_pocket_distance(
                 "error": f"Protein selection matched 0 atoms: '{protein_selection}'",
             }
 
-        # MDAnalysis distance-based contact selection
-        # Selects protein atoms within cutoff Å of any ligand atom at frame 0
-        pocket_sel_str = (
-            f"({protein_selection}) and around {cutoff} ({ligand_selection})"
-        )
+        if not pocket_sel_str:
+            pocket_sel_str = (
+                f"({protein_selection}) and around {cutoff} ({ligand_selection})"
+            )
+            pocket_source = "local_cutoff"
         pocket_atoms = u.select_atoms(pocket_sel_str)
 
         if len(pocket_atoms) == 0:
@@ -608,6 +650,9 @@ def calculate_ligand_pocket_distance(
             "pocket_residues": pocket_resids,
             "pocket_resnames": pocket_resnames,
             "pocket_selection": pocket_sel_str,
+            "pocket_source": pocket_source,
+            "topology_file": topology_file,
+            "trajectory_file": trajectory_file,
             "cutoff_angstrom": cutoff,
             "mean_distance": mean_dist,
             "std_distance": std_dist,

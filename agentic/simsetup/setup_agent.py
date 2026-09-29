@@ -553,6 +553,10 @@ class SimulationSetupAgent:
         # Store for use in _execute_plan
         self._last_analysis = analysis
         
+        if state.get("reuse_hpc"):
+            logger.info("reuse_hpc: skipping LLM setup planning, using deterministic fallback")
+            return self._create_fallback_plan(agent_input, analysis)
+
         # Build LLM prompt from config template
         prompt = self._build_planning_prompt(agent_input, analysis, state)
         

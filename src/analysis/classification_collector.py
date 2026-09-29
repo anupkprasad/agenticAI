@@ -111,32 +111,35 @@ CLASSIFICATION_FEATURE_GROUPS["reference_fel_archetype"] = (
     "ref_major_basin_population",
 )
 
-# Paper Ward k=4 feature set (mafft_0.5 / fig4): pocket×4 + RMSF×2 + χ₁ + DCCM + dihedral PCA.
-# Matches campaigns/ment/mafft_0.5_feature_analysis/repavg/output_ward4/ward4_meta.json.
+# Paper Ward k=4 feature set (mafft_0.5 fig3 sharedpcdyn): pocket×4 + χ₁×2 + RMSF×2 + DCCM + shared PKA-ref dyn.
+# Matches campaigns/ment/mafft_0.5_feature_analysis/draft/sharedpcdyn_lock.py FEATURE_COLS.
 PAPER_WARD4_FEATURE_COLUMNS: Tuple[str, ...] = (
     "reference_pocket_ligand_distance_mean_A",
     "reference_pocket_ligand_distance_std_A",
     "reference_pocket_ligand_axis_angle_mean_deg",
     "reference_pocket_std_ligand_axis_angle_deg",
+    "chi1_pocket_circ_mean_deg",
+    "chi1_pocket_circ_std_deg",
     "consensus_rmsf_mean_A",
     "consensus_rmsf_std_A",
-    "chi1_pocket_circ_mean_deg",
     "dccm_N_C_mean_corr",
-    "pca_grid_entropy",
+    "pca_pka_ref_shared_dyn",
 )
 PAPER_WARD4_METRIC_GROUPS: Tuple[str, ...] = (
     "reference_pocket",
     "consensus_rmsf",
     "consensus_torsions",
     "consensus_dccm",
-    "dihedral_pca",
+    "dihedral_pca_ref",
 )
 CLASSIFICATION_FEATURE_GROUPS["paper_ward4"] = PAPER_WARD4_FEATURE_COLUMNS
 
 # Optional modular family-dynamics groups (user/planner selects; never forced).
 CLASSIFICATION_FEATURE_GROUPS["consensus_torsions"] = (
     "chi1_circ_mean_deg",
+    "chi1_circ_std_deg",
     "chi1_pocket_circ_mean_deg",
+    "chi1_pocket_circ_std_deg",
 )
 CLASSIFICATION_FEATURE_GROUPS["consensus_rmsf"] = (
     "consensus_rmsf_mean_A",
@@ -165,6 +168,12 @@ CLASSIFICATION_FEATURE_GROUPS["cart_tica"] = (
 CLASSIFICATION_FEATURE_GROUPS["dihedral_pca_ref"] = (
     "pca_ref_grid_entropy",
     "pca_ref_major_basin_population",
+    "pca_pka_ref_shared_dyn",
+    "pca_pka_ref_shared_pc_rms",
+    "pca_pka_ref_shared_gmin_pc1",
+    "pca_pka_ref_shared_gmin_pc2",
+    "pca_pka_ref_shared_centroid_pc1",
+    "pca_pka_ref_shared_centroid_pc2",
 )
 CLASSIFICATION_FEATURE_GROUPS["dihedral_tica_ref"] = (
     "tica_ref_grid_entropy",
@@ -186,11 +195,21 @@ _MODULAR_DYNAMICS_FEL_DIRS: Tuple[Tuple[str, str], ...] = (
 _MODULAR_SCALAR_JSON: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     (
         "consensus_dihedrals/torsion_summary.json",
-        ("chi1_circ_mean_deg", "chi1_pocket_circ_mean_deg"),
+        (
+            "chi1_circ_mean_deg",
+            "chi1_circ_std_deg",
+            "chi1_pocket_circ_mean_deg",
+            "chi1_pocket_circ_std_deg",
+        ),
     ),
     (
         "consensus_dihedrals/dihedral_features_meta.json",
-        ("chi1_circ_mean_deg", "chi1_pocket_circ_mean_deg"),
+        (
+            "chi1_circ_mean_deg",
+            "chi1_circ_std_deg",
+            "chi1_pocket_circ_mean_deg",
+            "chi1_pocket_circ_std_deg",
+        ),
     ),
     (
         "consensus_rmsf/consensus_rmsf_features.json",
@@ -199,6 +218,28 @@ _MODULAR_SCALAR_JSON: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     (
         "consensus_DCCM/consensus_dccm_features.json",
         ("dccm_N_C_mean_corr", "mean_abs_dccm"),
+    ),
+    (
+        "shared_pc_features.json",
+        (
+            "pca_pka_ref_shared_dyn",
+            "pca_pka_ref_shared_pc_rms",
+            "pca_pka_ref_shared_gmin_pc1",
+            "pca_pka_ref_shared_gmin_pc2",
+            "pca_pka_ref_shared_centroid_pc1",
+            "pca_pka_ref_shared_centroid_pc2",
+        ),
+    ),
+    (
+        "avg/shared_pc_features.json",
+        (
+            "pca_pka_ref_shared_dyn",
+            "pca_pka_ref_shared_pc_rms",
+            "pca_pka_ref_shared_gmin_pc1",
+            "pca_pka_ref_shared_gmin_pc2",
+            "pca_pka_ref_shared_centroid_pc1",
+            "pca_pka_ref_shared_centroid_pc2",
+        ),
     ),
 )
 
@@ -832,16 +873,59 @@ def _parse_pocket_rmsf_dat(path: Path) -> Dict[str, Optional[float]]:
     return {"mean": float(np.mean(arr)), "max": float(np.max(arr))}
 
 
+def _mean_reference_pocket_metrics_across_reps(adir: Path) -> Dict[str, Any]:
+    """Average ``reference_pocket_metrics.json`` scalars across ``rep*/``."""
+    rep_dirs = sorted(p for p in adir.glob("rep*") if p.is_dir())
+    if not rep_dirs:
+        return {}
+    buckets: Dict[str, List[float]] = {}
+    for rep in rep_dirs:
+        for cand in (
+            rep / "reference_pocket_metrics.json",
+            rep / "reference_pocket" / "reference_pocket_metrics.json",
+        ):
+            data = _load_json(cand) or {}
+            if not data:
+                continue
+            for key in (
+                "ligand_pocket_distance_mean_A",
+                "ligand_pocket_distance_std_A",
+                "ligand_pocket_distance_p95_A",
+                "ligand_pocket_distance_max_A",
+                "mean_axis_angle_deg",
+                "std_axis_angle_deg",
+                "p95_axis_angle_deg",
+                "mean_hbonds",
+                "mean_pocket_sasa_nm2",
+                "fraction_bound",
+                "mean_pocket_rmsf_A",
+                "fraction_stable_coupling",
+            ):
+                if data.get(key) is None:
+                    continue
+                try:
+                    buckets.setdefault(key, []).append(float(data[key]))
+                except (TypeError, ValueError):
+                    continue
+            break
+    return {k: float(np.mean(v)) for k, v in buckets.items() if v}
+
+
 def _analysis_search_dirs(analysis_dir: Path) -> List[Path]:
-    """Prefer ``analysis/avg/`` then top-level analysis, then rep folders."""
+    """Search order for collector file discovery.
+
+    Prefer ``rep*/`` (real per-replicate traj metrics), then top-level
+    ``analysis/``, then ``avg/`` last — replicate-aggregate CSV dumps are often
+    headerless ``x mean`` files that are not usable as trajectory series.
+    """
     dirs: List[Path] = []
-    avg = analysis_dir / "avg"
-    if avg.is_dir():
-        dirs.append(avg)
-    dirs.append(analysis_dir)
     for rep in sorted(analysis_dir.glob("rep*")):
         if rep.is_dir():
             dirs.append(rep)
+    dirs.append(analysis_dir)
+    avg = analysis_dir / "avg"
+    if avg.is_dir():
+        dirs.append(avg)
     return dirs
 
 
@@ -1076,18 +1160,37 @@ def collect_features_for_sim(
         dccm_summary.get("mean_abs_correlation") if dccm_summary else None
     )
 
-    # Reference-mapped pocket metrics (combined-analysis output tree).
-    # Prefer MSA-mapped reference_pocket/{label}/ when usable; otherwise fall
-    # back to local ligand_pocket_distance / orientation so COM/angle still
-    # appear in the classification matrix.
-    rp_metrics = (
-        _load_json(reference_pocket_dir / "reference_pocket_metrics.json") or {}
-        if reference_pocket_usable
-        else {}
-    )
-    if not rp_metrics and reference_pocket_dir.is_dir():
-        # Manifest missing/empty but metrics were written anyway.
-        rp_metrics = _load_json(reference_pocket_dir / "reference_pocket_metrics.json") or {}
+    # Reference-mapped pocket metrics.
+    # Prefer averaging ``analysis/rep*/reference_pocket_metrics.json`` (multi-rep
+    # campaigns write metrics per replicate). Only then fall back to combined
+    # ``analysis/reference_pocket/{label}/`` or local ligand_pocket CSVs.
+    # Skip empty / headerless avg/*.csv dumps (they trigger "No numeric data").
+    rep_avg = _mean_reference_pocket_metrics_across_reps(adir)
+    rp_metrics: Dict[str, Any] = {}
+    if rep_avg:
+        # Map rep-averaged keys into the row's reference_pocket_* columns below.
+        rp_metrics = {
+            "ligand_pocket_distance_mean_A": rep_avg.get("ligand_pocket_distance_mean_A"),
+            "ligand_pocket_distance_std_A": rep_avg.get("ligand_pocket_distance_std_A"),
+            "ligand_pocket_distance_p95_A": rep_avg.get("ligand_pocket_distance_p95_A"),
+            "ligand_pocket_distance_max_A": rep_avg.get("ligand_pocket_distance_max_A"),
+            "mean_axis_angle_deg": rep_avg.get("mean_axis_angle_deg"),
+            "std_axis_angle_deg": rep_avg.get("std_axis_angle_deg"),
+            "p95_axis_angle_deg": rep_avg.get("p95_axis_angle_deg"),
+            "mean_hbonds": rep_avg.get("mean_hbonds"),
+            "mean_pocket_sasa_nm2": rep_avg.get("mean_pocket_sasa_nm2"),
+            "fraction_bound": rep_avg.get("fraction_bound"),
+            "mean_pocket_rmsf_A": rep_avg.get("mean_pocket_rmsf_A"),
+            "fraction_stable_coupling": rep_avg.get("fraction_stable_coupling"),
+        }
+    if not any(v is not None for v in rp_metrics.values()):
+        rp_metrics = (
+            _load_json(reference_pocket_dir / "reference_pocket_metrics.json") or {}
+            if reference_pocket_usable
+            else {}
+        )
+        if not rp_metrics and reference_pocket_dir.is_dir():
+            rp_metrics = _load_json(reference_pocket_dir / "reference_pocket_metrics.json") or {}
     if rp_metrics:
         row["reference_pocket_ligand_distance_mean_A"] = rp_metrics.get(
             "ligand_pocket_distance_mean_A"
@@ -1124,33 +1227,106 @@ def collect_features_for_sim(
         row["reference_pocket_residue_count"] = rp_metrics.get("pocket_residue_count")
         row["reference_pocket_net_charge"] = rp_metrics.get("pocket_net_charge")
     rp_sasa = reference_pocket_dir / "reference_pocket_sasa.csv"
-    m, s = _csv_mean_std(rp_sasa, "pocket_sasa_nm2")
-    if m is not None:
-        row["reference_pocket_mean_sasa_nm2"] = m
-        row["reference_pocket_std_sasa_nm2"] = s
-    p95_sasa = _csv_percentile(rp_sasa, "pocket_sasa_nm2", 95.0)
-    if p95_sasa is not None:
-        row["reference_pocket_p95_sasa_nm2"] = p95_sasa
+    if rp_sasa.is_file() and _looks_like_tabular_csv(rp_sasa, ("pocket_sasa_nm2", "sasa")):
+        m, s = _csv_mean_std(rp_sasa, "pocket_sasa_nm2")
+        if m is not None:
+            row["reference_pocket_mean_sasa_nm2"] = m
+            row["reference_pocket_std_sasa_nm2"] = s
+        p95_sasa = _csv_percentile(rp_sasa, "pocket_sasa_nm2", 95.0)
+        if p95_sasa is not None:
+            row["reference_pocket_p95_sasa_nm2"] = p95_sasa
     rp_rmsf = _parse_pocket_rmsf_dat(reference_pocket_dir / "reference_pocket_rmsf.dat")
     if rp_rmsf["mean"] is not None:
         row["reference_pocket_mean_rmsf_A"] = rp_rmsf["mean"]
         row["reference_pocket_max_rmsf_A"] = rp_rmsf["max"]
+
+    # Fill any remaining gaps from rep averages (already preferred above).
+    if row.get("reference_pocket_ligand_axis_angle_mean_deg") is None or row.get(
+        "reference_pocket_std_ligand_axis_angle_deg"
+    ) is None:
+        if not rep_avg:
+            rep_avg = _mean_reference_pocket_metrics_across_reps(adir)
+        if rep_avg:
+            if row.get("reference_pocket_ligand_distance_mean_A") is None:
+                row["reference_pocket_ligand_distance_mean_A"] = rep_avg.get(
+                    "ligand_pocket_distance_mean_A"
+                )
+            if row.get("reference_pocket_ligand_distance_std_A") is None:
+                row["reference_pocket_ligand_distance_std_A"] = rep_avg.get(
+                    "ligand_pocket_distance_std_A"
+                )
+            if row.get("reference_pocket_mean_ligand_axis_angle_deg") is None:
+                row["reference_pocket_mean_ligand_axis_angle_deg"] = rep_avg.get(
+                    "mean_axis_angle_deg"
+                )
+            if row.get("reference_pocket_ligand_axis_angle_mean_deg") is None:
+                row["reference_pocket_ligand_axis_angle_mean_deg"] = row.get(
+                    "reference_pocket_mean_ligand_axis_angle_deg"
+                )
+            if row.get("reference_pocket_std_ligand_axis_angle_deg") is None:
+                row["reference_pocket_std_ligand_axis_angle_deg"] = rep_avg.get(
+                    "std_axis_angle_deg"
+                )
+            if row.get("reference_pocket_ligand_axis_angle_p95_deg") is None:
+                row["reference_pocket_ligand_axis_angle_p95_deg"] = rep_avg.get(
+                    "p95_axis_angle_deg"
+                )
+            for dst, src in (
+                ("reference_pocket_ligand_distance_p95_A", "ligand_pocket_distance_p95_A"),
+                ("reference_pocket_ligand_distance_max_A", "ligand_pocket_distance_max_A"),
+                ("reference_pocket_mean_hbonds", "mean_hbonds"),
+                ("reference_pocket_mean_sasa_nm2", "mean_pocket_sasa_nm2"),
+                ("reference_pocket_fraction_bound", "fraction_bound"),
+                ("reference_pocket_mean_rmsf_A", "mean_pocket_rmsf_A"),
+                ("reference_pocket_fraction_stable_coupling", "fraction_stable_coupling"),
+            ):
+                if row.get(dst) is None and rep_avg.get(src) is not None:
+                    row[dst] = rep_avg[src]
+
     orient_csv = reference_pocket_dir / "reference_pocket_ligand_orientation.csv"
     if not orient_csv.is_file():
-        # Local per-sim orientation if a tool wrote it under analysis/.
+        # Local per-sim orientation if a tool wrote it under analysis/ (incl. reps).
         for cand in (
             adir / "reference_pocket_ligand_orientation.csv",
             adir / "pocket_axis_angle.csv",
             adir / "avg" / "reference_pocket_ligand_orientation.csv",
+            adir / "avg" / "pocket_axis_angle.csv",
         ):
-            if cand.is_file():
+            if cand.is_file() and _looks_like_tabular_csv(
+                cand, ("axis_angle_deg", "axis_angle")
+            ):
                 orient_csv = cand
                 break
+        if not orient_csv.is_file() or not _looks_like_tabular_csv(
+            orient_csv, ("axis_angle_deg", "axis_angle")
+        ):
+            for rep in sorted(adir.glob("rep*")):
+                if not rep.is_dir():
+                    continue
+                for name in (
+                    "reference_pocket_ligand_orientation.csv",
+                    "pocket_axis_angle.csv",
+                    "reference_pocket/reference_pocket_ligand_orientation.csv",
+                ):
+                    cand = rep / name
+                    if cand.is_file() and _looks_like_tabular_csv(
+                        cand, ("axis_angle_deg", "axis_angle")
+                    ):
+                        orient_csv = cand
+                        break
+                if orient_csv.is_file() and _looks_like_tabular_csv(
+                    orient_csv, ("axis_angle_deg", "axis_angle")
+                ):
+                    break
     orient_m, orient_s = _csv_mean_std(orient_csv, "axis_angle_deg")
+    if orient_m is None:
+        orient_m, orient_s = _csv_mean_std(orient_csv, "axis_angle")
     if orient_m is not None:
         row["reference_pocket_mean_ligand_axis_angle_deg"] = orient_m
         row["reference_pocket_std_ligand_axis_angle_deg"] = orient_s
-    if orient_csv.is_file() and (
+    if orient_csv.is_file() and _looks_like_tabular_csv(
+        orient_csv, ("axis_angle_deg", "axis_angle")
+    ) and (
         row.get("reference_pocket_ligand_distance_p95_A") is None
         or row.get("reference_pocket_ligand_axis_angle_p95_deg") is None
     ):

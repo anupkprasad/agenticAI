@@ -566,6 +566,39 @@ def format_hitl_pwd_lines(state: Dict[str, Any], agent_key: str) -> List[str]:
         preview = ", ".join(sorted(sim_dirs.keys())[:8])
         lines.append(f"  Per-simulation directories: {preview}")
         lines.append("  (bind one: switch p23458 analysis)")
+    inv_lines = _format_inventory_pwd(out_dir, sim_dir)
+    lines.extend(inv_lines)
+    return lines
+
+
+def _format_inventory_pwd(out_dir: str, sim_dir: str) -> List[str]:
+    """Print the stage inventory.json rather than guessing artifact paths."""
+    try:
+        from src.analysis.inventory import INVENTORY_NAME, load_stage_inventory
+    except Exception:
+        return []
+    candidates = [
+        Path(out_dir) / INVENTORY_NAME,
+        Path(sim_dir) / Path(out_dir).name / INVENTORY_NAME,
+    ]
+    data = None
+    path = None
+    for cand in candidates:
+        if cand.is_file():
+            data = load_stage_inventory(cand.parent)
+            path = cand
+            break
+    if not data:
+        return []
+    lines = [f"  Stage inventory: {path}"]
+    for key in ("topology", "trajectory", "pocket_mapped", "global_mapped", "cleaned_pdb"):
+        val = data.get(key)
+        if val:
+            lines.append(f"    {key}: {val}")
+    files = data.get("files") or {}
+    if isinstance(files, dict) and files:
+        preview = ", ".join(list(files.keys())[:8])
+        lines.append(f"    files: {preview}")
     return lines
 
 

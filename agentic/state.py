@@ -166,6 +166,7 @@ class MDState(TypedDict):
 
     # Agent retry counters (used by _assign_field_agent_tasks)
     current_agent_idx: Optional[int]
+    completed_pipeline_stages: Optional[List[str]]  # Forward-only ticks (preprocess…reporter)
     preprocess_retry_count: Optional[int]
     setup_retry_count: Optional[int]
     hpc_retry_count: Optional[int]
@@ -197,6 +198,10 @@ class MDState(TypedDict):
     pre_combined_plan: Optional[str]             # NL plan for pre_combined (pocket/MSA/consensus → base/cross_sim/)
     run_post_combined: Optional[bool]            # Optional combined tools AFTER all per-sim work (n_sims>1)
     post_combined_plan: Optional[str]            # NL plan for post_combined (compare/Ward/overlays)
+    campaign_spec: Optional[Dict[str, Any]]      # Compiled campaign program (recipe + contracts)
+    hitl_checkpoint_subtype: Optional[str]       # compile | pre_combined | post_combined
+    hitl_pause_after_compile: Optional[bool]     # Review compiled protocol before mapping
+    allow_partial_combined: Optional[bool]       # If True, Ward may run on a sparse matrix
     current_sim_index: Optional[int]             # Index into sim_prompts (which sim is next)
     completed_sim_states: Optional[List[Dict[str, Any]]]  # Saved state snapshots after each sim completes
     sim_working_dirs: Optional[List[str]]        # Per-sim working directories (e.g., base_dir/1abc/)

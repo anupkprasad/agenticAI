@@ -115,6 +115,9 @@ def _should_run_pre_combined(state: Dict[str, Any]) -> bool:
     n_sims = len(state.get("sim_prompts") or [])
     if n_sims <= 1:
         return False
+    spec = state.get("campaign_spec") or {}
+    if isinstance(spec, dict) and spec.get("family_modular"):
+        return True
     if state.get("combined_only"):
         # Combined-only skips per-sim traj; pre mapping still useful when requested
         return bool(state.get("run_pre_combined"))
@@ -1206,6 +1209,15 @@ class MDSupervisor:
             state["next_node"] = "planner"
             return state
 
+        # ── Step 3b: Optional review of the compiled analysis protocol ──
+        try:
+            from agentic.campaign.hitl_campaign import route_compile_review
+
+            if route_compile_review(state):
+                return state
+        except Exception:
+            logger.debug("compile review route skipped", exc_info=True)
+
         # ── Step 4: Extract agent-specific sub-plans ─────────────────────
         if state.get("execution_plan") and not state.get("preprocessing_instructions"):
             logger.info("SUPERVISOR: Extracting agent-specific plans")
@@ -2144,6 +2156,16 @@ class MDSupervisor:
 
     def _ensure_valid_next_node(self, state: MDState, *, _depth: int = 0) -> MDState:
         """Supervisor must never return ``next_node=supervisor`` to LangGraph routing."""
+        nxt = state.get("next_node")
+        if nxt in ("preprocess", "setup", "hpc", "analysis", "reporter"):
+            try:
+                from agentic.campaign.stage_tick import forbid_backward_route
+
+                fwd = forbid_backward_route(state, str(nxt))
+                if fwd and fwd != nxt:
+                    state["next_node"] = fwd
+            except Exception:
+                logger.debug("forward-only route guard skipped", exc_info=True)
         if _depth > 8:
             logger.error(
                 "SUPERVISOR: next_node resolution exceeded recursion guard "
@@ -3029,7 +3051,8 @@ class MDSupervisor:
             heading = "## Pre-Combined Cross-Simulation Setup"
             save_note = (
                 f"Write shared artifacts under `{basepath}/cross_sim/` "
-                f"(pocket_map.json, MSA, consensus residues). "
+                f"(pocket_mapped.json = 15 Å ATP pocket; global_consensus_msa.json = "
+                f"MAFFT columns with similarity ≥ 0.5). "
                 f"Do not run per-sim trajectory metrics here."
             )
         else:
@@ -3071,6 +3094,8 @@ class MDSupervisor:
             "hpc_pool", "hpc_pool_phase_complete",
             "master_enriched_prompt",
             "user_goal_original",
+            "campaign_spec",
+            "allow_partial_combined",
             "rep_num", "reuse_hpc", "skip_hpc_submit",
             "parallel_workers", "parallel_mem_gb_per_job", "llm_concurrency",
             "multi_sim_progress",
@@ -4181,6 +4206,15 @@ class MDSupervisor:
             required_agents = [a for a in required_agents if a in ("analysis", "reporter")]
         
         logger.info(f"FIELD_AGENT_ASSIGNMENT: Required agents for {subtask_type}: {required_agents}")
+
+        from agentic.campaign.stage_tick import (
+            advance_agent_index_past_done,
+            restore_stage_artifacts,
+        )
+
+        restore_stage_artifacts(state)
+        # Forward-only: skip stages already done on disk / in state.
+        state["current_agent_idx"] = advance_agent_index_past_done(state, required_agents)
         
         # Get progress - which agent are we on?
         current_agent_idx = state.get("current_agent_idx", 0)
@@ -4640,8 +4674,29 @@ class MDSupervisor:
                 log_supervisor_routing(state, "analysis", "Executing combined analysis agent")
                 return state
 
-            if state.get("analysis_results") and per_sim_analysis_done_on_disk(wd):
-                logger.info("FIELD_AGENT_ASSIGNMENT: Analysis already complete, moving to next agent")
+            science_done = per_sim_analysis_done_on_disk(wd)
+            if not science_done and wd:
+                try:
+                    from agentic.campaign.contracts import per_sim_science_complete
+                    from agentic.campaign.spec import spec_from_state
+
+                    _spec = spec_from_state(state)
+                    if _spec and _spec.family_modular:
+                        science_done = bool(
+                            per_sim_science_complete(wd, spec=_spec).get("ok")
+                        )
+                except Exception:
+                    pass
+            if science_done:
+                logger.info("FIELD_AGENT_ASSIGNMENT: Analysis artifacts on disk — moving to next agent")
+                state["errors"] = [
+                    e
+                    for e in (state.get("errors") or [])
+                    if not (
+                        str(e).startswith("Analysis failed:")
+                        or str(e).startswith("Analysis error:")
+                    )
+                ]
                 self._mark_post_hpc_agent_done(state, "analysis")
                 state["current_agent_idx"] = current_agent_idx + 1
                 return self._assign_field_agent_tasks(state)

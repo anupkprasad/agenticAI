@@ -1,0 +1,32 @@
+# Campaign defaults — CLI and CampaignSpec both read this file.
+# Override with --campaign-yaml PATH, {working-dir}/campaign.yaml, or env vars.
+# Agent YAML files (planner/analysis/…) stay for prompts only.
+
+# MSA / mapping
+conservation_metric: similarity   # similarity | identity | blosum | coverage
+min_conservation: 0.5             # group-similarity / identity / BLOSUM threshold
+min_coverage: 0.25                # column occupancy floor
+pocket_cutoff_A: 15.0             # reference ligand shell (Å)
+lobe_method: auto                 # auto | consensus_index | reference_resid | midpoint
+
+# Retrieval
+retrieval_k: 16                   # top-k tools and knowledge chunks
+embed_model: ""                   # empty = hashed n-grams; e.g. nomic-embed-text
+                                  # AGENTIC_EMBED_MODEL overrides when set
+
+# Family Ward columns — paper fig3 sharedpcdyn (10 features)
+gold_columns:
+  - reference_pocket_ligand_distance_mean_A
+  - reference_pocket_ligand_distance_std_A
+  - reference_pocket_ligand_axis_angle_mean_deg
+  - reference_pocket_std_ligand_axis_angle_deg
+  - chi1_pocket_circ_mean_deg
+  - chi1_pocket_circ_std_deg
+  - consensus_rmsf_mean_A
+  - consensus_rmsf_std_A
+  - dccm_N_C_mean_corr
+  - pca_pka_ref_shared_dyn
+
+# Human-in-the-loop: null | error | all
+# CLI --HITL still wins when passed.
+hitl: null

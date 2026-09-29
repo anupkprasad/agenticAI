@@ -662,20 +662,20 @@ def _short_feature_label(col: str) -> str:
         "delta_F_major_minus_global_kJ_mol": "ΔF major−global (kJ/mol)",
         "landscape_entropy": "landscape entropy",
         "major_basin_population": "major basin population",
-        "consensus_rmsf_mean_A": "consensus RMSF (mean)",
-        "consensus_rmsf_std_A": "consensus RMSF (std)",
-        "reference_pocket_ligand_distance_p95_A": "Pocket–ATP COM (p95)",
-        "reference_pocket_ligand_distance_mean_A": "Pocket–ATP COM (mean)",
-        "reference_pocket_ligand_distance_std_A": "Pocket–ATP COM (std)",
+        "consensus_rmsf_mean_A": r"global$_{\mathrm{cons}}$ RMSF (mean)",
+        "consensus_rmsf_std_A": r"global$_{\mathrm{cons}}$ RMSF (std)",
+        "reference_pocket_ligand_distance_p95_A": "pocket–ATP COM (p95)",
+        "reference_pocket_ligand_distance_mean_A": "pocket–ATP COM (mean)",
+        "reference_pocket_ligand_distance_std_A": "pocket–ATP COM (std)",
         "reference_pocket_fraction_bound": "Fraction bound",
-        "reference_pocket_ligand_axis_angle_p95_deg": "ATP–Pocket angle (p95)",
-        "reference_pocket_ligand_axis_angle_mean_deg": "ATP–Pocket angle (mean)",
-        "reference_pocket_std_ligand_axis_angle_deg": "ATP–Pocket angle (std)",
+        "reference_pocket_ligand_axis_angle_p95_deg": "pocket–ATP angle (p95)",
+        "reference_pocket_ligand_axis_angle_mean_deg": "pocket–ATP angle (mean)",
+        "reference_pocket_std_ligand_axis_angle_deg": "pocket–ATP angle (std)",
         "mean_abs_corr_offdiag": r"DCCM $\langle|C|\rangle$",
         "dccm_mean_abs_corr_offdiag": r"DCCM $\langle|C|\rangle$",
         "dccm_top_eigenvalue": r"$\lambda_1$",
-        "N_C_mean_corr": r"DCCM N lobe$\leftrightarrow$C lobe",
-        "dccm_N_C_mean_corr": r"DCCM N lobe$\leftrightarrow$C lobe",
+        "N_C_mean_corr": r"global$_{\mathrm{cons}}$ DCCM",
+        "dccm_N_C_mean_corr": r"global$_{\mathrm{cons}}$ DCCM",
         "pocket_C_mean_corr": r"pocket$\leftrightarrow$C",
         "C_C_mean_corr": r"C$\leftrightarrow$C",
         "timescale_ic1_ns": r"$\tau_1$ (ns)",
@@ -687,9 +687,17 @@ def _short_feature_label(col: str) -> str:
         "tica_major_basin_population": "TICA major basin pop.",
         "pca_grid_entropy": r"PCA grid entropy ($\phi$/$\psi$/$\chi_1$)",
         "pca_phipsi_grid_entropy": r"PCA grid entropy ($\phi$/$\psi$)",
-        "chi1_circ_mean_deg": r"Torsion $\chi_1$ global (circ. mean)",
-        "chi1_pocket_circ_mean_deg": r"Torsion $\chi_1$ pocket (circ. mean)",
+        "chi1_circ_mean_deg": r"global torsion $\chi_1$ (mean)",
+        "chi1_circ_std_deg": r"global torsion $\chi_1$ (std)",
+        "chi1_pocket_circ_mean_deg": r"pocket torsion $\chi_1$ (mean)",
+        "chi1_pocket_circ_std_deg": r"pocket torsion $\chi_1$ (std)",
         "phi_circ_mean_deg": r"Torsion $\phi$ (circ. mean)",
+        "pca_pka_ref_shared_dyn": r"global$_{\mathrm{cons}}$ PCA (PKA ref)",
+        "pca_pka_ref_shared_pc_rms": r"global$_{\mathrm{cons}}$ PCA PC RMS (PKA-ref)",
+        "pca_pka_ref_shared_gmin_pc1": r"global$_{\mathrm{cons}}$ PCA gmin PC1 (PKA-ref)",
+        "pca_pka_ref_shared_gmin_pc2": r"global$_{\mathrm{cons}}$ PCA gmin PC2 (PKA-ref)",
+        "pca_pka_ref_shared_centroid_pc1": r"global$_{\mathrm{cons}}$ PCA centroid PC1 (PKA-ref)",
+        "pca_pka_ref_shared_centroid_pc2": r"global$_{\mathrm{cons}}$ PCA centroid PC2 (PKA-ref)",
         "frac_frames_within_3kBT_of_minF": r"frac $\leq$ 3 kBT",
     }
     if col in aliases:
@@ -1061,7 +1069,7 @@ def _plot_dendrogram_heatmap_panel(
                     ranges.append((start, prev))
                     start = prev = j
             ranges.append((start, prev))
-            edge = cluster_colors.get(cid, "#222222")
+            edge = "#111111"
             for c0, c1 in ranges:
                 ax_hm.add_patch(
                     Rectangle(
@@ -1070,7 +1078,8 @@ def _plot_dendrogram_heatmap_panel(
                         (r1 - r0 + 1),
                         fill=False,
                         edgecolor=edge,
-                        linewidth=1.5,
+                        linestyle="--",
+                        linewidth=1.6,
                         zorder=6,
                     )
                 )
@@ -2217,10 +2226,12 @@ def _find_trajectory_file(sim_directory: str, metric_group: str) -> Optional[str
             except Exception:
                 pass
     search_roots = [
-        sim_path.parent / "analysis" / "reference_pocket" / sim_path.name,
+        *[p for p in sorted((sim_path / "analysis").glob("rep*")) if p.is_dir()],
         sim_path / "analysis",
+        sim_path.parent / "analysis" / "reference_pocket" / sim_path.name,
         sim_path,
     ]
+    # Prefer real per-rep series; avg/ headerless dumps are last-resort only.
     if metric_group == "com":
         for root in search_roots:
             if root.is_dir():

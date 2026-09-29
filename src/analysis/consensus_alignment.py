@@ -1,9 +1,9 @@
 """
 Consensus sequence alignment for cross-simulation coordinate mapping.
 
-Builds a star multiple-sequence alignment (MSA) to a user-chosen reference
-sequence, exports an inspectable residue map, and defines consensus columns
-for reference-projected PCA on mapped Cα atoms.
+Builds a global MAFFT MSA, keeps columns that pass physicochemical similarity
+and occupancy filters, and exports a compact residue map for transferable
+family analyses (RMSF / DCCM / shared-PC / pocket transfer).
 
 Inputs (any one):
   * ``pdb_files`` + ``labels``
@@ -11,9 +11,17 @@ Inputs (any one):
   * ``sim_dirs`` + ``labels`` (PDB resolved like phylo_tree tools)
 
 Outputs (under ``working_dir``):
-  * ``reference_msa_alignment.fasta`` — reference row first, gapped MSA
-  * ``reference_msa_residue_map.csv`` — per-column mappings for manual review
-  * ``reference_msa_alignment.json`` — machine-readable alignment + consensus indices
+  * ``global_msa.fasta`` — full gapped MAFFT alignment (sequence letter
+    source for plotting / transfer; plots show consensus/pocket columns only)
+  * ``global_consensus_msa.json`` / ``.csv`` — consensus columns with
+    occupancy ≥ min_coverage **and** similarity (or identity) ≥ min_conservation
+  * Legacy aliases: ``global_mapped.json``, ``consensus_residues.json``,
+    ``reference_msa_alignment.*``
+
+Pipeline note: the full unfiltered column JSON (``global_msa.json``) is **not**
+required. Pocket transfer is ``15 Å reference shell ∩ consensus columns`` —
+mathematically identical to filtering the full map then intersecting.
+MSA plots use ``global_consensus_msa`` and ``pocket_mapped`` columns only.
 """
 from __future__ import annotations
 
@@ -24,6 +32,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -45,13 +54,44 @@ try:
 except Exception:  # pragma: no cover
     HAS_BIO = False
 
-DEFAULT_ALIGNMENT_FASTA = "reference_msa_alignment.fasta"
-DEFAULT_RESIDUE_MAP_CSV = "reference_msa_residue_map.csv"
-DEFAULT_ALIGNMENT_JSON = "reference_msa_alignment.json"
+DEFAULT_ALIGNMENT_FASTA = "global_msa.fasta"
+DEFAULT_RESIDUE_MAP_CSV = "global_consensus_msa.csv"
+DEFAULT_ALIGNMENT_JSON = "global_consensus_msa.json"
+# Optional debug dump of every MAFFT column (not needed for paper pipeline).
+DEFAULT_FULL_MSA_JSON = "global_msa.json"
+# Legacy names still written / accepted so in-flight campaigns keep working.
+LEGACY_ALIGNMENT_JSON_ALIASES = (
+    "global_mapped.json",
+    "reference_msa_alignment.json",
+    "consensus_residues.json",
+)
+LEGACY_RESIDUE_MAP_CSV_ALIASES = (
+    "global_mapped.csv",
+    "reference_msa_residue_map.csv",
+    "reference_residue_map.csv",
+)
+LEGACY_ALIGNMENT_FASTA = "reference_msa_alignment.fasta"
+LEGACY_ALIGNMENT_JSON = "reference_msa_alignment.json"
+LEGACY_RESIDUE_MAP_CSV = "reference_msa_residue_map.csv"
+LEGACY_CONSENSUS_JSON = "consensus_residues.json"
+LEGACY_MAPPED_JSON = "global_mapped.json"
+LEGACY_MAPPED_CSV = "global_mapped.csv"
 DEFAULT_MSA_METHOD = "mafft"
 DEFAULT_CONSERVATION_METRIC = "similarity"
 DEFAULT_MIN_CONSERVATION = 0.5
-DEFAULT_MIN_COVERAGE = 0.5
+# Paper occupancy floor for physicochemical-group similarity columns.
+DEFAULT_MIN_COVERAGE = 0.25
+MAPPING_KIND_CONSENSUS = "global_consensus_msa"
+
+# Physicochemical groups for ``similarity`` (paper / ment mapping_residues).
+AA_GROUPS: Dict[str, str] = {
+    "A": "hydrophobic", "V": "hydrophobic", "L": "hydrophobic", "I": "hydrophobic",
+    "M": "hydrophobic", "G": "hydrophobic", "P": "hydrophobic", "C": "hydrophobic",
+    "F": "aromatic", "Y": "aromatic", "W": "aromatic",
+    "S": "polar", "T": "polar", "N": "polar", "Q": "polar",
+    "D": "acidic", "E": "acidic",
+    "K": "basic", "R": "basic", "H": "basic",
+}
 
 _MAFFT_CANDIDATES = (
     "/apps/gb/multi-bacpipe/0.8.0/libexec/t-coffee-13.46.0.919e8c6b-4/plugins/linux/mafft",
@@ -288,30 +328,52 @@ def build_star_msa_to_reference(
     }
 
 
+def normalize_conservation_metric(metric: str) -> str:
+    """Map user/LLM aliases onto an internal conservation metric.
+
+    * ``similarity`` / ``group`` — physicochemical-group agreement with the
+      modal AA (paper default).
+    * ``identity`` — modal AA fraction among non-gaps.
+    * ``blosum`` / ``blosum62`` — mean pairwise BLOSUM62, normalized to [0, 1].
+    * ``coverage`` / ``none`` — occupancy only.
+    """
+    m = (metric or DEFAULT_CONSERVATION_METRIC).strip().lower()
+    if m in ("similarity", "group", "group_similarity", "physchem", "physicochemical"):
+        return "group"
+    if m in ("blosum", "blosum62", "pairwise"):
+        return "blosum"
+    if m in ("identity", "id"):
+        return "identity"
+    if m in ("coverage", "none", "occupancy", ""):
+        return "coverage"
+    return m
+
+
 def select_consensus_positions(
     msa: Dict[str, Any],
     *,
     min_coverage: float = DEFAULT_MIN_COVERAGE,
-    require_reference: bool = True,
+    require_reference: bool = False,
     conservation_metric: str = DEFAULT_CONSERVATION_METRIC,
     min_conservation: float = DEFAULT_MIN_CONSERVATION,
 ) -> List[Dict[str, Any]]:
     """
-    Return consensus columns meeting coverage **and** conservation filters.
+    Return MSA columns meeting occupancy **and** conservation filters.
 
-    ``conservation_metric``:
-      * ``similarity`` — mean pairwise BLOSUM62 score normalized to ~[0, 1]
-        (default; keep columns with score ≥ ``min_conservation``, default 0.5)
+    ``conservation_metric`` (modular; user-selectable):
+      * ``similarity`` — fraction of non-gap AAs in the same physicochemical
+        group as the modal AA (default; paper method; threshold 0.5)
       * ``identity`` — fraction of non-gap residues matching the modal AA
-      * ``coverage`` / ``none`` — coverage only (legacy)
+      * ``blosum`` — mean pairwise BLOSUM62 score normalized to ~[0, 1]
+      * ``coverage`` / ``none`` — occupancy only
     """
     labels: List[str] = msa.get("labels") or []
     n_labels = max(len(labels), 1)
     threshold = float(min_coverage) * n_labels
-    metric = (conservation_metric or "similarity").strip().lower()
+    metric = normalize_conservation_metric(conservation_metric)
     consensus: List[Dict[str, Any]] = []
     blosum = None
-    if metric == "similarity" and HAS_BIO:
+    if metric == "blosum" and HAS_BIO:
         try:
             blosum = substitution_matrices.load("BLOSUM62")
         except Exception:
@@ -330,7 +392,7 @@ def select_consensus_positions(
             if (mappings.get(lab) or {}).get("aa")
         ]
         cons_score = _column_conservation(aas, metric=metric, blosum=blosum)
-        if metric in ("similarity", "identity") and cons_score < float(min_conservation):
+        if metric in ("group", "identity", "blosum") and cons_score < float(min_conservation):
             continue
         entry = {
             "consensus_index": len(consensus),
@@ -339,7 +401,9 @@ def select_consensus_positions(
             "reference_resid": col.get("reference_resid"),
             "reference_aa": col.get("reference_aa"),
             "coverage_fraction": len(present) / n_labels,
+            "occupancy": len(present) / n_labels,
             "conservation": cons_score,
+            "conservation_metric": metric,
             "mappings": mappings,
         }
         consensus.append(entry)
@@ -353,24 +417,26 @@ def _column_conservation(
     metric: str,
     blosum: Any = None,
 ) -> float:
-    letters = [a.upper() for a in aas if a and a != "-"]
+    letters = [a.upper() for a in aas if a and a not in "-.X"]
     if not letters:
         return 0.0
-    if metric in ("coverage", "none", ""):
+    metric = normalize_conservation_metric(metric)
+    if metric == "coverage":
         return 1.0
     if metric == "identity":
-        from collections import Counter
-
         mode, count = Counter(letters).most_common(1)[0]
         return float(count) / float(len(letters))
-    # similarity (default)
+    if metric == "group":
+        modal, _count = Counter(letters).most_common(1)[0]
+        group = AA_GROUPS.get(modal)
+        if not group:
+            return float(_count) / float(len(letters))
+        return float(sum(1 for a in letters if AA_GROUPS.get(a) == group)) / float(len(letters))
+    # blosum
     if blosum is None or len(letters) == 1:
-        from collections import Counter
-
         mode, count = Counter(letters).most_common(1)[0]
         return float(count) / float(len(letters))
     scores: List[float] = []
-    norms: List[float] = []
     for i in range(len(letters)):
         for j in range(i + 1, len(letters)):
             a, b = letters[i], letters[j]
@@ -382,10 +448,8 @@ def _column_conservation(
                 continue
             denom = max(0.5 * (na + nb), 1e-6)
             scores.append(s / denom)
-            norms.append(1.0)
     if not scores:
         return 0.0
-    # Clamp to [0, 1]
     mean = float(np.mean(scores))
     return float(max(0.0, min(1.0, mean)))
 
@@ -505,47 +569,44 @@ def build_mafft_msa_to_reference(
         ungapped_idx[lab] = idxs
 
     columns: List[Dict[str, Any]] = []
-    rows: Dict[str, str] = {}
-    # Reference-indexed rows (collapse MSA onto reference non-gap columns)
-    ref_keep = [i for i, ch in enumerate(ref_row) if ch != "-"]
-    for lab in labels:
-        rows[lab] = "".join(
-            aligned[lab][i] if aligned[lab][i] != "-" else "-" for i in ref_keep
-        )
+    rows: Dict[str, str] = {lab: aligned[lab] for lab in labels}
 
-    for new_col, msa_i in enumerate(ref_keep):
+    for msa_i in range(width):
         ref_seq_i = ungapped_idx[reference_label][msa_i]
-        assert ref_seq_i is not None
         ref_chain = chains[reference_label]
-        col: Dict[str, Any] = {
-            "msa_col": new_col,
-            "mafft_col": msa_i,
-            "reference_seq_index": int(ref_seq_i),
-            "reference_resid": int(ref_chain.resids[ref_seq_i]),
-            "reference_aa": ref_chain.sequence[ref_seq_i],
-            "mappings": {
-                reference_label: {
-                    "seq_index": int(ref_seq_i),
-                    "resid": int(ref_chain.resids[ref_seq_i]),
-                    "aa": ref_chain.sequence[ref_seq_i],
-                }
-            },
-        }
+        mappings: Dict[str, Any] = {}
+        if ref_seq_i is not None:
+            mappings[reference_label] = {
+                "seq_index": int(ref_seq_i),
+                "resid": int(ref_chain.resids[ref_seq_i]),
+                "aa": ref_chain.sequence[ref_seq_i],
+            }
         for lab in other_labels:
             oth_i = ungapped_idx[lab][msa_i]
             if oth_i is None:
                 continue
             oth = chains[lab]
-            col["mappings"][lab] = {
+            mappings[lab] = {
                 "seq_index": int(oth_i),
                 "resid": int(oth.resids[oth_i]),
                 "aa": oth.sequence[oth_i],
             }
-        columns.append(col)
+        columns.append({
+            "msa_col": msa_i,
+            "mafft_col": msa_i,
+            "reference_seq_index": int(ref_seq_i) if ref_seq_i is not None else None,
+            "reference_resid": (
+                int(ref_chain.resids[ref_seq_i]) if ref_seq_i is not None else None
+            ),
+            "reference_aa": (
+                ref_chain.sequence[ref_seq_i] if ref_seq_i is not None else "-"
+            ),
+            "mappings": mappings,
+        })
 
     return {
         "reference_label": reference_label,
-        "msa_width": len(ref_keep),
+        "msa_width": width,
         "mafft_width": width,
         "rows": rows,
         "columns": columns,
@@ -576,6 +637,13 @@ def _read_fasta_rows(path: Path) -> Dict[str, str]:
     return rows
 
 
+def _mirror_file(src: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.resolve() == src.resolve():
+        return
+    shutil.copy2(src, dest)
+
+
 def write_consensus_outputs(
     msa: Dict[str, Any],
     consensus: List[Dict[str, Any]],
@@ -584,12 +652,20 @@ def write_consensus_outputs(
     fasta_name: str = DEFAULT_ALIGNMENT_FASTA,
     csv_name: str = DEFAULT_RESIDUE_MAP_CSV,
     json_name: str = DEFAULT_ALIGNMENT_JSON,
+    full_msa_json_name: str = DEFAULT_FULL_MSA_JSON,
+    all_positions: Optional[List[Dict[str, Any]]] = None,
     chains: Optional[Dict[str, ChainSequence]] = None,
     conservation_metric: str = DEFAULT_CONSERVATION_METRIC,
     min_conservation: float = DEFAULT_MIN_CONSERVATION,
     min_coverage: float = DEFAULT_MIN_COVERAGE,
-) -> Dict[str, str]:
-    """Write FASTA, CSV, and compact consensus JSON artifacts."""
+    write_full_msa_json: bool = False,
+) -> Dict[str, Any]:
+    """Write FASTA, consensus CSV/JSON (and optionally unfiltered global_msa.json).
+
+    Paper path writes only ``global_consensus_msa.*`` + ``global_msa.fasta``.
+    Unfiltered ``global_msa.json`` is optional debug output — pocket transfer
+    uses consensus columns directly (15 Å ∩ consensus), not the full map.
+    """
     from src.analysis.cross_sim_artifacts import (
         compact_consensus_from_positions,
         write_json_compact,
@@ -662,17 +738,65 @@ def write_consensus_outputs(
         extra={
             "fasta_file": fasta_name,
             "residue_map_csv": csv_name,
+            "mapping_kind": MAPPING_KIND_CONSENSUS,
+            "n_global_consensus": len(consensus),
+            # Legacy key retained for in-flight consumers.
+            "n_global_mapped": len(consensus),
         },
     )
-    # Keep expanded positions available in-memory consumers that read the file
-    # via expand_consensus_positions; compact is the on-disk form.
     write_json_compact(json_path, payload)
 
-    return {
-        "fasta_file": str(fasta_path),
-        "residue_map_csv": str(csv_path),
-        "json_file": str(json_path),
+    result: Dict[str, Any] = {
+        "fasta_file": str(out_dir / DEFAULT_ALIGNMENT_FASTA),
+        "residue_map_csv": str(out_dir / DEFAULT_RESIDUE_MAP_CSV),
+        "json_file": str(out_dir / DEFAULT_ALIGNMENT_JSON),
+        "n_global_consensus": len(consensus),
+        "n_global_mapped": len(consensus),
     }
+
+    if write_full_msa_json and all_positions is not None:
+        full_json_path = out_dir / full_msa_json_name
+        full_payload = compact_consensus_from_positions(
+            reference_label=ref_label,
+            labels=labels,
+            consensus_positions=all_positions,
+            msa_width=msa.get("msa_width"),
+            msa_method=str(msa.get("msa_method") or DEFAULT_MSA_METHOD),
+            conservation_metric=conservation_metric,
+            min_conservation=0.0,
+            min_coverage=0.0,
+            extra={
+                "fasta_file": fasta_name,
+                "mapping_kind": "global_msa",
+                "n_global_consensus": len(consensus),
+                "global_consensus_msa_json": json_name,
+            },
+        )
+        if full_json_path.resolve() == json_path.resolve():
+            full_json_path = out_dir / DEFAULT_FULL_MSA_JSON
+        write_json_compact(full_json_path, full_payload)
+        _mirror_file(full_json_path, out_dir / DEFAULT_FULL_MSA_JSON)
+        result["global_msa_json"] = str(out_dir / DEFAULT_FULL_MSA_JSON)
+        result["n_global_msa_columns"] = len(all_positions)
+
+    for alias in (DEFAULT_ALIGNMENT_FASTA, LEGACY_ALIGNMENT_FASTA, "consensus_msa.fasta"):
+        _mirror_file(fasta_path, out_dir / alias)
+    for alias in (
+        DEFAULT_ALIGNMENT_JSON,
+        LEGACY_MAPPED_JSON,
+        LEGACY_ALIGNMENT_JSON,
+        LEGACY_CONSENSUS_JSON,
+    ):
+        _mirror_file(json_path, out_dir / alias)
+    for alias in (
+        DEFAULT_RESIDUE_MAP_CSV,
+        LEGACY_MAPPED_CSV,
+        LEGACY_RESIDUE_MAP_CSV,
+        "reference_residue_map.csv",
+    ):
+        _mirror_file(csv_path, out_dir / alias)
+
+    return result
 
 
 # ── Public tool ───────────────────────────────────────────────────────────────
@@ -698,15 +822,28 @@ def build_consensus_sequence_alignment(
     min_conservation: float = DEFAULT_MIN_CONSERVATION,
 ) -> Dict[str, Any]:
     """
-    Build a consensus MSA to a reference and export residue maps.
+    Build a MAFFT global MSA and export ``global_consensus_msa`` columns.
 
     Default alignment engine is **MAFFT** (falls back to Biopython star
-    pairwise if MAFFT is unavailable). Consensus columns require both
-    ``min_coverage`` presence and ``conservation_metric`` ≥ ``min_conservation``.
+    pairwise if MAFFT is unavailable).
 
-    ``conservation_metric``: ``similarity`` (default, BLOSUM62-based, threshold
-    0.5) or ``identity`` (modal AA fraction). Pass either explicitly when the
-    user requests it.
+    Paper-style outputs (defaults; all thresholds are user-overridable):
+      * ``global_msa.fasta`` — full gapped MAFFT alignment (display / provenance).
+      * ``global_consensus_msa.json`` / ``.csv`` — columns with occupancy ≥
+        ``min_coverage`` (default 0.25) **and** ``conservation_metric`` ≥
+        ``min_conservation`` (default similarity 0.5).
+
+    Unfiltered ``global_msa.json`` is **not** written by default (optional
+    debug). Pocket transfer is ``15 Å reference shell ∩ consensus columns``.
+
+    ``conservation_metric`` (modular):
+      * ``similarity`` — physicochemical-group agreement with the modal AA
+        (default; hydrophobic/aromatic/polar/acidic/basic). This is the paper method.
+      * ``identity`` — exact modal-AA fraction among non-gaps.
+      * ``blosum`` — mean pairwise BLOSUM62.
+      * ``coverage`` — occupancy only.
+
+    Alias of ``build_global_mapped_alignment`` / ``build_global_consensus_msa``.
 
     Provide sequences via **one** of:
       * ``pdb_files`` + ``labels``
@@ -722,13 +859,14 @@ def build_consensus_sequence_alignment(
         sim_dirs: Optional per-simulation directories for PDB resolution.
         base_dir: Base multi-simulation directory for ``{label}.pdb`` lookup.
         chain_id: Optional protein chain ID when reading PDBs.
-        min_coverage: Min fraction of sequences mapped in a column (default 0.5).
+        min_coverage: Min occupancy (non-gap fraction) of a column (default 0.25).
         alignment_fasta: Output MSA FASTA filename.
         residue_map_csv: Output mapping table for manual inspection.
         alignment_json: Output compact consensus JSON.
         consensus_json: Optional alias for ``alignment_json``.
         msa_method: ``mafft`` (default) or ``star_pairwise``.
-        conservation_metric: ``similarity`` (default) or ``identity``.
+        conservation_metric: ``similarity`` (default, physchem groups), ``identity``,
+            ``blosum``, or ``coverage``.
         min_conservation: Threshold for conservation_metric (default 0.5).
 
     Returns:
@@ -853,9 +991,12 @@ def build_consensus_sequence_alignment(
             msa = build_mafft_msa_to_reference(chains, reference_label)
 
         metric = (conservation_metric or DEFAULT_CONSERVATION_METRIC).strip().lower()
-        if metric not in ("similarity", "identity", "coverage", "none"):
+        internal = normalize_conservation_metric(metric)
+        if internal not in ("group", "identity", "blosum", "coverage"):
             metric = DEFAULT_CONSERVATION_METRIC
 
+        # Paper path: select consensus columns directly (no intermediate
+        # unfiltered global_msa.json). That file is optional debug only.
         consensus = select_consensus_positions(
             msa,
             min_coverage=min_coverage,
@@ -880,10 +1021,12 @@ def build_consensus_sequence_alignment(
             fasta_name=alignment_fasta,
             csv_name=residue_map_csv,
             json_name=alignment_json,
+            all_positions=None,
             chains=chains,
             conservation_metric=metric,
             min_conservation=min_conservation,
             min_coverage=min_coverage,
+            write_full_msa_json=False,
         )
 
         try:
@@ -910,19 +1053,77 @@ def build_consensus_sequence_alignment(
         return {
             "success": True,
             "message": (
-                f"Consensus alignment ({msa.get('msa_method')}): {len(chains)} sequences, "
-                f"{len(consensus)} consensus positions "
-                f"({metric}>={min_conservation})"
+                f"Global MSA ({msa.get('msa_method')}): {len(chains)} sequences, "
+                f"{len(consensus)} global_consensus_msa columns "
+                f"({metric}>={min_conservation}, occupancy>={min_coverage})"
             ),
             "reference_label": reference_label,
             "n_sequences": len(chains),
             "n_consensus_positions": len(consensus),
+            "n_global_consensus": len(consensus),
+            "n_global_mapped": len(consensus),
+            "mapping_kind": MAPPING_KIND_CONSENSUS,
             "msa_method": msa.get("msa_method"),
             "conservation_metric": metric,
             "min_conservation": min_conservation,
+            "min_coverage": min_coverage,
             "labels": list(chains.keys()),
             **paths,
         }
     except Exception as exc:
-        logger.exception("build_consensus_sequence_alignment failed")
+        logger.exception("build_global_mapped_alignment failed")
         return {"success": False, "error": str(exc)}
+
+
+@tool
+def build_global_mapped_alignment(
+    working_dir: str,
+    reference_label: str,
+    labels: Optional[List[str]] = None,
+    pdb_files: Optional[List[str]] = None,
+    fasta_file: str = "",
+    sim_dirs: Optional[List[str]] = None,
+    base_dir: str = "",
+    chain_id: Optional[str] = None,
+    min_coverage: float = DEFAULT_MIN_COVERAGE,
+    alignment_fasta: str = DEFAULT_ALIGNMENT_FASTA,
+    residue_map_csv: str = DEFAULT_RESIDUE_MAP_CSV,
+    alignment_json: str = DEFAULT_ALIGNMENT_JSON,
+    consensus_json: str = "",
+    msa_method: str = DEFAULT_MSA_METHOD,
+    conservation_metric: str = DEFAULT_CONSERVATION_METRIC,
+    min_conservation: float = DEFAULT_MIN_CONSERVATION,
+) -> Dict[str, Any]:
+    """Build a MAFFT global MSA; export ``global_consensus_msa`` (filtered columns).
+
+    Default ``global_consensus_msa`` = MAFFT columns with occupancy ≥ 0.25 and
+    physicochemical-group **similarity ≥ 0.5** (paper method). Pass
+    ``conservation_metric='identity'`` or ``'blosum'`` and/or different
+    ``min_conservation`` / ``min_coverage`` to change the definition.
+
+    Does **not** write unfiltered ``global_msa.json`` by default. Pocket
+    mapping is a separate step: 15 Å ligand shell ∩ these consensus columns,
+    then transferred to every protein.
+    """
+    return build_consensus_sequence_alignment.func(
+        working_dir=working_dir,
+        reference_label=reference_label,
+        labels=labels,
+        pdb_files=pdb_files,
+        fasta_file=fasta_file,
+        sim_dirs=sim_dirs,
+        base_dir=base_dir,
+        chain_id=chain_id,
+        min_coverage=min_coverage,
+        alignment_fasta=alignment_fasta,
+        residue_map_csv=residue_map_csv,
+        alignment_json=alignment_json,
+        consensus_json=consensus_json,
+        msa_method=msa_method,
+        conservation_metric=conservation_metric,
+        min_conservation=min_conservation,
+    )
+
+
+# Preferred name; ``build_global_mapped_alignment`` kept for in-flight plans.
+build_global_consensus_msa = build_global_mapped_alignment

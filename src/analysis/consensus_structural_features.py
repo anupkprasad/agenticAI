@@ -13,15 +13,20 @@ from langchain_core.tools import tool
 logger = logging.getLogger(__name__)
 
 
-def _resolve_traj(topology_file: str, trajectory_file: str, sim_directory: Optional[str]):
-    from src.analysis.combined_analysis import _find_sim_traj_topology
+def _resolve_traj(
+    topology_file: str,
+    trajectory_file: str,
+    sim_directory: Optional[str],
+    hpc_dir: Optional[str] = None,
+):
+    from src.analysis.traj_resolve import resolve_topology_trajectory
 
-    top, traj = topology_file, trajectory_file
-    if (not top or not Path(top).is_file()) and sim_directory:
-        found = _find_sim_traj_topology(str(sim_directory))
-        if found[0] and found[1]:
-            top, traj = found
-    return top, traj
+    return resolve_topology_trajectory(
+        topology_file,
+        trajectory_file,
+        sim_directory=sim_directory,
+        hpc_dir=hpc_dir,
+    )
 
 
 def _mapped_ca_atomgroup(u, mapping):
@@ -52,6 +57,7 @@ def calculate_consensus_rmsf_features(
     output_dir: str = "consensus_rmsf",
     working_dir: Optional[str] = None,
     sim_directory: Optional[str] = None,
+    hpc_dir: Optional[str] = None,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -84,7 +90,9 @@ def calculate_consensus_rmsf_features(
         if feat_path.is_file() and not overwrite:
             return {"success": True, "skipped": True, **json.loads(feat_path.read_text())}
 
-        top, traj = _resolve_traj(topology_file, trajectory_file, sim_directory)
+        top, traj = _resolve_traj(
+            topology_file, trajectory_file, sim_directory, hpc_dir=hpc_dir
+        )
         if not top or not traj:
             return {"success": False, "error": "Missing trajectory"}
 
@@ -114,6 +122,8 @@ def calculate_consensus_rmsf_features(
             "consensus_rmsf_std_A": std_a,
             "n_atoms": int(ag.n_atoms),
             "profile_csv": str(profile.resolve()),
+            "topology_file": str(Path(top).resolve()),
+            "trajectory_file": str(Path(traj).resolve()),
         }
         feat_path.write_text(json.dumps(feat, indent=2) + "\n", encoding="utf-8")
         try:
@@ -146,16 +156,19 @@ def calculate_consensus_dccm_features(
     label: str = "",
     n_lobe_ci_max: int = 34,
     c_lobe_ci_min: int = 35,
+    lobe_method: str = "auto",
     output_dir: str = "consensus_DCCM",
     working_dir: Optional[str] = None,
     sim_directory: Optional[str] = None,
+    hpc_dir: Optional[str] = None,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
     """
     Consensus-mapped Cα DCCM scalars: mean |corr| and N↔C lobe mean correlation.
 
-    Lobe split uses consensus indices: N-lobe ``ci <= n_lobe_ci_max``,
-    C-lobe ``ci >= c_lobe_ci_min`` (override for non-kinase families).
+    Lobe split (``lobe_method='auto'``): consensus-index cut when the map is
+    long enough (paper: ``ci <= 34`` / ``ci >= 35``); otherwise KAPCA/reference
+    residue hinge; otherwise midpoint. Override cuts or set ``lobe_method``.
 
     Writes ``dccm_N_C_mean_corr``, ``mean_abs_dccm`` into
     ``{output_dir}/consensus_dccm_features.json``.
@@ -184,7 +197,9 @@ def calculate_consensus_dccm_features(
         if feat_path.is_file() and not overwrite:
             return {"success": True, "skipped": True, **json.loads(feat_path.read_text())}
 
-        top, traj = _resolve_traj(topology_file, trajectory_file, sim_directory)
+        top, traj = _resolve_traj(
+            topology_file, trajectory_file, sim_directory, hpc_dir=hpc_dir
+        )
         if not top or not traj:
             return {"success": False, "error": "Missing trajectory"}
 
@@ -224,8 +239,15 @@ def calculate_consensus_dccm_features(
 
         iu = np.triu_indices(N, k=1)
         mean_abs = float(np.mean(np.abs(C[iu])))
-        n_idx = [i for i, m in enumerate(meta) if m["consensus_index"] <= int(n_lobe_ci_max)]
-        c_idx = [i for i, m in enumerate(meta) if m["consensus_index"] >= int(c_lobe_ci_min)]
+        from src.analysis.lobe_split import assign_n_c_lobe_indices
+
+        n_idx, c_idx, lobe_info = assign_n_c_lobe_indices(
+            meta,
+            alignment=alignment,
+            n_lobe_ci_max=int(n_lobe_ci_max),
+            c_lobe_ci_min=int(c_lobe_ci_min),
+            lobe_method=lobe_method,
+        )
         if n_idx and c_idx:
             block = C[np.ix_(n_idx, c_idx)]
             nc_mean = float(np.mean(block))
@@ -240,8 +262,9 @@ def calculate_consensus_dccm_features(
             "n_consensus_atoms": N,
             "N_lobe_n_atoms": len(n_idx),
             "C_lobe_n_atoms": len(c_idx),
-            "N_LOBE_CI_MAX": int(n_lobe_ci_max),
-            "C_LOBE_CI_MIN": int(c_lobe_ci_min),
+            "topology_file": str(Path(top).resolve()),
+            "trajectory_file": str(Path(traj).resolve()),
+            **lobe_info,
         }
         feat_path.write_text(json.dumps(feat, indent=2) + "\n", encoding="utf-8")
         try:

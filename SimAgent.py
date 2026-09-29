@@ -1855,7 +1855,18 @@ def main(argv=None):
                        choices=["error", "all"],
                        help=("Human-in-the-loop: 'error' pauses only on failures; "
                              "'all' pauses at every workflow checkpoint. "
-                             "Default: fully automatic (no HITL)."))
+                             "Default: fully automatic (no HITL), or campaign.yaml hitl."))
+    parser.add_argument(
+        "--campaign-yaml",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Campaign settings YAML (conservation_metric, pocket_cutoff_A, "
+            "retrieval_k, gold_columns, hitl, …). Default: "
+            "{working-dir}/campaign.yaml if present, else "
+            "agentic/campaign/campaign.yaml. Env AGENTIC_* overrides keys."
+        ),
+    )
     # Deprecated — kept for backward compatibility with older scripts/docs
     parser.add_argument("--use-llm", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-human-loop", action="store_true", help=argparse.SUPPRESS)
@@ -1975,9 +1986,15 @@ def main(argv=None):
             flush=True,
         )
 
+    from agentic.campaign.config import load_campaign_settings
     from agentic.hitl_config import resolve_hitl_from_cli
 
-    human_in_loop, hitl_mode = resolve_hitl_from_cli(args.hitl)
+    campaign_settings = load_campaign_settings(
+        path=getattr(args, "campaign_yaml", None),
+        working_dir=args.working_dir,
+    )
+    hitl_cli = args.hitl or campaign_settings.hitl
+    human_in_loop, hitl_mode = resolve_hitl_from_cli(hitl_cli)
     use_llm = not args.no_llm
 
     # -------------------------------------------------------------------------
@@ -2065,6 +2082,8 @@ def main(argv=None):
         "parallel_cpus_per_job": getattr(args, "parallel_cpus", None),
         "llm_concurrency": getattr(args, "llm_concurrency", "auto"),
         "sim_max_attempts": getattr(args, "sim_max_attempts", None),
+        "campaign_yaml": str(campaign_settings.source_path or ""),
+        "campaign_settings": campaign_settings.to_dict(),
     }
 
     if config["skip_hpc_submit"] and not config["reuse_hpc"]:

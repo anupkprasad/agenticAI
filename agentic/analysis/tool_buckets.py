@@ -55,6 +55,11 @@ PER_SIM_TOOL_NAMES: FrozenSet[str] = frozenset({
     "project_dynamics_model",
     "calculate_consensus_rmsf_features",
     "calculate_consensus_dccm_features",
+    "calculate_consensus_pocket_metrics",
+    "calculate_ligand_axis_angle",
+    "calculate_water_occupancy",
+    "cluster_trajectory_frames",
+    "calculate_hbond_lifetimes",
 })
 
 COMBINED_TOOL_NAMES: FrozenSet[str] = frozenset({
@@ -83,20 +88,25 @@ COMBINED_TOOL_NAMES: FrozenSet[str] = frozenset({
 
 SHARED_TOOL_NAMES: FrozenSet[str] = frozenset({
     "build_consensus_sequence_alignment",
+    "build_global_mapped_alignment",
+    "build_global_consensus_msa",
     "fit_reference_pca_model",
     "project_simulations_reference_pca",
     "build_shared_reference_fel_landscapes",
     "cluster_reference_fel_landscapes",
     "run_reference_landscape_pipeline",
     "define_reference_consensus_pocket",
+    "define_pocket_mapped_residues",
     "map_consensus_pocket_residues",
-    "calculate_consensus_pocket_metrics",
+    "map_pocket_mapped_residues",
     "run_consensus_pocket_metrics_batch",
     "plot_reference_msa_alignment",
+    "plot_global_mapped_alignment",
     "run_consensus_local_fel_batch",
     "run_consensus_torsions_batch",
     "fit_dynamics_model",
     "run_shared_dynamics_fel_batch",
+    "compute_shared_pka_ref_dyn_features",
 })
 
 

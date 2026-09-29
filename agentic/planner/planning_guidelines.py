@@ -768,7 +768,9 @@ _REFERENCE_LANDSCAPE_PATTERNS: tuple[str, ...] = (
     r"reference\s+fel\s+cluster",
     r"run_reference_landscape_pipeline",
     r"build_consensus_sequence_alignment",
+    r"build_global_mapped_alignment",
     r"plot_reference_msa_alignment",
+    r"plot_global_mapped_alignment",
 )
 
 _CONSENSUS_POCKET_PATTERNS: tuple[str, ...] = (
@@ -780,6 +782,9 @@ _CONSENSUS_POCKET_PATTERNS: tuple[str, ...] = (
     r"as\s+the\s+reference\s+to\s+define\s+(?:the\s+)?(?:atp\s+)?pocket",
     r"run_consensus_pocket_metrics_batch",
     r"define_reference_consensus_pocket",
+    r"define_pocket_mapped_residues",
+    r"pocket_mapped",
+    r"global_mapped",
 )
 
 _FAMILY_MODULAR_TOOL_PATTERNS: tuple[str, ...] = (
@@ -1154,8 +1159,8 @@ Combined phase:
 `collect_classification_features_table` → `cluster_classification_features`
 (hierarchical). Prefer a single dendrogram+heatmap panel. Do not hard-code k.
 
-Pre-combined: also `plot_reference_msa_alignment` → global + pocket MSA PNGs
-when a consensus/reference pocket is requested.
+Pre-combined: also `plot_global_mapped_alignment` → global_consensus_msa + pocket_mapped MSA PNGs
+when a reference pocket is requested.
 
 Do NOT run the collector unless the user asked for classification/clustering
 or a dendrogram / feature heatmap."""

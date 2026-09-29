@@ -243,6 +243,17 @@ def build_run_summary(
     if llm_usage:
         llm_usage["_path"] = str(Path(working_dir) / "llm_usage.json")
 
+    science: Dict[str, Any] = {}
+    try:
+        from agentic.campaign.contracts import campaign_science_report
+        from agentic.campaign.spec import spec_from_state
+
+        spec = spec_from_state(final_state)
+        if spec and spec.family_modular:
+            science = campaign_science_report(working_dir, spec=spec, state=final_state)
+    except Exception:
+        science = {}
+
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "working_directory": working_dir,
@@ -277,6 +288,8 @@ def build_run_summary(
         "combined_analysis_dir": combined_dir if Path(combined_dir).exists() else None,
         "analysis_dir": analysis_dir if Path(analysis_dir).exists() else None,
         "reporter_output": final_state.get("reporter_output"),
+        "science": science,
+        "campaign_spec": final_state.get("campaign_spec"),
         "final_report_present": bool(final_state.get("final_report")),
         "errors": list(final_state.get("errors") or [])[:20],
         "warnings": list(final_state.get("warnings") or [])[:20],
@@ -392,6 +405,32 @@ def format_run_summary_markdown(summary: Dict[str, Any]) -> str:
         f"| Failed | {counts.get('failed', 0)} |",
         "",
     ]
+    science = summary.get("science") or {}
+    if science:
+        lines.extend(
+            [
+                "## Science completeness",
+                "",
+                f"| Metric | Value |",
+                f"|--------|-------|",
+                f"| Family modular | {science.get('family_modular')} |",
+                f"| Systems with required artifacts | "
+                f"{science.get('n_science_complete', 0)}/"
+                f"{science.get('n_systems', 0)} |",
+                f"| Feature matrix ready | {bool((science.get('matrix') or {}).get('ok'))} |",
+                f"| Campaign science OK | {science.get('ok')} |",
+                "",
+            ]
+        )
+        incomplete = science.get("incomplete_labels") or []
+        if incomplete:
+            lines.append("Incomplete labels: " + ", ".join(incomplete))
+            lines.append("")
+        reason = (science.get("matrix") or {}).get("reason")
+        if reason:
+            lines.append(f"Matrix: {reason}")
+            lines.append("")
+
 
     if summary.get("domain_context"):
         lines.extend(["## Domain / Structure", "", summary["domain_context"], ""])

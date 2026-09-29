@@ -49,27 +49,43 @@ Given a natural-language goal and either a PDB file or a UniProt accession, the 
 - **LLM-driven scientific inference** — the Planner selects analysis observables
   from goal semantics; the Analysis agent selects tools per trajectory; the
   Reporter synthesises a literature-grounded narrative.
-- **Family modular dynamics** — consensus-mapped torsions, RMSF, N↔C DCCM, and
-  independent dihedral PCA landscape entropy when the goal asks for comparative
-  kinase/pseudokinase descriptors (not a fixed paper schema).
+- **Family modular dynamics** — consensus pocket metrics (COM + axis-angle),
+  mapped torsions, RMSF, N↔C DCCM, and independent dihedral PCA landscape
+  entropy when the goal asks for comparative descriptors (not a fixed paper
+  schema). Required calculations are artifact-gated for science completeness.
 - **Consensus reference pocket** — define ATP pocket on a reference (e.g. KAPCA),
   map via star MSA, compute COM distance + axis orientation for all systems.
 - **LLM classification feature selection** — after collecting dynamics scalars,
   the Analysis agent asks the LLM to choose a scientifically motivated subset
   (with written reasoning) before hierarchical clustering / dendrogram+heatmap.
+  Empty / all-NaN columns are recorded as unavailable, not claimed as used.
+- **Campaign YAML** — `campaign.yaml` sets conservation metric, pocket cutoff,
+  retrieval k, gold columns, and HITL. `--campaign-yaml` / env vars override.
+- **Knowledge RAG** — planner sees retrieved chunks with `[kb:…]` citations,
+  not a dump of every manual.
 - **Human checkpoints** — optional approval gates after preprocessing, setup, HPC,
   analysis, and reporter. Enable with `--HITL all` or pause on failures with `--HITL error`.
+- **Restricted file tools** — field agents can list, search, and read the
+  inventory only inside this study’s directories. HITL `pwd` prints
+  `{stage}/inventory.json`.
+- **Run memory** — past errors and fixes (`campaign/memory.jsonl`) are
+  retrieved when planning after a failure.
+- **Review pauses** — `--HITL all` can pause after the compiled protocol,
+  after shared MSA/pocket mapping, and after cross-system comparison.
+- **Programmer software list** — [`AVAILABLE_SOFTWARE.md`](../AVAILABLE_SOFTWARE.md)
+  documents engines/libraries the Programmer may assume when generating tools.
 - **Cross-sim HPC pool** — multi-sim full pipeline preps in parallel (local
   workers), submits up to N SLURM jobs in parallel, then runs post-HPC
   analysis/reporter (see [POOLS.md](POOLS.md)).
 - **Graceful LLM fallback** — deterministic heuristic routing when LLM unavailable.
 - **Run audit trail** — `agent_conversation.log`, `execution_plan.md`,
-  `execution_report.md`, `run_summary.md`, and `run_summary.json` at the
-  base working directory after every run.
+  `execution_report.md`, `run_summary.md`, `run_summary.json`, and
+  `llm_usage.json` (tokens tagged by workflow node) at the base working
+  directory after every run.
 - **Interactive HTML report** — literature (PubMed + bioRxiv + UniProt),
-  analysis plots, DCCM and DCCM-difference heatmaps, and a 3Dmol.js viewer
-  with trajectory snapshots and PNG export.
-
+  analysis plots, DCCM and DCCM-difference heatmaps, a science-completeness
+  banner for family campaigns, and a 3Dmol.js viewer with trajectory
+  snapshots and PNG export.
 ## Repository Layout
 
 ```
@@ -79,7 +95,9 @@ agentic/
     state.py                    # MDState TypedDict — central shared state (~65 fields)
     workflow.py                 # LangGraph StateGraph (12 nodes)
     supervisor/                 # MDSupervisor: routing, enrichment, multi-sim loop
-    planner/                    # MDPlanner + MDProgrammer; knowledge/ knowledge base
+    planner/                    # MDPlanner + MDProgrammer; knowledge/ + knowledge_index.json
+    campaign/                   # CampaignSpec, campaign.yaml, compile/contracts
+    retrieval/                  # Hybrid tool + knowledge retriever
     preprocess/                 # PreprocessingAgent: download, domain trim, clean
     simsetup/                   # SimulationSetupAgent: topology, MDP, solvation
     hpc/                        # MDHPCAgent: SLURM, SSH, job monitoring
@@ -126,6 +144,8 @@ docs/                           # Project documentation (you are here)
 | [ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md) | Per-tool observables, theory, and output filenames |
 | [TOOLS.md](TOOLS.md) | External dependencies plus GROMACS/analysis mechanisms |
 | [POOLS.md](POOLS.md) | Local parallel workers and SLURM HPC pool |
+| [CAMPAIGN_AND_RETRIEVAL.md](CAMPAIGN_AND_RETRIEVAL.md) | CampaignSpec, science gates, hybrid tool retrieval |
+| [implementation_plan.md](implementation_plan.md) | Prioritized backlog (P0–P3) to improve SimAgent |
 | [OLLAMA_SETUP.md](OLLAMA_SETUP.md) | Ollama server + `gpt-oss:20b` (separate from conda) |
 
 Each page opens with a purpose paragraph. Related mechanisms share one
@@ -188,7 +208,8 @@ python SimAgent.py \
 | `--no-llm` | `False` | Disable LLM-powered routing and planning |
 | `--llm-model` | `gpt-oss:20b` | Ollama model name |
 | `--llm-base-url` | `http://127.0.0.1:11434` | Ollama server URL |
-| `--HITL` | off | `error` or `all` — enable human-in-the-loop |
+| `--HITL` | off | `error` or `all` — enable human-in-the-loop (or `campaign.yaml` `hitl`) |
+| `--campaign-yaml` | shipped / `{dir}/campaign.yaml` | Mapping, retrieval, gold columns, HITL defaults |
 | `--resume` | off | Restore `{working-dir}/supervisor/state.jsonl` and continue |
 | `--combined-only` | off | Combined analysis + reporter only (existing per-sim results) |
 | `--allowed-hpc-jobs` | auto | Max concurrent SLURM jobs in cross-sim HPC pool |
@@ -209,14 +230,21 @@ After every run the following are written to the base working directory:
 
 | File | Description |
 |------|-------------|
-| `run_summary.md` | Human-readable run outcome: mode, counts, per-sim status, domain context |
+| `run_summary.md` | Human-readable run outcome: mode, counts, per-sim status, **science completeness** |
 | `run_summary.json` | Same data in structured JSON for scripts |
+| `llm_usage.json` | Token totals tagged by workflow node (`planner`, `analysis`, `reporter`, …) |
 | `agent_conversation.log` | Full agent dialogue, LLM prompts/responses, routing decisions |
 | `planner/master_plan.md` | Multi-sim master plan with per-case prompts and combined analysis plan |
+| `campaign/state.json` | Versioned campaign snapshot (spec hash, stages, science contract) |
+| `campaign/memory.jsonl` | Past errors/fixes retrieved on later failures |
+| `{label}/state.json` | Per-simulation snapshot (completed stages, bound `hpc/repXX` traj) |
+| `{label}/{stage}/inventory.json` | Per-stage artifact index (preprocess → reporter; HITL `pwd` reads this) |
+| `{label}/analysis/repXX/inventory.json` | Absolute topology, trajectory, and mapped-residue paths |
+| `planner/knowledge_index.json` | Cached knowledge chunks + hashed embeddings |
 | `supervisor/execution_report.md` | Stage-by-stage execution summary |
-| `reporter/combined_report.html` | Interactive HTML report (multi-sim) |
+| `reporter/combined_report.html` | Interactive HTML report (multi-sim; includes science banner when family) |
 | `analysis/statistical_summary.json` | Cross-simulation statistics table |
 | `analysis/classification_features*.csv` | Raw + robust z-score feature matrix (when classified) |
-| `analysis/classification_feature_selection.json` | LLM-chosen columns + scientific reasoning |
+| `analysis/classification_feature_selection.json` | LLM-chosen columns, unavailable columns, reasoning |
 | `analysis/classification_dendrogram_heatmap.png` | Ward dendrogram + feature heatmap panel |
 | `cross_sim/` | Pre-combined MSA / pocket-map artifacts (multi-sim) |

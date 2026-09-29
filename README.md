@@ -123,7 +123,7 @@ Include these details when they apply:
 - **Workflow stage:** say whether to preprocess, set up simulation, submit to HPC, analyze completed trajectories, report results, or only run a subset via `--subtask`.
 - **Simulation intent:** specify component cases such as protein-only, protein+ATP+MG, mutant vs wild type, phosphorylated vs dephosphorylated, or chain/residue windows.
 - **Analysis scope:** name the exact analyses you want. For example, “RMSF only for all simulations” will keep the analysis focused on RMSF. If you ask broadly for “protein dynamics” without naming metrics, the planner may choose appropriate dynamics analyses such as RMSD, RMSF, Rg, DCCM, or interaction distances based on available tools and biological context.
-- **Family comparative descriptors (recommended for kinase/pseudokinase panels):** describe science, not internal column names — e.g. ATP–pocket COM distance mean/std, pocket axis orientation, consensus Cα RMSF, pocket χ₁, N↔C DCCM, independent dihedral PCA landscape entropy, then hierarchical clustering with a feature heatmap (do not force a fixed cluster count unless you want one). The framework schedules modular tools and lets the LLM pick a feature subset with written reasoning.
+- **Family comparative descriptors (recommended for kinase/pseudokinase panels):** describe science, not internal column names — e.g. ATP–pocket COM distance mean/std, pocket axis orientation, consensus Cα RMSF, pocket χ₁, N↔C DCCM, independent dihedral PCA landscape entropy, then hierarchical clustering with a feature heatmap (do not force a fixed cluster count unless you want one). The framework schedules the shared analysis protocol (required calculations per protein) and lets the LLM pick a feature subset with written reasoning; empty columns are marked unavailable rather than claimed as used.
 - **Per-metric simulation subsets (multi-sim):** each combined metric can target a different set of simulations. You do not need every metric on every protein. Examples:
   - “RMSF for all four simulations” → combined RMSF overlay uses all sims.
   - “DCCM for JAK1 and TYK2 only” → per-sim DCCM on those two; combined DCCM compares only them.
@@ -239,7 +239,8 @@ python SimAgent.py --goal "..." [options]
 | `--no-llm`             | off                        | Disable LLM planning (deterministic fallback)                                                                 |
 | `--llm-model`          | `gpt-oss:20b`            | Model name                                                                                                    |
 | `--llm-base-url`       | `http://localhost:11434` | LLM API base URL                                                                                              |
-| `--HITL`               | off                        | `error` or `all` — enable human-in-the-loop (default: off)                                               |
+| `--HITL`               | off                        | `error` or `all` — enable human-in-the-loop (default: off; or `campaign.yaml` `hitl`)                    |
+| `--campaign-yaml`      | shipped / `{dir}/campaign.yaml` | Mapping, retrieval k, gold columns, HITL defaults ([CAMPAIGN_AND_RETRIEVAL.md](docs/CAMPAIGN_AND_RETRIEVAL.md)) |
 | `--force-field`        | `amber99sb-ildn`         | GROMACS force field (e.g.`charmm36-jul2022`)                                                                |
 | `--water-model`        | `tip3p`                  | Water model                                                                                                   |
 | `--max-concurrent`     | `4`                      | Max concurrent sims (legacy)                                                                                  |
@@ -291,19 +292,21 @@ Multi-sim run under `--working-dir /work/pseudo`:
     agent_conversation.log
   p21860_ATP_MG/      # or skipped with reason in run_summary
   cross_sim/          # optional pre_combined MSA / pocket-map artifacts
+  campaign/           # state.json, memory.jsonl
   analysis/           # combined overlays; classification_* when requested
   reporter/
     combined_report.html   # fixed name — cross-simulation HTML report
-  run_summary.md      # human-readable outcome
+  run_summary.md      # human-readable outcome (+ science completeness)
   run_summary.json    # structured outcome
+  llm_usage.json      # token totals by workflow node
   agent_conversation.log
 ```
 
 **Report naming (automation-friendly):** every per-simulation HTML report is always
 `{label}/reporter/report.html`. The combined multi-sim report is always
 `{base}/reporter/combined_report.html`. Do not rely on protein-specific filenames
-(e.g. `kinase_report.html`) — the framework normalizes to these paths.
-
+(e.g. `kinase_report.html`) — the framework normalizes to these paths. Family
+campaigns also show a science-completeness banner in the combined HTML.
 **Multi-sim reporting phases:** when the user goal requests combined analysis, the
 supervisor runs optional `pre_combined` (MSA/pocket → `cross_sim/`) → per-sim
 analysis → per-sim `report.html` → `post_combined` at `{base}/analysis/`

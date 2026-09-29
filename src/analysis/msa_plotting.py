@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Plot reference star-MSA alignments (full + high-consensus / pocket columns).
+"""Plot MSA panels for global_consensus_msa and pocket_mapped columns.
 
-Used by combined-analysis agents and manuscript Fig. S3 assets.
+Used by combined-analysis agents and manuscript Fig. S3 assets. Plots show
+**filtered** columns only (consensus / pocket) — never the unfiltered MAFFT
+width as the primary display.
 """
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -21,11 +24,33 @@ MSA_METHOD = (
     "(one pairwise alignment per sequence vs the reference; columns indexed by reference residues)."
 )
 
-# Display-only column filter for MSA panels (not used to define the pocket).
-# Framework MSA consensus uses min_coverage=0.85; pocket uses 15 Å ∩ consensus columns.
+# Legacy display-only filter used only when consensus/pocket JSON is missing.
 POCKET_MIN_OCCUPANCY = 0.90
 POCKET_MIN_CONSERVATION = 0.40
 POCKET_TARGET_N = 40
+
+DEFAULT_CONSENSUS_JSON = "global_consensus_msa.json"
+DEFAULT_POCKET_DEFINITION_JSON = "pocket_mapped_definition.json"
+DEFAULT_GLOBAL_PLOT = "global_consensus_msa.png"
+DEFAULT_POCKET_PLOT = "pocket_mapped_msa.png"
+DEFAULT_ALIGNMENT_FASTA = "global_msa.fasta"
+
+CONSENSUS_JSON_CANDIDATES = (
+    "global_consensus_msa.json",
+    "global_mapped.json",
+    "reference_msa_alignment.json",
+    "consensus_residues.json",
+)
+FASTA_CANDIDATES = (
+    "global_msa.fasta",
+    "reference_msa_alignment.fasta",
+    "consensus_msa.fasta",
+)
+POCKET_DEFINITION_CANDIDATES = (
+    "pocket_mapped_definition.json",
+    "reference_pocket_definition.json",
+    "pocket_mapped.json",
+)
 
 
 AA_COLORS = {
@@ -89,12 +114,7 @@ def select_high_consensus_columns(
     min_conservation: float = POCKET_MIN_CONSERVATION,
     target_n: int = POCKET_TARGET_N,
 ) -> np.ndarray:
-    """Select well-occupied, high-modal-conservation columns for *display*.
-
-    Only columns meeting ``min_occupancy`` and ``min_conservation`` are kept;
-    results are ranked by conservation then occupancy and capped at ``target_n``.
-    Sub-threshold columns are never padded in to fill the target.
-    """
+    """Legacy display filter when consensus/pocket JSON is unavailable."""
     occ, cons = column_stats(mat)
     if preferred_cols is not None:
         pool = [int(c) for c in preferred_cols if 0 <= int(c) < mat.shape[1]]
@@ -114,6 +134,60 @@ def select_high_consensus_columns(
         scored = scored[: int(target_n)]
     keep = [c for c, _, _ in scored]
     return np.asarray(sorted(keep), dtype=int)
+
+
+def _valid_cols(cols: Sequence[int], n_width: int) -> np.ndarray:
+    keep = sorted({int(c) for c in cols if c is not None and 0 <= int(c) < n_width})
+    return np.asarray(keep, dtype=int)
+
+
+def load_msa_cols_from_consensus_json(path: Path) -> List[int]:
+    """Return MSA column indices from ``global_consensus_msa.json`` (or legacy)."""
+    from src.analysis.cross_sim_artifacts import expand_consensus_positions
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data.get("msa_cols"), list) and data["msa_cols"]:
+        return [int(c) for c in data["msa_cols"] if c is not None]
+    positions = expand_consensus_positions(data) if isinstance(data, dict) else []
+    cols: List[int] = []
+    for pos in positions:
+        c = pos.get("msa_col")
+        if c is not None:
+            cols.append(int(c))
+    return cols
+
+
+def load_msa_cols_from_pocket_definition(path: Path) -> List[int]:
+    """Return pocket_mapped MSA column indices from pocket definition / map."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    cols: List[int] = []
+    for key in (
+        "consensus_pocket_positions",
+        "pocket_positions",
+        "consensus_positions",
+    ):
+        for pos in data.get(key) or []:
+            if isinstance(pos, dict) and pos.get("msa_col") is not None:
+                cols.append(int(pos["msa_col"]))
+        if cols:
+            return cols
+    if isinstance(data.get("msa_cols"), list):
+        return [int(c) for c in data["msa_cols"] if c is not None]
+    return cols
+
+
+def _resolve_existing(base: Path, requested: str, candidates: Sequence[str]) -> Optional[Path]:
+    if requested:
+        p = Path(requested)
+        if not p.is_file():
+            p = base / requested
+        if p.is_file():
+            return p
+    for name in candidates:
+        cand = base / name
+        if cand.is_file():
+            return cand
+    return None
 
 
 def _draw_msa(
@@ -142,6 +216,7 @@ def _draw_msa(
     top_bar_label: str = "cons.",
     top_bar_vmax: Optional[float] = None,
     show_conservation_under_top_bar: bool = True,
+    cons_bar_color: Optional[str] = None,
     column_groups: Optional[Sequence[Tuple[str, str]]] = None,
     xlabel_pad: float = 6.0,
     xtick_pad: float = 1.0,
@@ -275,6 +350,7 @@ def _draw_msa(
         ax_bar.set_xlim(-0.5, n_cols - 0.5)
 
     cons_vals = [float(cons[int(c)]) for c in col_indices]
+    bar_face = cons_bar_color or C_FOCUS
 
     # Conservation under the custom top bar (e.g. RMSF), or as the only top track.
     if top_bar_values is not None and show_conservation_under_top_bar:
@@ -283,7 +359,7 @@ def _draw_msa(
             np.arange(n_cols, dtype=float),
             cons_vals,
             width=0.92,
-            color="#6b8f71",
+            color=bar_face,
             edgecolor="none",
             align="center",
             zorder=2,
@@ -303,7 +379,7 @@ def _draw_msa(
         bar_vals = cons_vals
         vmax = 1.02
         ylab = "cons."
-        bar_color = C_FOCUS
+        bar_color = bar_face
         ylim = vmax
     ax_cons.bar(
         np.arange(n_cols, dtype=float),
@@ -496,10 +572,39 @@ def _msa_letter_fs(n_cols: int) -> float:
         return 8.2
     if n_cols <= 70:
         return 6.5
-    return 4.8
+    if n_cols <= 120:
+        return 4.8
+    if n_cols <= 220:
+        return 3.6
+    return 2.8
 
 
-def _msa_footer(
+def _msa_footer_consensus(
+    *,
+    n_selected: int,
+    n_alignment: int,
+    min_conservation: float = 0.5,
+    min_coverage: float = 0.25,
+) -> str:
+    return (
+        f"global_consensus_msa  ·  similarity ≥ {min_conservation:.2f}  ·  "
+        f"occupancy ≥ {min_coverage:.2f}  ·  n={n_selected}/{n_alignment} cols"
+    )
+
+
+def _msa_footer_pocket(
+    *,
+    n_selected: int,
+    n_consensus: int,
+    pocket_cutoff_A: float = 15.0,
+) -> str:
+    return (
+        f"pocket_mapped  ·  {pocket_cutoff_A:g} Å reference shell ∩ consensus  ·  "
+        f"n={n_selected}/{n_consensus} cols"
+    )
+
+
+def _msa_footer_legacy(
     *,
     min_occupancy: float,
     min_conservation: float,
@@ -507,7 +612,7 @@ def _msa_footer(
     n_total: int,
     pocket: bool = False,
 ) -> str:
-    """One-line footer with display parameters only."""
+    """Fallback footer when consensus/pocket JSON is missing."""
     tag = "pocket cols" if pocket else "cols"
     return (
         f"occ ≥ {min_occupancy:.2f}  ·  cons ≥ {min_conservation:.2f}  ·  "
@@ -519,41 +624,100 @@ def plot_msa_panels(
     fasta_file: str,
     output_dir: str,
     *,
+    consensus_cols: Optional[Sequence[int]] = None,
+    pocket_cols: Optional[Sequence[int]] = None,
     preferred_cols: Optional[Sequence[int]] = None,
-    full_name: str = "reference_msa_full.png",
-    focused_name: str = "reference_msa_high_consensus.png",
+    full_name: str = DEFAULT_GLOBAL_PLOT,
+    focused_name: str = DEFAULT_POCKET_PLOT,
     min_occupancy: float = POCKET_MIN_OCCUPANCY,
     min_conservation: float = POCKET_MIN_CONSERVATION,
     target_n: int = POCKET_TARGET_N,
     highlight_rows: Optional[Sequence[str]] = None,
+    consensus_min_conservation: float = 0.5,
+    consensus_min_coverage: float = 0.25,
+    pocket_cutoff_A: float = 15.0,
 ) -> Dict[str, Any]:
-    """Write filtered full + pocket/high-consensus MSA PNGs."""
+    """Write global_consensus_msa + pocket_mapped MSA PNGs.
+
+    Column sets come from calculated artifacts when provided:
+      * ``consensus_cols`` → global panel (all consensus columns)
+      * ``pocket_cols`` → pocket panel (all pocket_mapped columns)
+
+    The unfiltered MAFFT width is **not** plotted. ``preferred_cols`` is a
+    legacy alias for ``pocket_cols``. Display occupancy/conservation filters
+    apply only as a fallback when those JSON-derived column lists are absent.
+    """
     import matplotlib.pyplot as plt
 
     names, mat = load_msa_fasta(fasta_file)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    n_width = int(mat.shape[1])
 
-    # Full MSA (display-filtered across all columns — not pocket-restricted)
-    sel_full = select_high_consensus_columns(
-        mat, None,
-        min_occupancy=min_occupancy,
-        min_conservation=min_conservation,
-        target_n=target_n,
-    )
-    # Full MSA — wide horizontal panel (2× prior width)
-    fig, ax = plt.subplots(figsize=(22.0, 10.0), dpi=300, facecolor=C_BG)
-    _draw_msa(
-        ax, names, mat,
-        col_indices=sel_full,
-        title="Multiple sequence alignment",
-        footer=_msa_footer(
+    used_consensus = consensus_cols is not None and len(list(consensus_cols)) > 0
+    if used_consensus:
+        sel_full = _valid_cols(consensus_cols, n_width)
+        full_footer = _msa_footer_consensus(
+            n_selected=len(sel_full),
+            n_alignment=n_width,
+            min_conservation=consensus_min_conservation,
+            min_coverage=consensus_min_coverage,
+        )
+        full_title = "Global consensus MSA"
+    else:
+        sel_full = select_high_consensus_columns(
+            mat,
+            None,
+            min_occupancy=min_occupancy,
+            min_conservation=min_conservation,
+            target_n=target_n,
+        )
+        full_footer = _msa_footer_legacy(
             min_occupancy=min_occupancy,
             min_conservation=min_conservation,
             n_selected=len(sel_full),
-            n_total=mat.shape[1],
+            n_total=n_width,
             pocket=False,
-        ),
+        )
+        full_title = "Multiple sequence alignment (display filter)"
+
+    pocket_source = pocket_cols if pocket_cols is not None else preferred_cols
+    used_pocket = pocket_source is not None and len(list(pocket_source)) > 0
+    if used_pocket:
+        sel = _valid_cols(pocket_source, n_width)
+        focused_footer = _msa_footer_pocket(
+            n_selected=len(sel),
+            n_consensus=len(sel_full) if used_consensus else n_width,
+            pocket_cutoff_A=pocket_cutoff_A,
+        )
+        focused_title = "Pocket-mapped MSA"
+    else:
+        sel = select_high_consensus_columns(
+            mat,
+            preferred_cols,
+            min_occupancy=min_occupancy,
+            min_conservation=min_conservation,
+            target_n=target_n,
+        )
+        focused_footer = _msa_footer_legacy(
+            min_occupancy=min_occupancy,
+            min_conservation=min_conservation,
+            n_selected=len(sel),
+            n_total=n_width,
+            pocket=True,
+        )
+        focused_title = "High-consensus alignment columns (filtered)"
+
+    # Global consensus panel — wide horizontal
+    fig_w = 22.0 if len(sel_full) <= 120 else min(36.0, 14.0 + 0.06 * len(sel_full))
+    fig, ax = plt.subplots(figsize=(fig_w, 10.0), dpi=300, facecolor=C_BG)
+    _draw_msa(
+        ax,
+        names,
+        mat,
+        col_indices=sel_full,
+        title=full_title,
+        footer=full_footer,
         draw_letters=True,
         letter_fs=_msa_letter_fs(len(sel_full)),
         label_fs=7.8,
@@ -562,49 +726,57 @@ def plot_msa_panels(
     )
     full_path = out / full_name
     fig.subplots_adjust(left=0.07, right=0.995, top=0.94, bottom=0.08)
-    fig.savefig(full_path, dpi=300, facecolor=fig.get_facecolor(), bbox_inches="tight", pad_inches=0.06)
+    fig.savefig(
+        full_path,
+        dpi=300,
+        facecolor=fig.get_facecolor(),
+        bbox_inches="tight",
+        pad_inches=0.06,
+    )
     plt.close(fig)
 
-    # Focused pocket / high-consensus panel — fixed size for compositing
-    sel = select_high_consensus_columns(
-        mat, preferred_cols,
-        min_occupancy=min_occupancy,
-        min_conservation=min_conservation,
-        target_n=target_n,
-    )
-    fig, ax = plt.subplots(figsize=(7.3, 6.4), dpi=300, facecolor=C_BG)
+    # Pocket panel — widen when many columns
+    fig_pw = 7.3 if len(sel) <= 50 else min(22.0, 6.0 + 0.08 * len(sel))
+    fig, ax = plt.subplots(figsize=(fig_pw, 6.4), dpi=300, facecolor=C_BG)
     _draw_msa(
-        ax, names, mat,
+        ax,
+        names,
+        mat,
         col_indices=sel,
-        title="High-consensus alignment columns (filtered)",
-        footer=_msa_footer(
-            min_occupancy=min_occupancy,
-            min_conservation=min_conservation,
-            n_selected=len(sel),
-            n_total=mat.shape[1],
-            pocket=True,
-        ),
+        title=focused_title,
+        footer=focused_footer,
         draw_letters=True,
-        letter_fs=max(4.5, _msa_letter_fs(len(sel)) * 0.72),
+        letter_fs=max(3.2, _msa_letter_fs(len(sel)) * 0.85),
         label_fs=5.2,
         highlight_rows=highlight_rows,
-        mark_preferred=preferred_cols,
+        mark_preferred=None,
     )
     focused_path = out / focused_name
     fig.subplots_adjust(left=0.16, right=0.99, top=0.92, bottom=0.10)
-    # Keep exact (7.3, 6.4) in for Inkscape composites
-    fig.savefig(focused_path, dpi=300, facecolor=fig.get_facecolor(), bbox_inches=None, pad_inches=0)
+    fig.savefig(
+        focused_path,
+        dpi=300,
+        facecolor=fig.get_facecolor(),
+        bbox_inches=None if fig_pw <= 7.5 else "tight",
+        pad_inches=0 if fig_pw <= 7.5 else 0.04,
+    )
     plt.close(fig)
 
     return {
         "success": True,
         "full_msa_plot": str(full_path),
         "focused_msa_plot": str(focused_path),
+        "global_consensus_msa_plot": str(full_path),
+        "pocket_mapped_msa_plot": str(focused_path),
         "n_sequences": len(names),
-        "n_columns_alignment": int(mat.shape[1]),
+        "n_columns_alignment": n_width,
+        "n_columns_global_consensus": int(len(sel_full)),
+        "n_columns_pocket_mapped": int(len(sel)),
         "n_columns_full_display": int(len(sel_full)),
         "n_columns_focused": int(len(sel)),
-        "n_columns_full": int(mat.shape[1]),  # backward-compatible key
+        "n_columns_full": n_width,
+        "used_consensus_json": bool(used_consensus),
+        "used_pocket_definition": bool(used_pocket),
         "min_occupancy": float(min_occupancy),
         "min_conservation": float(min_conservation),
         "msa_method": MSA_METHOD,
@@ -616,64 +788,113 @@ def plot_msa_panels(
 @tool
 def plot_reference_msa_alignment(
     working_dir: str,
-    alignment_fasta: str = "reference_msa_alignment.fasta",
-    pocket_definition_json: str = "",
-    full_plot_file: str = "reference_msa_full.png",
-    focused_plot_file: str = "reference_msa_high_consensus.png",
+    alignment_fasta: str = DEFAULT_ALIGNMENT_FASTA,
+    consensus_json: str = DEFAULT_CONSENSUS_JSON,
+    pocket_definition_json: str = DEFAULT_POCKET_DEFINITION_JSON,
+    full_plot_file: str = DEFAULT_GLOBAL_PLOT,
+    focused_plot_file: str = DEFAULT_POCKET_PLOT,
     min_occupancy: float = POCKET_MIN_OCCUPANCY,
     min_conservation: float = POCKET_MIN_CONSERVATION,
     target_n_columns: int = POCKET_TARGET_N,
 ) -> dict:
-    """Plot star-MSA alignment as (1) full MSA and (2) filtered high-consensus / pocket columns.
+    """Plot ``global_consensus_msa`` and ``pocket_mapped`` MSA panels.
 
-    Call after ``build_consensus_sequence_alignment``. If ``pocket_definition_json``
-    is provided (e.g. reference_pocket_definition.json), the focused panel prefers
-    those consensus-pocket MSA columns, then applies the display filters below.
+    Call after ``build_global_mapped_alignment`` / ``define_pocket_mapped_residues``.
 
-    Display column selection (focused panel only; does not redefine the pocket):
-      * ``min_occupancy`` — fraction of sequences non-gap in the column (default 0.90)
-      * ``min_conservation`` — modal amino-acid fraction among non-gaps (default 0.40)
-      * ``target_n_columns`` — hard cap after ranking by conservation (default 40)
+    Panels (paper path):
+      * Global: all columns in ``global_consensus_msa.json`` (similarity ≥ 0.5,
+        occupancy ≥ 0.25) — **not** the unfiltered MAFFT width.
+      * Pocket: all columns in ``pocket_mapped_definition.json``
+        (15 Å reference shell ∩ consensus).
 
-    The star MSA itself (used for pocket mapping and reference PCA) is built by
-    ``build_consensus_sequence_alignment`` (framework ``min_coverage`` default 0.85).
+    ``alignment_fasta`` supplies AA letters for those columns only. Legacy
+    occupancy/conservation display filters apply only if consensus/pocket JSON
+    is missing.
     """
     try:
         base = Path(working_dir)
-        fasta = Path(alignment_fasta)
-        if not fasta.is_file():
-            fasta = base / alignment_fasta
-        if not fasta.is_file():
-            return {"success": False, "error": f"Alignment FASTA not found: {alignment_fasta}"}
+        fasta = _resolve_existing(base, alignment_fasta, FASTA_CANDIDATES)
+        if fasta is None:
+            return {
+                "success": False,
+                "error": f"Alignment FASTA not found: {alignment_fasta}",
+            }
 
-        preferred = None
-        if pocket_definition_json:
-            import json
+        cons_path = _resolve_existing(base, consensus_json, CONSENSUS_JSON_CANDIDATES)
+        consensus_cols: Optional[List[int]] = None
+        cons_min_cons = 0.5
+        cons_min_cov = 0.25
+        if cons_path is not None:
+            try:
+                consensus_cols = load_msa_cols_from_consensus_json(cons_path)
+                meta = json.loads(cons_path.read_text(encoding="utf-8"))
+                if meta.get("min_conservation") is not None:
+                    cons_min_cons = float(meta["min_conservation"])
+                if meta.get("min_coverage") is not None:
+                    cons_min_cov = float(meta["min_coverage"])
+            except Exception as exc:
+                logger.warning("Could not load consensus cols from %s: %s", cons_path, exc)
 
-            pdef = Path(pocket_definition_json)
-            if not pdef.is_file():
-                pdef = base / pocket_definition_json
-            if pdef.is_file():
-                defn = json.loads(pdef.read_text())
-                preferred = [
-                    int(p["msa_col"])
-                    for p in defn.get("consensus_pocket_positions", [])
-                    if "msa_col" in p
-                ]
+        pocket_path = _resolve_existing(
+            base, pocket_definition_json, POCKET_DEFINITION_CANDIDATES
+        )
+        pocket_cols: Optional[List[int]] = None
+        pocket_cutoff = 15.0
+        if pocket_path is not None:
+            try:
+                pocket_cols = load_msa_cols_from_pocket_definition(pocket_path)
+                meta = json.loads(pocket_path.read_text(encoding="utf-8"))
+                if meta.get("pocket_cutoff_A") is not None:
+                    pocket_cutoff = float(meta["pocket_cutoff_A"])
+            except Exception as exc:
+                logger.warning("Could not load pocket cols from %s: %s", pocket_path, exc)
 
         result = plot_msa_panels(
             str(fasta),
             str(base),
-            preferred_cols=preferred,
+            consensus_cols=consensus_cols,
+            pocket_cols=pocket_cols,
             full_name=full_plot_file,
             focused_name=focused_plot_file,
             min_occupancy=float(min_occupancy),
             min_conservation=float(min_conservation),
             target_n=int(target_n_columns),
             highlight_rows=None,
+            consensus_min_conservation=cons_min_cons,
+            consensus_min_coverage=cons_min_cov,
+            pocket_cutoff_A=pocket_cutoff,
         )
         result["target_n_columns"] = int(target_n_columns)
+        result["consensus_json"] = str(cons_path) if cons_path else ""
+        result["pocket_definition_json"] = str(pocket_path) if pocket_path else ""
+        result["alignment_fasta"] = str(fasta)
         return result
     except Exception as exc:
         logger.exception("plot_reference_msa_alignment failed")
         return {"success": False, "error": str(exc)}
+
+
+@tool
+def plot_global_mapped_alignment(
+    working_dir: str,
+    alignment_fasta: str = DEFAULT_ALIGNMENT_FASTA,
+    consensus_json: str = DEFAULT_CONSENSUS_JSON,
+    pocket_definition_json: str = DEFAULT_POCKET_DEFINITION_JSON,
+    full_plot_file: str = DEFAULT_GLOBAL_PLOT,
+    focused_plot_file: str = DEFAULT_POCKET_PLOT,
+    min_occupancy: float = POCKET_MIN_OCCUPANCY,
+    min_conservation: float = POCKET_MIN_CONSERVATION,
+    target_n_columns: int = POCKET_TARGET_N,
+) -> dict:
+    """Plot global_consensus_msa and pocket_mapped MSA panels (not unfiltered MSA)."""
+    return plot_reference_msa_alignment.func(
+        working_dir=working_dir,
+        alignment_fasta=alignment_fasta,
+        consensus_json=consensus_json,
+        pocket_definition_json=pocket_definition_json,
+        full_plot_file=full_plot_file,
+        focused_plot_file=focused_plot_file,
+        min_occupancy=min_occupancy,
+        min_conservation=min_conservation,
+        target_n_columns=target_n_columns,
+    )

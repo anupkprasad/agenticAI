@@ -143,6 +143,10 @@ def _pick_xy_column_indices(header: Sequence[str], n_cols: int) -> Tuple[int, in
         "n_contacts",
         "n_hbonds",
     )
+    # Orientation / axis-angle series must not fall back to a distance column
+    # when both appear in the header (common for pocket ligand CSVs).
+    if any("axis_angle" in n for n in lower):
+        y_priority = ("axis_angle_deg", "axis_angle") + y_priority
     for pat in y_priority:
         for i, name in enumerate(lower):
             if i == xi or name in skip_y:
@@ -311,15 +315,38 @@ def _aggregate_xy_metric(
     }
     if HAS_MPL:
         fig, ax = plt.subplots(figsize=(8, 4))
-        for (rid, _), (_, y) in zip(paths, series):
-            ax.plot(x, y[: len(x)], alpha=0.35, linewidth=0.9, label=rid)
-        ax.plot(x, mean, color="black", linewidth=1.6, label="mean")
+        colors = ("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd")
+        identical = (
+            mat.shape[0] > 1
+            and float(np.nanmax(np.nanstd(mat, axis=0))) < 1e-12
+        )
+        for i, ((rid, _), yrow) in enumerate(zip(paths, mat)):
+            ax.plot(
+                x,
+                yrow,
+                color=colors[i % len(colors)],
+                alpha=0.75,
+                linewidth=1.1,
+                label=rid,
+            )
+        ax.plot(x, mean, color="black", linewidth=1.8, linestyle="--", label="mean")
+        if mat.shape[0] > 1:
+            ax.fill_between(
+                x, mean - std, mean + std, color="black", alpha=0.12, label="± std"
+            )
         ax.set_title(f"{stem} (n={len(paths)})")
-        # Prefer ns when the series looks like MD time already converted
-        if float(np.nanmax(x)) <= 5000:
-            ax.set_xlabel("Time (ns)")
-        else:
-            ax.set_xlabel("x")
+        ax.set_xlabel(_overlay_xlabel(stem, x))
+        ax.set_ylabel(_overlay_ylabel(stem))
+        if identical:
+            ax.text(
+                0.02,
+                0.95,
+                "replica traces overlap (identical series)",
+                transform=ax.transAxes,
+                fontsize=8,
+                va="top",
+                color="#555555",
+            )
         ax.legend(fontsize=7, loc="best")
         fig.tight_layout()
         png = avg / f"{stem}_overlay.png"
@@ -327,6 +354,30 @@ def _aggregate_xy_metric(
         plt.close(fig)
         written.append(str(png))
     return written, scalars
+
+
+def _overlay_xlabel(stem: str, x: np.ndarray) -> str:
+    low = stem.lower()
+    if any(tok in low for tok in ("rmsf", "per_residue", "residue")):
+        return "Residue index"
+    xmax = float(np.nanmax(x)) if x.size else 0.0
+    xmin = float(np.nanmin(x)) if x.size else 0.0
+    if xmax <= 50 and xmin >= 0 and "time" not in low:
+        return "Residue index"
+    if xmax <= 5000:
+        return "Time (ns)"
+    return "x"
+
+
+def _overlay_ylabel(stem: str) -> str:
+    low = stem.lower()
+    if "rmsf" in low:
+        return "RMSF (Å)"
+    if "distance" in low:
+        return "Distance (Å)"
+    if "dihedral" in low or "chi" in low or "phi" in low or "psi" in low:
+        return "Angle (°)"
+    return "value"
 
 
 def _aggregate_dense_matrix(
@@ -461,39 +512,42 @@ def _aggregate_dccm(
         "kind": "dccm",
     }
     if HAS_MPL:
-        fig, ax = plt.subplots(figsize=(6, 5))
-        im = ax.imshow(
-            mean,
-            cmap="coolwarm",
-            vmin=-1,
-            vmax=1,
-            origin="lower",
-            aspect="equal",
-        )
-        fig.colorbar(im, ax=ax, fraction=0.046, label="correlation")
-        ax.set_title(f"DCCM mean (n={len(paths)})")
-        ax.set_xlabel("residue index")
-        ax.set_ylabel("residue index")
-        # Sparse tick labels from residue IDs
-        if len(common_ids) <= 20:
-            ticks = list(range(len(common_ids)))
-        else:
-            step = max(1, len(common_ids) // 8)
-            ticks = list(range(0, len(common_ids), step))
-        ax.set_xticks(ticks)
-        ax.set_yticks(ticks)
-        ax.set_xticklabels([str(common_ids[i]) for i in ticks], fontsize=7, rotation=45)
-        ax.set_yticklabels([str(common_ids[i]) for i in ticks], fontsize=7)
-        fig.tight_layout()
-        png = avg / "dccm_mean.png"
-        fig.savefig(png, dpi=150)
-        plt.close(fig)
-        written.append(str(png))
-        # Also write dccm_overlay.png as the heatmap so collectors find a plot
-        overlay = avg / "dccm_overlay.png"
-        import shutil
+        from src.analysis.feature_matrix_plots import save_feature_matrix_png
 
-        shutil.copy2(png, overlay)
+        png = avg / "dccm_mean.png"
+        saved = save_feature_matrix_png(
+            mean,
+            png,
+            title=f"DCCM mean (n={len(paths)})",
+            kind="correlation",
+            std_mat=std,
+        )
+        if saved:
+            written.append(saved)
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4.8))
+        off = mean.copy()
+        np.fill_diagonal(off, np.nan)
+        finite = off[np.isfinite(off)]
+        lim = float(np.nanpercentile(np.abs(finite), 98)) if finite.size else 1.0
+        lim = min(1.0, max(lim, 0.15))
+        im0 = axes[0].imshow(
+            mean, cmap="coolwarm", vmin=-lim, vmax=lim, origin="lower", aspect="equal"
+        )
+        axes[0].set_title("mean")
+        fig.colorbar(im0, ax=axes[0], fraction=0.046, label="correlation")
+        im1 = axes[1].imshow(
+            std, cmap="viridis", origin="lower", aspect="equal"
+        )
+        axes[1].set_title("replicate std")
+        fig.colorbar(im1, ax=axes[1], fraction=0.046, label="std")
+        for ax in axes:
+            ax.set_xlabel("residue index")
+            ax.set_ylabel("residue index")
+        fig.suptitle(f"DCCM overlay (n={len(paths)})")
+        fig.tight_layout()
+        overlay = avg / "dccm_overlay.png"
+        fig.savefig(overlay, dpi=150)
+        plt.close(fig)
         written.append(str(overlay))
     return written, scalars
 

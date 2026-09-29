@@ -16,6 +16,34 @@ from pathlib import Path
 # into the wrong per-sim agent_conversation.log.
 _log_redirect_lock = threading.RLock()
 
+_ENGINE_SOURCES = frozenset(
+    {
+        "engine",
+        "deterministic",
+        "deterministic_pre_plan",
+        "recipe",
+        "campaign_spec",
+        "family_recipe",
+        "supervisor_validation",
+        "stage_tick",
+    }
+)
+_LLM_SOURCES = frozenset({"llm", "planner", "analysis_llm"})
+
+
+def normalize_action_source(raw: Any) -> str:
+    """Map log tags to engine | llm | hitl (or the original token)."""
+    text = str(raw or "").strip().lower()
+    if not text:
+        return "unknown"
+    if text in _ENGINE_SOURCES or text.startswith("deterministic"):
+        return "engine"
+    if text in _LLM_SOURCES:
+        return "llm"
+    if text == "hitl":
+        return "hitl"
+    return text
+
 
 def _compact_analysis_result(name: str, result: Any) -> str:
     """One-line summary of a single analysis tool result (no raw arrays)."""
@@ -291,7 +319,10 @@ class ConversationLogger:
     
     def log_agent_action(self, agent_name: str, action: str, details: Dict[str, Any]):
         """Log specific actions taken by agents."""
-        self.logger.info(f"⚡ AGENT ACTION ({agent_name}):")
+        details = dict(details or {})
+        source = normalize_action_source(details.get("source"))
+        details["source"] = source
+        self.logger.info(f"⚡ AGENT ACTION ({agent_name}) [source={source}]:")
         self.logger.info(f"   🎬 Action: {action}")
         
         # Log action details
@@ -413,6 +444,21 @@ class ConversationLogger:
             self.logger.error(f"   Details: {json.dumps(details, indent=6)}")
         self.logger.error("")
         self._flush()
+        try:
+            from agentic.campaign.memory import remember_episode
+
+            details = details or {}
+            base = details.get("working_directory") or details.get("multi_sim_base_dir") or ""
+            if not base and self.log_file:
+                base = str(Path(self.log_file).parent)
+            if base:
+                remember_episode(
+                    base_dir=base,
+                    stage=str(context or "unknown"),
+                    error=f"{type(error).__name__}: {error}",
+                )
+        except Exception:
+            pass
 
 # Global conversation logger instance
 _conversation_logger: Optional[ConversationLogger] = None

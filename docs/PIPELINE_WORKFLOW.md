@@ -78,13 +78,17 @@ only; each simulation’s agent work lives under its label directory.
 - `planner/master_plan.md` (+ `.json`) — short campaign summary
 - `run_summary.md` / `run_summary.json`
 - `supervisor/state.jsonl`, pool status
+- `campaign/state.json` — versioned campaign snapshot
 - Combined `analysis/` + `reporter/combined_report.html` **only when** `len(sim_prompts) > 1`
-- Optional `cross_sim/` — pre-combined pocket/MSA/consensus artifacts
+- Optional `cross_sim/` — pre-combined pocket/MSA/consensus artifacts + `inventory.json`
+- Optional `campaign.yaml` — local override of shipped mapping/retrieval knobs
+- `planner/knowledge_index.json` — retrieved knowledge cache
 
 **Per simulation (`{base}/{label}/`):**
 - `agent_conversation.log` — per-sim validation, execution plan, preprocess → reporter
 - `planner/execution_plan.md` (+ `.json`)
-- `preprocess/`, `simsetup/`, `hpc/`, `analysis/`, `reporter/`
+- `preprocess/`, `simsetup/`, `hpc/`, `analysis/`, `reporter/` (each writes `inventory.json`)
+- `state.json` — per-sim snapshot (completed stages, bound traj)
 
 ```
 --working-dir ./kinase_study/
@@ -96,6 +100,7 @@ only; each simulation’s agent work lives under its label directory.
 │   ├── reporter/report.html
 │   ├── planner/             # per-sim execution_plan
 │   ├── supervisor/
+│   ├── state.json
 │   └── agent_conversation.log
 ├── p21860/                  # apo (protein-only)
 │   └── …
@@ -108,13 +113,16 @@ only; each simulation’s agent work lives under its label directory.
 ├── planner/
 │   ├── master_plan.md       # campaign summary (incl. pre/post plans)
 │   └── master_plan.json
+├── campaign/
+│   └── state.json
 ├── supervisor/
 │   ├── state.jsonl
 │   ├── pool_status.json
 │   └── execution_report.md
 ├── agent_conversation.log   # campaign-level only
-├── run_summary.md
-└── run_summary.json
+├── run_summary.md           # includes science completeness for family runs
+├── run_summary.json
+└── llm_usage.json           # tokens tagged by workflow node
 ```
 
 Labels come from PDB basenames and component cases (e.g. `p21860` vs
@@ -124,16 +132,18 @@ master plan yields more than one `sim_prompts` entry (e.g. apo+holo from one
 PDB still gets combined). Stage order when `n_sims > 1`:
 
 1. Optional **`pre_combined`** (pocket/MSA/consensus → `{base}/cross_sim/`)
-2. Per-sim traj analysis → reporter (multi-rep fan-out → `analysis/avg/`)
+2. Per-sim traj analysis → reporter (multi-rep fan-out → `analysis/avg/`;
+   family shared analysis protocol includes per-sim pocket metrics)
 3. Optional **`post_combined`** / legacy `combined_analysis` (overlays,
-   consensus-pocket batch, classification collect → LLM feature selection →
-   Ward dendrogram+heatmap, …)
-4. **`combined_reporter`** when post ran
+   optional consensus-pocket batch, classification collect → LLM feature
+   selection → Ward dendrogram+heatmap, …)
+4. **`combined_reporter`** when post ran (family HTML includes a science
+   completeness banner)
 
 Combined stages use the same analysis/reporter agents as per-sim, with **LLM
 planning** and combined tool metadata exposed (deterministic pipelines remain
-as fallbacks).
-
+as fallbacks). Family science gates:
+[CAMPAIGN_AND_RETRIEVAL.md](CAMPAIGN_AND_RETRIEVAL.md).
 `--HITL` (any mode) forces **sequential** per-sim execution. Without HITL,
 prep and post-HPC analysis/reporter use the local worker pool; production MD
 uses the SLURM pool. Details: [POOLS.md](POOLS.md).
@@ -154,6 +164,7 @@ Names below are the usual ones. The planner may add extras from the goal
 | `protein_h.pdb` | Protonated protein (PDB2PQR / PROPKA) |
 | `ligand.pdb` / `ATP_h.pdb` | Ligand if present (alias map: `ligand.pdb` → real name) |
 | Domain-trimmed PDB | When the goal names a UniProt domain |
+| `inventory.json` | Absolute paths to the files above (HITL `pwd` / `read_inventory`) |
 
 If the goal is a UniProt accession with no local PDB, preprocess downloads
 AlphaFold (RCSB fallback), then trims the domain. See
@@ -168,6 +179,7 @@ AlphaFold (RCSB fallback), then trims the domain. See
 | `*ions.gro` | Solvated + neutralized system |
 | `*.mdp` | EM / NVT / NPT / production |
 | `chain_residue_map.json` | PDB `chainID`+`resid` → trajectory `resindex` ([TOOLS.md](TOOLS.md#multi-chain-residue-map)) |
+| `inventory.json` | Stage artifact index |
 
 `--force-field` and `--water-model` change the topology and `.mdp` content,
 not the folder names.
@@ -180,6 +192,7 @@ not the folder names.
 | `md.tpr` | Production input |
 | `md.xtc` / `mdWrap.xtc` | Trajectory (wrap often created at analysis) |
 | `md.edr`, `md.log` | Energy / log |
+| `inventory.json` | Bound `md.tpr` / `mdWrap.xtc` paths |
 
 Analysis reads trajectories from `{sim}/hpc/` on the shared filesystem.
 `download_results` is not part of the default plan.
@@ -201,6 +214,9 @@ but never calls `sbatch` (keeps existing `md.tpr` / `mdWrap.xtc`).
 | `{base}/analysis/classification_dendrogram_heatmap.png` | Dendrogram + feature heatmap panel |
 | `{label}/analysis/avg/` | Multi-rep mean±std products (`--rep-num N`) |
 | `{label}/analysis/consensus_*/` | Modular family dynamics outputs |
+| `{label}/analysis/inventory.json` | Stage index; `repXX/inventory.json` binds each replica traj |
+| `{label}/analysis/ligand_pocket_distance.csv` | Collector alias from consensus pocket metrics (COM) |
+| `{label}/analysis/pocket_axis_angle.csv` | Collector alias (axis-angle) |
 
 Full filename list: [ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md#standard-output-filenames-multi-sim).
 
@@ -224,6 +240,7 @@ Full filename list: [ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md#standard-output-filena
 | omit `--subtask` (full) | Prep → HPC pool wait → analysis → reporter | Full tree; analysis waits for `.xtc` |
 | `--HITL all` | Pause after each stage | Sequential; no local worker pool |
 | `--HITL error` | Pause on failures / SLURM errors | Sequential; HPC pool HITL at `human_hpc_pool_check` |
+| `--campaign-yaml PATH` | Mapping / retrieval / gold columns / HITL defaults | Does not change folder layout; writes resolved settings into `campaign_spec` |
 | `--resume` | Skip sims already marked done | Same `DIR`; restores `supervisor/state.jsonl` |
 | `--retry-labels L1 L2` | Re-run those labels even if they succeeded | Overwrites those `{label}/` stages that re-run |
 | `--combined-only` | Skip per-sim analysis/reporter | Writes `{base}/analysis/` and `combined_report.html` only when N>1 |

@@ -1092,6 +1092,131 @@ def _build_combined_final_impression(
     return "\n\n".join(parts)
 
 
+def _build_science_status_html(
+    *,
+    working_dir: str,
+    base_analysis_dir: str = "",
+) -> str:
+    """Banner for campaign science completeness (general MD, not process success)."""
+    try:
+        from agentic.campaign.contracts import (
+            campaign_science_report,
+            clustering_table_usable,
+            family_feature_matrix_ready,
+        )
+        from agentic.campaign.spec import CampaignSpec
+    except Exception:
+        return ""
+
+    base = Path(working_dir)
+    # Reporter writes under ``{campaign}/reporter``; campaign root is parent.
+    campaign_root = base.parent if base.name == "reporter" else base
+    if not (campaign_root / "analysis").is_dir() and base_analysis_dir:
+        campaign_root = Path(base_analysis_dir).parent
+
+    spec = None
+    state_path = campaign_root / "campaign" / "state.json"
+    if state_path.is_file():
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            raw = payload.get("campaign_spec") or payload
+            if isinstance(raw, dict) and raw.get("mode"):
+                spec = CampaignSpec.from_dict(raw)
+        except Exception:
+            spec = None
+    if spec is None or not getattr(spec, "family_modular", False):
+        return ""
+
+    report = campaign_science_report(str(campaign_root), spec=spec)
+    feat = campaign_root / "analysis" / "classification_features.csv"
+    matrix = family_feature_matrix_ready(str(feat), spec) if feat.is_file() else {
+        "ok": False,
+        "reason": "classification_features.csv missing",
+        "n_complete": 0,
+        "n_rows": 0,
+    }
+    usable = clustering_table_usable(str(feat)) if feat.is_file() else {"ok": False}
+    ok = bool(report.get("ok"))
+    bg = "#ecfdf5" if ok else "#fff7ed"
+    border = "#059669" if ok else "#c2410c"
+    title = "Science completeness: OK" if ok else "Science completeness: incomplete"
+    icon = "&#9989;" if ok else "&#9888;"
+    bits = [
+        f"<div class='task-box' style='background:{bg};border:1px solid {border};margin:12px 0;'>",
+        f"<div class='task-box-header' style='color:{border};'>{icon} {title}</div>",
+        "<div class='task-box-body' style='font-size:13.5px;line-height:1.55;'>",
+        f"<p><b>Systems with required artifacts:</b> "
+        f"{report.get('n_science_complete', '?')}/"
+        f"{report.get('n_systems', '?')}</p>",
+        f"<p><b>Feature matrix:</b> {_html_mod.escape(str(matrix.get('reason') or ('ready' if matrix.get('ok') else 'incomplete')))}</p>",
+    ]
+    incomplete = report.get("incomplete_labels") or []
+    if incomplete:
+        bits.append(
+            "<p><b>Incomplete systems:</b> "
+            + _html_mod.escape(", ".join(str(x) for x in incomplete[:20]))
+            + ("…" if len(incomplete) > 20 else "")
+            + "</p>"
+        )
+    if matrix.get("n_rows"):
+        bits.append(
+            f"<p><b>Complete rows:</b> {matrix.get('n_complete', 0)}/{matrix.get('n_rows', 0)} "
+            f"(clustering plot usable: {'yes' if usable.get('ok') else 'no'})</p>"
+        )
+    # Surface empty preferred columns when present in the table as NaN.
+    empty_cols: List[str] = []
+    if feat.is_file():
+        try:
+            import csv as _csv
+
+            with feat.open(newline="", encoding="utf-8") as fh:
+                rows = list(_csv.DictReader(fh))
+            skip = {"label", "sim_directory", "n_features_present"}
+            preferred = list(
+                (spec.analysis_recipe.required_feature_columns if spec else [])
+                or []
+            )
+            for col in preferred:
+                if not rows or col not in (rows[0] or {}):
+                    empty_cols.append(col)
+                    continue
+                n_fin = 0
+                for row in rows:
+                    raw = (row.get(col) or "").strip()
+                    if not raw or raw.lower() in {"nan", "none", "null"}:
+                        continue
+                    try:
+                        float(raw)
+                        n_fin += 1
+                    except ValueError:
+                        continue
+                if n_fin < 2:
+                    empty_cols.append(col)
+        except Exception:
+            empty_cols = []
+    if empty_cols:
+        bits.append(
+            "<p><b>Empty / unusable preferred columns:</b> "
+            + _html_mod.escape(", ".join(empty_cols))
+            + "</p>"
+        )
+        bits.append(
+            "<p style='margin:0;color:#9a3412;'>"
+            "Dendrogram/heatmap may still be drawn from the remaining numeric columns; "
+            "treat clustering as provisional until required calculations fill these fields."
+            "</p>"
+        )
+    elif not ok:
+        bits.append(
+            "<p style='margin:0;color:#9a3412;'>"
+            "Process success is not enough — required shared calculations or modular "
+            "artifacts are still missing."
+            "</p>"
+        )
+    bits.append("</div></div>")
+    return "\n".join(bits)
+
+
 def _build_task_description_html(
     enriched_prompt: str,
     sim_resources: Optional[List[Dict[str, Any]]] = None,
@@ -3219,6 +3344,10 @@ def generate_combined_html_report(
         sim_resources=sim_resources,
         user_goal=user_goal,
     )
+    science_html = _build_science_status_html(
+        working_dir=working_dir,
+        base_analysis_dir=base_analysis_dir,
+    )
 
     # ---- Metadata header ----------------------------------------------------
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
@@ -3279,6 +3408,8 @@ def generate_combined_html_report(
 </div>
 
 {task_html}
+
+{science_html}
 
 <div class="section-divider"></div>
 

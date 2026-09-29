@@ -645,12 +645,51 @@ class HumanCheckpoints:
             generated = _list_files_in_dir(analysis_dir)
             figures = state.get("figures", [])
             combined_info = (state.get("analysis_results") or {}).get("combined", {})
+            subtype = str(state.get("hitl_checkpoint_subtype") or "")
+            if subtype == "compile":
+                spec = state.get("campaign_spec") or {}
+                summary["current_state"] = {
+                    "review": "compiled analysis protocol",
+                    "mode": spec.get("mode"),
+                    "n_systems": spec.get("n_systems"),
+                    "labels": spec.get("labels") or [],
+                    "required_calculations": spec.get("required_calculations") or spec.get("pin_tools") or [],
+                    "required_shared_setup": spec.get("required_shared_setup") or spec.get("pin_pre_tools") or [],
+                }
+                summary["scope"] = "campaign"
+                summary["recommendations"] = [
+                    "Approve the compiled protocol before mapping residues across the family",
+                    "Check required calculations (pocket COM/orientation, RMSF, DCCM, dihedral PCA)",
+                    "'approved' / 'continue' to start shared MSA/pocket setup",
+                ]
+            elif subtype == "pre_combined":
+                summary["current_state"] = {
+                    "review": "shared residue mapping (MSA + pocket)",
+                    "cross_sim": str(Path(state.get("multi_sim_base_dir") or ".") / "cross_sim"),
+                    "generated_files": generated,
+                }
+                summary["scope"] = "combined"
+                summary["recommendations"] = [
+                    "Inspect pocket_mapped.json and global_consensus_msa.json before per-protein MD analysis",
+                    "'approved' / 'continue' to start per-simulation analysis",
+                ]
+            elif subtype == "post_combined":
+                summary["current_state"] = {
+                    "review": "cross-system comparison (overlays / clustering)",
+                    "generated_files": generated,
+                }
+                summary["scope"] = "combined"
+                summary["recommendations"] = [
+                    "Review the dendrogram/heatmap and overlay plots",
+                    "'approved' / 'continue' to write the combined report",
+                ]
 
-            summary["current_state"] = {
-                "analysis_results": list(state.get("analysis_results", {}).keys()),
-                "figures": [Path(f).name for f in figures] if figures else [],
-                "generated_files": generated,
-            }
+            if subtype not in ("compile", "pre_combined", "post_combined"):
+                summary["current_state"] = {
+                    "analysis_results": list(state.get("analysis_results", {}).keys()),
+                    "figures": [Path(f).name for f in figures] if figures else [],
+                    "generated_files": generated,
+                }
             if combined_info:
                 summary["current_state"]["combined"] = {
                     "overlay_plots": len(combined_info.get("overlay_plots") or []),

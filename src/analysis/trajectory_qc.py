@@ -29,12 +29,14 @@ def run_trajectory_qc(
     selection: str = "protein and name CA",
     output_json: str = "trajectory_qc.json",
     working_dir: Optional[str] = None,
+    ligand_selection: str = "",
+    reference_pdb: str = "",
 ) -> Dict[str, Any]:
     """
-    Quick trajectory QC: n_frames, dt, box lengths, protein CA RMSD drift.
-
-    Use early in per-sim analysis to catch truncated or unstable runs before
-    spending tokens on heavy metrics.
+    Trajectory quality checks: length, box, Cα RMSD drift, optional ligand
+    RMSD to the first (or crystal) frame, and a simple Ramachandran outlier
+    fraction. Replica-collapse (identical products on distinct trajectories)
+    is a separate gate.
     """
     if not HAS_DEPS:
         return {"success": False, "error": "MDAnalysis and numpy required"}
@@ -56,6 +58,43 @@ def run_trajectory_qc(
         R = rms.RMSD(u, select=selection, ref_frame=0)
         R.run()
         rmsd = R.results.rmsd[:, 2]
+        # PBC jump: protein COM displacement vs half-box
+        prot = u.select_atoms("protein")
+        com0 = prot.center_of_mass() if len(prot) else None
+        u.trajectory[-1]
+        com1 = prot.center_of_mass() if len(prot) else None
+        com_jump = None
+        pbc_suspect = False
+        if com0 is not None and com1 is not None and box_abc[0] > 0:
+            com_jump = float(np.linalg.norm(np.asarray(com1) - np.asarray(com0)))
+            pbc_suspect = com_jump > 0.5 * min(box_abc)
+
+        rama_outlier_frac = None
+        try:
+            from MDAnalysis.analysis.dihedrals import Ramachandran
+
+            rama = Ramachandran(u.select_atoms("protein")).run()
+            angles = np.asarray(rama.results.angles)
+            # Crude disallowed: |φ|>150 and |ψ|<30 (left-handed sparse region)
+            if angles.size:
+                phi = angles[..., 0]
+                psi = angles[..., 1]
+                bad = (np.abs(phi) > 150.0) & (np.abs(psi) < 30.0)
+                rama_outlier_frac = float(np.mean(bad))
+        except Exception:
+            rama_outlier_frac = None
+
+        ligand_rmsd_mean = None
+        if ligand_selection:
+            try:
+                ref = mda.Universe(str(reference_pdb)) if reference_pdb and Path(reference_pdb).is_file() else u
+                lig_sel = ligand_selection
+                Rlig = rms.RMSD(u, ref, select=lig_sel, ref_frame=0)
+                Rlig.run()
+                ligand_rmsd_mean = float(np.mean(Rlig.results.rmsd[:, 2]))
+            except Exception as lig_exc:
+                logger.debug("ligand RMSD in QC skipped: %s", lig_exc)
+
         result = {
             "success": True,
             "n_frames": n_frames,
@@ -68,6 +107,10 @@ def run_trajectory_qc(
             "rmsd_mean_A": float(np.mean(rmsd)),
             "rmsd_final_A": float(rmsd[-1]),
             "rmsd_max_A": float(np.max(rmsd)),
+            "protein_com_jump_A": com_jump,
+            "pbc_unwrap_suspect": pbc_suspect,
+            "ramachandran_outlier_fraction": rama_outlier_frac,
+            "ligand_rmsd_mean_A": ligand_rmsd_mean,
         }
         out = Path(working_dir or ".") / output_json if working_dir and not Path(output_json).is_absolute() else Path(output_json)
         out.parent.mkdir(parents=True, exist_ok=True)

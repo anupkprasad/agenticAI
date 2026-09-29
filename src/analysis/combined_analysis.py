@@ -1586,12 +1586,18 @@ def run_combined_rmsf_apo_holo_analysis(
     }
 
 
-def _find_sim_traj_topology(sim_dir: str) -> Tuple[Optional[str], Optional[str]]:
+def _find_sim_traj_topology(
+    sim_dir: str,
+    hpc_dir: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
     """Locate (topology, trajectory) for a simulation directory.
 
     Prefers a wrapped trajectory (``mdWrap.xtc``) and ``md.tpr``/``md.gro``
     under ``hpc/repXX`` (or flat ``hpc/``). Avoids fresh simsetup ``system.gro``
     when production topologies exist (atom-count mismatch under reuse-hpc).
+
+    When several ``hpc/repXX`` slots exist, ``hpc_dir`` is required — we do
+    not silently return the first replica.
     """
     from src.analysis.replicate_paths import (
         discover_hpc_rep_dirs,
@@ -1599,7 +1605,25 @@ def _find_sim_traj_topology(sim_dir: str) -> Tuple[Optional[str], Optional[str]]
         resolve_production_trajectory,
     )
 
-    search_roots: list[Path] = list(discover_hpc_rep_dirs(sim_dir))
+    if hpc_dir:
+        slot = Path(hpc_dir)
+        if slot.is_dir():
+            found_t = resolve_production_topology(slot)
+            found_x = resolve_production_trajectory(slot)
+            if found_t is not None and found_x is not None:
+                return str(found_t), str(found_x)
+
+    nested = list(discover_hpc_rep_dirs(sim_dir))
+    if len(nested) > 1 and not hpc_dir:
+        logger.warning(
+            "_find_sim_traj_topology: %d replica dirs under %s without hpc_dir — "
+            "using %s as a representative slot (per-rep tools must pass hpc_dir)",
+            len(nested),
+            sim_dir,
+            nested[0],
+        )
+
+    search_roots: list[Path] = list(nested)
     flat = Path(sim_dir) / "hpc"
     if flat.is_dir() and flat not in search_roots:
         search_roots.append(flat)

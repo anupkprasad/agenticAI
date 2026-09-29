@@ -41,7 +41,7 @@ Analysis tools are gated into **two domains** (names unchanged):
 
 | Domain | When exposed | Examples |
 | ------ | ------------ | -------- |
-| **Per-sim** | Each simulation's traj analysis | `calculate_rmsd`, `calculate_rmsf`, `calculate_dccm`, `plot_md_data` |
+| **Per-sim** | Each simulation's traj analysis | `calculate_rmsd`, `calculate_rmsf`, `calculate_dccm`, `calculate_consensus_pocket_metrics`, `calculate_ligand_axis_angle`, `calculate_water_occupancy`, `cluster_trajectory_frames`, `calculate_hbond_lifetimes`, `plot_md_data` |
 | **Combined (cross-sim)** | Multi-sim `pre_combined` / `post_combined` (and HITL combined view) | `run_combined_analysis`, `plot_combined_overlay`, `build_consensus_sequence_alignment`, `define_reference_consensus_pocket` |
 
 There is **no** third LLM-facing menu (no separate “cross-rep” tool list).
@@ -81,10 +81,12 @@ Pre-combined tools write shared artifacts under `{multi_sim_base}/cross_sim/`:
 
 | File | Role |
 | ---- | ---- |
-| `pocket_map.json` | Reference label + per-sim mapped residues / selections |
-| `consensus_residues.json` | Consensus / MSA residue map (when present) |
-| `consensus_msa.fasta` | Shared MSA FASTA |
+| `global_consensus_msa.json` (`global_mapped.json`, `consensus_residues.json`) | MAFFT columns with occupancy ≥ 0.25 **and** physicochemical-group similarity ≥ 0.5 |
+| `global_msa.fasta` | Full gapped MAFFT alignment (display / provenance) |
+| `pocket_mapped.json` (`pocket_map.json`) | (15 Å ATP) ∩ global_consensus_msa, mapped onto every system |
 | `pre_combined_complete.json` | Stage completion marker |
+
+Optional debug (not required): `global_msa.json` = every MAFFT column.
 
 Schema (minimal) for `pocket_map.json`:
 
@@ -99,10 +101,14 @@ Schema (minimal) for `pocket_map.json`:
 }
 ```
 
-Framework harvests known tool outputs (`reference_pocket_definition.json`,
-`reference_msa_alignment.fasta`, …) into this layout. Per-sim analysis
+Framework harvests known tool outputs (`pocket_mapped_definition.json`,
+`global_msa.fasta`, `global_consensus_msa.json`, …) into this layout. Per-sim analysis
 **auto-discovers** these paths and injects them into the planning prompt so
 pocket RMSF / DCCM selections do not invent alternate files.
+
+`pocket_mapped` is **(15 Å ligand shell) ∩ global_consensus_msa** by default (paper method).
+Pass ``pocket_filter='none'`` to map the full 15 Å shell without the similarity cut.
+``conservation_metric`` on the MSA tool selects group-similarity (default), identity, or BLOSUM.
 
 ---
 
@@ -457,8 +463,8 @@ Run at `{base}/analysis/` after all per-simulation runs complete.
 | `plot_cluster_rmsf_profiles`            | After clustering: pocket/ligand RMSF profiles,**one subplot per cluster**               |
 | `build_sequence_phylo_tree`             | **On request**: sequence-based phylogenetic tree from sequences extracted from each input PDB (pairwise % identity → UPGMA) |
 | `build_structure_phylo_tree`            | **On request**: structure-based phylogenetic tree from CA coordinates (sequence-guided superposition → CA-RMSD → UPGMA)     |
-| `build_consensus_sequence_alignment`    | Star MSA to a reference (PDB list / FASTA / sim_dirs) → `consensus_alignment.fasta` + `consensus_residue_map.csv` |
-| `plot_reference_msa_alignment`          | Plot full star-MSA + high-consensus/pocket column panels (after alignment; optional pocket JSON) |
+| `build_global_mapped_alignment`         | MAFFT MSA → `global_msa.fasta` + `global_consensus_msa.*` (group similarity ≥ 0.5, occupancy ≥ 0.25). Does not write unfiltered `global_msa.json` by default. Metric is selectable (`identity`, `blosum`). Alias: `build_consensus_sequence_alignment` / `build_global_consensus_msa` |
+| `plot_global_mapped_alignment`          | Plot `global_consensus_msa` + `pocket_mapped` MSA panels (columns from calculated JSONs — not unfiltered MAFFT). Alias: `plot_reference_msa_alignment` |
 | `fit_reference_pca_model`               | Fit PCA on consensus Cα from a reference trajectory |
 | `project_simulations_reference_pca`     | Project all trajectories onto the reference PCA basis |
 | `build_shared_reference_fel_landscapes` | FEL in a **shared** PC1/PC2 grid from reference-projected PCA |
@@ -475,28 +481,32 @@ via ``consensus_alignment.json``.
 
 | Tool | Purpose |
 | --- | --- |
-| `define_reference_consensus_pocket` | Reference pocket = star-MSA consensus positions whose reference resid is within ``pocket_cutoff_A`` (default 15 Å) of the ligand at frame 0 |
-| `map_consensus_pocket_residues` | Per-simulation PDB resid lists + coverage audit |
-| `calculate_consensus_pocket_metrics` | One sim: COM distance, pocket SASA, pocket-restricted contacts, residence, pocket RMSF |
-| `run_consensus_pocket_metrics_batch` | End-to-end for all simulations |
-| `plot_reference_msa_alignment` | Visualize star MSA (full + filtered pocket/high-consensus columns) |
+| `define_pocket_mapped_residues` | `pocket_mapped` = (reference residues within 15 Å of ATP) ∩ `global_consensus_msa`, transferred via MSA. Pass `pocket_filter='none'` for the full 15 Å shell. Alias: `define_reference_consensus_pocket` |
+| `map_pocket_mapped_residues` | Per-simulation PDB resid lists + coverage audit. Alias: `map_consensus_pocket_residues` |
+| `calculate_consensus_pocket_metrics` | **Per-sim required calculation:** COM distance **and** ligand axis-angle vs `pocket_mapped` residues (also SASA / contacts / residence / pocket RMSF when requested). Must be registered on the per-sim executor. |
+| `run_consensus_pocket_metrics_batch` | Combined/shared helper: end-to-end for all simulations (optional; per-sim metrics are preferred for family science gates) |
+| `plot_global_mapped_alignment` / `plot_reference_msa_alignment` | Visualize `global_consensus_msa` + `pocket_mapped` columns |
 
-**Outputs:** ``{base}/analysis/reference_pocket_definition.json``,
-``reference_pocket_residue_map.csv``, and per-protein metrics under:
-``{base}/analysis/reference_pocket/{uniprot}/reference_pocket_*.csv/dat/json``.
-This is a combined-analysis tree; reference-pocket outputs are not written to
-``{uniprot}/analysis/``.
+**Shared setup outputs** (pre_combined → `cross_sim/`, harvested into `{base}/analysis/`):
+``pocket_mapped_definition.json``, ``pocket_mapped.csv``, ``pocket_mapped.json``,
+``global_consensus_msa.json``.
+
+**Per-sim metrics** (shared analysis protocol) write under each
+``{label}/analysis/repXX/`` (and aliases under ``reference_pocket/``), e.g.
+``reference_pocket_ligand_distance.csv``, ``reference_pocket_ligand_orientation.csv``,
+``ligand_pocket_distance.csv``, ``reference_pocket_metrics.json``.
 
 **Classification:** use metric group ``reference_pocket`` in
 ``collect_classification_features_table`` (columns prefixed
-``reference_pocket_``). When batch metrics are missing, the collector copies
-local ``ligand_pocket_distance_*`` into the reference COM columns so clustering
-still sees pocket–ligand distance. Axis angle requires
-``reference_pocket_ligand_orientation.csv`` from the consensus-pocket batch
-(reference sim labels like ``p17612`` match folders ``p17612_ATP``).
+``reference_pocket_``). When per-sim / batch metrics are missing, the collector
+may copy local ``ligand_pocket_distance_*`` into the reference COM columns so
+clustering still sees pocket–ligand distance. Axis angle requires the
+orientation CSV from ``calculate_consensus_pocket_metrics``. Empty preferred
+columns are listed in ``classification_feature_selection.json`` as
+``unavailable_columns`` — the LLM must not claim they were used.
 
-Requires prior ``build_consensus_sequence_alignment`` and holo trajectories with ATP.
-
+Requires prior ``build_global_mapped_alignment`` / ``define_pocket_mapped_residues``
+(or legacy consensus aliases) and holo trajectories with the ligand.
 ---
 
 ## Reference-projected landscape clustering
@@ -605,6 +615,10 @@ Default metric groups when modular + consensus pocket are detected:
 
 - Pass `requested_metric_groups` and/or exact `feature_columns=[...]`
 - Or `auto_discover=True` to include modular scalars found on disk
+- Paper Ward-9 columns (`gold_columns` in `campaign.yaml`) are **preferred**,
+  never required to draw the dendrogram. Combined Ward runs on any table
+  with ≥2 systems and ≥2 numeric columns. Missing gold columns are a
+  science-report warning, not a plot block.
 - Paper Ward-4-style columns are **guidance only** (`PAPER_WARD4_FEATURE_COLUMNS`);
   the LLM may select a similar subset (more or less) with written reasoning
 - Local `ligand_pocket_distance.csv` fills `reference_pocket_ligand_distance_*`
@@ -636,13 +650,13 @@ analyze_fel_landscape_features
 For **family modular** goals, prefer consensus tools instead (or in addition):
 
 ```
-calculate_consensus_torsions → calculate_consensus_rmsf_features →
-calculate_consensus_dccm_features → run_independent_dynamics_fel (dihedral/pca)
+calculate_consensus_pocket_metrics → calculate_consensus_torsions →
+calculate_consensus_rmsf_features → calculate_consensus_dccm_features →
+run_independent_dynamics_fel (dihedral/pca)
 ```
 
 Each tool writes **scalar summaries** (JSON or CSV stats) plus time series /
 plots where needed. With `--rep-num N`, prefer `analysis/avg/` scalars.
-
 ### Step 2 — Consolidate (only if user requested classification)
 
 The framework runs `collect_classification_features_table` **only** when the goal
@@ -688,17 +702,21 @@ by default. The raw CSV is never fed directly into Ward / k-means.
 ### Step 2b — LLM feature selection (automatic in post_combined)
 
 After the full collected matrix exists, `MDAnalysisAgent` asks the LLM to
-select a scientifically motivated subset (typically 6–12 columns) with written
-reasoning. Preferences (not hard requirements):
+select a scientifically motivated subset (typically 4–12 columns) with written
+reasoning. Only columns with ≥2 finite values across systems are offered as
+**AVAILABLE**. All-NaN / sparse columns are listed as **UNAVAILABLE** and must
+not be claimed as used.
+
+Preferences (not hard requirements):
 
 - Pocket–ligand COM mean/std and axis-angle mean/std (`reference_pocket_*`)
 - Consensus RMSF mean/std, pocket χ₁, N↔C DCCM, dihedral PCA grid entropy
 - Drop static/redundant columns (residue_count, net_charge, …) unless justified
 
-The selection is written to `classification_feature_selection.json`, the table
-is re-collected with those `feature_columns`, then clustering runs. If the LLM
-is unavailable, a preferred-column heuristic fallback is used.
-
+The selection is written to `classification_feature_selection.json`
+(`feature_columns`, `unavailable_columns`, `dropped_rationale`, reasoning).
+The table is re-collected with those `feature_columns`, then clustering runs.
+If the LLM is unavailable, a preferred-column heuristic fallback is used.
 ---
 
 ### Classification feature dictionary
@@ -987,13 +1005,17 @@ Per-simulation and combined reports use **fixed filenames** so agents, resume lo
 The Reporter agent always writes per-sim reports as `report.html` (not protein-specific names
 like `kinase_report.html`). Combined mode writes `combined_report.html` at the project base.
 
+For **family / comparative** campaigns, the combined HTML includes a **science
+completeness** banner (systems with required artifacts, feature-matrix status,
+and empty preferred columns). Process success alone is not enough — see
+[CAMPAIGN_AND_RETRIEVAL.md](CAMPAIGN_AND_RETRIEVAL.md).
+
 **Multi-sim phases:** optional `pre_combined` (pocket/MSA → `cross_sim/`) runs
 before the per-sim pool; after all per-sim analysis/reporter work, the supervisor
 may advance `multi_sim_phase` to `combined_analysis` / `post_combined` then
 `combined_reporter`. Combined reporter completeness is checked only against
 `{base}/reporter/combined_report.html` — not against per-sim `report.html`
 files in individual simulation directories.
-
 **Resume / skip:** parallel pool and `--resume` treat a per-sim reporter as done when
 `{label}/analysis/analysis_summary.jsonl` and `{label}/reporter/report.html` both exist.
 Combined reporter is done when `{base}/reporter/combined_report.html` exists.

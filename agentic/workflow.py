@@ -120,10 +120,57 @@ class MDWorkflow:
         """Wrap a node function to track current_node and save progress."""
         def wrapped_node(state: MDState) -> MDState:
             state["current_node"] = node_name
+            # Tag LLM usage by the active workflow node (shared client).
+            agent_for_usage = {
+                "input_validation": "supervisor",
+                "planner": "planner",
+                "preprocess": "preprocess",
+                "setup": "simsetup",
+                "hpc": "hpc",
+                "analysis": "analysis",
+                "reporter": "reporter",
+                "human_checkpoint": "hitl",
+            }.get(node_name, node_name)
+            try:
+                if self.llm is not None and hasattr(self.llm, "set_agent"):
+                    self.llm.set_agent(agent_for_usage)
+            except Exception:
+                pass
             result = node_func(state)
             if result is None:
                 logger.error(f"Node '{node_name}' returned None – returning input state as fallback")
                 return state
+            try:
+                from agentic.campaign.stage_tick import mark_stage_done
+
+                if node_name == "preprocess" and result.get("cleaned_pdb"):
+                    mark_stage_done(result, "preprocessing")
+                elif node_name == "setup" and (
+                    result.get("coordinates") or result.get("topology")
+                ):
+                    mark_stage_done(result, "simsetup")
+                elif node_name == "hpc" and (
+                    result.get("job_id")
+                    or result.get("reuse_hpc")
+                    or result.get("hpc_output_directory")
+                ):
+                    mark_stage_done(result, "hpc")
+                elif node_name == "analysis" and result.get("analysis_results"):
+                    mark_stage_done(result, "analysis")
+                elif node_name == "reporter" and result.get("reporter_output"):
+                    mark_stage_done(result, "reporter")
+                if node_name in {
+                    "preprocess", "setup", "hpc", "analysis", "reporter"
+                }:
+                    from src.analysis.inventory import write_stage_inventory_for_state
+
+                    stage = {
+                        "preprocess": "preprocessing",
+                        "setup": "simsetup",
+                    }.get(node_name, node_name)
+                    write_stage_inventory_for_state(result, stage)
+            except Exception:
+                logger.debug("stage tick mark skipped", exc_info=True)
             # Save incremental state after key stages (used by non-HITL run())
             if node_name in self._SAVE_AFTER_NODES:
                 try:
@@ -301,6 +348,7 @@ class MDWorkflow:
                 "analysis": "analysis",
                 "reporter": "reporter",
                 "human_reporter_check": "human_reporter_check",
+                "human_analysis_check": "human_analysis_check",
                 "human_hpc_pool_check": "human_hpc_pool_check",
                 "hpc_pool_wait": "hpc_pool_wait",
                 "parallel_pool_wait": "parallel_pool_wait",
@@ -475,6 +523,7 @@ class MDWorkflow:
         valid_nodes = [
             "input_validation", "planner", "preprocess", "setup", 
             "hpc", "analysis", "reporter", "human_reporter_check",
+            "human_analysis_check",
             "human_hpc_pool_check", "hpc_pool_wait", "parallel_pool_wait", "final_report"
         ]
         
@@ -910,8 +959,10 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             state_path.write_text(json.dumps(entry, indent=2, default=str) + "\n", encoding="utf-8")
 
             from agentic.utils.state_persistence import write_pool_status_json
+            from agentic.campaign.snapshots import persist_state_snapshots
 
             write_pool_status_json(state, supervisor_dir)
+            persist_state_snapshots(state)
 
             # Mirror to active per-sim directory when different from base.
             if state.get("is_multi_simulation") and multi_base_dir:
@@ -936,27 +987,33 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         Returns the last saved state dict, or None if no saved state exists.
         """
         state_path = Path(working_dir) / "supervisor" / "state.jsonl"
-        if not state_path.exists():
-            return None
-        
+        saved_state = None
+        if state_path.exists():
+            try:
+                content = state_path.read_text(encoding="utf-8").strip()
+                if content:
+                    entry = json.loads(content)
+                    saved_state = entry.get("state")
+                    if saved_state:
+                        # Expose save metadata to restore policy in _initialize_state.
+                        saved_state["_saved_workflow_status"] = entry.get("workflow_status")
+                        saved_state["_saved_timestamp"] = entry.get("timestamp")
+                        logger.info(
+                            f"Loaded previous workflow state from {state_path} "
+                            f"(status={entry.get('workflow_status')}, ts={entry.get('timestamp')})"
+                        )
+            except Exception as e:
+                logger.warning(f"Failed to load workflow state from {state_path}: {e}")
+                saved_state = None
+        if saved_state is None:
+            saved_state = {}
         try:
-            content = state_path.read_text(encoding="utf-8").strip()
-            if not content:
-                return None
-            entry = json.loads(content)
-            saved_state = entry.get("state")
-            if saved_state:
-                # Expose save metadata to restore policy in _initialize_state.
-                saved_state["_saved_workflow_status"] = entry.get("workflow_status")
-                saved_state["_saved_timestamp"] = entry.get("timestamp")
-                logger.info(
-                    f"Loaded previous workflow state from {state_path} "
-                    f"(status={entry.get('workflow_status')}, ts={entry.get('timestamp')})"
-                )
-            return saved_state
-        except Exception as e:
-            logger.warning(f"Failed to load workflow state from {state_path}: {e}")
-            return None
+            from agentic.campaign.snapshots import merge_snapshot_into_state
+
+            saved_state = merge_snapshot_into_state(saved_state, working_dir)
+        except Exception as snap_exc:
+            logger.debug("campaign state.json overlay skipped: %s", snap_exc)
+        return saved_state or None
     
     def _initialize_state(self, user_goal: str, config: Optional[Dict[str, Any]]) -> MDState:
         """Create initial workflow state with config overrides applied."""
@@ -1058,6 +1115,8 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "sim_prompts": None,
             "run_combined_analysis": None,
             "combined_analysis_plan": None,
+            "campaign_spec": None,
+            "allow_partial_combined": False,
             "current_sim_index": 0,
             "completed_sim_states": None,
             "sim_working_dirs": None,
@@ -1069,6 +1128,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             "multisim_resume_applied": False,
             "workflow_loop_streak": 0,
             "workflow_loop_key": None,
+            "completed_pipeline_stages": [],
             "retry_labels": None,
             "_resume_succeeded_labels": None,
             "hpc_pool": None,
@@ -1550,6 +1610,13 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         # verbatim, regardless of later state mutations (enrichment, combined goals).
         if not state.get("user_goal_original"):
             state["user_goal_original"] = user_goal
+        if not state.get("campaign_spec"):
+            try:
+                from agentic.campaign.compile import compile_campaign_spec
+
+                state["campaign_spec"] = compile_campaign_spec(state).to_dict()
+            except Exception:
+                pass
         return state
 
     def run(self, user_goal: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

@@ -505,9 +505,9 @@ class PreprocessingAgent:
                     )
                 else:
                     # LLM unavailable — fall back; human_rec is already in additional_instructions
-                    plan = self._create_preprocessing_plan(agent_input)
+                    plan = self._create_preprocessing_plan(agent_input, state)
             else:
-                plan = self._create_preprocessing_plan(agent_input)
+                plan = self._create_preprocessing_plan(agent_input, state)
 
             log_agent_action("preprocessing", "Generated preprocessing plan", {
                 "steps": len(plan.steps),
@@ -607,7 +607,11 @@ class PreprocessingAgent:
                 supervisor_update={}
             )
     
-    def _create_preprocessing_plan(self, agent_input: PreprocessingAgentInput) -> PreprocessingPlan:
+    def _create_preprocessing_plan(
+        self,
+        agent_input: PreprocessingAgentInput,
+        state: Optional[MDState] = None,
+    ) -> PreprocessingPlan:
         """
         Use LLM to analyze PDB and create intelligent preprocessing plan
         Falls back to template-based plan if LLM fails
@@ -619,6 +623,10 @@ class PreprocessingAgent:
         )
         
         analysis = analysis_result.get("analysis", {}) if analysis_result.get("success") else {}
+
+        if state and state.get("reuse_hpc"):
+            logger.info("reuse_hpc: skipping LLM preprocess planning, using deterministic fallback")
+            return self._create_fallback_plan(agent_input, analysis)
         
         # Build LLM prompt from config template
         prompt = self._build_planning_prompt(agent_input, analysis)
@@ -1161,7 +1169,35 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     },
                 )
             
+            _METADATA_NOOP_TOOLS = {
+                "",
+                "noop",
+                "none",
+                "n/a",
+                "na",
+                "metadata",
+                "note",
+                "pass",
+                "skip",
+            }
+
             for i, step in enumerate(plan.steps):
+                tool_key_name = (step.tool_name or "").strip().lower()
+                if tool_key_name in _METADATA_NOOP_TOOLS:
+                    execution_log.append(
+                        f"\n--- Step {i+1}: {step.name} — skipped (metadata/no-op tool {step.tool_name!r}) ---"
+                    )
+                    log_agent_action(
+                        "preprocessing",
+                        f"Step {i+1}/{len(plan.steps)} skipped",
+                        {
+                            "step": step.name,
+                            "tool": step.tool_name or "noop",
+                            "reason": "Metadata placeholder — not an executable tool",
+                        },
+                    )
+                    continue
+
                 # Log step start
                 log_agent_action("preprocessing", f"Executing step {i+1}/{len(plan.steps)}", {
                     "step": step.name,

@@ -1,14 +1,20 @@
 """
-Consensus-mapped reference pocket analysis for cross-simulation comparison.
+Pocket-mapped residue analysis for cross-simulation comparison.
 
-Defines a pocket on a reference structure from consensus residues near the
-ligand, maps those positions to every simulation via ``consensus_alignment.json``,
-and computes pocket metrics using the mapped residue lists.
+Paper-style maps (defaults; every threshold is a tool argument):
+
+  * **global_consensus_msa** — MAFFT columns with occupancy ≥ min_coverage
+    (0.25) and physicochemical-group similarity ≥ min_conservation (0.5).
+    (Legacy filename: ``global_mapped.json``.)
+  * **pocket_mapped** — (reference residues within 15 Å of the ligand)
+    ∩ global_consensus_msa, then transferred to every system via the MSA.
+
+Pass ``pocket_filter='none'`` to map the full 15 Å shell without the
+similarity intersection (requires an unfiltered MSA JSON if present).
 
 Workflow:
-  1. ``define_reference_consensus_pocket`` — reference pocket from ligand proximity
-     intersected with consensus alignment positions
-  2. ``map_consensus_pocket_residues`` — per-simulation PDB resid lists + audit CSV
+  1. ``define_pocket_mapped_residues`` — 15 Å ∩ global_consensus_msa (default)
+  2. ``map_pocket_mapped_residues`` — per-simulation PDB resid lists + audit CSV
   3. ``calculate_consensus_pocket_metrics`` — one simulation
   4. ``run_consensus_pocket_metrics_batch`` — all simulations + optional re-collect
 """
@@ -18,6 +24,7 @@ import csv
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -38,9 +45,18 @@ STABLE_COUPLING_ANGLE_DEG = 65.0
 # so frames with COM ≤ this envelope are counted as bound.
 REFERENCE_POCKET_BOUND_DISTANCE_A = 15.0
 
-DEFAULT_DEFINITION_JSON = "reference_pocket_definition.json"
-DEFAULT_RESIDUE_MAP_CSV = "reference_pocket_residue_map.csv"
-DEFAULT_ALIGNMENT_JSON = "reference_msa_alignment.json"
+DEFAULT_DEFINITION_JSON = "pocket_mapped_definition.json"
+DEFAULT_RESIDUE_MAP_CSV = "pocket_mapped.csv"
+DEFAULT_ALIGNMENT_JSON = "global_consensus_msa.json"
+LEGACY_ALIGNMENT_JSON_NAMES = (
+    "global_consensus_msa.json",
+    "global_mapped.json",
+    "reference_msa_alignment.json",
+    "consensus_residues.json",
+)
+LEGACY_DEFINITION_JSON = "reference_pocket_definition.json"
+LEGACY_RESIDUE_MAP_CSV = "reference_pocket_residue_map.csv"
+DEFAULT_POCKET_FILTER = "global_consensus_msa"
 
 try:
     import MDAnalysis as mda
@@ -101,6 +117,63 @@ def compute_pocket_net_charge(pocket_atomgroup) -> Dict[str, Any]:
         "n_positive": int(n_pos),
         "n_negative": int(n_neg),
     }
+
+
+def _n_mapped_positions(path: Path) -> int:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    n = data.get("n_consensus_positions") or data.get("n_global_msa_columns")
+    if n:
+        return int(n)
+    if data.get("consensus_positions"):
+        return len(data["consensus_positions"])
+    return len(data.get("reference_resids") or [])
+
+
+def resolve_msa_json_for_pocket(
+    out_dir: Path,
+    requested: str,
+    *,
+    prefer_full: bool = False,
+) -> Path:
+    """Resolve the MSA JSON used to transfer pocket residues.
+
+    Default (paper): ``global_consensus_msa.json`` — 15 Å ∩ similarity-consensus.
+    Legacy ``global_mapped.json`` is accepted. ``prefer_full=True`` looks for
+    optional ``global_msa.json`` (every aligned column; not written by default).
+    """
+    out_dir = Path(out_dir)
+    req = Path(requested)
+    if not req.is_absolute():
+        req = out_dir / req.name
+    if req.is_file():
+        return req
+    if prefer_full:
+        names = (
+            "global_msa.json",
+            *LEGACY_ALIGNMENT_JSON_NAMES,
+        )
+    else:
+        names = (
+            *LEGACY_ALIGNMENT_JSON_NAMES,
+            "global_msa.json",
+        )
+    for name in names:
+        p = out_dir / name
+        if p.is_file():
+            return p
+    return req
+
+
+def _mirror_artifact(src: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.resolve() == src.resolve():
+        return
+    shutil.copy2(src, dest)
 
 
 def _consensus_positions_near_ligand(
@@ -852,30 +925,33 @@ def define_reference_consensus_pocket(
     chain_id: Optional[str] = None,
     output_json: str = DEFAULT_DEFINITION_JSON,
     residue_map_csv: str = DEFAULT_RESIDUE_MAP_CSV,
+    pocket_filter: str = DEFAULT_POCKET_FILTER,
 ) -> Dict[str, Any]:
     """
-    Define a reference ATP pocket from consensus residues near the ligand.
+    Define ``pocket_mapped`` residues: 15 Å ligand shell ∩ global consensus.
 
-    Requires a prior star MSA from ``build_consensus_sequence_alignment``. On the
-    reference simulation (e.g. MLKL ``q8nb16``), selects consensus alignment
-    positions whose reference Cα lies within ``pocket_cutoff_A`` Å of the ligand
-    at frame 0, then maps those columns to every label via the residue map.
-    Downstream pocket features (COM, contacts, residence, orientation, RMSF)
-    use these MSA-transferred residues — not per-system local pockets.
+    Paper default: KAPCA (or ``reference_label``) residues within
+    ``pocket_cutoff_A`` Å of the ligand, **intersected with**
+    ``global_consensus_msa`` columns (physicochemical-group similarity ≥ 0.5),
+    then transferred to every protein via the MSA.
 
-    Exports a pocket definition JSON and wide residue map CSV for all labels
-    in the consensus alignment.
+    Modular override: ``pocket_filter='none'`` maps the full 15 Å shell using
+    optional ``global_msa.json`` when present (no similarity intersection).
 
     Args:
         working_dir: Combined analysis output directory.
-        reference_label: Reference simulation label (e.g. ``q8nb16``).
+        reference_label: Reference simulation label (e.g. ``p17612_ATP``).
         sim_dir: Reference simulation root directory.
-        consensus_json: Path to ``consensus_alignment.json`` (relative to working_dir).
+        consensus_json: MSA JSON; default ``global_consensus_msa.json``.
         ligand_selection: Ligand MDAnalysis selection string.
         pocket_cutoff_A: Distance cutoff in Å (default 15).
         chain_id: Optional protein chain ID.
         output_json: Output pocket definition JSON filename.
         residue_map_csv: Output wide residue map CSV filename.
+        pocket_filter: ``global_consensus_msa`` / ``global_mapped`` (default,
+            transferable family pocket) or ``none`` (full proximity shell —
+            only when user explicitly requests unfiltered; not for comparative
+            clustering features).
 
     Returns:
         Dict with ``success``, pocket position count, output paths.
@@ -886,9 +962,20 @@ def define_reference_consensus_pocket(
     out_dir = Path(working_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    align_path = Path(consensus_json)
-    if not align_path.is_absolute():
-        align_path = out_dir / Path(consensus_json).name
+    filt = (pocket_filter or DEFAULT_POCKET_FILTER).strip().lower()
+    prefer_full = filt in ("none", "shell", "proximity", "full", "global_msa")
+    json_name = Path(consensus_json).name
+    consensus_defaults = {
+        "",
+        "global_consensus_msa.json",
+        "global_mapped.json",
+        "reference_msa_alignment.json",
+    }
+    if prefer_full and json_name in consensus_defaults:
+        consensus_json = "global_msa.json"
+    align_path = resolve_msa_json_for_pocket(
+        out_dir, consensus_json, prefer_full=prefer_full
+    )
     loaded = load_consensus_alignment(str(align_path))
     if not loaded.get("success"):
         return loaded
@@ -950,6 +1037,9 @@ def define_reference_consensus_pocket(
         "pocket_cutoff_A": float(pocket_cutoff_A),
         "consensus_json": str(align_path),
         "n_consensus_pocket_positions": len(pocket_positions),
+        "n_pocket_mapped": len(pocket_positions),
+        "mapping_kind": "pocket_mapped",
+        "pocket_filter": filt,
         "proximity_resids_reference": proximity_resids,
         "consensus_pocket_positions": pocket_positions,
         "labels": labels,
@@ -964,16 +1054,54 @@ def define_reference_consensus_pocket(
         json.dump(definition, fh, indent=2)
     _write_residue_map_csv(csv_path, pocket_positions, labels)
 
+    _mirror_artifact(json_path, out_dir / DEFAULT_DEFINITION_JSON)
+    _mirror_artifact(json_path, out_dir / LEGACY_DEFINITION_JSON)
+    _mirror_artifact(csv_path, out_dir / DEFAULT_RESIDUE_MAP_CSV)
+    _mirror_artifact(csv_path, out_dir / LEGACY_RESIDUE_MAP_CSV)
+    _mirror_artifact(csv_path, out_dir / "reference_pocket_resid_map.csv")
+
+    # Compact audit contract (no full residue lists) for robustness / reproducibility scoring.
+    contract = {
+        "reference_label": reference_label,
+        "ligand_selection": ligand_selection,
+        "pocket_cutoff_A": float(pocket_cutoff_A),
+        "pocket_filter": filt,
+        "msa_json": str(align_path),
+        "msa_json_basename": Path(align_path).name,
+        "n_proximity_resids": int(len(proximity_resids)),
+        "n_pocket_mapped": int(len(pocket_positions)),
+        "n_labels": int(len(labels)),
+        "mapping_kind": "pocket_mapped",
+        "definition_json": str(out_dir / DEFAULT_DEFINITION_JSON),
+        "mean_per_label_coverage": (
+            float(np.mean(list(per_label_coverage.values())))
+            if per_label_coverage
+            else None
+        ),
+    }
+    contract_path = out_dir / "pocket_contract.json"
+    with open(contract_path, "w", encoding="utf-8") as fh:
+        json.dump(contract, fh, indent=2)
+        fh.write("\n")
+    _mirror_artifact(contract_path, out_dir / "reference_pocket_contract.json")
+
     return {
         "success": True,
         "message": (
-            f"Defined consensus pocket: {len(pocket_positions)} positions "
-            f"(reference={reference_label}, cutoff={pocket_cutoff_A} Å)"
+            f"Defined pocket_mapped: {len(pocket_positions)} residues "
+            f"(reference={reference_label}, cutoff={pocket_cutoff_A} Å, "
+            f"15Å shell={len(proximity_resids)})"
         ),
-        "definition_json": str(json_path),
-        "residue_map_csv": str(csv_path),
+        "definition_json": str(out_dir / DEFAULT_DEFINITION_JSON),
+        "residue_map_csv": str(out_dir / DEFAULT_RESIDUE_MAP_CSV),
+        "pocket_contract_json": str(contract_path),
         "n_pocket_positions": len(pocket_positions),
+        "n_pocket_mapped": len(pocket_positions),
+        "n_proximity_resids": len(proximity_resids),
+        "mapping_kind": "pocket_mapped",
+        "msa_json": str(align_path),
         "per_label_coverage": per_label_coverage,
+        "pocket_contract": contract,
     }
 
 
@@ -1010,6 +1138,16 @@ def map_consensus_pocket_residues(
         # ``.../analysis`` — always resolve by basename under working_dir.
         def_path = out_dir / Path(definition_json).name
     if not def_path.is_file():
+        for name in (
+            DEFAULT_DEFINITION_JSON,
+            LEGACY_DEFINITION_JSON,
+            "filtered_pocket_definition.json",
+        ):
+            cand = out_dir / name
+            if cand.is_file():
+                def_path = cand
+                break
+    if not def_path.is_file():
         return {"success": False, "error": f"Pocket definition not found: {def_path}"}
 
     with open(def_path, encoding="utf-8") as fh:
@@ -1039,13 +1177,19 @@ def map_consensus_pocket_residues(
 
     with open(def_path, "w", encoding="utf-8") as fh:
         json.dump(definition, fh, indent=2)
-    _write_residue_map_csv(out_dir / residue_map_csv, pocket_positions, all_labels)
+    csv_path = out_dir / residue_map_csv
+    _write_residue_map_csv(csv_path, pocket_positions, all_labels)
+    _mirror_artifact(def_path, out_dir / DEFAULT_DEFINITION_JSON)
+    _mirror_artifact(def_path, out_dir / LEGACY_DEFINITION_JSON)
+    _mirror_artifact(csv_path, out_dir / DEFAULT_RESIDUE_MAP_CSV)
+    _mirror_artifact(csv_path, out_dir / LEGACY_RESIDUE_MAP_CSV)
+    _mirror_artifact(csv_path, out_dir / "reference_pocket_resid_map.csv")
 
     return {
         "success": True,
-        "message": f"Mapped consensus pocket to {len(usable)}/{len(target_labels)} simulations",
-        "definition_json": str(def_path),
-        "residue_map_csv": str(out_dir / residue_map_csv),
+        "message": f"Mapped pocket_mapped residues to {len(usable)}/{len(target_labels)} simulations",
+        "definition_json": str(out_dir / DEFAULT_DEFINITION_JSON),
+        "residue_map_csv": str(out_dir / DEFAULT_RESIDUE_MAP_CSV),
         "per_label_resids": per_label_resids,
         "per_label_coverage": per_label_coverage,
         "usable_labels": usable,
@@ -1054,9 +1198,174 @@ def map_consensus_pocket_residues(
 
 
 @tool
+def define_pocket_mapped_residues(
+    working_dir: str,
+    reference_label: str,
+    sim_dir: str,
+    consensus_json: str = DEFAULT_ALIGNMENT_JSON,
+    ligand_selection: str = "resname ATP",
+    pocket_cutoff_A: float = 15.0,
+    chain_id: Optional[str] = None,
+    output_json: str = DEFAULT_DEFINITION_JSON,
+    residue_map_csv: str = DEFAULT_RESIDUE_MAP_CSV,
+    pocket_filter: str = DEFAULT_POCKET_FILTER,
+) -> Dict[str, Any]:
+    """Map the reference ligand pocket ∩ global_consensus_msa onto every system.
+
+    **Default (family / transferable):** ``pocket_filter='global_consensus_msa'``
+    (alias ``global_mapped``) — reference residues within ``pocket_cutoff_A`` of
+    the ligand **intersected with** conserved MAFFT columns, then transferred
+    via the MSA. This is the correct choice for cross-system clustering /
+    comparative MD.
+
+    **Override:** ``pocket_filter='none'`` keeps the full proximity shell
+    without conservation filtering (much larger residue lists; use only when
+    the user explicitly asks for an unfiltered shell, not for family features).
+
+    Cutoff defaults to 15 Å; parse from the user goal when they specify e.g.
+    "within 15 Å of ATP".
+    """
+    return define_reference_consensus_pocket.func(
+        working_dir=working_dir,
+        reference_label=reference_label,
+        sim_dir=sim_dir,
+        consensus_json=consensus_json,
+        ligand_selection=ligand_selection,
+        pocket_cutoff_A=pocket_cutoff_A,
+        chain_id=chain_id,
+        output_json=output_json,
+        residue_map_csv=residue_map_csv,
+        pocket_filter=pocket_filter,
+    )
+
+
+@tool
+def map_pocket_mapped_residues(
+    working_dir: str,
+    definition_json: str = DEFAULT_DEFINITION_JSON,
+    labels: Optional[List[str]] = None,
+    min_coverage: float = 0.5,
+    output_json: str = DEFAULT_DEFINITION_JSON,
+    residue_map_csv: str = DEFAULT_RESIDUE_MAP_CSV,
+) -> Dict[str, Any]:
+    """Export per-simulation ``pocket_mapped`` residue lists from the pocket definition."""
+    return map_consensus_pocket_residues.func(
+        working_dir=working_dir,
+        definition_json=definition_json,
+        labels=labels,
+        min_coverage=min_coverage,
+        output_json=output_json,
+        residue_map_csv=residue_map_csv,
+    )
+
+
+def _coerce_resid_list(raw: Any) -> List[int]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        parts = [p.strip() for p in raw.replace(",", " ").split() if p.strip()]
+        out: List[int] = []
+        for p in parts:
+            try:
+                out.append(int(p))
+            except ValueError:
+                continue
+        return out
+    if isinstance(raw, (list, tuple)):
+        out = []
+        for item in raw:
+            try:
+                if item is None or str(item).strip() == "":
+                    continue
+                out.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        return out
+    return []
+
+
+def discover_pocket_map_json(
+    sim_dir: str = "",
+    pocket_map_json: str = "",
+) -> Optional[Path]:
+    if pocket_map_json:
+        p = Path(pocket_map_json)
+        if p.is_file():
+            return p.resolve()
+    if not sim_dir:
+        return None
+    root = Path(sim_dir)
+    try:
+        from src.analysis.inventory import discover_mapped_path
+
+        found = discover_mapped_path(root, ("pocket_mapped.json", "pocket_map.json"))
+        if found:
+            return Path(found)
+    except Exception:
+        pass
+    for folder in (root.parent / "analysis", root.parent / "cross_sim"):
+        for name in ("pocket_mapped.json", "pocket_map.json"):
+            cand = folder / name
+            if cand.is_file():
+                return cand.resolve()
+    return None
+
+
+def resolve_pocket_resids_for_sim(
+    *,
+    pocket_resids: Any = None,
+    label: str = "",
+    pocket_map_json: str = "",
+    sim_dir: str = "",
+) -> List[int]:
+    """Use explicit resids, else ``pocket_mapped.json`` for this label."""
+    parsed = _coerce_resid_list(pocket_resids)
+    if len(parsed) >= 3:
+        return parsed
+    path = discover_pocket_map_json(sim_dir, pocket_map_json)
+    if not path:
+        return parsed
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return parsed
+    from src.analysis.cross_sim_artifacts import pocket_resids_for_label
+
+    lab = label or Path(sim_dir).name
+    found = pocket_resids_for_label(data, lab)
+    return found or parsed
+
+
+def _write_pocket_collector_aliases(adir: Path, output_prefix: str) -> Dict[str, str]:
+    """Copy COM / orientation products to names collectors already search."""
+    aliases: Dict[str, str] = {}
+    dist = adir / f"{output_prefix}_ligand_distance.csv"
+    dest = adir / "ligand_pocket_distance.csv"
+    if dist.is_file() and dist.resolve() != dest.resolve():
+        shutil.copy2(dist, dest)
+        aliases["ligand_pocket_distance_csv"] = str(dest)
+    orient = adir / f"{output_prefix}_ligand_orientation.csv"
+    dest_o = adir / "pocket_axis_angle.csv"
+    if orient.is_file() and orient.resolve() != dest_o.resolve():
+        shutil.copy2(orient, dest_o)
+        aliases["pocket_axis_angle_csv"] = str(dest_o)
+    rp_dir = adir / "reference_pocket"
+    rp_dir.mkdir(parents=True, exist_ok=True)
+    metrics = adir / f"{output_prefix}_metrics.json"
+    if metrics.is_file():
+        shutil.copy2(metrics, rp_dir / "reference_pocket_metrics.json")
+        aliases["reference_pocket_metrics_json"] = str(
+            rp_dir / "reference_pocket_metrics.json"
+        )
+    if orient.is_file():
+        shutil.copy2(orient, rp_dir / f"{output_prefix}_ligand_orientation.csv")
+    return aliases
+
+
+@tool
 def calculate_consensus_pocket_metrics(
     sim_dir: str,
-    pocket_resids: List[int],
+    pocket_resids: Optional[List[int]] = None,
     label: str = "",
     ligand_selection: str = "resname ATP",
     protein_selection: str = "protein",
@@ -1068,6 +1377,11 @@ def calculate_consensus_pocket_metrics(
     reference_ligand_template: Optional[Dict[str, Any]] = None,
     mobile_display: str = "",
     consensus_json: Optional[str] = None,
+    topology_file: str = "",
+    trajectory_file: str = "",
+    hpc_dir: str = "",
+    pocket_map_json: str = "",
+    sim_directory: str = "",
 ) -> Dict[str, Any]:
     """
     Compute pocket metrics using a consensus-mapped residue list.
@@ -1079,10 +1393,12 @@ def calculate_consensus_pocket_metrics(
       - ``{prefix}_residence.csv`` / ``{prefix}_residence.json``
       - ``{prefix}_rmsf.dat``
       - ``{prefix}_metrics.json`` summary
+      - ``ligand_pocket_distance.csv`` / ``pocket_axis_angle.csv`` aliases
 
     Args:
         sim_dir: Simulation root directory.
-        pocket_resids: Mapped PDB residue IDs for this simulation.
+        pocket_resids: Mapped PDB residue IDs for this simulation. Optional when
+            ``pocket_map_json`` / campaign ``pocket_mapped.json`` is available.
         label: Simulation label (for logging).
         ligand_selection: Ligand selection string.
         protein_selection: Protein selection string.
@@ -1091,31 +1407,60 @@ def calculate_consensus_pocket_metrics(
         frame_interval: Trajectory frame stride.
         working_dir: Output directory (default: ``{sim_dir}/analysis``).
         output_prefix: Filename prefix for outputs.
+        topology_file: Bound production topology (preferred over first-hit).
+        trajectory_file: Bound production trajectory.
+        hpc_dir: Replica slot (``hpc/repXX``). Required when several reps exist.
+        pocket_map_json: Path to ``pocket_mapped.json``.
 
     Returns:
         Dict with ``success``, output file paths, scalar summaries.
     """
     if not HAS_MDA:
         return {"success": False, "error": "MDAnalysis is required"}
-    if len(pocket_resids) < 3:
+
+    sim_root = sim_directory or sim_dir
+    lab = label or Path(sim_root).name
+    resids = resolve_pocket_resids_for_sim(
+        pocket_resids=pocket_resids,
+        label=lab,
+        pocket_map_json=pocket_map_json,
+        sim_dir=sim_root,
+    )
+    if len(resids) < 3:
         return {
             "success": False,
-            "error": f"Need >=3 pocket resids; got {len(pocket_resids)}",
+            "error": (
+                f"Need >=3 pocket resids; got {len(resids)}. "
+                "Pass pocket_resids or pocket_map_json / pocket_mapped.json."
+            ),
         }
 
-    adir = Path(working_dir) if working_dir else Path(sim_dir) / "analysis"
+    adir = Path(working_dir) if working_dir else Path(sim_root) / "analysis"
     adir.mkdir(parents=True, exist_ok=True)
 
-    topo, traj = _find_sim_traj_topology(sim_dir)
+    from src.analysis.traj_resolve import resolve_topology_trajectory
+
+    topo, traj = resolve_topology_trajectory(
+        topology_file or "",
+        trajectory_file or "",
+        sim_directory=sim_root,
+        hpc_dir=hpc_dir or None,
+    )
     if not topo or not traj:
-        return {"success": False, "error": f"No topology/trajectory in {sim_dir}"}
+        return {
+            "success": False,
+            "error": (
+                f"No topology/trajectory for {sim_root} "
+                f"(hpc_dir={hpc_dir or 'unset'})"
+            ),
+        }
     topo = str(Path(topo).resolve())
     traj = str(Path(traj).resolve())
 
     original = _chdir_working(str(adir))
     try:
         u = mda.Universe(topo, traj)
-        resids = [int(r) for r in pocket_resids]
+        resids = [int(r) for r in resids]
 
         pocket_atoms, _resolved_resids, _pocket_meta = resolve_pocket_atoms(
             u, pocket_resids=resids, protein_selection=protein_selection
@@ -1177,8 +1522,11 @@ def calculate_consensus_pocket_metrics(
             )
 
         summary = {
-            "label": label or Path(sim_dir).name,
-            "sim_directory": str(Path(sim_dir).resolve()),
+            "label": lab,
+            "sim_directory": str(Path(sim_root).resolve()),
+            "topology_file": topo,
+            "trajectory_file": traj,
+            "hpc_dir": hpc_dir or "",
             "pocket_residue_count": len(resids),
             "pocket_resids": resids,
             "ligand_pocket_distance_mean_A": com_res.get("mean_distance_A"),
@@ -1211,6 +1559,13 @@ def calculate_consensus_pocket_metrics(
         }
         summary_path = f"{output_prefix}_metrics.json"
         Path(summary_path).write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        aliases = _write_pocket_collector_aliases(adir, output_prefix)
+        if aliases:
+            summary["outputs"].update(aliases)
+            Path(summary_path).write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            rp_metrics = adir / "reference_pocket" / "reference_pocket_metrics.json"
+            if rp_metrics.is_file():
+                shutil.copy2(summary_path, rp_metrics)
 
         append_analysis_summary(
             working_dir=str(adir),
@@ -1241,7 +1596,7 @@ def calculate_consensus_pocket_metrics(
         ok = com_res.get("success") and contact_res.get("success")
         return {
             "success": bool(ok),
-            "message": f"Consensus pocket metrics for {label or sim_dir}",
+            "message": f"Consensus pocket metrics for {lab}",
             "metrics_json": str(adir / summary_path),
             **summary,
         }

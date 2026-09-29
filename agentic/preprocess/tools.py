@@ -231,6 +231,19 @@ class PreprocessingToolExecutor:
         """
         tool_func = self.tool_map.get(tool_name)
         if not tool_func:
+            try:
+                from agentic.utils.sandbox_files import execute_sandbox_tool
+
+                sand = execute_sandbox_tool(
+                    tool_name,
+                    params,
+                    roots=[self.working_dir.parent, self.working_dir],
+                    sim_root=str(self.working_dir.parent),
+                )
+                if sand is not None:
+                    return sand
+            except Exception:
+                pass
             return {
                 "success": False,
                 "error": f"Unknown tool: {tool_name}"
