@@ -1050,22 +1050,15 @@ class MDAnalysisAgent:
                     e for e in state.get("errors", [])
                     if not (e.startswith("Analysis failed:") or e.startswith("Analysis error:"))
                 ]
+                self._record_analysis_outcome(state, success=True, detail="")
                 if hitl_should_interact(state):
                     state["next_node"] = "human_analysis_check"
                 else:
                     state["next_node"] = "supervisor"
             else:
-                state["errors"].append(f"Analysis failed: {agent_output.result.report}")
-                try:
-                    from agentic.campaign.memory import remember_from_state
-
-                    remember_from_state(
-                        state,
-                        stage="analysis",
-                        error=str(agent_output.result.report),
-                    )
-                except Exception:
-                    pass
+                report = str(agent_output.result.report)
+                state["errors"].append(f"Analysis failed: {report}")
+                self._record_analysis_outcome(state, success=False, detail=report)
                 # Error-triggered HITL
                 state["next_node"] = "human_analysis_check"
                 state["error_triggered_hitl"] = True
@@ -1080,12 +1073,7 @@ class MDAnalysisAgent:
             logger.error(f"Traceback: {tb}")
             log_error("analysis_agent.analysis_node", e, {"state": str(state), "traceback": tb})
             state["errors"].append(f"Analysis error: {str(e)}")
-            try:
-                from agentic.campaign.memory import remember_from_state
-
-                remember_from_state(state, stage="analysis", error=str(e))
-            except Exception:
-                pass
+            self._record_analysis_outcome(state, success=False, detail=str(e))
             # Error-triggered HITL
             state["next_node"] = "human_analysis_check"
             state["error_triggered_hitl"] = True
@@ -2100,6 +2088,7 @@ Output as JSON:
         user_goal: str,
         metric_groups: Optional[List[str]] = None,
         required_columns: Optional[List[str]] = None,
+        state: Optional[MDState] = None,
     ) -> Optional[Dict[str, Any]]:
         """Ask the LLM to choose clustering features with written scientific reasoning.
 
@@ -2203,6 +2192,15 @@ Return ONLY JSON:
   "dropped_rationale": "note missing/empty columns and any deliberate drops"
 }}
 """
+        if state is not None:
+            try:
+                from agentic.campaign.agent_context import agent_context_block
+
+                extra = agent_context_block(state, "analysis", query=(user_goal or "")[:800])
+                if extra:
+                    prompt = f"{prompt}\n\n{extra}\n"
+            except Exception:
+                logger.debug("analysis feature-selection context skipped", exc_info=True)
         try:
             content = self.llm.prompt_raw(
                 prompt, temperature=0.2, max_tokens=4096, format="json"
@@ -3459,6 +3457,7 @@ Return ONLY JSON:
                                 user_goal=user_goal_text,
                                 metric_groups=collect_groups,
                                 required_columns=_required_cols,
+                                state=state,
                             )
                         except Exception as _sel_exc:
                             logger.warning(
@@ -4449,6 +4448,7 @@ Return ONLY JSON:
         3. Return structured results
         """
         try:
+            self._attach_retrieved_context(state, agent_input)
             # Step 1: LLM analyzes available data and creates plan.
             # When human_recommendation is set, replan on top of the existing plan
             # so the recommendation is actually applied (not bypassed).
@@ -5734,6 +5734,59 @@ Return ONLY JSON:
             plan_dict["steps"] = steps
         return plan_dict
 
+    def _sim_label_from_state(self, state: MDState) -> str:
+        wd = str(state.get("working_directory") or "")
+        if wd:
+            return Path(wd).name
+        return str(state.get("sim_label") or "")
+
+    def _attach_retrieved_context(self, state: MDState, agent_input: AnalysisAgentInput) -> None:
+        """Load knowledge, run memory, and study notes before the analysis model."""
+        try:
+            from agentic.campaign.agent_context import agent_context_block
+
+            query = " ".join(collect_goal_texts_for_intent(state, agent_input))[:1200]
+            block = agent_context_block(state, "analysis", query=query)
+        except Exception:
+            logger.debug("analysis retrieval skipped", exc_info=True)
+            return
+        if not block:
+            return
+        state["analysis_retrieved_context"] = block[:6000]
+        log_agent_action("analysis", "Retrieved campaign context", {
+            "chars": len(block),
+            "source": "agent_retrieval",
+        })
+
+    def _record_analysis_outcome(self, state: MDState, *, success: bool, detail: str) -> None:
+        """Write a campaign-level memory episode and a study note. Never raises."""
+        label = self._sim_label_from_state(state)
+        try:
+            from agentic.campaign.memory import record_fix, remember_episode
+            from agentic.campaign.study_notes import record_study_note, summarize_analysis_dir
+
+            wd = str(state.get("working_directory") or "")
+            numeric = summarize_analysis_dir(Path(wd) / "analysis", label=label) if wd else ""
+            if success:
+                record_fix(
+                    state,
+                    stage="analysis",
+                    fix=f"{label or 'system'} analysis completed",
+                )
+                summary = numeric or f"{label or 'system'} analysis completed"
+            else:
+                remember_episode(
+                    state=state,
+                    stage="analysis",
+                    error=(detail or "analysis failed")[:800],
+                    tool="analysis",
+                    label=label,
+                )
+                summary = numeric or f"{label or 'system'} analysis error: {(detail or '')[:400]}"
+            record_study_note(state, stage="analysis", summary=summary, label=label)
+        except Exception:
+            logger.debug("analysis memory write skipped", exc_info=True)
+
     def _build_analysis_planning_prompt(self, agent_input: AnalysisAgentInput, 
                                         state: MDState) -> str:
         """Build LLM planning prompt - use planner's detailed instructions if available"""
@@ -5741,12 +5794,26 @@ Return ONLY JSON:
         # Check if we have detailed instructions from planner
         if agent_input.additional_instructions:
             logger.info("Using planner's detailed instructions for analysis")
-            return self._build_prompt_from_planner_instructions(
+            prompt = self._build_prompt_from_planner_instructions(
                 agent_input, agent_input.additional_instructions, state
             )
-        
-        # Otherwise use standard config-based prompt
-        return self._build_standard_analysis_prompt(agent_input, state)
+        else:
+            prompt = self._build_standard_analysis_prompt(agent_input, state)
+        extra = str(state.get("analysis_retrieved_context") or "")
+        if not extra:
+            try:
+                from agentic.campaign.agent_context import agent_context_block
+
+                extra = agent_context_block(
+                    state,
+                    "analysis",
+                    query=" ".join(collect_goal_texts_for_intent(state, agent_input))[:1200],
+                )
+            except Exception:
+                extra = ""
+        if extra:
+            prompt = f"{prompt}\n\n{extra}\n"
+        return prompt
 
     def _build_prompt_from_planner_instructions(self, agent_input: AnalysisAgentInput,
                                                 planner_instructions: str,

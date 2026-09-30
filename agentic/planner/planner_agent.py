@@ -25,6 +25,7 @@ from .planning_guidelines import (
     detect_combined_only_metrics,
     detect_classification_requested,
     detect_requested_metrics,
+    strip_negated_clauses,
     get_intent_preservation_block,
     get_planner_metric_tool_reference,
     get_standard_output_filenames_block,
@@ -116,11 +117,13 @@ def _goal_requests_combined_analysis(goal: str, agent_list: List[str], subtask_t
         r"\bonly\s+per[-\s]?simulation\b",
         r"\beach\s+simulation\s+separately\b",
     ]
+    text = strip_negated_clauses(text)
     if any(re.search(p, text) for p in negative_patterns):
         return False
 
     positive_patterns = [
-        r"\bcombined\s+(analysis|report|comparison)\b",
+        r"\bcombined\s+(?:html\s+)?(?:analysis|report|comparison)\b",
+        r"\bcomparison\s+table\b",
         r"\bcross[-\s]?simulation\b",
         r"\bcomparative\s+(analysis|report|study|plots?)\b",
         r"\bcompare\s+(the\s+)?(simulations|proteins|systems|cases|conditions)\b",
@@ -130,7 +133,7 @@ def _goal_requests_combined_analysis(goal: str, agent_list: List[str], subtask_t
         r"\bclassif(y|ication)\b",
         r"\bcluster(ing|ed|s)?\b",
         r"\bunsupervised\b",
-        r"\boverlay\b",
+        r"\boverlay\s+(?:across|all|between|of\s+the\s+(?:proteins|systems|simulations))\b",
         r"\bcommon\s+(trends|patterns|flexible regions|motions)\b",
         r"\bconserved\s+(flexible regions|motions|dynamic patterns)\b",
         r"\bapo\s*(/|vs|versus|and)\s*holo\b",
@@ -156,12 +159,12 @@ def _goal_requests_pre_combined(goal: str, agent_list: List[str], subtask_type: 
         .replace("\u2014", "-")
         .replace("\u2212", "-")
     )
+    text = strip_negated_clauses(text)
     if re.search(r"\bno\s+(pocket\s+map|consensus|msa|pre[-\s]?combined)\b", text):
         return False
 
+    # A pocket-distance question is not a request to build the shared MSA.
     positive_patterns = [
-        r"\bpocket\b",
-        r"\bconsensus\b",
         r"\bmsa\b",
         r"\bsequence\s+alignment\b",
         r"\bglobal\s+sequence\s+alignment\b",
@@ -1200,21 +1203,37 @@ class MDPlanner:
             spec = compile_campaign_spec(state)
             state["campaign_spec"] = spec.to_dict()
             if spec.family_modular and len(sim_prompts) > 1:
-                # Family campaigns always need MSA/pocket maps and Ward reduce.
-                state["run_pre_combined"] = True
-                state["run_post_combined"] = True
-                state["run_combined_analysis"] = True
-                if not (pre_combined_plan or "").strip():
-                    pre_combined_plan = _build_pre_combined_plan_fallback(
-                        state, expanded_entries
-                    )
-                if not (post_combined_plan or "").strip():
-                    post_combined_plan = _build_combined_analysis_plan_fallback(
-                        state, expanded_entries
-                    )
-                run_pre_combined = True
-                run_post_combined = True
-                run_combined_analysis = True
+                # Several systems do not imply the manuscript recipe. Pin the
+                # shared MSA only when a pocket map was asked for, and pin Ward
+                # only when clustering was asked for.
+                from agentic.planner.planning_guidelines import (
+                    detect_consensus_pocket_requested,
+                )
+
+                want_pre = bool(
+                    detect_consensus_pocket_requested(
+                        original_goal, enriched_prompt
+                    ).get("requested")
+                )
+                want_post = bool(
+                    detect_classification_requested(original_goal, enriched_prompt)
+                )
+                if want_pre:
+                    state["run_pre_combined"] = True
+                    if not (pre_combined_plan or "").strip():
+                        pre_combined_plan = _build_pre_combined_plan_fallback(
+                            state, expanded_entries
+                        )
+                    run_pre_combined = True
+                if want_post:
+                    state["run_post_combined"] = True
+                    state["run_combined_analysis"] = True
+                    if not (post_combined_plan or "").strip():
+                        post_combined_plan = _build_combined_analysis_plan_fallback(
+                            state, expanded_entries
+                        )
+                    run_post_combined = True
+                    run_combined_analysis = True
             spec_path = Path(base_working_dir) / "planner" / "campaign_spec.json"
             spec_path.parent.mkdir(parents=True, exist_ok=True)
             spec_path.write_text(

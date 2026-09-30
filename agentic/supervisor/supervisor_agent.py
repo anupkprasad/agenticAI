@@ -2157,6 +2157,14 @@ class MDSupervisor:
     def _ensure_valid_next_node(self, state: MDState, *, _depth: int = 0) -> MDState:
         """Supervisor must never return ``next_node=supervisor`` to LangGraph routing."""
         nxt = state.get("next_node")
+        if nxt == "final_report":
+            try:
+                from agentic.campaign.route_policy import maybe_apply_route_policy
+
+                state = maybe_apply_route_policy(state, self.llm)
+                nxt = state.get("next_node")
+            except Exception:
+                logger.debug("route policy skipped", exc_info=True)
         if nxt in ("preprocess", "setup", "hpc", "analysis", "reporter"):
             try:
                 from agentic.campaign.stage_tick import forbid_backward_route

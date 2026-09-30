@@ -208,6 +208,10 @@ def forbid_backward_route(state: Dict[str, Any], requested_node: str) -> Optiona
     req = normalize_stage(requested_node)
     if req not in PER_SIM_STAGES:
         return None
+    # One configured supervisor decision may revisit a stage the tick already closed.
+    if state.get("_route_policy_force") == req:
+        state.pop("_route_policy_force", None)
+        return None
     if not stage_already_done(state, req):
         return None
     # Find the next incomplete per-sim stage (campaign-level phases are separate).

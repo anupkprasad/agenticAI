@@ -260,7 +260,9 @@ Responsibilities:
 2. Query UniProt REST API for domain residue boundaries
 3. Single LLM enrichment call → `structured_prompt`
 4. Build `master_plan.md` + `sim_prompts` for multi-sim
-5. Route agents in strict order; retry after human feedback
+5. Route agents in stage order. After an analysis error, one model call may
+   choose `analysis`, `reporter`, or `final_report` from `campaign.yaml`
+   (`agent_retrieval.supervisor`). The graph rejects any other destination.
 6. Feasibility guard: skip holo cases when ligand/ion absent in source structure
 7. Record `completed_sim_states` snapshots per simulation
 
@@ -269,8 +271,10 @@ Config: `agentic/supervisor/config.yaml`
 ### Planner (`MDPlanner`)
 
 1. Auto-discovers all `@tool` functions from every agent's `tools.py`
-2. Retrieves top-k tools and knowledge chunks (hybrid hashed n-gram + Jaccard;
-   optional Ollama). Knowledge is cited as `[kb:…]`, not dumped whole.
+2. Retrieves top-k tools and knowledge chunks (hybrid hashed n-gram + Jaccard,
+   plus cached Ollama vectors when `embed_model` answers). Knowledge is cited
+   as `[kb:…]`, not dumped whole. Analysis and reporter use the same retrieval
+   for their own prompts (`agent_retrieval` in `campaign.yaml`).
 3. Submits retrieved tools + knowledge + goal to LLM → execution plan
 4. Extracts per-agent instruction blocks into state fields:
    `preprocessing_instructions`, `setup_instructions`,

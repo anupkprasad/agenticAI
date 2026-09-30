@@ -6,7 +6,12 @@ import logging
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from agentic.retrieval.catalog import catalog_from_registry
-from agentic.retrieval.embed import hashed_ngram_embed, hybrid_score, ollama_embed
+from agentic.retrieval.embed import (
+    blend_with_dense,
+    dense_vectors,
+    hashed_ngram_embed,
+    hybrid_score,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,17 +49,15 @@ class ToolRetriever:
 
         q_vec = hashed_ngram_embed(query)
         scored: List[tuple[float, Dict[str, Any]]] = []
-        dense = ollama_embed([query] + [r["embed_text"] for r in records])
+        dense = dense_vectors([query] + [r["embed_text"] for r in records])
         q_dense = dense[0] if dense else None
-        d_dense = dense[1:] if dense else None
+        d_dense = dense[1:] if len(dense) > 1 else []
 
         for i, rec in enumerate(records):
             d_vec = hashed_ngram_embed(rec["embed_text"])
             score = hybrid_score(query, rec["embed_text"], q_vec, d_vec)
-            if q_dense is not None and d_dense is not None:
-                from agentic.retrieval.embed import cosine
-
-                score = 0.55 * score + 0.45 * cosine(q_dense, d_dense[i])
+            doc_dense = d_dense[i] if i < len(d_dense) else None
+            score = blend_with_dense(score, q_dense, doc_dense)
             scored.append((score, rec))
         scored.sort(key=lambda x: x[0], reverse=True)
 

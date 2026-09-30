@@ -68,8 +68,10 @@ Given a natural-language goal and either a PDB file or a UniProt accession, the 
 - **Restricted file tools** — field agents can list, search, and read the
   inventory only inside this study’s directories. HITL `pwd` prints
   `{stage}/inventory.json`.
-- **Run memory** — past errors and fixes (`campaign/memory.jsonl`) are
-  retrieved when planning after a failure.
+- **Run memory** — one episode per distinct error at `campaign/memory.jsonl`
+  (stage, tool, system, fix). Analysis, reporter, and the supervisor retrieve
+  it with the same embedding search as the planner, together with short study
+  notes from this run.
 - **Review pauses** — `--HITL all` can pause after the compiled protocol,
   after shared MSA/pocket mapping, and after cross-system comparison.
 - **Programmer software list** — [`AVAILABLE_SOFTWARE.md`](../AVAILABLE_SOFTWARE.md)
@@ -236,7 +238,8 @@ After every run the following are written to the base working directory:
 | `agent_conversation.log` | Full agent dialogue, LLM prompts/responses, routing decisions |
 | `planner/master_plan.md` | Multi-sim master plan with per-case prompts and combined analysis plan |
 | `campaign/state.json` | Versioned campaign snapshot (spec hash, stages, science contract) |
-| `campaign/memory.jsonl` | Past errors/fixes retrieved on later failures |
+| `campaign/memory.jsonl` | Deduped errors and later fixes, retrieved by analysis, reporter, supervisor, and planner |
+| `campaign/study_notes.jsonl` | Short numeric notes from this run, same retrieval |
 | `{label}/state.json` | Per-simulation snapshot (completed stages, bound `hpc/repXX` traj) |
 | `{label}/{stage}/inventory.json` | Per-stage artifact index (preprocess → reporter; HITL `pwd` reads this) |
 | `{label}/analysis/repXX/inventory.json` | Absolute topology, trajectory, and mapped-residue paths |

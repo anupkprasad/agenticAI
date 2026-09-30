@@ -10,9 +10,31 @@ pocket_cutoff_A: 15.0             # reference ligand shell (Å)
 lobe_method: auto                 # auto | consensus_index | reference_resid | midpoint
 
 # Retrieval
-retrieval_k: 16                   # top-k tools and knowledge chunks
-embed_model: ""                   # empty = hashed n-grams; e.g. nomic-embed-text
+retrieval_k: 16                   # top-k tools for the planner
+embed_model: nomic-embed-text    # dense blend when this Ollama model answers;
+                                  # hashed n-grams remain if it does not
                                   # AGENTIC_EMBED_MODEL overrides when set
+
+# What each agent retrieves before its model call. Required calculations stay
+# in the planner tool list; these knobs only add context.
+agent_retrieval:
+  analysis:
+    knowledge_k: 4
+    memory_k: 5
+    study_k: 4
+  reporter:
+    knowledge_k: 6
+    memory_k: 4
+    study_k: 6
+  supervisor:
+    knowledge_k: 2
+    memory_k: 5
+    study_k: 4
+    route_once: true
+    allowed_destinations:
+      - analysis
+      - reporter
+      - final_report
 
 # Family Ward columns — paper fig3 sharedpcdyn (10 features)
 gold_columns:

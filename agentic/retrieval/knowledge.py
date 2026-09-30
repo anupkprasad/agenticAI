@@ -9,7 +9,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from agentic.retrieval.embed import hashed_ngram_embed, hybrid_score, ollama_embed
+from agentic.retrieval.embed import (
+    blend_with_dense,
+    dense_vectors,
+    hashed_ngram_embed,
+    hybrid_score,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -195,18 +200,18 @@ def retrieve_knowledge_chunks(
         return []
     q = (query or "").strip() or "molecular dynamics protein simulation protocol"
     q_vec = hashed_ngram_embed(q)
-    dense = ollama_embed([q] + [c.get("embed_text") or c.get("text") or "" for c in chunks])
+    dense = dense_vectors(
+        [q] + [c.get("embed_text") or c.get("text") or "" for c in chunks]
+    )
     q_dense = dense[0] if dense else None
-    d_dense = dense[1:] if dense else None
+    d_dense = dense[1:] if len(dense) > 1 else []
 
     scored: List[tuple[float, Dict[str, Any]]] = []
     for i, ch in enumerate(chunks):
         d_vec = ch.get("embedding") or hashed_ngram_embed(ch.get("embed_text") or "")
         score = hybrid_score(q, ch.get("embed_text") or ch.get("text") or "", q_vec, d_vec)
-        if q_dense is not None and d_dense is not None:
-            from agentic.retrieval.embed import cosine
-
-            score = 0.55 * score + 0.45 * cosine(q_dense, d_dense[i])
+        doc_dense = d_dense[i] if i < len(d_dense) else None
+        score = blend_with_dense(score, q_dense, doc_dense)
         scored.append((score, ch))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [ch for _, ch in scored[: max(1, int(top_k))]]

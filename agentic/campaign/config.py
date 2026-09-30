@@ -23,6 +23,34 @@ _ENV_MAP = {
     "hitl": "AGENTIC_HITL",
 }
 
+_DEFAULT_AGENT_RETRIEVAL: Dict[str, Any] = {
+    "analysis": {"knowledge_k": 4, "memory_k": 5, "study_k": 4},
+    "reporter": {"knowledge_k": 6, "memory_k": 4, "study_k": 6},
+    "supervisor": {
+        "knowledge_k": 2,
+        "memory_k": 5,
+        "study_k": 4,
+        "route_once": True,
+        "allowed_destinations": ["analysis", "reporter", "final_report"],
+    },
+}
+
+
+def _merge_agent_retrieval(raw: Any) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {
+        name: dict(profile) for name, profile in _DEFAULT_AGENT_RETRIEVAL.items()
+    }
+    if not isinstance(raw, dict):
+        return merged
+    for name, profile in raw.items():
+        if not isinstance(profile, dict):
+            continue
+        base = dict(merged.get(str(name), {}))
+        base.update(profile)
+        merged[str(name)] = base
+    return merged
+
+
 _DEFAULT_GOLD = [
     "reference_pocket_ligand_distance_mean_A",
     "reference_pocket_ligand_distance_std_A",
@@ -48,6 +76,9 @@ class CampaignSettings:
     lobe_method: str = "auto"
     retrieval_k: int = 16
     embed_model: str = ""
+    agent_retrieval: Dict[str, Any] = field(
+        default_factory=lambda: _merge_agent_retrieval(None)
+    )
     gold_columns: List[str] = field(default_factory=lambda: list(_DEFAULT_GOLD))
     hitl: Optional[str] = None
     source_path: str = ""
@@ -76,6 +107,7 @@ class CampaignSettings:
             lobe_method=str(data.get("lobe_method") or "auto"),
             retrieval_k=int(data.get("retrieval_k") if data.get("retrieval_k") is not None else 16),
             embed_model=str(embed),
+            agent_retrieval=_merge_agent_retrieval(data.get("agent_retrieval")),
             gold_columns=[str(c) for c in gold if c],
             hitl=hitl,
             source_path=str(data.get("source_path") or ""),

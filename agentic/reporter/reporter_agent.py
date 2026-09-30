@@ -1653,6 +1653,15 @@ No need to specify image paths in tool_params - they're extracted from the analy
 
         return literature_refs[:MAX_REFS]
 
+    def _retrieved_context(self, state: MDState, query: str = "") -> str:
+        try:
+            from agentic.campaign.agent_context import agent_context_block
+
+            return agent_context_block(state, "reporter", query=query[:1200])
+        except Exception:
+            logger.debug("reporter retrieval skipped", exc_info=True)
+            return ""
+
     def _generate_literature_review(
         self,
         analysis_data: Dict[str, Any],
@@ -1758,11 +1767,12 @@ No need to specify image paths in tool_params - they're extracted from the analy
             )
 
         combined_note = (
-            "This is a MULTI-SIMULATION comparative report (apo vs holo, multiple proteins). "
-            "Prioritise papers that discuss the named proteins, pseudokinase regulation, "
-            "activation-loop conformations, ATP/nucleotide effects, and MD-derived dynamics."
+            "This is a multi-simulation comparison. "
+            "Prioritise papers that discuss the named systems and the measurements "
+            "that actually appear in the results."
             if is_combined else ""
         )
+        retrieved = self._retrieved_context(state, query=objective)
 
         prompt = f"""You are a computational biophysics expert writing the Literature Review section of an MD simulation report.
 
@@ -1781,6 +1791,8 @@ No need to specify image paths in tool_params - they're extracted from the analy
 
 **Candidate Publications (read each abstract; relevance score provided):**
 {lit_text}
+
+{retrieved}
 
 **Instructions:**
 - Prioritise papers whose primary subject is {protein_focus}; use related-family papers (e.g. other pseudokinases) only when they illuminate the same mechanism observed in this simulation
@@ -1881,6 +1893,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 snippet = abstract[:350] if abstract else "No abstract"
                 lit_parts.append(f"[{i}] {title}\n    {snippet}")
             lit_text = "\n".join(lit_parts)
+        retrieved = self._retrieved_context(state, query=user_goal)
 
         prompt = f"""You are a computational biophysics expert writing the Combined Final Impression for a multi-simulation MD report.
 
@@ -1901,8 +1914,11 @@ No need to specify image paths in tool_params - they're extracted from the analy
 **Literature References (use for contextual comparison; cite as [1], [2], ...):**
 {lit_text}
 
+{retrieved}
+
 **Instructions:**
 - Write 3–5 paragraphs that tell one coherent story aligned with the user's objective
+- Quote numbers that appear in the retrieved study notes or the analysis results; do not replace them with a generic stability summary
 - If the goal emphasises unsupervised classification or clustering, lead with how simulations group by dynamic regime (FEL/phylogenetic tree), what distinguishes each cluster (COM distance, contacts, pocket RMSF, ligand flexibility), and biological interpretation — do not repeat generic RMSD/Rg lists unless they support the classification story
 - If the goal emphasises apo vs holo or binding, integrate ligand–pocket coupling, contacts, and flexibility trends with literature
 - Cite relevant literature using bracket notation [1], [2], etc.
@@ -2094,6 +2110,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
             or state.get("user_goal", "MD simulation analysis")
         )
         findings_block = focused_findings or "; ".join(context.get("finding_phrases") or [])
+        retrieved = self._retrieved_context(state, query=user_goal_display)
         
         prompt = f"""You are a computational biophysics expert. Based on the analysis results and literature below, write a concise Final Impression section for a scientific MD simulation report.
 
@@ -2111,8 +2128,11 @@ No need to specify image paths in tool_params - they're extracted from the analy
 **Literature References:**
 {lit_text}
 
+{retrieved}
+
 **Instructions:**
-- Write specifically about {protein_label} — not generic kinase/pseudokinase commentary unless directly supported by the data
+- Write specifically about {protein_label}. Use related-system commentary only when the results or retrieved notes support it
+- Quote numbers from the analysis results and the retrieved study notes when they are present
 - Correlate the analysis results with findings from the literature on {protein_label} or closely related systems
 - Highlight the most important observations: stability, flexible regions, ligand effects, FEL basins, activation-loop behaviour, interface H-bond occupancy, salt bridges, and named residue–residue interaction partners — whichever appear in the results
 - Draw a clear conclusion that answers the user's research question

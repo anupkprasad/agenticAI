@@ -111,8 +111,10 @@ tools are retrieved instead of dumping the full catalog into the LLM:
 1. **Hashed character n-grams** (256-d, MD5-stable, no extra model)
 2. **Lexical Jaccard** on tokens
 3. Hybrid score: `0.65 * cosine + 0.35 * overlap`
-4. Optional **Ollama dense embeddings** if `AGENTIC_EMBED_MODEL` is set
-   (e.g. `nomic-embed-text`); blended at 45% when the server answers
+4. **Ollama dense embeddings** when `embed_model` is set (`nomic-embed-text`
+   by default). Vectors are cached for the process. If one request fails, that
+   item stays on the hashed score and the rest of the batch still blends.
+   After the server is unreachable, the process stays on hashed n-grams.
 
 Required calculations for the study are always included, then the top-k (~16)
 ranked tools.
@@ -126,11 +128,33 @@ The index is `planner/knowledge_index.json` (next to
 `agentic/planner/knowledge/`, copied into the campaign `planner/` folder).
 
 ```bash
-export AGENTIC_EMBED_MODEL=nomic-embed-text   # optional dense blend
-# hashed n-grams always run; Ollama failure falls back silently
+# optional override; campaign.yaml embed_model is used when this is unset
+export AGENTIC_EMBED_MODEL=nomic-embed-text
 ```
 
-`retrieval_k` (default 16) and `embed_model` live in `campaign.yaml`.
+`retrieval_k` (planner tool top-k) and `embed_model` live in `campaign.yaml`.
+`agent_retrieval` sets how many knowledge chunks, memory episodes, and study
+notes each of analysis, reporter, and supervisor sees before its model call.
+The same search is not kinase-specific: the query is the user goal plus any
+error text.
+
+## Agent retrieval and routing
+
+| Agent | What the model receives |
+|-------|-------------------------|
+| Planner | Top-k tools (required calculations pinned) and knowledge chunks |
+| Analysis | Knowledge, prior errors for this campaign, and study notes, before planning or feature selection |
+| Reporter | The same block inside the literature review and the final impression |
+| Supervisor | Once per system, only when analysis left an error and the next node would be `final_report` |
+
+The supervisor model may return only `agent_retrieval.supervisor.allowed_destinations`
+(`analysis`, `reporter`, or `final_report`). The graph checks that name. One
+decision may send analysis back even if that stage was already ticked done.
+If the model is unavailable, the existing route is kept.
+
+Study notes are `campaign/study_notes.jsonl`: the system label plus numeric
+fields already present in `analysis/analysis_summary.jsonl`. They are
+retrieved with the same embedder. They are not a fixed feature schema.
 
 ## campaign.yaml
 
@@ -147,8 +171,9 @@ CLI `--HITL`.
 | `min_coverage` | `0.25` | Column occupancy floor |
 | `pocket_cutoff_A` | `15` | Reference ligand shell (Å) |
 | `lobe_method` | `auto` | N/C lobe split |
-| `retrieval_k` | `16` | Top-k tools (knowledge uses k/2) |
-| `embed_model` | `""` | Optional Ollama embed model |
+| `retrieval_k` | `16` | Planner tool top-k (knowledge uses the per-agent `knowledge_k`) |
+| `embed_model` | `nomic-embed-text` | Dense blend; hashed n-grams if the model does not answer |
+| `agent_retrieval` | per agent | `knowledge_k`, `memory_k`, `study_k`; supervisor destinations |
 | `gold_columns` | paper 9 | Preferred Ward columns (not a plot gate) |
 | `hitl` | `null` | `error` / `all` if CLI `--HITL` is omitted |
 
@@ -162,7 +187,11 @@ the current protein folder). They cannot read files outside the study.
 `write_file` stays HITL-only.
 
 Prior errors and fixes from this campaign are stored in
-`campaign/memory.jsonl` and shown to the planner on the next failure.
+`campaign/memory.jsonl` at the **campaign root** (not under each protein
+folder). A repeated stage + tool + error updates the existing episode.
+When a later attempt succeeds, the open episode receives a fix. Analysis,
+reporter, supervisor, and planner retrieve the top episodes with the same
+hybrid embedder.
 
 With `--HITL all`, a human can review (1) the compiled analysis protocol,
 (2) the shared MSA/pocket mapping, and (3) the cross-system comparison,

@@ -413,7 +413,10 @@ _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
     ),
     "consensus_dccm": (
         r"consensus\s+dccm",
-        r"n[-\s]?lobe.*c[-\s]?lobe",
+        # Lobe names alone are not DCCM: a COM distance between lobes must not
+        # schedule a correlation matrix.
+        r"n[-\s]?lobe.{0,40}c[-\s]?lobe.{0,40}(?:dccm|correlat)",
+        r"(?:dccm|correlat).{0,40}n[-\s]?lobe.{0,40}c[-\s]?lobe",
         r"dccm_N_C",
         r"dccm\s+n\s*[-–—/]\s*c",
         r"mapped\s+dccm",
@@ -448,6 +451,60 @@ _BROAD_DYNAMICS_PATTERNS = (
     "comprehensive analysis",
     "full analysis",
 )
+
+_NEGATION_START = re.compile(
+    r"\b(?:do\s+not|don't|dont|never|must\s+not)\b",
+    re.IGNORECASE,
+)
+
+
+def strip_negated_clauses(text: str) -> str:
+    """Remove prohibitions before intent detection.
+
+    "Do not compute DCCM" is not a request for DCCM. A prohibition may wrap
+    onto the next line ("Do not compute X,\\nY, or Z."). It stops at a period,
+    at a colon (so "do not drop any:" does not erase the following list),
+    or at a blank line or numbered item.
+    """
+    if not text:
+        return ""
+    kept: List[str] = []
+    carry = False
+    for line in text.splitlines(keepends=True):
+        nl = "\n" if line.endswith("\n") else ""
+        body = line[:-1] if nl else line
+        if carry:
+            if not body.strip() or re.match(r"\s*\d+\.\s", body):
+                carry = False
+            else:
+                term = re.search(r"[.!?]", body)
+                if term:
+                    body = body[term.end():]
+                    carry = False
+                else:
+                    kept.append(nl)
+                    continue
+        pieces: List[str] = []
+        cursor = 0
+        while cursor <= len(body):
+            match = _NEGATION_START.search(body, cursor)
+            if not match:
+                pieces.append(body[cursor:])
+                break
+            pieces.append(body[cursor:match.start()])
+            rest = body[match.end():]
+            term = re.search(r"[.!?]", rest)
+            colon = rest.find(":")
+            if term and (colon < 0 or term.start() <= colon):
+                cursor = match.end() + term.end()
+                continue
+            if colon >= 0:
+                pieces.append(rest[colon + 1:])
+                break
+            carry = True
+            break
+        kept.append("".join(pieces) + nl)
+    return "".join(kept)
 
 
 def collect_goal_texts_for_intent(
@@ -550,13 +607,22 @@ def _normalize_metric_false_positives(text: str, found: Set[str]) -> None:
             lower,
         ):
             found.discard("pca")
-    if "consensus_dccm" in found and "dccm" in found:
-        if not re.search(r"\bdccm\b(?!\s+n)", lower) and re.search(
-            r"dccm\s+n|consensus\s+dccm|n[-\s]?lobe", lower
+    # "residues within 15 Å of ATP" defines a pocket cutoff. It is not a
+    # request for a separate nearby-residue analysis.
+    if "nearby" in found and re.search(
+        r"residues?\s+within\s+\d+(?:\.\d+)?\s*(?:å|a|angstrom)?\s+of\s+(?:the\s+)?(?:atp|ligand)",
+        lower,
+    ):
+        if not re.search(
+            r"nearby\s+resid|identify\s+all\s+chain|neighbouring\s+resid|neighboring\s+resid",
+            lower,
         ):
-            # Keep both only if user also asked for generic DCCM maps
-            if not re.search(r"dccm\s+(?:map|matrix|plot|overlay|difference)", lower):
-                found.discard("dccm")
+            found.discard("nearby")
+    if "consensus_dccm" in found and "dccm" in found:
+        # "N–C DCCM mean correlation" is the consensus feature, not a second
+        # full-matrix DCCM analysis. Keep generic DCCM only when a map is asked for.
+        if not re.search(r"dccm\s+(?:map|matrix|heatmap|plot|overlay|difference)", lower):
+            found.discard("dccm")
 
 
 def _normalize_binding_rmsf_metrics(text: str, found: Set[str]) -> None:
@@ -624,6 +690,7 @@ def detect_requested_metrics(goal: str) -> Optional[FrozenSet[str]]:
         .replace("\u2014", "-")
         .replace("\u2212", "-")
     )
+    text = strip_negated_clauses(text)
 
     found = {
         metric
@@ -718,11 +785,13 @@ def _normalize_goal_text(*goal_texts: str) -> str:
         if not text:
             continue
         parts.append(
-            text.lower()
-            .replace("\u2011", "-")
-            .replace("\u2012", "-")
-            .replace("\u2013", "-")
-            .replace("\u2014", "-")
+            strip_negated_clauses(
+                text.lower()
+                .replace("\u2011", "-")
+                .replace("\u2012", "-")
+                .replace("\u2013", "-")
+                .replace("\u2014", "-")
+            )
         )
     return " ".join(parts)
 
@@ -812,8 +881,8 @@ def detect_family_modular_dynamics_requested(*goal_texts: str) -> bool:
         return True
     has_pocket = bool(
         re.search(
-            r"pocket.*(distance|com)|how far .*(atp|ligand)|"
-            r"(?:atp|ligand).*(?:center\s+of\s+mass|com).*pocket|"
+            r"pocket.{0,40}(?:distance|\bcom\b)|how far .*(atp|ligand)|"
+            r"(?:atp|ligand).*(?:center\s+of\s+mass|\bcom\b).*pocket|"
             r"distance of the (?:atp|ligand)",
             text,
         )
@@ -830,7 +899,11 @@ def detect_family_modular_dynamics_requested(*goal_texts: str) -> bool:
     )
     has_chi = bool(re.search(r"χ\s*₁|chi\s*1|side[-\s]?chain", text))
     has_dccm = bool(
-        re.search(r"n[-\s]?lobe|c[-\s]?lobe|correlated\s+motion|dccm", text)
+        re.search(
+            r"\bdccm\b|correlated\s+motion|"
+            r"n[-\s]?lobe.{0,40}c[-\s]?lobe.{0,40}(?:dccm|correlat)",
+            text,
+        )
     )
     has_entropy = bool(
         re.search(
@@ -1032,7 +1105,7 @@ def detect_classification_requested(*goal_texts: str) -> bool:
             .replace("\u2013", "-")
             .replace("\u2014", "-")
         )
-        normalized = _strip_compute_cluster_mentions(normalized)
+        normalized = strip_negated_clauses(_strip_compute_cluster_mentions(normalized))
         if any(re.search(p, normalized) for p in _CLASSIFICATION_REQUEST_PATTERNS):
             return True
     return False

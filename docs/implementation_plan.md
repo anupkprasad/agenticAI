@@ -194,8 +194,15 @@ axis-angle was missing or that `noop` is not a tool.
 **Do.** `campaign/memory.jsonl`: `{stage, error, fix, embedding}`. Retrieve
 on planner / supervisor error. Do not replace `CampaignSpec`.
 
-**Status.** Landed. `campaign/memory.jsonl` stores `{stage, error, fix,
-embedding}`. Retrieved into the planner prompt on the next failure.
+**Status.** Landed, then extended. Episodes live at the campaign root and
+include tool and system label. A repeated error updates the same episode;
+a later success writes the fix. Analysis, reporter, and the supervisor
+retrieve the same episodes as the planner (`agent_retrieval` in
+`campaign.yaml`). `campaign/study_notes.jsonl` holds short numeric notes
+from this run. After an analysis error, the supervisor model may choose
+`analysis`, `reporter`, or `final_report` once per system. Dense embeddings
+use `embed_model` (default `nomic-embed-text`) with a process cache and a
+hashed-n-gram fallback.
 
 ### P2.2 HITL on compile and combined stages
 
