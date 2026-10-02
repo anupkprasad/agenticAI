@@ -426,8 +426,9 @@ Tests: `pytest` (see `environment.yml` for dependencies).
 
 ## License
 
-See repository license file if present. CHARMM36 force field parameters are
-distributed separately by the MacKerell lab and are not part of this repository.
+This project is released under the [MIT License](LICENSE). CHARMM36 force field
+parameters are distributed separately by the MacKerell lab and are not part of
+this repository.
 
 ---
 
