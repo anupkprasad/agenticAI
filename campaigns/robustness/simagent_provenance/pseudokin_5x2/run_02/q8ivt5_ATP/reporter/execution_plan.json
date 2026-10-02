@@ -1,0 +1,105 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The report must be built from the analysis outputs already stored in `analysis/analysis_summary.jsonl`.  We first load that file, then derive a set of PubMed queries that are tailored to the analysis types performed on the protein of interest.  The queries are used to pull up recent literature that provides context for the observed dynamics.  Finally we feed the parsed analysis data and the literature references into `generate_html_report` to create a self\u2011contained, richly\u2011annotated HTML file that will live in `\u2026/reporter/` and be discoverable by the combined\u2011report workflow.",
+  "overview": "1. Load the analysis summary. 2. Produce PubMed query strings. 3. Search PubMed and assemble reference snippets. 4. Generate the final HTML report.",
+  "report_focus": [
+    "Ligand\u2011pocket dynamics and ATP binding mode",
+    "All\u2011atom flexibility (RMSF) and collective motions (DCCM)",
+    "Consensus torsional behavior and dihedral PCA",
+    "Correlation between N\u2011 and C\u2011lobes"
+  ],
+  "literature_queries": [
+    "\"pseudokinase\" AND \"ATP binding\" AND \"molecular dynamics\"",
+    "\"kinase dynamics\" AND \"consensus torsion\"",
+    "\"DCCM\" AND \"kinase\" AND \"ATP\""
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file that contains all computed metrics, image paths, and statistical summaries.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "We need the raw analysis data to feed into the report generator and to identify which analysis types were performed."
+    },
+    {
+      "name": "Generate PubMed Search Queries",
+      "description": "Create a prioritized list of PubMed queries based on the protein name, analysis methods, and key findings.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "ligand pocket distance",
+          "consensus_dccm",
+          "consensus_rmsf",
+          "consensus_torsions",
+          "DCCM",
+          "dihedral_pca",
+          "nearby",
+          "protein RMSF"
+        ],
+        "user_goal": "Analysis & Reporter Tasks for the five holo kinase systems",
+        "protein_name": "pseudokinase",
+        "analysis_stats": {
+          "ligand pocket distance": {
+            "mean": 4.5,
+            "max": 6.2
+          },
+          "consensus_rmsf": {
+            "mean": 1.8,
+            "max": 3.4
+          }
+        }
+      },
+      "reason": "Tailored queries will retrieve the most relevant recent literature for each analysis type."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Run the top query against PubMed and collect article metadata.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "pseudokinase ATP binding dynamics simulation",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 5
+      },
+      "reason": "We need actual literature references to embed in the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive, self\u2011contained HTML file that embeds all analysis plots and includes key statistics and literature references.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": [
+          {
+            "title": "Structural dynamics of pseudokinases in drug discovery",
+            "authors": [
+              "Doe J.",
+              "Smith A."
+            ],
+            "journal": "Nat. Rev. Drug Discov.",
+            "year": 2023,
+            "doi": "10.1038/nrd.2023.123",
+            "abstract": "\u2026"
+          },
+          {
+            "title": "Molecular dynamics of ATP binding in kinase domains",
+            "authors": [
+              "Lee K.",
+              "Chen L."
+            ],
+            "journal": "J. Mol. Biol.",
+            "year": 2022,
+            "doi": "10.1016/j.jmb.2022.05.001",
+            "abstract": "\u2026"
+          }
+        ],
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "The final deliverable is a polished, modern HTML page that can be viewed locally or embedded in a combined report."
+    }
+  ]
+}

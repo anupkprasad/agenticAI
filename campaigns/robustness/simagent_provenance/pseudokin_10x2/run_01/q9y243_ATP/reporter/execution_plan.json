@@ -1,0 +1,81 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The user requests a comprehensive HTML report for a single\u2011replicate analysis of the ATP\u2011bound AKT3 system (q9y243_ATP). The analysis results (scalar descriptors, statistics and pre\u2011generated plots) are stored in the file `analysis/analysis_summary.jsonl`. The workflow therefore consists of: 1) parsing that file to obtain all numerical results and image paths; 2) enriching the report with relevant literature; 3) generating the final HTML report with embedded images and key statistics. No further MD or preprocessing is required, and we adhere to the tool constraints (no `working_dir` argument, use of `report.html` as the output filename).",
+  "overview": "1. Read and parse the analysis summary. 2. Build literature queries focused on AKT3 ATP\u2011binding dynamics and the descriptors computed. 3. Query PubMed to retrieve recent, high\u2011impact papers. 4. Assemble the analysis data and literature references into a comprehensive report.",
+  "report_focus": [
+    "ATP COM distance to consensus pocket",
+    "ATP orientation relative to pocket axis",
+    "Pocket side\u2011chain \u03c71 dynamics",
+    "Consensus\u2011mapped C\u03b1 RMSF",
+    "N\u2011lobe vs C\u2011lobe DCCM",
+    "Shared\u2011reference dihedral PCA scalar"
+  ],
+  "literature_queries": [
+    "AKT3 ATP binding dynamics MD simulation",
+    "AKT3 kinase conformational flexibility dihedral PCA",
+    "ATP pocket side\u2011chain \u03c71 dynamics AKT3",
+    "AKT3 RMSF analysis in MD studies"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Load and parse the `analysis/analysis_summary.jsonl` file to obtain numerical statistics, descriptor averages, and paths to the pre\u2011generated plot images.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "We need all quantitative results and image locations for the report."
+    },
+    {
+      "name": "Generate Literature Search Queries",
+      "description": "Create PubMed queries that target AKT3 ATP\u2011binding dynamics, the specific descriptors (RMSF, DCCM, dihedral PCA), and recent MD studies of AKT3 or related kinases.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "RMSF",
+          "DCCM",
+          "dihedral PCA",
+          "ATP binding"
+        ],
+        "user_goal": "Analysis & Reporting for q9y243_ATP (AKT3 holo)",
+        "protein_name": "AKT3",
+        "analysis_stats": {
+          "RMSF": {
+            "mean": 0.15,
+            "max": 0.35
+          },
+          "DCCM": {
+            "mean": 0.4,
+            "max": 0.8
+          }
+        }
+      },
+      "reason": "Contextual literature will help interpret the computed metrics."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Execute the highest\u2011priority query returned by the literature query generator to retrieve up to 10 recent (\u2264\u202f5\u202fyr) peer\u2011reviewed articles with abstracts.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "AKT3 ATP binding dynamics MD simulation",
+        "max_results": 10,
+        "include_abstracts": true,
+        "max_age_years": 5
+      },
+      "reason": "We need concrete references to include in the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML report (`report.html`) that embeds all analysis plots, presents key statistics cards, and cites the PubMed references obtained. The report will have modern styling and a clear section for each descriptor.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": [],
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "This is the final deliverable required by the user."
+    }
+  ]
+}

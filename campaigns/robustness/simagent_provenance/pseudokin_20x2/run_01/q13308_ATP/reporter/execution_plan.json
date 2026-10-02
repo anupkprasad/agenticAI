@@ -1,0 +1,40 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The report requires only the analysis results that have already been computed and stored in `analysis_summary.jsonl`. We first read and parse this file to obtain all statistical values and image paths. Then we feed the parsed data directly to `generate_html_report`, which will embed the images, display key statistics, and format the content in a professional, comprehensive layout. No additional preprocessing or external data is needed for a single\u2011simulation report, so we keep the workflow minimal and deterministic.",
+  "overview": "Generate a single\u2011simulation HTML report for the q13308_ATP system by (1) parsing the existing analysis summary and (2) rendering the report with embedded visualisations and statistics.",
+  "report_focus": [
+    "ATP\u2011pocket interaction metrics",
+    "Pocket residue dynamics",
+    "Inter\u2011lobe correlation",
+    "Consensus\u2011mapped flexibility"
+  ],
+  "literature_queries": [],
+  "estimated_complexity": "low",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Load and parse the `analysis_summary.jsonl` file that contains all computed descriptors, statistics, and image file paths for the two 200\u202fns replicates.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Retrieve all analysis data needed for report generation."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML report (`report.html`) that embeds the trajectory plots, displays key statistics cards, and uses a modern layout with visual hierarchy.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": [],
+        "report_type": "comprehensive",
+        "output_file": "report.html",
+        "system_info": null,
+        "final_impression": null,
+        "pdb_data": null,
+        "enriched_prompt": null
+      },
+      "reason": "Produce the final deliverable as specified."
+    }
+  ]
+}

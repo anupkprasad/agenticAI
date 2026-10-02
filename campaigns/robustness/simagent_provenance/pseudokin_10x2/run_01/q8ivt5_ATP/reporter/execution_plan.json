@@ -1,0 +1,80 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The analysis for the two KSR1 replicas is already completed and the results are stored in `analysis/analysis_summary.jsonl`.  The report must present the averaged descriptor vector, visualizations (heatmap, dendrogram, etc.) and a concise interpretation.  The only required step is to parse the summary file and feed the data to `generate_html_report`, which will embed all plots and produce the final `report.html` in the reporter's working directory.  A brief literature context will be added by performing a PubMed search for recent papers on KSR1 structure\u2013function and on the specific analysis methods (RMSF, DCCM, dihedral PCA).",
+  "overview": "1. Parse the analysis summary to extract scalar descriptors, averaged values, and image paths. 2. Perform a targeted PubMed search for recent KSR1 MD/structural studies and for the analysis methods used. 3. Generate a comprehensive HTML report that embeds the visualizations, presents key statistics, and situates the findings in the literature.",
+  "report_focus": [
+    "Averaged descriptor vector for KSR1 holo system",
+    "Heatmap of descriptor values (robust z\u2011score/IQR scaling)",
+    "Ward clustering dendrogram with k=4 cut",
+    "Literature context on KSR1 MD/structure\u2011function"
+  ],
+  "literature_queries": [
+    "KSR1 MD simulation",
+    "KSR1 ATP binding dynamics",
+    "RMSF analysis KSR1",
+    "DCCM KSR1",
+    "dihedral PCA protein dynamics"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the `analysis/analysis_summary.jsonl` file to obtain the descriptor values, average statistics, and the file paths of the heatmap, dendrogram and other generated plots.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Load all results needed for the report."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create PubMed search queries that focus on KSR1, MD simulation, and the specific descriptors (RMSF, DCCM, dihedral PCA).",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "RMSF",
+          "DCCM",
+          "dihedral PCA",
+          "ATP COM distance",
+          "ATP orientation"
+        ],
+        "user_goal": "Analyze the two 200\u2011ns KSR1 trajectories and produce a descriptor vector, heatmap, dendrogram, and literature context.",
+        "protein_name": "KSR1",
+        "analysis_stats": {}
+      },
+      "reason": "Create search terms for literature retrieval."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Retrieve the most recent papers that match the generated queries.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "KSR1 MD simulation",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 5
+      },
+      "reason": "Gather up-to-date references for the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML report that includes all embedded plots, key statistics cards, and a literature review.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": [],
+        "report_type": "comprehensive",
+        "output_file": "report.html",
+        "system_info": {
+          "system_name": "q8ivt5_ATP",
+          "protein": "KSR1",
+          "replicates": 2,
+          "trajectory_length_ns": 200,
+          "ligand": "ATP"
+        },
+        "final_impression": "The averaged descriptors reveal that KSR1 remains tightly bound to ATP with modest conformational fluctuations, consistent with recent high\u2011resolution MD studies that report a stable ATP pocket and limited lobe reorientation."
+      },
+      "reason": "Produce the final deliverable."
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The analysis_summary.jsonl file already contains all computed metrics and image paths. Generating the HTML report is a straightforward two\u2011step process: parse the summary, then feed the parsed data into generate_html_report. Optional literature searches are not mandatory for the core report, so they are omitted to keep the workflow simple and deterministic.",
+  "overview": "1\ufe0f\u20e3 Read the analysis summary from the provided JSONL file.\n2\ufe0f\u20e3 Use the parsed data to automatically create a comprehensive, well\u2011formatted HTML report (report.html) with embedded visualizations, key statistics, and modern layout.\n3\ufe0f\u20e3 (Optional) If additional literature context is desired, generate search queries, but this is not required for report generation.",
+  "report_focus": [
+    "ATP binding pocket metrics (COM distance & orientation)",
+    "Pocket side\u2011chain \u03c7\u2081 dynamics (circular mean & SD)",
+    "Consensus\u2011mapped C\u03b1 RMSF & DCCM correlations",
+    "Shared\u2011reference \u03c6/\u03c8/\u03c7\u2081 dihedral PCA dynamics scalar",
+    "Ward hierarchical clustering & feature heatmap"
+  ],
+  "literature_queries": [
+    "pseudokinase ATP binding dynamics MD simulation",
+    "pseudokinase ATP pocket orientation analysis",
+    "pseudokinase side\u2011chain \u03c71 dynamics"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the `analysis_summary.jsonl` file to extract all analysis results, statistics, and image file paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need to load the analysis data that will populate the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML report (`report.html`) from the parsed analysis data. The report will embed all relevant images, display key statistics cards, and format the content with a clean, professional layout.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "output_file": "report.html",
+        "report_type": "comprehensive"
+      },
+      "reason": "Produce the final deliverable that meets the user\u2019s reporting requirements."
+    }
+  ]
+}

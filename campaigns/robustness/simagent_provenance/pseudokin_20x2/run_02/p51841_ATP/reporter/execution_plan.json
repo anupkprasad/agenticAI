@@ -1,0 +1,34 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The analysis_summary.jsonl file contains all scalar descriptors, image paths, and summary statistics for the current simulation. The only required output for a single\u2011simulation report is an HTML file that embeds these visualisations and highlights key statistics. The workflow therefore consists of two deterministic steps: (1) parse the summary, (2) feed the parsed data into the HTML\u2011report generator. Literature queries are optional and are omitted to keep the process concise.",
+  "overview": "Generate a comprehensive HTML report for the current protein\u2011ATP holo simulation by reading the analysis summary and passing the data to the report generator.",
+  "report_focus": [
+    "Scalar dynamics descriptors (RMSD, RMSF, DCCM, etc.)",
+    "Pocket\u2011focused metrics and MSA visualisations",
+    "Key statistical summaries and visual hierarchy"
+  ],
+  "literature_queries": [],
+  "estimated_complexity": "low",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the analysis_summary.jsonl file to extract results, statistics, and image paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Load all analysis outputs needed for the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create the final report with embedded images and key statistics.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "output_file": "report.html",
+        "report_type": "comprehensive"
+      },
+      "reason": "Produce the deliverable report in the reporter directory."
+    }
+  ]
+}

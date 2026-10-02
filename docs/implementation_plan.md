@@ -40,7 +40,7 @@ registered on the per-sim executor (it was incorrectly combined-only). Science
 completeness now requires each required calculation’s artifacts, feature
 selection records empty columns honestly, combined HTML shows a science banner,
 reporter inventories resolve campaign-root `cross_sim/`, LLM usage is tagged by
-workflow node, and `AVAILABLE_SOFTWARE.md` ships for the programmer.
+workflow node, and `AVAILABLE_SOFTWARE.md` ships with the programmer agent.
 
 ---
 

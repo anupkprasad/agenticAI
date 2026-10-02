@@ -1,0 +1,67 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The goal is to produce a concise yet comprehensive HTML report for the q7z7a4_ATP simulation.  We first load the analysis summary produced by the analysis agent, then generate literature queries that are relevant to the protein and the MD metrics calculated.  A PubMed search for the highest\u2011priority query will provide contextual references.  Finally, we feed the parsed analysis data and the literature citations into the `generate_html_report` tool to create the final `report.html` in the reporter directory.  The plan keeps steps linear, uses only the allowed tools, and adheres to the file\u2011path rules.",
+  "overview": "1) Read the analysis_summary.jsonl file.\n2) Generate literature queries.\n3) Search PubMed for the top query.\n4) Create the HTML report with embedded visualizations and literature context.",
+  "report_focus": [
+    "ATP binding dynamics and pocket geometry",
+    "Consensus RMSF and DCCM clustering",
+    "Comparative insights across pseudokinase holo structures"
+  ],
+  "literature_queries": [
+    "{{GENERATE_LITERATURE_QUERIES_OUTPUT.queries['priority_1']}}",
+    "{{GENERATE_LITERATURE_QUERIES_OUTPUT.queries['priority_2']}}"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file to obtain all per\u2011system metrics, statistics, and image paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need the analysis data for the report."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create prioritized PubMed queries based on the protein name, MD simulation context, and analysis methods.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "RMSF",
+          "DCCM",
+          "dihedral PCA",
+          "ATP binding"
+        ],
+        "user_goal": "Compare ATP binding dynamics across 37 pseudokinase holo structures.",
+        "protein_name": "pseudokinase",
+        "analysis_stats": null
+      },
+      "reason": "Generate queries that target relevant literature for later searching."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Retrieve recent publications for the highest\u2011priority query.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "{{GENERATE_LITERATURE_QUERIES_OUTPUT.queries['priority_1']}}",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "Obtain a concise list of references to embed in the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive report with embedded plots, key statistics, and literature citations.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": "{{READ_ANALYSIS_SUMMARY_OUTPUT.data}}",
+        "literature_refs": "{{SEARCH_PUBMED_OUTPUT.results}}",
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "Produce the final deliverable."
+    }
+  ]
+}

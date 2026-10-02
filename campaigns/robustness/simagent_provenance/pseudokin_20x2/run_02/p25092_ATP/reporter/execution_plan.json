@@ -1,0 +1,54 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The report workflow requires only the parsed analysis results to generate a comprehensive HTML summary. Reading the JSONL file provides all metrics, image paths, and derived statistics. The `generate_html_report` tool automatically embeds images and produces the required layout. Optionally, literature search queries can be prepared for later use, but are not mandatory for the report generation.",
+  "overview": "1. Load the analysis summary. 2. (Optional) Create PubMed/BioRxiv query strings for contextual literature. 3. Generate a single\u2011simulation HTML report in the reporter subdirectory.",
+  "report_focus": [
+    "ATP\u2011binding pocket dynamics",
+    "Hierarchical clustering of descriptor space"
+  ],
+  "literature_queries": [
+    "protein kinase AND MD simulation AND ATP binding",
+    "protein kinase AND DCCM AND dynamic clustering",
+    "protein kinase AND PCA AND functional dynamics"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file that contains the descriptor values, dendrogram, heat\u2011map, and image paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need the full set of computed metrics and image references for report construction."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create PubMed and BioRxiv search queries to retrieve context about protein kinase dynamics and the applied analysis methods.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "RMSF",
+          "DCCM",
+          "PCA",
+          "clustering"
+        ],
+        "user_goal": "Summarize the clustering of ATP\u2011binding pocket dynamics across 20 protein\u2013ATP holo systems.",
+        "protein_name": "protein kinase",
+        "analysis_stats": {}
+      },
+      "reason": "Optional literature context can be incorporated later or referenced in the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive report that embeds the dendrogram, heat\u2011map, and key statistics cards, using the parsed analysis data.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "output_file": "report.html",
+        "report_type": "comprehensive"
+      },
+      "reason": "Produce the final deliverable in the reporter directory."
+    }
+  ]
+}

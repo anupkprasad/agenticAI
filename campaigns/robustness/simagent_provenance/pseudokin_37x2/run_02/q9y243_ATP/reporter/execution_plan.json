@@ -1,0 +1,72 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The user wants a concise HTML report that embeds all visualisations from the analysis_summary.jsonl file and provides context from relevant literature. The workflow therefore needs to (1) load the analysis data, (2) build targeted PubMed queries based on the analysis types, (3) fetch the most recent papers for each query, and (4) generate a single\u2011simulation HTML report that includes the figures, key statistics, and literature references.",
+  "overview": "1\ufe0f\u20e3 Load the `analysis_summary.jsonl` file. 2\ufe0f\u20e3 Create PubMed search queries that focus on the specific descriptors calculated. 3\ufe0f\u20e3 Retrieve a handful of recent abstracts for each query. 4\ufe0f\u20e3 Feed the parsed analysis data and the literature references into `generate_html_report`, producing `report.html` in the reporter directory.",
+  "report_focus": [
+    "ATP ligand positioning and orientation dynamics",
+    "Pocket residue flexibility (\u03c71, RMSF)",
+    "Inter\u2011lobe communication (DCCM)",
+    "Entropy of dihedral\u2011PCA space"
+  ],
+  "literature_queries": [
+    "pseudokinase ATP binding dynamics",
+    "pseudokinase pocket \u03c71 conformational variability",
+    "pseudokinase dihedral PCA entropy",
+    "pseudokinase DCCM inter\u2011lobe communication"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file containing all per\u2011replica metrics, mean\u2011SD tables, and image paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "All subsequent steps rely on the parsed analysis results."
+    },
+    {
+      "name": "Generate PubMed Search Queries",
+      "description": "Create a list of search strings that target the protein\u2013ATP holo context, the descriptors computed, and recent literature.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "ATP COM distance",
+          "ATP orientation",
+          "pocket \u03c71",
+          "C\u03b1 RMSF",
+          "DCCM",
+          "dihedral\u2011PCA entropy"
+        ],
+        "user_goal": "Analyze the 200\u2011ns trajectories for each protein\u2013ATP holo system and interpret the 10\u2011descriptor feature matrix.",
+        "protein_name": "pseudokinase",
+        "analysis_stats": {}
+      },
+      "reason": "To tailor PubMed searches to the specific analysis performed."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Query PubMed with the generated strings, retrieving up to 5 recent abstracts for each.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "{{queries}}",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "Gather literature that can be cited in the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive, self\u2011contained HTML report that embeds all images, displays key statistics, and lists the literature references.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": "{{analysis_summary}}",
+        "literature_refs": "{{pubmed_results}}",
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "This is the final deliverable that satisfies the user\u2019s request."
+    }
+  ]
+}

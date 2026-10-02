@@ -1,0 +1,39 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The user has already performed all trajectory analyses and stored the results in `analysis/analysis_summary.jsonl`. The only remaining tasks are to parse that file, optionally gather relevant literature, and produce a self\u2011contained HTML report. The workflow therefore consists of two deterministic steps: reading the summary and generating the report. Literature queries can be added as an optional step if further context is desired.",
+  "overview": "1. Load the analysis results from `analysis/analysis_summary.jsonl`. 2. (Optional) Generate PubMed/BioRxiv queries based on the analysis types and protein names to fetch contextual literature. 3. Pass the parsed data (and any literature references) to `generate_html_report`, which will embed all plots, statistics, and literature snippets into `report.html` within the dedicated reporter directory.",
+  "report_focus": [
+    "Summary of the six consensus descriptors across the 20 proteins",
+    "Visualization of the dendrogram and heat\u2011map",
+    "Contextual literature highlights for each protein system"
+  ],
+  "literature_queries": [
+    "pseudokinase ATP binding dynamics",
+    "ATP pocket conservation in human kinases",
+    "MD simulation of protein\u2011ligand binding heterogeneity",
+    "Consensus pocket analysis human kinases"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file that contains all per\u2011replicate statistics, aggregated descriptors, and image paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis/analysis_summary.jsonl"
+      },
+      "reason": "We need the full set of computed descriptors and the paths to the generated plots to construct the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML report that embeds all visualizations, displays key statistics, and includes brief literature context.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "output_file": "report.html",
+        "report_type": "comprehensive"
+      },
+      "reason": "This is the final deliverable that the user requested."
+    }
+  ]
+}

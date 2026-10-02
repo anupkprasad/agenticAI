@@ -167,7 +167,7 @@ and [CAMPAIGN_AND_RETRIEVAL.md](CAMPAIGN_AND_RETRIEVAL.md).
 | **Seaborn** | — | Statistical plot styling |
 
 The Programmer agent also reads
-[`AVAILABLE_SOFTWARE.md`](../AVAILABLE_SOFTWARE.md) at the repo root when
+[`AVAILABLE_SOFTWARE.md`](../agentic/programmer/AVAILABLE_SOFTWARE.md) when
 generating new tools (GROMACS, MDAnalysis, MAFFT, etc.).
 
 ---

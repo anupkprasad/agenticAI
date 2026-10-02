@@ -1,0 +1,41 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The analysis data are already stored in `analysis/analysis_summary.jsonl`.  Reading this file gives us all computed descriptors, the per\u2011system statistics and the file paths to the visualisations that the report must embed.  The only further requirement is to create a single, fully self\u2011contained HTML report in the reporter directory.  Because literature context is optional, we simply supply a list of PubMed search queries that the user can run independently if desired.  No additional preprocessing or simulation work is needed.",
+  "overview": "1. Load the analysis summary. 2. Feed the parsed data to the report generator to produce `report.html` in the reporter directory. 3. Provide a set of suggested literature search queries.",
+  "report_focus": [
+    "Hierarchical clustering of the 37 holo systems",
+    "Key dynamic descriptors (ATP COM distance, orientation, pocket \u03c7\u2081, RMSF, DCCM, dihedral PCA entropy)",
+    "Interpretation with a k\u202f=\u202f4 cut",
+    "Contextual literature on ATP binding in pseudokinases"
+  ],
+  "literature_queries": [
+    "pseudokinase ATP binding dynamics simulation",
+    "ATP binding pocket conformational entropy pseudokinase",
+    "protein kinase domain allosteric flexibility ATP",
+    "pseudokinase functional regulation ATP binding",
+    "MD simulation of kinase ATP binding site dynamics"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file that contains all per\u2011system descriptors, statistics and image paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need to obtain the analysis data for the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive, self\u2011contained HTML report that embeds all visualisations and displays the key statistics.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "output_file": "report.html",
+        "report_type": "comprehensive"
+      },
+      "reason": "Produce the final deliverable in the required location."
+    }
+  ]
+}

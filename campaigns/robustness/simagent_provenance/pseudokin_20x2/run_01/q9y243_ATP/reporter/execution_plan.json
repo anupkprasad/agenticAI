@@ -1,0 +1,72 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The user requires a comprehensive HTML report summarising the scalar dynamics descriptors from two 200\u2011ns replicates of the q9y243\u2013ATP holo system, enriched with literature context. The workflow therefore involves: (1) parsing the already\u2011generated analysis summary, (2) formulating targeted PubMed queries using the supplied analysis types, (3) retrieving relevant literature, and (4) assembling all information into a self\u2011contained HTML report.",
+  "overview": "1\ufe0f\u20e3 Parse analysis_summary.jsonl \u2192 2\ufe0f\u20e3 Generate PubMed queries \u2192 3\ufe0f\u20e3 Fetch literature \u2192 4\ufe0f\u20e3 Produce report.html",
+  "report_focus": [
+    "Dynamics of ATP binding (COM distance & axis angle)",
+    "Pocket torsional stability (\u03c71) and ligand\u2013protein coupling",
+    "Structural flexibility (C\u03b1 RMSF) and cross\u2011lobe correlation (DCCM)",
+    "Dimensionality reduction (PCA) as a shared\u2011reference scalar"
+  ],
+  "literature_queries": [
+    "\"q9y243\" AND \"molecular dynamics\"",
+    "\"q9y243\" AND ATP AND protein\u2011ligand dynamics",
+    "\"ATP\" AND RMSF AND pseudokinase",
+    "\"DCCM\" AND protein dynamics AND ATP"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Load the JSONL file that contains all scalar descriptors, per\u2011replicate statistics, and image file paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "We need the numeric values and image paths to embed in the report."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create PubMed search strings that prioritize the protein name, MD simulation context, and specific analysis methods used.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "ATP COM distance",
+          "ATP axis angle",
+          "pocket \u03c71",
+          "C\u03b1 RMSF",
+          "DCCM",
+          "PCA"
+        ],
+        "user_goal": "Analyze the two 200\u2011ns replicates of the q9y243 protein\u2013ATP holo trajectory extracting scalar dynamics descriptors.",
+        "protein_name": "q9y243",
+        "analysis_stats": {}
+      },
+      "reason": "These queries will drive a focused PubMed search for recent literature."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Retrieve up to 20 recent references that match the generated queries.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "q9y243 AND (ATP AND \"molecular dynamics\" OR \"protein\u2011ligand dynamics\" OR \"RMSF\" OR \"DCCM\" OR \"PCA\")",
+        "max_results": 20,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "We need up-to-date literature to contextualise the findings."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a self\u2011contained HTML report that embeds all analysis visualisations, key statistics, and the literature references.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": {},
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "The final deliverable requested by the user."
+    }
+  ]
+}

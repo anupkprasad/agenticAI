@@ -288,7 +288,7 @@ Config: `agentic/supervisor/config.yaml`
 - Called internally by Planner only (never by Supervisor)
 - Generates Python `@tool` functions, TCL scripts, MDP files, SLURM scripts
 - Validates syntax before registering in the live tool library
-- Reads [`AVAILABLE_SOFTWARE.md`](../AVAILABLE_SOFTWARE.md) (repo root) for
+- Reads [`AVAILABLE_SOFTWARE.md`](../agentic/programmer/AVAILABLE_SOFTWARE.md) for
   engine / analysis library context; falls back to a short built-in list if
   the file is missing
 

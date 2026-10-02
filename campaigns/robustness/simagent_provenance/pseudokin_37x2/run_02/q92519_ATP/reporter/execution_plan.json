@@ -1,0 +1,75 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The task requires a single\u2011simulation HTML report that incorporates all analysis outputs stored in the JSONL file and optionally contextual literature. We first load the analysis data, then optionally generate PubMed queries to enrich the report with recent literature. Finally, we feed the parsed data into `generate_html_report` to produce a self\u2011contained, base64\u2011encoded HTML document with embedded plots and statistical cards.",
+  "overview": "1\ufe0f\u20e3 Read the analysis summary (JSONL). 2\ufe0f\u20e3 (Optional) Build PubMed search queries for contextual literature. 3\ufe0f\u20e3 Generate a comprehensive HTML report embedding all visualizations and key statistics.",
+  "report_focus": [
+    "Key statistical metrics for each analysis (mean, std, min, max)",
+    "Visualization of ligand pocket dynamics",
+    "Consensus RMSF and DCCM patterns",
+    "Cluster dendrogram and feature heat\u2011map",
+    "Literature context linking simulation findings to experimental insights"
+  ],
+  "literature_queries": [
+    "pseudokinase ATP holo simulation RMSD",
+    "pseudokinase ATP holo DCCM analysis",
+    "ATP binding pocket dynamics pseudokinase",
+    "MD simulation of pseudokinase ATP binding"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file to extract all per\u2011system metrics, statistics, and image paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "We need the raw analysis results to populate the report."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create PubMed search queries based on the protein name, simulation context, and analysis methods to fetch relevant literature.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "RMSD",
+          "RMSF",
+          "DCCM",
+          "Torsion",
+          "Dihedral PCA",
+          "Contact Map",
+          "Ligand Pocket Distance",
+          "Consensus Metrics"
+        ],
+        "user_goal": "Perform per\u2011system analysis of protein\u2011ATP holo trajectories and report clustering results.",
+        "protein_name": "pseudokinase ATP holo",
+        "analysis_stats": {}
+      },
+      "reason": "Provides structured queries for the subsequent PubMed search."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Retrieve abstracts and citations that match the generated queries.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "pseudokinase ATP holo simulation RMSD",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "To supply up\u2011to\u2011date literature context for the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive, self\u2011contained HTML report embedding all analysis images and statistics.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": "<placeholder for parsed analysis summary>",
+        "literature_refs": "<placeholder for PubMed results>",
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "Produces the final deliverable expected by the user."
+    }
+  ]
+}

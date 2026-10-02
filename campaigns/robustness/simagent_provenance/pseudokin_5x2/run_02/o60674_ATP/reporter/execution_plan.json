@@ -1,0 +1,74 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The report requires a single\u2011simulation HTML page that integrates the metrics already computed in `analysis_summary.jsonl` with a concise literature context. We will (1) read the JSONL file to retrieve all analysis statistics and image paths, (2) generate targeted PubMed queries based on the protein names and the analysis methods performed, (3) fetch recent literature references that address ATP\u2011binding pseudokinase dynamics, and (4) produce a comprehensive HTML report embedding the visualisations and key statistics while citing the retrieved literature.",
+  "overview": "Generate a single\u2011simulation HTML report for the JAK2\u2011ATP holo complex by pulling the pre\u2011computed analysis results, adding relevant literature references, and compiling everything into a clean, professional web page.",
+  "report_focus": [
+    "ATP pocket stability and ligand\u2013protein distance dynamics",
+    "Consensus residue\u2011level flexibility (RMSF) and inter\u2011residue correlations (DCCM)",
+    "Torsion and dihedral PCA signatures distinguishing the five pseudokinase systems"
+  ],
+  "literature_queries": [
+    "JAK2 ATP binding pseudokinase molecular dynamics",
+    "pseudokinase ATP pocket flexibility MD simulation",
+    "dihedral PCA analysis protein dynamics"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the pre\u2011generated `analysis_summary.jsonl` file to obtain all analysis metrics, statistics, and paths to visualisation images.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need to load the analysis data that will be displayed in the report."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create PubMed search queries that focus on ATP\u2011binding pseudokinase dynamics and the specific analysis techniques applied.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "RMSD",
+          "RMSF",
+          "DCCM",
+          "torsions",
+          "dihedral PCA"
+        ],
+        "user_goal": "Analyze ATP binding dynamics and compare pocket stability across five pseudokinase ATP holo complexes.",
+        "protein_name": "JAK2",
+        "analysis_stats": {
+          "RMSF": {
+            "mean": 0.8,
+            "max": 1.5
+          }
+        }
+      },
+      "reason": "Produce focused PubMed queries to retrieve high\u2011impact literature relevant to the analysis."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Execute a PubMed search using the highest\u2011priority query to gather recent studies on ATP\u2011binding pseudokinases and MD analysis.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "JAK2 ATP binding pseudokinase molecular dynamics",
+        "max_results": 10,
+        "include_abstracts": true,
+        "max_age_years": 5
+      },
+      "reason": "Obtain contemporary literature that provides context for the observed dynamics."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML report that embeds the analysis images, displays key statistics, and cites the retrieved literature.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": {},
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "Produce the final user deliverable in the required directory."
+    }
+  ]
+}

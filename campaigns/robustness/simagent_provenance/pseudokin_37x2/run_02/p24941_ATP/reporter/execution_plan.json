@@ -1,0 +1,37 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "To produce a per\u2011simulation HTML report we need only the analysis results stored in the `analysis_summary.jsonl` file. The report generator can embed all plots, compute key statistics and render a concise, professional page. Literature searching is optional; omitting it keeps the workflow lightweight while still producing a complete, self\u2011contained report.",
+  "overview": "Read the pre\u2011generated analysis summary, feed the parsed data to the report generator, and output a `report.html` file in the simulation\u2019s `/reporter` folder. The report will contain embedded images, key statistics cards, and a modern layout.",
+  "report_focus": [
+    "ATP\u2011COM distance",
+    "ATP\u2011axis angle",
+    "Pocket \u03c71",
+    "Consensus\u2011mapped C\u03b1 RMSF",
+    "N\u2011lobe \u2194 C\u2011lobe DCCM",
+    "Shared\u2011reference \u03c6/\u03c8/\u03c71 PCA dynamics"
+  ],
+  "literature_queries": [],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file that contains all analysis metrics, statistics, and image paths for the current simulation.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Load all analysis results that the report must display."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML report that embeds all images, shows key statistics, and provides a clean, professional layout.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "output_file": "report.html",
+        "report_type": "comprehensive"
+      },
+      "reason": "Generate the final deliverable that can be viewed in a browser."
+    }
+  ]
+}

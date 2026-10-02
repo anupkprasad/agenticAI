@@ -29,7 +29,7 @@ __pycache__/
 !archive/ops/ollama_server.slurm
 
 # Local run / work directories
-campaigns/
+# campaigns/ is ignored in the block below, with one published exception.
 results/
 jobs/
 working_dir_backup/
@@ -47,12 +47,19 @@ scripts/*
 !scripts/examples/**
 pseudo_JAK/
 
-# Active local campaigns (~60G+ sims + manuscript drafts) — keep out of git
-campaigns/
+# Active local campaigns (~60G+ sims + manuscript drafts) — keep out of git.
+# campaigns/ itself stays visible so one nested path can be re-included.
+campaigns/*
 !campaigns/README.md
-# Legacy root paths (if recreated outside campaigns/)
+!campaigns/robustness/
+campaigns/robustness/*
+!campaigns/robustness/simagent_provenance/
+!campaigns/robustness/simagent_provenance/**
+# *.log is ignored above; keep the provenance logs
+!campaigns/robustness/simagent_provenance/**/*.log
+# Legacy root paths only (a bare name also matches campaigns/robustness/).
 ment/
-robustness/
+/robustness/
 dclk3_psma4/
 dclk3_dcx_psma4/
 pseudoKin*/

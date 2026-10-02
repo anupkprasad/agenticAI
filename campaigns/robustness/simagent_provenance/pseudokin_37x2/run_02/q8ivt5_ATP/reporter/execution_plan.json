@@ -1,0 +1,36 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The analysis_summary.jsonl already contains all computed scalar descriptors, statistics, and image paths for each trajectory replica. To produce a concise, self\u2011contained HTML report we simply need to parse this file and feed the resulting data into the `generate_html_report` tool. The report will automatically embed images, display key statistics cards, and organize the content by analysis type. A literature context section is optional; if desired, we can generate targeted PubMed queries, but it is not mandatory for the per\u2011simulation report.",
+  "overview": "1\ufe0f\u20e3 Read the analysis_summary.jsonl file.\n2\ufe0f\u20e3 Pass the parsed data to `generate_html_report` to create `report.html` inside the reporter directory. The report will feature embedded plots, statistics, and a modern layout. Optionally, generate PubMed queries to enrich the report with recent literature.",
+  "report_focus": [
+    "ATP binding\u2011site dynamics (COM distance & axis angle)",
+    "Pocket \u03c7\u2081 torsion variability",
+    "Consensus\u2011mapped C\u03b1 RMSF",
+    "Lobe DCCM correlations",
+    "Dihedral\u2011PCA entropy"
+  ],
+  "literature_queries": [],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file containing per\u2011replica results and image paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need to load the analysis results and image references."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML report using the parsed analysis data.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "output_file": "report.html",
+        "report_type": "comprehensive"
+      },
+      "reason": "Produce the final, self\u2011contained report with embedded visualizations."
+    }
+  ]
+}

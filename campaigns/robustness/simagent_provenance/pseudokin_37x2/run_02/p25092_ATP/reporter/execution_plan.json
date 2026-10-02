@@ -1,0 +1,34 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The user has provided a pre\u2011computed analysis summary (JSONL) for a single MD simulation of a holo\u2011ATP pseudokinase. The goal is to convert this raw data into a polished HTML report that includes embedded visualizations, key statistics, and a concise narrative. No additional HPC steps are required. The workflow therefore consists of two core operations: parsing the analysis summary and generating the report. Literature context is optional; in this plan we focus on the data\u2011driven report and leave literature search for a future extension.",
+  "overview": "1. Load the per\u2011trajectory analysis results from `analysis/analysis_summary.jsonl`. 2. Pass the parsed data to the report generator to create a comprehensive, self\u2011contained HTML file (`report.html`) in the reporter directory. 3. The report will embed all analysis plots, display statistical cards, and present a concise interpretation of the key descriptors (e.g., ATP\u2013pocket distance, side\u2011chain \u03c7\u2081, RMSF, DCCM, PCA scalar).",
+  "report_focus": [
+    "ATP binding pocket dynamics (COM\u2013pocket distance & orientation)",
+    "Conformational coupling between N\u2011 and C\u2011lobes (DCCM correlations)",
+    "Side\u2011chain \u03c7\u2081 distributions and overall flexibility (RMSF, torsions)"
+  ],
+  "literature_queries": [],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file containing all computed descriptors, statistics, and image file paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Load the analysis data that will feed the report generator."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive, self\u2011contained HTML report embedding all plots and key statistics.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "output_file": "report.html",
+        "report_type": "comprehensive"
+      },
+      "reason": "Produce the final deliverable for the user."
+    }
+  ]
+}

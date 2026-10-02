@@ -1,0 +1,79 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "Load analysis results, enrich with PubMed literature, and produce an embedded HTML report.",
+  "overview": "The workflow parses the analysis summary, generates targeted literature queries, fetches relevant papers, aggregates references, and calls the HTML report generator with all data.",
+  "report_focus": [
+    "ATP binding pocket dynamics",
+    "Global flexibility (RMSF, DCCM)",
+    "Cluster analysis and k=4 cut",
+    "Comparison of replicate statistics"
+  ],
+  "literature_queries": [
+    "\"CDK2\" AND \"molecular dynamics\" AND \"ATP\" AND \"binding site\"",
+    "\"CDK2\" AND \"RMSF\" AND \"kinase dynamics\"",
+    "\"CDK2\" AND \"docking\" AND \"ATP\" AND \"MD\"",
+    "\"CDK2\" AND \"simulation\" AND \"pocket analysis\""
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse analysis_summary.jsonl to obtain descriptor results, statistics, and image paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need to load all analysis outputs."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create prioritized PubMed queries based on protein, methods, and hypothesis.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "COM distance",
+          "Orientation",
+          "Chi1",
+          "RMSF",
+          "DCCM",
+          "Shared-reference dihedral PCA"
+        ],
+        "user_goal": "Analyze the two existing 200\u2011ns replicates for the CDK2\u2013ATP holo system (protein\u202f+\u202fligand, ions excluded) and compute the ten scalar dynamics descriptors defined in the user\u2019s list for each replicate, then average across replicates.",
+        "protein_name": "CDK2",
+        "analysis_stats": null
+      },
+      "reason": "Generate focused search strings for relevant literature."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Execute each generated query and retrieve up to 10 abstracts.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "<generated query>",
+        "max_results": 10,
+        "include_abstracts": true,
+        "max_age_years": null
+      },
+      "reason": "Collect recent literature supporting the analysis."
+    },
+    {
+      "name": "Compile References",
+      "description": "Aggregate search results into a list of reference objects.",
+      "tool_name": "internal",
+      "tool_params": {},
+      "reason": "Prepare input for report generation."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML report with embedded plots and literature.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": "<parsed analysis data from step 1>",
+        "literature_refs": "<compiled references list>",
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "Deliver the final scientific report."
+    }
+  ]
+}

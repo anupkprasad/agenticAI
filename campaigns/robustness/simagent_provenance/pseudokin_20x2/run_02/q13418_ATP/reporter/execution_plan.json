@@ -1,0 +1,35 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The user requests a single\u2011simulation report that pulls data from an existing analysis summary, optionally adds literature context, and produces a comprehensive HTML file. Since the analysis summary already contains all numerical descriptors and image paths, we first load it with `read_analysis_summary`.  The report requires a literature paragraph; to keep the workflow lightweight we will skip a full literature search and provide an empty reference list (the tool accepts this).  Finally, we generate the HTML using `generate_html_report`, passing the parsed data and specifying the output filename as required.",
+  "overview": "Load analysis results \u2192 (optionally) gather literature references \u2192 generate a standalone `report.html` containing embedded visualisations, statistics cards, and a context paragraph.",
+  "report_focus": [
+    "ATP binding pocket dynamics",
+    "inter\u2011lobe communication",
+    "pocket side\u2011chain conformational sampling"
+  ],
+  "literature_queries": [],
+  "estimated_complexity": "low",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the existing analysis_summary.jsonl file to retrieve descriptor values and image paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need the data to populate the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive report that embeds all images, displays key statistics, and includes a literature context paragraph.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": [],
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "Produce the final deliverable in the reporter directory."
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The report must summarize the scalar descriptors, display the dendrogram and heat\u2011map, and provide literature context on pseudokinase vs active kinase behavior.  The analysis results are already stored in `analysis_summary.jsonl`.  We will parse this file, then query PubMed for recent literature that discusses the KAPCA pocket, consensus\u2011based metrics, and pseudokinase activity.  Finally, we will feed the parsed analysis data together with the literature references into `generate_html_report` to produce a self\u2011contained, professionally styled HTML file (`report.html`) in the `reporter/` directory.",
+  "overview": "1. Parse analysis results\n2. Generate PubMed search queries (protein\u2011specific + method\u2011specific)\n3. Retrieve up to 5 recent PubMed abstracts\n4. Build a reference list\n5. Produce the final HTML report",
+  "report_focus": [
+    "Summary of simulation conditions and scalar descriptors",
+    "Visualizations: dendrogram, heat\u2011map, and per\u2011descriptor plots",
+    "Literature context on KAPCA pocket mapping and pseudokinase activation"
+  ],
+  "literature_queries": [
+    "\"pseudokinase\" AND \"ATP\" AND \"MD simulation\"",
+    "\"pseudokinase\" AND \"kinase activation\""
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Load the per\u2011simulation analysis results and image paths from `analysis/analysis_summary.jsonl`.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need the scalar descriptors, cluster plots, and metadata for the report."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create PubMed search strings that target the protein family, KAPCA pocket, and the scalar descriptors used.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "ATP distance",
+          "ATP orientation",
+          "RMSF",
+          "DCCM",
+          "dihedral PCA entropy"
+        ],
+        "user_goal": "Summarize simulation conditions, list computed descriptors, and provide literature context on pseudokinase vs active kinase behavior.",
+        "protein_name": "pseudokinase",
+        "analysis_stats": {}
+      },
+      "reason": "To build focused, high\u2011quality PubMed queries."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Query PubMed with the generated queries and retrieve the most recent 5 relevant papers (abstracts included).",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "\"pseudokinase\" AND \"ATP\" AND \"MD simulation\"",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "Obtain up\u2011to\u2011date literature to cite in the report."
+    },
+    {
+      "name": "Extract Literature References",
+      "description": "Format the PubMed results into a list of citation objects suitable for the report.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "\"pseudokinase\" AND \"kinase activation\"",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "Collect a second set of references that focus on activation mechanisms."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive report that embeds all analysis images, displays key statistics, and cites the literature.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": [],
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "Produce the final deliverable in the reporter directory."
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The user wants a single\u2011simulation HTML report that incorporates the analysis results, key statistics, and literature context.  The workflow is straightforward: load the analysis summary, generate relevant PubMed queries, fetch a handful of citations, and finally generate a comprehensive HTML report that embeds all plots and statistics.",
+  "overview": "1) Read analysis results from `analysis_summary.jsonl`. 2) Build PubMed search queries from the analysis types and the user goal. 3) Retrieve up to 5 recent citations for each query. 4) Generate a full HTML report (`report.html`) that embeds all images, displays key statistics cards, and includes the literature references.",
+  "report_focus": [
+    "Consensus RMSF and pocket flexibility",
+    "Ligand pocket distance & orientation",
+    "Cross\u2011lobe DCCM and dihedral PCA",
+    "Literature context on pseudokinase dynamics"
+  ],
+  "literature_queries": [
+    "Pseudokinase AND \"MD simulation\"",
+    "Pseudokinase AND RMSF",
+    "Pseudokinase AND DCCM",
+    "Pseudokinase AND dihedral PCA",
+    "Pseudokinase AND ligand pocket distance"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file that contains the per\u2011replicate analysis metrics and image file paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need the analysis data and plot locations to build the report."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create PubMed query strings that combine the protein context with each analysis type.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "RMSF",
+          "DCCM",
+          "PCA",
+          "distance",
+          "orientation",
+          "torsion"
+        ],
+        "user_goal": "Analyze the existing 200\u202fns production trajectories for the ten protein\u2011ATP holo complexes in the working directory, computing ligand pocket distance, consensus DCCM, consensus RMSF, consensus torsions, DCCM, dihedral PCA, nearby contacts, and protein RMSF.",
+        "protein_name": "Pseudokinase"
+      },
+      "reason": "Generate high\u2011priority search queries that are tailored to the protein and the specific analyses performed."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Query PubMed for each generated query string and collect up to 5 recent citations.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "{{queries.priority1}} AND \"pseudokinase\" AND (\"MD simulation\" OR \"Molecular dynamics\")",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "Retrieve literature that contextualizes the observed dynamics in pseudokinases."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a professional, fully\u2011self\u2011contained report that embeds all analysis plots and highlights key statistics.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": "{{analysis_data}}",
+        "literature_refs": "{{literature_refs}}",
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "Produce the final deliverable for the user."
+    }
+  ]
+}

@@ -1,0 +1,105 @@
+{
+  "timestamp": "2026-09-23T23:03:33.377040",
+  "llm_plan": {
+    "reasoning": "The user requires a concise, self\u2011contained HTML report summarising the clustering, descriptor statistics, and literature context for a single MD simulation run.  The analysis results are already available in `analysis/analysis_summary.jsonl`; therefore the report generation workflow consists of three deterministic steps: 1) parse the summary file, 2) retrieve a small set of relevant literature to provide context, and 3) generate the HTML report using the supplied tool.  No additional preprocessing or simulation steps are needed, and the report will be stored in the dedicated `reporter/` directory.",
+    "overview": "The workflow reads the per\u2011simulation analysis summary, queries PubMed for recent literature on ATP\u2011bound pseudokinases and the specific descriptors used, and then produces a professional HTML report containing embedded plots, key statistics, and literature references.",
+    "report_focus": [
+      "ATP binding dynamics and orientation",
+      "Pocket flexibility and \u03c71 rotamer distributions",
+      "Structural correlation between N\u2011lobe and C\u2011lobe motions",
+      "Consensus\u2011based RMSF and DCCM clustering"
+    ],
+    "literature_queries": [
+      "pseudokinase ATP binding dynamics molecular dynamics",
+      "pseudokinase pocket flexibility \u03c71 rotamer analysis"
+    ],
+    "estimated_complexity": "low"
+  },
+  "execution": {
+    "total_steps": 4,
+    "completed_steps": 4,
+    "failed_steps": 0,
+    "success_rate": "100.0%"
+  },
+  "step_results": [
+    {
+      "step_name": "Read Analysis Summary",
+      "tool": "read_analysis_summary",
+      "success": true,
+      "result": {
+        "success": true,
+        "file_path": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_37x2/run_02/q13308_ATP/analysis/analysis_summary.jsonl",
+        "total_entries": 1,
+        "entries": [
+          {
+            "timestamp": "2026-09-24, Time 02:49:26",
+            "analysis_type": "PDB_Input_Validation",
+            "statistics": {
+              "total_atoms": 4339,
+              "total_residues": 274
+            },
+            "files": {
+              "topology_file": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_37x2/run_02/q13308_ATP/simsetup/protein.pdb"
+            },
+            "metadata": {
+              "components_available": {
+                "protein": true,
+                "ligand": true,
+                "water": false,
+                "ions": true,
+                "hydrogens": true
+              },
+              "human_readable_summary": "Protein: Chain A (271 residues) | Ligands: ATP | Ions: MG (\u00d72)",
+              "protein_sequences": {
+                "A": "LQPITTLGKSEFGEVFLAKAQGLEEGVAETLVLVKSLQSKDEQQQLDFRRELEMFGKLNHANVVRLLGLCREAEPHYMVLEYVDLGDLKQFLRISKSKDEKLKSQPLSTKQKVALCTQVALGMEHLSNNRFVHKDLAARNCLVSAQRQVKVSALGLSKDVYNSEYYHFRQAWVPLRWMSPEAILEGDFSTKSDVWAFGVLMWEVFTHGEMPHGGQADDEVLADLQAGKARLPQPEGCPSKLYRLMQRCWALSPKDRPSFSEIASALGDSTV"
+              },
+              "source": "supervisor_validation"
+            }
+          }
+        ],
+        "analysis_types": {
+          "PDB_Input_Validation": 1
+        },
+        "timestamp": "2026-09-23T23:03:28.987367"
+      }
+    },
+    {
+      "step_name": "Generate Literature Queries",
+      "tool": "generate_literature_queries",
+      "success": true,
+      "result": {
+        "skipped": true,
+        "reason": "literature handled by _ensure_literature_search"
+      }
+    },
+    {
+      "step_name": "Search PubMed",
+      "tool": "search_pubmed",
+      "success": true,
+      "result": {
+        "skipped": true,
+        "reason": "literature handled by _ensure_literature_search"
+      }
+    },
+    {
+      "step_name": "Generate HTML Report",
+      "tool": "generate_html_report",
+      "success": true,
+      "result": {
+        "success": true,
+        "report_file": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_37x2/run_02/q13308_ATP/reporter/report.html",
+        "report_type": "comprehensive",
+        "file_size_kb": 24.33984375
+      }
+    }
+  ],
+  "analysis_data_summary": {
+    "entries_found": 1,
+    "analysis_types": {
+      "PDB_Input_Validation": 1
+    }
+  },
+  "literature_references": 6,
+  "issues": [],
+  "warnings": []
+}

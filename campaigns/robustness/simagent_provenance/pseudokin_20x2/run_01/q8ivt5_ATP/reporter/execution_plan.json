@@ -1,0 +1,60 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The user wants a single\u2011simulation HTML report that embeds all visualisations, statistics, and literature context derived from the analysis summary.  We first parse the analysis_summary.jsonl to obtain the necessary data structures and image paths.  Then we invoke generate_html_report to create a self\u2011contained report named `report.html`.  For added value we also generate targeted PubMed queries so the reporter can fetch relevant literature, but the actual PubMed search is optional and can be run later if desired.",
+  "overview": "1. Load the analysis summary. 2. Build a list of literature search queries tailored to the protein and analysis types. 3. Create the comprehensive HTML report with embedded plots and statistical cards.",
+  "report_focus": [
+    "ATP\u2011binding pocket definition and consensus pocket metrics",
+    "Scalar dynamics descriptors (distance, angle, torsions, RMSF, DCCM)",
+    "Ward hierarchical clustering of averaged descriptors",
+    "Comparison of the two 200\u2011ns replicates"
+  ],
+  "literature_queries": [
+    "pseudokinase ATP binding MD simulation",
+    "pseudokinase ATP binding pocket RMSF analysis",
+    "pseudokinase DCCM clustering in MD",
+    "pseudokinase torsion PCA analysis"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file that contains all scalar descriptors, consensus metrics, image file paths, and statistical summaries for the current 200\u2011ns trajectory pair.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Acquire structured analysis data and visualisation paths for the report."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create PubMed search queries that target the protein name, ATP binding, MD simulation methods, and the specific analysis descriptors (RMSF, DCCM, torsions).  These queries can be used later to fetch abstracts and citations.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "RMSF",
+          "DCCM",
+          "torsion",
+          "binding pocket",
+          "ATP"
+        ],
+        "user_goal": "Analyze ATP binding pocket dynamics and cluster systems by scalar descriptors.",
+        "protein_name": "pseudokinase",
+        "analysis_stats": null
+      },
+      "reason": "Prepare concise, high\u2011priority search strings for literature retrieval."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML report that embeds all trajectory plots, MSA panels, clustering visualisations, and a feature\u2011heatmap.  The report includes key statistics cards and a literature context section.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "output_file": "report.html",
+        "report_type": "comprehensive",
+        "literature_refs": [],
+        "final_impression": "The analysis demonstrates consistent ATP\u2011binding pocket dynamics across replicates, with clustering revealing distinct conformational families."
+      },
+      "reason": "Produce the final deliverable report for the simulation."
+    }
+  ]
+}

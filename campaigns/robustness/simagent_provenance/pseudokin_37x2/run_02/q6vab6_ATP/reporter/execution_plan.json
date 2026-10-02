@@ -1,0 +1,43 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The user wants a concise, data\u2011driven HTML report that summarises the per\u2011system MD analysis stored in `analysis_summary.jsonl`. The workflow is deterministic: first load the summary, then generate the report using the built\u2011in HTML generator. We do not need any literature searches in this single\u2011simulation report, but we will include a few targeted PubMed queries for future enrichment. The plan therefore focuses on reading the summary and producing the report, while keeping the steps clear and reproducible.",
+  "overview": "1. Load `analysis_summary.jsonl` containing all scalar descriptors, statistics, and image file paths. 2. Pass the parsed data to `generate_html_report` to create a single `report.html` file in the reporter directory. 3. Optionally generate a set of PubMed queries for literature context. 4. Produce the final JSON plan with the required tool calls.",
+  "report_focus": [
+    "ATP pocket occupancy and COM distance dynamics",
+    "Pocket side\u2011chain \u03c7\u2081 rotamer distribution",
+    "Consensus RMSF of the protein scaffold",
+    "N\u2011lobe \u2194 C\u2011lobe inter\u2011domain correlation",
+    "Dihedral PCA dynamics scalar",
+    "Overall hierarchical clustering of systems"
+  ],
+  "literature_queries": [
+    "pseudokinase ATP binding pocket MD simulation",
+    "ATP COM distance dynamics pseudokinase",
+    "side\u2011chain \u03c71 rotamer flexibility pseudokinase",
+    "inter\u2011domain DCCM pseudokinase",
+    "dihedral PCA in protein dynamics literature"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file to extract all analysis results, statistics, and image paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Load all per\u2011system descriptors and plot paths for report generation."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML report embedding the images and key statistics extracted from the summary.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "output_file": "report.html",
+        "report_type": "comprehensive"
+      },
+      "reason": "Produce the final deliverable that can be viewed in a web browser."
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The per\u2011simulation report requires parsing the JSONL summary to obtain all metrics, plots and file paths, optionally augmenting it with literature context, and then rendering a single self\u2011contained HTML page.  The workflow is deterministic, uses only the provided tools, and follows the path guidelines strictly.",
+  "overview": "1\ufe0f\u20e3 Read and parse the per\u2011simulation analysis summary. 2\ufe0f\u20e3 (Optional) Generate targeted PubMed queries and fetch relevant literature. 3\ufe0f\u20e3 Feed the parsed data, literature references, and plot image paths into the report generator to produce a professional, fully embedded HTML report named `report.html` in the reporter directory.",
+  "report_focus": [
+    "ATP\u2013pocket interaction dynamics",
+    "Global conformational flexibility (RMSF, DCCM, dihedral PCA)"
+  ],
+  "literature_queries": [
+    "KSR2 ATP binding dynamics",
+    "pseudokinase conformational flexibility MD"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the analysis_summary.jsonl file to collect all computed descriptors, statistics, and image paths for this simulation.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Load all analysis outputs needed for the report."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create prioritized PubMed search queries based on the protein name, analysis types performed, and the user\u2019s hypothesis.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "ATP_COM_distance",
+          "ATP_orientation",
+          "\u03c71_angles",
+          "RMSF",
+          "DCCM",
+          "dihedral_PCA"
+        ],
+        "user_goal": "Rephrase Goal for the Analysis \u2192 Reporter Workflow",
+        "protein_name": "KSR2",
+        "analysis_stats": {}
+      },
+      "reason": "Provide relevant literature search terms that focus on both the system (KSR2) and the specific dynamics descriptors."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Retrieve recent articles and abstracts that match the top priority queries.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "KSR2 ATP binding dynamics",
+        "max_results": 10,
+        "include_abstracts": true,
+        "max_age_years": 5
+      },
+      "reason": "Obtain concise, up\u2011to\u2011date references to contextualise the findings."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive, fully embedded HTML report named `report.html` that includes all plots, key statistics, and literature references.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": [],
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "Produce the final deliverable for this simulation."
+    }
+  ]
+}

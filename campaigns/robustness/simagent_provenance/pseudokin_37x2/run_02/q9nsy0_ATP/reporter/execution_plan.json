@@ -1,0 +1,69 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The workflow must ingest the already computed per\u2011system descriptors from the analysis_summary.jsonl file, optionally enrich the report with relevant literature, and output a single self\u2011contained HTML file named report.html in the reporter directory. We therefore first read the analysis summary, then generate a list of PubMed queries that match the analyses performed, search PubMed for recent literature, and finally build the report embedding the analysis data, plots, and literature references.",
+  "overview": "1\ufe0f\u20e3 Parse the analysis summary (contains descriptor values, statistics, and image file paths). 2\ufe0f\u20e3 Build PubMed search queries based on the protein name, analysis types, and key statistics. 3\ufe0f\u20e3 Retrieve literature results. 4\ufe0f\u20e3 Generate a comprehensive HTML report that embeds all images and displays key statistics and literature citations.",
+  "report_focus": [
+    "ATP binding pocket dynamics across systems",
+    "N\u2011lobe \u2194 C\u2011lobe communication and dihedral PCA entropy"
+  ],
+  "literature_queries": [
+    "pseudokinase AND ATP binding pocket dynamics",
+    "pseudokinase AND RMSF analysis",
+    "pseudokinase AND DCCM",
+    "pseudokinase AND dihedral PCA entropy"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the analysis_summary.jsonl file to obtain all descriptor values, statistical summaries, and image paths for the 37 \u00d7 2 system runs.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "We need the data to feed into the report and to create literature queries."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create a prioritized set of PubMed search strings based on the analyses performed and the protein of interest.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "RMSF",
+          "DCCM",
+          "Pocket distance",
+          "Ligand orientation",
+          "Dihedral PCA entropy"
+        ],
+        "user_goal": "Generate a comprehensive analysis of ATP binding pocket dynamics and lobe\u2011lobe communication in pseudokinases across 37 systems.",
+        "protein_name": "pseudokinase",
+        "analysis_stats": {}
+      },
+      "reason": "These queries will guide the literature search to provide context for the computed descriptors."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Retrieve recent articles that match the generated queries.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "pseudokinase AND ATP binding pocket dynamics AND RMSF",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "To supply up\u2011to\u2011date literature references for inclusion in the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive, self\u2011contained report that embeds analysis images, displays key statistics, and lists the literature references obtained.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": [],
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "Produce the final deliverable for the user."
+    }
+  ]
+}

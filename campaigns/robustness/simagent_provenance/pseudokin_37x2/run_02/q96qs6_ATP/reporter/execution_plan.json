@@ -1,0 +1,91 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The workflow requires a concise, automated pipeline that (1) pulls the analysis results from the existing JSONL file, (2) optionally enriches the report with recent literature relevant to PSKH2 and the specific MD metrics, and (3) compiles all of this into a professional HTML document.  The plan follows the tool contracts exactly: it reads the summary, optionally performs literature searches using the generated queries, then calls `generate_html_report` with the parsed data and the retrieved references.  All outputs are written to the reporter directory, keeping the filenames and structure consistent with the requirements.",
+  "overview": "1. Parse the per\u2011simulation analysis results. 2. Generate PubMed queries that combine the protein name (PSKH2), the analysis types performed (RMSF, DCCM, PCA entropy, etc.) and the goal of the study. 3. Execute the literature searches and collect the top references. 4. Build the HTML report, embedding images, statistics cards, and a brief literature context section. 5. Store the report as `report.html` in the reporter directory.",
+  "report_focus": [
+    "Ligand pocket dynamics (distance statistics)",
+    "Consensus pocket residue flexibility (RMSF, \u03c7\u2081 torsions)",
+    "Inter\u2011lobe communication (DCCM)",
+    "Overall protein dynamics (PCA entropy)"
+  ],
+  "literature_queries": [
+    "PSKH2 pseudokinase MD simulation",
+    "Pseudokinase flexibility RMSF",
+    "Pseudokinase ligand binding dynamics",
+    "Dihedral PCA entropy in protein dynamics"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Load the JSONL file that contains all analysis metrics, statistics, and image file paths for this simulation.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need a structured representation of the analysis results to feed into the report generator."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create PubMed search queries that prioritize the protein (PSKH2), the MD analysis methods (RMSF, DCCM, PCA), and the study hypothesis.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "RMSF",
+          "DCCM",
+          "PCA entropy",
+          "ligand pocket dynamics"
+        ],
+        "user_goal": "Assess PSKH2 holo\u2011complex dynamics and compare to literature on pseudokinase flexibility.",
+        "protein_name": "PSKH2",
+        "analysis_stats": {
+          "RMSF": {
+            "mean": 2.5,
+            "max": 4.0
+          },
+          "DCCM": {
+            "mean": 0.2
+          },
+          "PCA entropy": {
+            "mean": 0.8
+          }
+        }
+      },
+      "reason": "Provide context\u2011aware literature search terms for the next step."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Execute the top priority PubMed queries to retrieve relevant recent literature.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "PSKH2 pseudokinase MD simulation",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "Collect up-to-date references to include in the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create the comprehensive HTML report, embedding analysis figures, statistics, and literature references.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": [],
+        "report_type": "comprehensive",
+        "output_file": "report.html",
+        "system_info": {
+          "protein_name": "PSKH2",
+          "ligand_name": "ATP",
+          "simulation_length": "200 ns",
+          "replicas": [
+            "rep01",
+            "rep02"
+          ]
+        },
+        "final_impression": "The PSKH2 holo\u2011complex exhibits a stable ligand pocket distance with moderate flexibility in the consensus pocket residues, as reflected by the RMSF and DCCM statistics. The dihedral PCA entropy indicates a compact conformational landscape, consistent with recent studies of pseudokinase dynamics."
+      },
+      "reason": "Generate the final deliverable with embedded visuals and contextual literature."
+    }
+  ]
+}

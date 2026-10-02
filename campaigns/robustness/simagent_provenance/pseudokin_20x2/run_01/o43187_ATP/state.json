@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "timestamp": "2026-09-23T13:44:37.551020",
+  "label": "o43187_ATP",
+  "working_directory": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o43187_ATP",
+  "workflow_status": "completed",
+  "spec_hash": "503a9ae25d62b34b",
+  "completed_pipeline_stages": [
+    "preprocessing",
+    "simsetup",
+    "hpc",
+    "reporter"
+  ],
+  "hpc_reps": [
+    {
+      "rep_id": "rep01",
+      "hpc_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o43187_ATP/hpc/rep01",
+      "topology": "/scratch/akp66103/pseudoKin/o43187/hpc/md.tpr",
+      "trajectory": "/scratch/akp66103/pseudoKin/o43187/hpc/mdWrap.xtc"
+    },
+    {
+      "rep_id": "rep02",
+      "hpc_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o43187_ATP/hpc/rep02",
+      "topology": "/scratch/akp66103/pseudoKin2/o43187/hpc/md.tpr",
+      "trajectory": "/scratch/akp66103/pseudoKin2/o43187/hpc/mdWrap.xtc"
+    }
+  ],
+  "science": {
+    "ok": false,
+    "missing": [
+      "consensus_* modular dirs"
+    ],
+    "reason": "consensus_* modular dirs"
+  },
+  "user_goal": "I have 20 human protein\u2013ATP holo structures in given working directory\n(one PDB per system), spanning active kinases and pseudokinases.\nPlease run a full end-to-end comparative MD study on all of them.\n\nSystems (UniProt id : protein name):\n  p17612:KAPCA, o60674:JAK2, p24941:CDK2, q8ivt5:KSR1, q13418:ILK, p00533:EGFR,\n  p23458:JAK1, q6vab6:KSR2, q92519:TRIB2, q9y243:AKT3, o15197:EPHB6, o43187:IRAK2,\n  p21860:ERBB3, p25092:GUC2C, p28482:MK01, p29597:TYK2, p51841:GUC2F, p52333:JAK3,\n  q05823:RN5A,"
+}

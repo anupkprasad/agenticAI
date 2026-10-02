@@ -1,0 +1,37 @@
+[2026-09-22T16:23:56-04:00] seeding run_01 → /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/run_01
+[2026-09-22T16:23:56-04:00] seeding 10 labels → /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/run_01  case_suffix=_ATP
+  rep01←/scratch/akp66103/pseudoKin  rep02←/scratch/akp66103/pseudoKin2  link_mode=auto
+  p17612_ATP: hpc/rep01 + hpc/rep02 linked
+  o60674_ATP: hpc/rep01 + hpc/rep02 linked
+  p24941_ATP: hpc/rep01 + hpc/rep02 linked
+  q8ivt5_ATP: hpc/rep01 + hpc/rep02 linked
+  q13418_ATP: hpc/rep01 + hpc/rep02 linked
+  p00533_ATP: hpc/rep01 + hpc/rep02 linked
+  p23458_ATP: hpc/rep01 + hpc/rep02 linked
+  q6vab6_ATP: hpc/rep01 + hpc/rep02 linked
+  q92519_ATP: hpc/rep01 + hpc/rep02 linked
+  q9y243_ATP: hpc/rep01 + hpc/rep02 linked
+[2026-09-22T16:24:00-04:00] seeded_ok=10 / 10  (hardlink_slots≈0 symlink_slots≈20)
+[2026-09-22T16:24:00-04:00] seeding run_02 → /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/run_02
+[2026-09-22T16:24:00-04:00] seeding 10 labels → /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/run_02  case_suffix=_ATP
+  rep01←/scratch/akp66103/pseudoKin  rep02←/scratch/akp66103/pseudoKin2  link_mode=auto
+  p17612_ATP: hpc/rep01 + hpc/rep02 linked
+  o60674_ATP: hpc/rep01 + hpc/rep02 linked
+  p24941_ATP: hpc/rep01 + hpc/rep02 linked
+  q8ivt5_ATP: hpc/rep01 + hpc/rep02 linked
+  q13418_ATP: hpc/rep01 + hpc/rep02 linked
+  p00533_ATP: hpc/rep01 + hpc/rep02 linked
+  p23458_ATP: hpc/rep01 + hpc/rep02 linked
+  q6vab6_ATP: hpc/rep01 + hpc/rep02 linked
+  q92519_ATP: hpc/rep01 + hpc/rep02 linked
+  q9y243_ATP: hpc/rep01 + hpc/rep02 linked
+[2026-09-22T16:24:04-04:00] seeded_ok=10 / 10  (hardlink_slots≈0 symlink_slots≈20)
+[2026-09-22T16:24:04-04:00] nohup start run_01  log=/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/logs/run_01.log
+  pid=1276913
+[2026-09-22T16:24:04-04:00] waiting for run_01 (pid=1276913) …
+[2026-09-22T17:34:04-04:00] run_01 finished exit=0 done=2026-09-22T17:33:13-04:00
+[2026-09-22T17:34:04-04:00] nohup start run_02  log=/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/logs/run_02.log
+  pid=1329126
+[2026-09-22T17:34:04-04:00] waiting for run_02 (pid=1329126) …
+[2026-09-22T18:41:04-04:00] run_02 finished exit=0 done=2026-09-22T18:40:33-04:00
+[2026-09-22T18:41:04-04:00] all requested runs finished (aggregate_exit=0)

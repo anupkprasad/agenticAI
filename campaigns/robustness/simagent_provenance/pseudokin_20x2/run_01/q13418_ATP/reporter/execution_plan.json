@@ -1,0 +1,83 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The analysis_summary.jsonl contains all required statistics and image paths, so the first step is to load it. To enrich the report with relevant literature, we will query UniProt for the protein\u2019s functional annotations, generate focused PubMed queries using the analysis types and the user goal, and then retrieve the top articles. Finally, the generate_html_report tool will weave the analysis data and literature references into a self\u2011contained, professional HTML document.",
+  "overview": "1\ufe0f\u20e3 Load analysis results\n2\ufe0f\u20e3 Obtain protein functional context (UniProt)\n3\ufe0f\u20e3 Generate PubMed search queries\n4\ufe0f\u20e3 Retrieve literature references\n5\ufe0f\u20e3 Build comprehensive HTML report",
+  "report_focus": [
+    "Quantitative comparison of ATP binding pocket dynamics",
+    "Structural flexibility and inter\u2011lobe communication",
+    "Consensus\u2011based PCA insights"
+  ],
+  "literature_queries": [
+    "Q13418 ATP binding pocket dynamics molecular dynamics",
+    "ATP axis angle protein kinases MD simulation",
+    "pseudokinase \u03c71 torsion dynamics study",
+    "C\u03b1 RMSF analysis kinase activity",
+    "DCCM inter\u2011lobe communication protein kinases",
+    "PCA dynamics holo kinase complexes"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the analysis_summary.jsonl file for metrics and plot paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need to access all quantitative results and image locations."
+    },
+    {
+      "name": "Get Protein Functional Annotations",
+      "description": "Query UniProt for the Q13418 entry to collect functional notes and key literature.",
+      "tool_name": "search_uniprot",
+      "tool_params": {
+        "query": "Q13418",
+        "max_results": 1
+      },
+      "reason": "Provides biological context and background references for the report."
+    },
+    {
+      "name": "Generate PubMed Queries",
+      "description": "Create tailored PubMed queries based on analysis types and the user\u2019s goal.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "ATP COM distance",
+          "ATP axis angle",
+          "pocket \u03c71",
+          "C\u03b1 RMSF",
+          "DCCM",
+          "PCA dynamics"
+        ],
+        "user_goal": "Holo Kinase Comparative Dynamics Study",
+        "protein_name": "Q13418",
+        "analysis_stats": {}
+      },
+      "reason": "Produces prioritized search strings that target relevant literature."
+    },
+    {
+      "name": "Search PubMed for Each Query",
+      "description": "Retrieve the top 5 PubMed entries for each generated query.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "{{query}}",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "Collect recent, peer\u2011reviewed articles that discuss similar analyses or findings."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML document embedding analysis images, key statistics, and literature references.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": "{{analysis_data}}",
+        "literature_refs": "{{literature_refs}}",
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "Produces the final deliverable that satisfies the user\u2019s goal."
+    }
+  ]
+}

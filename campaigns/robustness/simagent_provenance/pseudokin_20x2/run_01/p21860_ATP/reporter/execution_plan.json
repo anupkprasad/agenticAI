@@ -1,0 +1,70 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The report requires only a single\u2011simulation, per\u2011system summary.  The analysis artifacts are already produced in `analysis/analysis_summary.jsonl` and the image paths are embedded in that file.  A straightforward two\u2011step workflow\u2014load the summary, feed it into `generate_html_report`\u2014suffices to produce the required `report.html`.  Optionally, a literature search can enrich the context, but the primary deliverable is the HTML file with embedded visualisations and statistics.",
+  "overview": "1. Parse the per\u2011system analysis summary. 2. (Optional) Run a focused PubMed search for recent MD\u2011simulation studies on the same pseudokinase family. 3. Create a comprehensive HTML report that embeds all plots and key statistics, and optionally lists literature references.",
+  "report_focus": [
+    "Dynamics of the ATP\u2011binding pocket relative to the KAPCA reference",
+    "Quantitative comparison of scalar descriptors across the two 200\u2011ns replicates",
+    "Hierarchical clustering of the 20 holo kinase\u2013ATP complexes"
+  ],
+  "literature_queries": [
+    "pseudokinase ATP binding dynamics MD simulation",
+    "pseudokinase RMSF analysis structural flexibility",
+    "pseudokinase PCA dynamic clustering"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the `analysis_summary.jsonl` file located in the `analysis/` directory.  This file contains the computed scalar descriptors, trajectory plots, and any intermediate metrics that were produced by the analysis agent.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "We need the raw analysis data and image paths to build the report."
+    },
+    {
+      "name": "Generate Literature Queries (Optional)",
+      "description": "Create a set of PubMed search queries that focus on pseudokinase MD simulations and the specific analytical methods used (e.g., RMSF, PCA, DCCM).  The queries are then executed to retrieve up to 10 relevant recent papers.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "RMSF",
+          "DCCM",
+          "PCA",
+          "RMSD"
+        ],
+        "user_goal": "Provide context for the ATP\u2011binding pocket dynamics in pseudokinases",
+        "protein_name": "pseudokinase",
+        "analysis_stats": {}
+      },
+      "reason": "Adding literature references enhances the report\u2019s scientific value."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Execute the generated PubMed queries and collect metadata and abstracts for the top hits.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "",
+        "max_results": 10,
+        "include_abstracts": true,
+        "max_age_years": 5
+      },
+      "reason": "Retrieve recent literature to contextualise the findings."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML file (`report.html`) that embeds all visualisations from the summary, displays key statistical cards, and optionally lists the literature references obtained in the previous step.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": [],
+        "report_type": "comprehensive",
+        "output_file": "report.html",
+        "system_info": {},
+        "final_impression": ""
+      },
+      "reason": "Produce the final deliverable \u2013 a professional, self\u2011contained HTML report."
+    }
+  ]
+}

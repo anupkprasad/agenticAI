@@ -1,0 +1,79 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The user wants a single\u2011simulation HTML report that contains all analysis plots, descriptor statistics, and a brief literature context for EGFR ATP binding dynamics. The analysis data are already stored in `analysis/analysis_summary.jsonl`. We will first parse that file, then generate a set of PubMed search queries tailored to EGFR MD studies, run a PubMed search to retrieve recent references, and finally create a comprehensive HTML report that embeds the plots and cites the literature.",
+  "overview": "1\ufe0f\u20e3 Parse analysis results from `analysis_summary.jsonl`. 2\ufe0f\u20e3 Create focused PubMed queries using the protein name, simulation context, and analysis types. 3\ufe0f\u20e3 Retrieve up to three recent papers for each query. 4\ufe0f\u20e3 Assemble all information and invoke `generate_html_report` to produce `report.html` with embedded figures, statistics cards, and a short literature summary.",
+  "report_focus": [
+    "EGFR ATP binding pocket dynamics over 200\u202fns",
+    "Comparative descriptor analysis between rep01 and rep02",
+    "Contextualizing findings with recent EGFR MD literature"
+  ],
+  "literature_queries": [
+    "EGFR ATP MD simulation RMSF",
+    "EGFR ATP binding pocket dynamics PCA",
+    "EGFR DCCM analysis protein flexibility",
+    "EGFR ATP binding site angle distance MD study"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Load the JSONL file containing all descriptor values, statistics, and image paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need the raw analysis data for the report."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create PubMed search strings that target EGFR, ATP binding, and the specific analysis methods used (RMSF, DCCM, PCA, pocket metrics).",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "RMSF",
+          "DCCM",
+          "PCA",
+          "pocket distance",
+          "pocket angle"
+        ],
+        "user_goal": "Analyze the two existing 200\u202fns trajectories for EGFR (p00533) from the directories `rep01` and `rep02` in `/home/akp66103/.../p00533_ATP`. Compute the ten scalar dynamics descriptors and generate a report.",
+        "protein_name": "EGFR",
+        "analysis_stats": null
+      },
+      "reason": "Generate targeted queries to find relevant literature."
+    },
+    {
+      "name": "Search PubMed (first query)",
+      "description": "Query PubMed with the highest\u2011priority literature query and retrieve up to 3 recent papers.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "{{generated_queries.priority1}}",
+        "max_results": 3,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "Collect up to three recent references for inclusion in the report."
+    },
+    {
+      "name": "Prepare Literature References",
+      "description": "Extract title, authors, journal, year, and PMID from the PubMed search results to pass to the report generator.",
+      "tool_name": "extract_literature_refs",
+      "tool_params": {
+        "pubmed_results": "{{search_pubmed_output}}"
+      },
+      "reason": "Format references in a way the report generator can consume."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive, self\u2011contained HTML report that includes all plots, descriptor statistics, and literature references.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": "{{read_analysis_summary_output}}",
+        "literature_refs": "{{literature_refs}}",
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "Produce the final deliverable."
+    }
+  ]
+}

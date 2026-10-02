@@ -1,0 +1,43 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The task requires a single\u2011simulation HTML report. The analysis results and image paths are stored in `analysis/analysis_summary.jsonl`. We will parse this file, then feed the parsed data directly to `generate_html_report`. Literature search is optional; for completeness we can generate a few PubMed queries but they will not be mandatory for report generation. The final report will be written as `report.html` in the reporter directory.",
+  "overview": "1. Read the analysis summary JSONL file. 2. Optionally create literature queries. 3. Generate a comprehensive HTML report containing embedded visualizations, key statistics, and a concise narrative.",
+  "report_focus": [
+    "ATP\u2013pocket distance distribution",
+    "ATP orientation relative to pocket axis",
+    "Side\u2011chain \u03c7\u2081 statistics",
+    "Consensus\u2011mapped C\u03b1 RMSF",
+    "N\u2011lobe \u2194 C\u2011lobe DCCM mean",
+    "Shared\u2011reference PCA dynamics"
+  ],
+  "literature_queries": [
+    "p51841 pseudokinase ATP binding site dynamics",
+    "ATP binding orientation pseudokinase",
+    "RMSF consensus mapping in protein kinases",
+    "p51841 crystal structure PubMed"
+  ],
+  "estimated_complexity": "low",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the `analysis_summary.jsonl` file to obtain all analysis descriptors and image paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Load all computed scalar dynamics descriptors and associated plots for report generation."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a professional, comprehensive report embedding all plots, displaying key statistics, and summarizing the findings.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": [],
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "Produce the final deliverable that the user requests."
+    }
+  ]
+}

@@ -1,0 +1,108 @@
+{
+  "timestamp": "2026-09-23T16:13:09.781017",
+  "llm_plan": {
+    "reasoning": "The per\u2011simulation report requires only the analysis results stored in the local `analysis_summary.jsonl` file. These results already contain the image file paths, scalar descriptors, and metadata needed for the HTML output. The `generate_html_report` tool automatically embeds the images and creates the desired layout. To enrich the report with recent literature, a small literature\u2011search step can be inserted before report generation, but it is optional. The plan therefore reads the summary, optionally pulls a handful of PubMed references relevant to ATP\u2011binding pseudokinases and MD descriptors, and finally produces the HTML report.",
+    "overview": "1. Parse the analysis summary. 2. (Optional) Retrieve up to five recent PubMed articles for context. 3. Generate a comprehensive HTML report titled `report.html` in the `reporter/` directory, embedding all visualisations and key statistics.",
+    "report_focus": [
+      "Key ATP\u2011binding pocket metrics (COM distance, orientation, \u03c71 torsion)",
+      "Consensus RMSF and DCCM insights",
+      "Clustering of pseudokinase dynamics",
+      "Literature context on ATP\u2011binding flexibility"
+    ],
+    "literature_queries": [
+      "ATP binding pseudokinase dynamics MD",
+      "pseudokinase RMSF analysis",
+      "ATP pocket flexibility protein dynamics",
+      "Dihedral PCA pseudokinase ATP",
+      "MD simulation of kinase pocket dynamics"
+    ],
+    "estimated_complexity": "medium"
+  },
+  "execution": {
+    "total_steps": 4,
+    "completed_steps": 4,
+    "failed_steps": 0,
+    "success_rate": "100.0%"
+  },
+  "step_results": [
+    {
+      "step_name": "Read Analysis Summary",
+      "tool": "read_analysis_summary",
+      "success": true,
+      "result": {
+        "success": true,
+        "file_path": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_02/p29597_ATP/analysis/analysis_summary.jsonl",
+        "total_entries": 1,
+        "entries": [
+          {
+            "timestamp": "2026-09-23, Time 19:46:20",
+            "analysis_type": "PDB_Input_Validation",
+            "statistics": {
+              "total_atoms": 4507,
+              "total_residues": 289
+            },
+            "files": {
+              "topology_file": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_02/p29597_ATP/simsetup/protein.pdb"
+            },
+            "metadata": {
+              "components_available": {
+                "protein": true,
+                "ligand": true,
+                "water": false,
+                "ions": true,
+                "hydrogens": true
+              },
+              "human_readable_summary": "Protein: Chain A (287 residues) | Ligands: ATP | Ions: MG",
+              "protein_sequences": {
+                "A": "ITQLSHLGQGTRTNVYEGRLRVEGSGDPEEGKMDDEDPLVPGRDRGQELRVVLKVLDPSHHDIALAFYETASLMSQVSHTHLAFVHGVCVRGPENIMVTEYVEHGPLDVWLRRERGHVPMAWKMVVAQQLASALSYLENKNLVHGNVCGRNILLARLGLAEGTSPFIKLSDPGVGLGALSREERVERIPWLAPECLPGGANSLSTAMDKWGFGATLLEICFDGEAPLQSRSPSEKEHFYQRQHRLPEPSCPQLATLTSQCLTYEPTQRPSFRTILRDLTRLQPHNLA"
+              },
+              "source": "supervisor_validation"
+            }
+          }
+        ],
+        "analysis_types": {
+          "PDB_Input_Validation": 1
+        },
+        "timestamp": "2026-09-23T16:12:50.845356"
+      }
+    },
+    {
+      "step_name": "Generate Literature Queries",
+      "tool": "generate_literature_queries",
+      "success": true,
+      "result": {
+        "skipped": true,
+        "reason": "literature handled by _ensure_literature_search"
+      }
+    },
+    {
+      "step_name": "Search PubMed",
+      "tool": "search_pubmed",
+      "success": true,
+      "result": {
+        "skipped": true,
+        "reason": "literature handled by _ensure_literature_search"
+      }
+    },
+    {
+      "step_name": "Generate HTML Report",
+      "tool": "generate_html_report",
+      "success": true,
+      "result": {
+        "success": true,
+        "report_file": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_02/p29597_ATP/reporter/report.html",
+        "report_type": "comprehensive",
+        "file_size_kb": 32.81640625
+      }
+    }
+  ],
+  "analysis_data_summary": {
+    "entries_found": 1,
+    "analysis_types": {
+      "PDB_Input_Validation": 1
+    }
+  },
+  "literature_references": 14,
+  "issues": [],
+  "warnings": []
+}

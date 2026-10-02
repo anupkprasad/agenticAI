@@ -1,0 +1,76 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The per\u2011simulation report requires only the analysis results stored in the local `analysis_summary.jsonl` file. These results already contain the image file paths, scalar descriptors, and metadata needed for the HTML output. The `generate_html_report` tool automatically embeds the images and creates the desired layout. To enrich the report with recent literature, a small literature\u2011search step can be inserted before report generation, but it is optional. The plan therefore reads the summary, optionally pulls a handful of PubMed references relevant to ATP\u2011binding pseudokinases and MD descriptors, and finally produces the HTML report.",
+  "overview": "1. Parse the analysis summary. 2. (Optional) Retrieve up to five recent PubMed articles for context. 3. Generate a comprehensive HTML report titled `report.html` in the `reporter/` directory, embedding all visualisations and key statistics.",
+  "report_focus": [
+    "Key ATP\u2011binding pocket metrics (COM distance, orientation, \u03c71 torsion)",
+    "Consensus RMSF and DCCM insights",
+    "Clustering of pseudokinase dynamics",
+    "Literature context on ATP\u2011binding flexibility"
+  ],
+  "literature_queries": [
+    "ATP binding pseudokinase dynamics MD",
+    "pseudokinase RMSF analysis",
+    "ATP pocket flexibility protein dynamics",
+    "Dihedral PCA pseudokinase ATP",
+    "MD simulation of kinase pocket dynamics"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file containing per\u2011replica metrics, images, and metadata for the current simulation.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "We need the analysis data to feed the report generator."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Construct a small set of PubMed queries that focus on ATP\u2011binding pseudokinases and MD descriptor analysis to provide context.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "ATP binding",
+          "RMSF",
+          "RMSD",
+          "DCCM",
+          "torsion analysis"
+        ],
+        "user_goal": "Analyze ATP\u2011binding dynamics of pseudokinase homologs and relate descriptors to functional flexibility.",
+        "protein_name": "pseudokinase",
+        "analysis_stats": {}
+      },
+      "reason": "We want a concise literature context for the report."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Retrieve up to 5 recent PubMed abstracts that match the generated queries.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "${generate_literature_queries.output.queries[0]}",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 5
+      },
+      "reason": "Provide up-to-date literature references in the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create the final HTML report incorporating analysis data, embedded plots, statistics cards, and literature references.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": "${read_analysis_summary.output}",
+        "literature_refs": "${search_pubmed.output.results}",
+        "report_type": "comprehensive",
+        "output_file": "report.html",
+        "system_info": null,
+        "final_impression": null,
+        "pdb_data": null,
+        "enriched_prompt": null
+      },
+      "reason": "Produce the deliverable in the reporter directory."
+    }
+  ]
+}

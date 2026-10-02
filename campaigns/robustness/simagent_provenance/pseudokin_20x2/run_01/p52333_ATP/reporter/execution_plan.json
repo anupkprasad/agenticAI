@@ -1,0 +1,75 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The user wants a single\u2011simulation HTML report that includes all plots, summary statistics, and contextual literature. The analysis results are already stored in `analysis/analysis_summary.jsonl`, which contains the scalar descriptors, images and metadata. We therefore: 1) read and parse the summary, 2) construct relevant PubMed queries to provide background on JAK3, ATP binding, and the specific analyses (distance, orientation, \u03c7\u2081, RMSF, DCCM, dihedral PCA), 3) perform a PubMed search, 4) feed the parsed data and literature references into `generate_html_report` to produce a self\u2011contained `report.html` in the reporter directory.",
+  "overview": "Read analysis summary \u2192 Search literature \u2192 Generate HTML report with embedded plots and statistics.",
+  "report_focus": [
+    "ATP\u2013JAK3 binding dynamics",
+    "Comparison of scalar descriptors to literature benchmarks"
+  ],
+  "literature_queries": [
+    "JAK3 ATP binding site molecular dynamics",
+    "JAK3 ATP orientation analysis",
+    "JAK3 RMSF in kinase domain",
+    "DCCM in JAK3 simulations"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file to obtain analysis metrics, image paths and metadata.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need to load all analysis results for the report."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create PubMed queries that target JAK3, ATP binding, and the analysis methods used.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "ATP binding site",
+          "ATP COM distance",
+          "ATP orientation",
+          "chi1 torsion analysis",
+          "RMSF",
+          "DCCM",
+          "dihedral PCA"
+        ],
+        "user_goal": "Analyse JAK3 ATP binding dynamics and compare to literature.",
+        "protein_name": "JAK3",
+        "analysis_stats": null
+      },
+      "reason": "To retrieve relevant recent literature for contextual discussion."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Query PubMed with the generated queries to obtain article metadata.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "JAK3 AND ATP AND \"binding site\" AND \"molecular dynamics\"",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "Gather recent studies that discuss JAK3 ATP interactions and MD analysis."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML report embedding all plots, statistics and literature references.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": [],
+        "report_type": "comprehensive",
+        "output_file": "report.html",
+        "system_info": null,
+        "final_impression": null,
+        "pdb_data": null,
+        "enriched_prompt": null
+      },
+      "reason": "Produce the final deliverable for the user."
+    }
+  ]
+}

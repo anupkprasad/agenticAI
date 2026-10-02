@@ -1,0 +1,2059 @@
+{
+  "limit": null,
+  "prompt_tokens": 316903,
+  "completion_tokens": 188571,
+  "total_tokens": 505474,
+  "calls": 126,
+  "estimated_calls": 0,
+  "remaining": null,
+  "billing_enabled": false,
+  "by_agent": {
+    "supervisor": {
+      "prompt_tokens": 148671,
+      "completion_tokens": 50044,
+      "total_tokens": 198715,
+      "calls": 58
+    },
+    "planner": {
+      "prompt_tokens": 32144,
+      "completion_tokens": 36064,
+      "total_tokens": 68208,
+      "calls": 9
+    },
+    "preprocess": {
+      "prompt_tokens": 24834,
+      "completion_tokens": 11413,
+      "total_tokens": 36247,
+      "calls": 7
+    },
+    "simsetup": {
+      "prompt_tokens": 37027,
+      "completion_tokens": 25137,
+      "total_tokens": 62164,
+      "calls": 12
+    },
+    "final_report": {
+      "prompt_tokens": 67183,
+      "completion_tokens": 64092,
+      "total_tokens": 131275,
+      "calls": 38
+    },
+    "analysis": {
+      "prompt_tokens": 9688,
+      "completion_tokens": 2063,
+      "total_tokens": 11751,
+      "calls": 1
+    },
+    "reporter": {
+      "prompt_tokens": 8178,
+      "completion_tokens": 3580,
+      "total_tokens": 11758,
+      "calls": 3
+    }
+  },
+  "call_log": [
+    {
+      "prompt_tokens": 3368,
+      "completion_tokens": 2873,
+      "total_tokens": 6241,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:37:45"
+    },
+    {
+      "prompt_tokens": 3504,
+      "completion_tokens": 1228,
+      "total_tokens": 4732,
+      "model": "gpt-oss:20b",
+      "agent": "preprocess",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:39:12"
+    },
+    {
+      "prompt_tokens": 3132,
+      "completion_tokens": 1769,
+      "total_tokens": 4901,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:39:27"
+    },
+    {
+      "prompt_tokens": 1134,
+      "completion_tokens": 1394,
+      "total_tokens": 2528,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:40:33"
+    },
+    {
+      "prompt_tokens": 1589,
+      "completion_tokens": 910,
+      "total_tokens": 2499,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:35"
+    },
+    {
+      "prompt_tokens": 1510,
+      "completion_tokens": 129,
+      "total_tokens": 1639,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:42"
+    },
+    {
+      "prompt_tokens": 10847,
+      "completion_tokens": 2928,
+      "total_tokens": 13775,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:02"
+    },
+    {
+      "prompt_tokens": 1880,
+      "completion_tokens": 463,
+      "total_tokens": 2343,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:27"
+    },
+    {
+      "prompt_tokens": 3446,
+      "completion_tokens": 3073,
+      "total_tokens": 6519,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:27:18"
+    },
+    {
+      "prompt_tokens": 3525,
+      "completion_tokens": 1673,
+      "total_tokens": 5198,
+      "model": "gpt-oss:20b",
+      "agent": "preprocess",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:28:02"
+    },
+    {
+      "prompt_tokens": 2983,
+      "completion_tokens": 3723,
+      "total_tokens": 6706,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:28:47"
+    },
+    {
+      "prompt_tokens": 2983,
+      "completion_tokens": 2587,
+      "total_tokens": 5570,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:29:07"
+    },
+    {
+      "prompt_tokens": 2983,
+      "completion_tokens": 1601,
+      "total_tokens": 4584,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:29:21"
+    },
+    {
+      "prompt_tokens": 1589,
+      "completion_tokens": 910,
+      "total_tokens": 2499,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:35"
+    },
+    {
+      "prompt_tokens": 1510,
+      "completion_tokens": 129,
+      "total_tokens": 1639,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:42"
+    },
+    {
+      "prompt_tokens": 10847,
+      "completion_tokens": 2928,
+      "total_tokens": 13775,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:02"
+    },
+    {
+      "prompt_tokens": 1869,
+      "completion_tokens": 820,
+      "total_tokens": 2689,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:31"
+    },
+    {
+      "prompt_tokens": 3324,
+      "completion_tokens": 2660,
+      "total_tokens": 5984,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:48"
+    },
+    {
+      "prompt_tokens": 3439,
+      "completion_tokens": 1539,
+      "total_tokens": 4978,
+      "model": "gpt-oss:20b",
+      "agent": "preprocess",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:27:36"
+    },
+    {
+      "prompt_tokens": 3010,
+      "completion_tokens": 1975,
+      "total_tokens": 4985,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:28:21"
+    },
+    {
+      "prompt_tokens": 1134,
+      "completion_tokens": 1759,
+      "total_tokens": 2893,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:29:29"
+    },
+    {
+      "prompt_tokens": 1868,
+      "completion_tokens": 518,
+      "total_tokens": 2386,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:30:04"
+    },
+    {
+      "prompt_tokens": 3376,
+      "completion_tokens": 3623,
+      "total_tokens": 6999,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:30:39"
+    },
+    {
+      "prompt_tokens": 3509,
+      "completion_tokens": 1211,
+      "total_tokens": 4720,
+      "model": "gpt-oss:20b",
+      "agent": "preprocess",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:30:59"
+    },
+    {
+      "prompt_tokens": 3015,
+      "completion_tokens": 1230,
+      "total_tokens": 4245,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:31:24"
+    },
+    {
+      "prompt_tokens": 1889,
+      "completion_tokens": 994,
+      "total_tokens": 2883,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:31:52"
+    },
+    {
+      "prompt_tokens": 3415,
+      "completion_tokens": 2631,
+      "total_tokens": 6046,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:32:14"
+    },
+    {
+      "prompt_tokens": 3527,
+      "completion_tokens": 1648,
+      "total_tokens": 5175,
+      "model": "gpt-oss:20b",
+      "agent": "preprocess",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:32:39"
+    },
+    {
+      "prompt_tokens": 3102,
+      "completion_tokens": 3352,
+      "total_tokens": 6454,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:33:03"
+    },
+    {
+      "prompt_tokens": 3102,
+      "completion_tokens": 1979,
+      "total_tokens": 5081,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:33:17"
+    },
+    {
+      "prompt_tokens": 1879,
+      "completion_tokens": 944,
+      "total_tokens": 2823,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:33:43"
+    },
+    {
+      "prompt_tokens": 3505,
+      "completion_tokens": 2715,
+      "total_tokens": 6220,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:34:14"
+    },
+    {
+      "prompt_tokens": 3606,
+      "completion_tokens": 1370,
+      "total_tokens": 4976,
+      "model": "gpt-oss:20b",
+      "agent": "preprocess",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:34:49"
+    },
+    {
+      "prompt_tokens": 3325,
+      "completion_tokens": 2643,
+      "total_tokens": 5968,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:35:21"
+    },
+    {
+      "prompt_tokens": 3325,
+      "completion_tokens": 1607,
+      "total_tokens": 4932,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:35:50"
+    },
+    {
+      "prompt_tokens": 3325,
+      "completion_tokens": 1756,
+      "total_tokens": 5081,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:36:07"
+    },
+    {
+      "prompt_tokens": 1869,
+      "completion_tokens": 830,
+      "total_tokens": 2699,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:36:41"
+    },
+    {
+      "prompt_tokens": 3368,
+      "completion_tokens": 2873,
+      "total_tokens": 6241,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:37:45"
+    },
+    {
+      "prompt_tokens": 1870,
+      "completion_tokens": 526,
+      "total_tokens": 2396,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:39:15"
+    },
+    {
+      "prompt_tokens": 3362,
+      "completion_tokens": 2106,
+      "total_tokens": 5468,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:39:41"
+    },
+    {
+      "prompt_tokens": 3572,
+      "completion_tokens": 1640,
+      "total_tokens": 5212,
+      "model": "gpt-oss:20b",
+      "agent": "preprocess",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:40:18"
+    },
+    {
+      "prompt_tokens": 3059,
+      "completion_tokens": 1810,
+      "total_tokens": 4869,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:40:42"
+    },
+    {
+      "prompt_tokens": 1589,
+      "completion_tokens": 910,
+      "total_tokens": 2499,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:35"
+    },
+    {
+      "prompt_tokens": 1510,
+      "completion_tokens": 129,
+      "total_tokens": 1639,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:42"
+    },
+    {
+      "prompt_tokens": 10847,
+      "completion_tokens": 2928,
+      "total_tokens": 13775,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:02"
+    },
+    {
+      "prompt_tokens": 1880,
+      "completion_tokens": 463,
+      "total_tokens": 2343,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:27"
+    },
+    {
+      "prompt_tokens": 3446,
+      "completion_tokens": 3073,
+      "total_tokens": 6519,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:27:18"
+    },
+    {
+      "prompt_tokens": 3525,
+      "completion_tokens": 1673,
+      "total_tokens": 5198,
+      "model": "gpt-oss:20b",
+      "agent": "preprocess",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:28:02"
+    },
+    {
+      "prompt_tokens": 2983,
+      "completion_tokens": 3723,
+      "total_tokens": 6706,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:28:47"
+    },
+    {
+      "prompt_tokens": 2983,
+      "completion_tokens": 2587,
+      "total_tokens": 5570,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:29:07"
+    },
+    {
+      "prompt_tokens": 2983,
+      "completion_tokens": 1601,
+      "total_tokens": 4584,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:29:21"
+    },
+    {
+      "prompt_tokens": 1589,
+      "completion_tokens": 910,
+      "total_tokens": 2499,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:35"
+    },
+    {
+      "prompt_tokens": 1510,
+      "completion_tokens": 129,
+      "total_tokens": 1639,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:42"
+    },
+    {
+      "prompt_tokens": 10847,
+      "completion_tokens": 2928,
+      "total_tokens": 13775,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:02"
+    },
+    {
+      "prompt_tokens": 1869,
+      "completion_tokens": 820,
+      "total_tokens": 2689,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:31"
+    },
+    {
+      "prompt_tokens": 3324,
+      "completion_tokens": 2660,
+      "total_tokens": 5984,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:48"
+    },
+    {
+      "prompt_tokens": 3439,
+      "completion_tokens": 1539,
+      "total_tokens": 4978,
+      "model": "gpt-oss:20b",
+      "agent": "preprocess",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:27:36"
+    },
+    {
+      "prompt_tokens": 3010,
+      "completion_tokens": 1975,
+      "total_tokens": 4985,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:28:21"
+    },
+    {
+      "prompt_tokens": 1134,
+      "completion_tokens": 1759,
+      "total_tokens": 2893,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:29:29"
+    },
+    {
+      "prompt_tokens": 1868,
+      "completion_tokens": 518,
+      "total_tokens": 2386,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:30:04"
+    },
+    {
+      "prompt_tokens": 3376,
+      "completion_tokens": 3623,
+      "total_tokens": 6999,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:30:39"
+    },
+    {
+      "prompt_tokens": 3509,
+      "completion_tokens": 1211,
+      "total_tokens": 4720,
+      "model": "gpt-oss:20b",
+      "agent": "preprocess",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:30:59"
+    },
+    {
+      "prompt_tokens": 3015,
+      "completion_tokens": 1230,
+      "total_tokens": 4245,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:31:24"
+    },
+    {
+      "prompt_tokens": 1889,
+      "completion_tokens": 994,
+      "total_tokens": 2883,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:31:52"
+    },
+    {
+      "prompt_tokens": 3415,
+      "completion_tokens": 2631,
+      "total_tokens": 6046,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:32:14"
+    },
+    {
+      "prompt_tokens": 3527,
+      "completion_tokens": 1648,
+      "total_tokens": 5175,
+      "model": "gpt-oss:20b",
+      "agent": "preprocess",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:32:39"
+    },
+    {
+      "prompt_tokens": 3102,
+      "completion_tokens": 3352,
+      "total_tokens": 6454,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:33:03"
+    },
+    {
+      "prompt_tokens": 3102,
+      "completion_tokens": 1979,
+      "total_tokens": 5081,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:33:17"
+    },
+    {
+      "prompt_tokens": 1879,
+      "completion_tokens": 944,
+      "total_tokens": 2823,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:33:43"
+    },
+    {
+      "prompt_tokens": 3505,
+      "completion_tokens": 2715,
+      "total_tokens": 6220,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:34:14"
+    },
+    {
+      "prompt_tokens": 3606,
+      "completion_tokens": 1370,
+      "total_tokens": 4976,
+      "model": "gpt-oss:20b",
+      "agent": "preprocess",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:34:49"
+    },
+    {
+      "prompt_tokens": 3325,
+      "completion_tokens": 2643,
+      "total_tokens": 5968,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:35:21"
+    },
+    {
+      "prompt_tokens": 3325,
+      "completion_tokens": 1607,
+      "total_tokens": 4932,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:35:50"
+    },
+    {
+      "prompt_tokens": 3325,
+      "completion_tokens": 1756,
+      "total_tokens": 5081,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:36:07"
+    },
+    {
+      "prompt_tokens": 1869,
+      "completion_tokens": 830,
+      "total_tokens": 2699,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:36:41"
+    },
+    {
+      "prompt_tokens": 3368,
+      "completion_tokens": 2873,
+      "total_tokens": 6241,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:37:45"
+    },
+    {
+      "prompt_tokens": 1868,
+      "completion_tokens": 675,
+      "total_tokens": 2543,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:39:18"
+    },
+    {
+      "prompt_tokens": 3299,
+      "completion_tokens": 2467,
+      "total_tokens": 5766,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:39:53"
+    },
+    {
+      "prompt_tokens": 3789,
+      "completion_tokens": 1691,
+      "total_tokens": 5480,
+      "model": "gpt-oss:20b",
+      "agent": "preprocess",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:40:26"
+    },
+    {
+      "prompt_tokens": 3156,
+      "completion_tokens": 2356,
+      "total_tokens": 5512,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:40:53"
+    },
+    {
+      "prompt_tokens": 1869,
+      "completion_tokens": 815,
+      "total_tokens": 2684,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:41:21"
+    },
+    {
+      "prompt_tokens": 3375,
+      "completion_tokens": 3503,
+      "total_tokens": 6878,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:41:50"
+    },
+    {
+      "prompt_tokens": 3426,
+      "completion_tokens": 1461,
+      "total_tokens": 4887,
+      "model": "gpt-oss:20b",
+      "agent": "preprocess",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:42:12"
+    },
+    {
+      "prompt_tokens": 2903,
+      "completion_tokens": 1675,
+      "total_tokens": 4578,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:42:22"
+    },
+    {
+      "prompt_tokens": 1145,
+      "completion_tokens": 1458,
+      "total_tokens": 2603,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:43:05"
+    },
+    {
+      "prompt_tokens": 1869,
+      "completion_tokens": 517,
+      "total_tokens": 2386,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:43:22"
+    },
+    {
+      "prompt_tokens": 3385,
+      "completion_tokens": 1715,
+      "total_tokens": 5100,
+      "model": "gpt-oss:20b",
+      "agent": "planner",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:43:54"
+    },
+    {
+      "prompt_tokens": 3528,
+      "completion_tokens": 1733,
+      "total_tokens": 5261,
+      "model": "gpt-oss:20b",
+      "agent": "preprocess",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:44:21"
+    },
+    {
+      "prompt_tokens": 2875,
+      "completion_tokens": 2528,
+      "total_tokens": 5403,
+      "model": "gpt-oss:20b",
+      "agent": "simsetup",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:44:46"
+    },
+    {
+      "prompt_tokens": 1134,
+      "completion_tokens": 2021,
+      "total_tokens": 3155,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:47:00"
+    },
+    {
+      "prompt_tokens": 2559,
+      "completion_tokens": 938,
+      "total_tokens": 3497,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:47:12"
+    },
+    {
+      "prompt_tokens": 2751,
+      "completion_tokens": 808,
+      "total_tokens": 3559,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:01:58"
+    },
+    {
+      "prompt_tokens": 3250,
+      "completion_tokens": 1590,
+      "total_tokens": 4840,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:02:10"
+    },
+    {
+      "prompt_tokens": 2177,
+      "completion_tokens": 1182,
+      "total_tokens": 3359,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:02:17"
+    },
+    {
+      "prompt_tokens": 1984,
+      "completion_tokens": 1427,
+      "total_tokens": 3411,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:02:25"
+    },
+    {
+      "prompt_tokens": 2559,
+      "completion_tokens": 763,
+      "total_tokens": 3322,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:02:58"
+    },
+    {
+      "prompt_tokens": 1832,
+      "completion_tokens": 1886,
+      "total_tokens": 3718,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:03:09"
+    },
+    {
+      "prompt_tokens": 2559,
+      "completion_tokens": 862,
+      "total_tokens": 3421,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:03:30"
+    },
+    {
+      "prompt_tokens": 1832,
+      "completion_tokens": 2161,
+      "total_tokens": 3993,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:03:42"
+    },
+    {
+      "prompt_tokens": 2547,
+      "completion_tokens": 810,
+      "total_tokens": 3357,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:04:01"
+    },
+    {
+      "prompt_tokens": 2913,
+      "completion_tokens": 1037,
+      "total_tokens": 3950,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:18:09"
+    },
+    {
+      "prompt_tokens": 3269,
+      "completion_tokens": 2120,
+      "total_tokens": 5389,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:18:22"
+    },
+    {
+      "prompt_tokens": 2192,
+      "completion_tokens": 1190,
+      "total_tokens": 3382,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:18:29"
+    },
+    {
+      "prompt_tokens": 1973,
+      "completion_tokens": 1498,
+      "total_tokens": 3471,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:18:37"
+    },
+    {
+      "prompt_tokens": 2547,
+      "completion_tokens": 465,
+      "total_tokens": 3012,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:18:54"
+    },
+    {
+      "prompt_tokens": 1821,
+      "completion_tokens": 1784,
+      "total_tokens": 3605,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:19:05"
+    },
+    {
+      "prompt_tokens": 2547,
+      "completion_tokens": 845,
+      "total_tokens": 3392,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:19:26"
+    },
+    {
+      "prompt_tokens": 1821,
+      "completion_tokens": 1460,
+      "total_tokens": 3281,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:19:36"
+    },
+    {
+      "prompt_tokens": 2548,
+      "completion_tokens": 900,
+      "total_tokens": 3448,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:19:58"
+    },
+    {
+      "prompt_tokens": 2741,
+      "completion_tokens": 1334,
+      "total_tokens": 4075,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:31:37"
+    },
+    {
+      "prompt_tokens": 3266,
+      "completion_tokens": 1561,
+      "total_tokens": 4827,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:31:48"
+    },
+    {
+      "prompt_tokens": 2192,
+      "completion_tokens": 1940,
+      "total_tokens": 4132,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:31:58"
+    },
+    {
+      "prompt_tokens": 1974,
+      "completion_tokens": 1753,
+      "total_tokens": 3727,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:32:07"
+    },
+    {
+      "prompt_tokens": 2548,
+      "completion_tokens": 955,
+      "total_tokens": 3503,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:32:20"
+    },
+    {
+      "prompt_tokens": 1822,
+      "completion_tokens": 1619,
+      "total_tokens": 3441,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:32:31"
+    },
+    {
+      "prompt_tokens": 2548,
+      "completion_tokens": 932,
+      "total_tokens": 3480,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:32:51"
+    },
+    {
+      "prompt_tokens": 1822,
+      "completion_tokens": 1900,
+      "total_tokens": 3722,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:33:04"
+    },
+    {
+      "prompt_tokens": 2548,
+      "completion_tokens": 1091,
+      "total_tokens": 3639,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:33:23"
+    },
+    {
+      "prompt_tokens": 2729,
+      "completion_tokens": 1075,
+      "total_tokens": 3804,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:48:07"
+    },
+    {
+      "prompt_tokens": 3321,
+      "completion_tokens": 1538,
+      "total_tokens": 4859,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:48:19"
+    },
+    {
+      "prompt_tokens": 2248,
+      "completion_tokens": 1593,
+      "total_tokens": 3841,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:48:28"
+    },
+    {
+      "prompt_tokens": 1974,
+      "completion_tokens": 1691,
+      "total_tokens": 3665,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:48:36"
+    },
+    {
+      "prompt_tokens": 2548,
+      "completion_tokens": 1095,
+      "total_tokens": 3643,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:48:49"
+    },
+    {
+      "prompt_tokens": 1822,
+      "completion_tokens": 1427,
+      "total_tokens": 3249,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:49:00"
+    },
+    {
+      "prompt_tokens": 2548,
+      "completion_tokens": 457,
+      "total_tokens": 3005,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:49:17"
+    },
+    {
+      "prompt_tokens": 1822,
+      "completion_tokens": 1955,
+      "total_tokens": 3777,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:49:29"
+    },
+    {
+      "prompt_tokens": 2549,
+      "completion_tokens": 1406,
+      "total_tokens": 3955,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T15:49:54"
+    },
+    {
+      "prompt_tokens": 2579,
+      "completion_tokens": 790,
+      "total_tokens": 3369,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:05:12"
+    },
+    {
+      "prompt_tokens": 3269,
+      "completion_tokens": 1283,
+      "total_tokens": 4552,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:05:22"
+    },
+    {
+      "prompt_tokens": 2192,
+      "completion_tokens": 888,
+      "total_tokens": 3080,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:05:27"
+    },
+    {
+      "prompt_tokens": 1975,
+      "completion_tokens": 1674,
+      "total_tokens": 3649,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:05:35"
+    },
+    {
+      "prompt_tokens": 2549,
+      "completion_tokens": 1057,
+      "total_tokens": 3606,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:05:51"
+    },
+    {
+      "prompt_tokens": 1823,
+      "completion_tokens": 1593,
+      "total_tokens": 3416,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:06:01"
+    },
+    {
+      "prompt_tokens": 2549,
+      "completion_tokens": 820,
+      "total_tokens": 3369,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:06:21"
+    },
+    {
+      "prompt_tokens": 1823,
+      "completion_tokens": 1663,
+      "total_tokens": 3486,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:06:31"
+    },
+    {
+      "prompt_tokens": 2548,
+      "completion_tokens": 924,
+      "total_tokens": 3472,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:06:54"
+    },
+    {
+      "prompt_tokens": 2711,
+      "completion_tokens": 1123,
+      "total_tokens": 3834,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:20:33"
+    },
+    {
+      "prompt_tokens": 1515,
+      "completion_tokens": 1251,
+      "total_tokens": 2766,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:20:49"
+    },
+    {
+      "prompt_tokens": 1379,
+      "completion_tokens": 881,
+      "total_tokens": 2260,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:20:54"
+    },
+    {
+      "prompt_tokens": 1974,
+      "completion_tokens": 1774,
+      "total_tokens": 3748,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:21:03"
+    },
+    {
+      "prompt_tokens": 2548,
+      "completion_tokens": 513,
+      "total_tokens": 3061,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:21:16"
+    },
+    {
+      "prompt_tokens": 1822,
+      "completion_tokens": 1854,
+      "total_tokens": 3676,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:21:28"
+    },
+    {
+      "prompt_tokens": 2548,
+      "completion_tokens": 746,
+      "total_tokens": 3294,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:21:48"
+    },
+    {
+      "prompt_tokens": 1822,
+      "completion_tokens": 1495,
+      "total_tokens": 3317,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:21:59"
+    },
+    {
+      "prompt_tokens": 1589,
+      "completion_tokens": 910,
+      "total_tokens": 2499,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:35"
+    },
+    {
+      "prompt_tokens": 1510,
+      "completion_tokens": 129,
+      "total_tokens": 1639,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:42"
+    },
+    {
+      "prompt_tokens": 10847,
+      "completion_tokens": 2928,
+      "total_tokens": 13775,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:02"
+    },
+    {
+      "prompt_tokens": 9688,
+      "completion_tokens": 2063,
+      "total_tokens": 11751,
+      "model": "gpt-oss:20b",
+      "agent": "analysis",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:46:48"
+    },
+    {
+      "prompt_tokens": 2178,
+      "completion_tokens": 267,
+      "total_tokens": 2445,
+      "model": "gpt-oss:20b",
+      "agent": "analysis",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:22:53"
+    },
+    {
+      "prompt_tokens": 1589,
+      "completion_tokens": 910,
+      "total_tokens": 2499,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:35"
+    },
+    {
+      "prompt_tokens": 1510,
+      "completion_tokens": 129,
+      "total_tokens": 1639,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:42"
+    },
+    {
+      "prompt_tokens": 10847,
+      "completion_tokens": 2928,
+      "total_tokens": 13775,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:02"
+    },
+    {
+      "prompt_tokens": 9688,
+      "completion_tokens": 2063,
+      "total_tokens": 11751,
+      "model": "gpt-oss:20b",
+      "agent": "analysis",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:46:48"
+    },
+    {
+      "prompt_tokens": 2178,
+      "completion_tokens": 267,
+      "total_tokens": 2445,
+      "model": "gpt-oss:20b",
+      "agent": "analysis",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:22:53"
+    },
+    {
+      "prompt_tokens": 3785,
+      "completion_tokens": 2058,
+      "total_tokens": 5843,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:15"
+    },
+    {
+      "prompt_tokens": 1589,
+      "completion_tokens": 910,
+      "total_tokens": 2499,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:35"
+    },
+    {
+      "prompt_tokens": 1510,
+      "completion_tokens": 129,
+      "total_tokens": 1639,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:42"
+    },
+    {
+      "prompt_tokens": 10847,
+      "completion_tokens": 2928,
+      "total_tokens": 13775,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:02"
+    },
+    {
+      "prompt_tokens": 9688,
+      "completion_tokens": 2063,
+      "total_tokens": 11751,
+      "model": "gpt-oss:20b",
+      "agent": "analysis",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:46:48"
+    },
+    {
+      "prompt_tokens": 2178,
+      "completion_tokens": 267,
+      "total_tokens": 2445,
+      "model": "gpt-oss:20b",
+      "agent": "analysis",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:22:53"
+    },
+    {
+      "prompt_tokens": 3785,
+      "completion_tokens": 2058,
+      "total_tokens": 5843,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:15"
+    },
+    {
+      "prompt_tokens": 3547,
+      "completion_tokens": 1885,
+      "total_tokens": 5432,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:30"
+    },
+    {
+      "prompt_tokens": 1589,
+      "completion_tokens": 910,
+      "total_tokens": 2499,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:35"
+    },
+    {
+      "prompt_tokens": 1510,
+      "completion_tokens": 129,
+      "total_tokens": 1639,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:42"
+    },
+    {
+      "prompt_tokens": 10847,
+      "completion_tokens": 2928,
+      "total_tokens": 13775,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:02"
+    },
+    {
+      "prompt_tokens": 9688,
+      "completion_tokens": 2063,
+      "total_tokens": 11751,
+      "model": "gpt-oss:20b",
+      "agent": "analysis",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:46:48"
+    },
+    {
+      "prompt_tokens": 2178,
+      "completion_tokens": 267,
+      "total_tokens": 2445,
+      "model": "gpt-oss:20b",
+      "agent": "analysis",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:22:53"
+    },
+    {
+      "prompt_tokens": 3785,
+      "completion_tokens": 2058,
+      "total_tokens": 5843,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:15"
+    },
+    {
+      "prompt_tokens": 3547,
+      "completion_tokens": 1885,
+      "total_tokens": 5432,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:30"
+    },
+    {
+      "prompt_tokens": 2415,
+      "completion_tokens": 1216,
+      "total_tokens": 3631,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:37"
+    },
+    {
+      "prompt_tokens": 1589,
+      "completion_tokens": 910,
+      "total_tokens": 2499,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:35"
+    },
+    {
+      "prompt_tokens": 1510,
+      "completion_tokens": 129,
+      "total_tokens": 1639,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:42"
+    },
+    {
+      "prompt_tokens": 10847,
+      "completion_tokens": 2928,
+      "total_tokens": 13775,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:02"
+    },
+    {
+      "prompt_tokens": 9688,
+      "completion_tokens": 2063,
+      "total_tokens": 11751,
+      "model": "gpt-oss:20b",
+      "agent": "analysis",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:46:48"
+    },
+    {
+      "prompt_tokens": 2178,
+      "completion_tokens": 267,
+      "total_tokens": 2445,
+      "model": "gpt-oss:20b",
+      "agent": "analysis",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:22:53"
+    },
+    {
+      "prompt_tokens": 3785,
+      "completion_tokens": 2058,
+      "total_tokens": 5843,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:15"
+    },
+    {
+      "prompt_tokens": 3547,
+      "completion_tokens": 1885,
+      "total_tokens": 5432,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:30"
+    },
+    {
+      "prompt_tokens": 2415,
+      "completion_tokens": 1216,
+      "total_tokens": 3631,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:37"
+    },
+    {
+      "prompt_tokens": 1690,
+      "completion_tokens": 305,
+      "total_tokens": 1995,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:43"
+    },
+    {
+      "prompt_tokens": 1589,
+      "completion_tokens": 910,
+      "total_tokens": 2499,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:35"
+    },
+    {
+      "prompt_tokens": 1510,
+      "completion_tokens": 129,
+      "total_tokens": 1639,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:42"
+    },
+    {
+      "prompt_tokens": 10847,
+      "completion_tokens": 2928,
+      "total_tokens": 13775,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:02"
+    },
+    {
+      "prompt_tokens": 9688,
+      "completion_tokens": 2063,
+      "total_tokens": 11751,
+      "model": "gpt-oss:20b",
+      "agent": "analysis",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:46:48"
+    },
+    {
+      "prompt_tokens": 2178,
+      "completion_tokens": 267,
+      "total_tokens": 2445,
+      "model": "gpt-oss:20b",
+      "agent": "analysis",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:22:53"
+    },
+    {
+      "prompt_tokens": 3785,
+      "completion_tokens": 2058,
+      "total_tokens": 5843,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:15"
+    },
+    {
+      "prompt_tokens": 3547,
+      "completion_tokens": 1885,
+      "total_tokens": 5432,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:30"
+    },
+    {
+      "prompt_tokens": 2415,
+      "completion_tokens": 1216,
+      "total_tokens": 3631,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:37"
+    },
+    {
+      "prompt_tokens": 1690,
+      "completion_tokens": 305,
+      "total_tokens": 1995,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:43"
+    },
+    {
+      "prompt_tokens": 2515,
+      "completion_tokens": 241,
+      "total_tokens": 2756,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:47"
+    },
+    {
+      "prompt_tokens": 1589,
+      "completion_tokens": 910,
+      "total_tokens": 2499,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:35"
+    },
+    {
+      "prompt_tokens": 1510,
+      "completion_tokens": 129,
+      "total_tokens": 1639,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:25:42"
+    },
+    {
+      "prompt_tokens": 10847,
+      "completion_tokens": 2928,
+      "total_tokens": 13775,
+      "model": "gpt-oss:20b",
+      "agent": "supervisor",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:26:02"
+    },
+    {
+      "prompt_tokens": 9688,
+      "completion_tokens": 2063,
+      "total_tokens": 11751,
+      "model": "gpt-oss:20b",
+      "agent": "analysis",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T14:46:48"
+    },
+    {
+      "prompt_tokens": 2178,
+      "completion_tokens": 267,
+      "total_tokens": 2445,
+      "model": "gpt-oss:20b",
+      "agent": "analysis",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:22:53"
+    },
+    {
+      "prompt_tokens": 3785,
+      "completion_tokens": 2058,
+      "total_tokens": 5843,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:15"
+    },
+    {
+      "prompt_tokens": 3547,
+      "completion_tokens": 1885,
+      "total_tokens": 5432,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:30"
+    },
+    {
+      "prompt_tokens": 2415,
+      "completion_tokens": 1216,
+      "total_tokens": 3631,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:37"
+    },
+    {
+      "prompt_tokens": 1690,
+      "completion_tokens": 305,
+      "total_tokens": 1995,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:43"
+    },
+    {
+      "prompt_tokens": 2515,
+      "completion_tokens": 241,
+      "total_tokens": 2756,
+      "model": "gpt-oss:20b",
+      "agent": "reporter",
+      "method": "prompt_raw",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:23:47"
+    },
+    {
+      "prompt_tokens": 4809,
+      "completion_tokens": 1835,
+      "total_tokens": 6644,
+      "model": "gpt-oss:20b",
+      "agent": "final_report",
+      "method": "prompt",
+      "estimated": false,
+      "timestamp": "2026-09-23T16:24:00"
+    }
+  ],
+  "updated_at": "2026-09-23T16:24:00",
+  "tracking_enabled": true,
+  "budget_enforced": false
+}

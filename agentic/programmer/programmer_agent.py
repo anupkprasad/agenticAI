@@ -77,13 +77,13 @@ class MDProgrammer:
         Returns:
             String containing available software list or empty string if not found
         """
-        # Look for AVAILABLE_SOFTWARE.md near the package / workspace root
+        # Canonical copy sits beside this module. Earlier paths stay as fallbacks.
         software_doc_paths = [
+            os.path.join(os.path.dirname(__file__), "AVAILABLE_SOFTWARE.md"),
             "AVAILABLE_SOFTWARE.md",
             "../AVAILABLE_SOFTWARE.md",
             "../../AVAILABLE_SOFTWARE.md",
             os.path.join(os.path.dirname(__file__), "..", "..", "AVAILABLE_SOFTWARE.md"),
-            os.path.join(os.path.dirname(__file__), "AVAILABLE_SOFTWARE.md"),
         ]
         
         for path in software_doc_paths:

@@ -1,0 +1,52 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The report requires the consolidated analysis data and contextual literature. We first read the analysis summary JSONL to obtain all per\u2011system metrics and image paths. Next, we query PubMed with a combined, topic\u2011focused search to pull recent, relevant studies on pseudokinase ATP dynamics and the specific analytical methods used. Finally, we feed the analysis data and the retrieved literature into the HTML report generator, which will embed the plots and summary cards automatically. This two\u2011step workflow keeps the report comprehensive while leveraging only the provided tools.",
+  "overview": "1. Load analysis results from `analysis/analysis_summary.jsonl`. 2. Search PubMed for recent literature on pseudokinase ATP simulations and the key analytical techniques (consensus DCCM, dihedral PCA, etc.). 3. Generate a single, fully\u2011embedded HTML report (`report.html`) in the reporter directory that includes plots, statistics, and literature context.",
+  "report_focus": [
+    "Per\u2011system dynamics descriptors (e.g., ATP COM distance, pocket \u03c7\u2081, DCCM)",
+    "Consensus metrics across replicates",
+    "Literature context for pseudokinase ATP binding and analytical methods"
+  ],
+  "literature_queries": [
+    "pseudokinase ATP MD simulation",
+    "ATP binding pocket dynamics",
+    "consensus DCCM protein kinases",
+    "dihedral PCA protein kinase flexibility"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the JSONL file to obtain all analysis metrics, statistics, and image file paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need to load the analysis results for the report."
+    },
+    {
+      "name": "Search PubMed for Contextual Literature",
+      "description": "Retrieve recent papers on pseudokinase ATP dynamics and the analytical methods applied.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "pseudokinase ATP MD simulation OR ATP binding pocket dynamics OR consensus DCCM protein kinases OR dihedral PCA protein kinase flexibility",
+        "max_results": 10,
+        "include_abstracts": true,
+        "max_age_years": 5
+      },
+      "reason": "Provide up\u2011to\u2011date literature references to contextualize the findings."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML report with embedded images, key statistics, and literature citations.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": {},
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "Produce the final deliverable for the current simulation run."
+    }
+  ]
+}

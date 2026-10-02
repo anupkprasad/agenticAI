@@ -1,0 +1,40 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The user has already completed all trajectory analyses and stored the results in a single `analysis_summary.jsonl` file. The only remaining task is to parse this file and generate a self\u2011contained HTML report that embeds all plots, presents the key scalar descriptors, and gives a concise literature context. No additional simulations or preprocessing are required. The plan therefore focuses on two straightforward tool calls: (1) read the summary file and (2) generate the HTML report. Optional literature queries are included for completeness, but they are not mandatory for the final deliverable.",
+  "overview": "1. Parse the existing analysis summary. 2. Generate a comprehensive HTML report (`report.html`) that embeds all visualizations, displays key statistics, and (optionally) includes a brief literature review.",
+  "report_focus": [
+    "ATP\u2011pocket interaction descriptors (COM distance, orientation, side\u2011chain \u03c7\u2081)",
+    "Consensus RMSF and DCCM statistics",
+    "Shared\u2011reference PCA dynamics versus KAPCA",
+    "Integrated visualizations of the full 200\u2011ns trajectories"
+  ],
+  "literature_queries": [
+    "KSR2 pseudokinase ATP binding site dynamics simulation",
+    "KSR2 ATP pocket consensus residues MD analysis",
+    "Shared\u2011reference PCA in protein dynamics",
+    "Correlation of ATP orientation with kinase activation"
+  ],
+  "estimated_complexity": "low",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the `analysis_summary.jsonl` file to obtain the statistical results and image paths for the two 200\u2011ns trajectories.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need to load the analysis data that will be fed into the report generator."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a professional, comprehensive HTML report that includes embedded images, statistical cards, and a brief literature context.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "output_file": "report.html",
+        "report_type": "comprehensive"
+      },
+      "reason": "Produce the final deliverable for the user."
+    }
+  ]
+}

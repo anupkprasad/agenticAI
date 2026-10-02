@@ -1,0 +1,447 @@
+{
+  "title": "Multi-Simulation Master Plan",
+  "format": "master_plan",
+  "phase": "master",
+  "workflow_pipeline": "preprocess -> simsetup -> hpcjob -> analysis -> reporter",
+  "task_scope": "full_pipeline",
+  "enriched_prompt": "Preprocess the 20 holo PDBs by extracting only the protein, ligand (ATP) and ion (Mg\u00b2\u207a) components, discarding any water, and prepare cleaned coordinate files.  \nSet up GROMACS for each system using amber99sb\u2011ildn, TIP3P, 310\u202fK, 1\u202fbar, 0.15\u202fM NaCl, a cubic box with 1.2\u202fnm buffer, generating the necessary topology, coordinates, MDP, and TPR files.  \nSubmit and run two independent 200\u202fns production MD replicates per system on the HPC, ensuring all trajectories are completed before proceeding.  \nAnalyze each full 200\u202fns trajectory to (i) map the ATP\u2011binding pocket from KAPCA (p17612) onto the other proteins via MAFFT MSA, (ii) compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c7\u2081 mean & SD, C\u03b1 RMSF mean & SD, DCCM mean correlation, shared\u2011reference PCA scalar) for both replicates and average them, (iii) assemble the descriptors into a feature table, and (iv) perform Ward hierarchical clustering, generating a dendrogram and feature\u2011heatmap (robust z\u2011score/IQR scaling) while noting a k\u202f=\u202f4 cut but retaining the full tree.  \nProduce a single HTML report that includes the dendrogram, heatmap, the compiled feature table, and brief literature context for the kinases/pseudokinases.",
+  "shared_per_sim_intent": null,
+  "sim_entries": [
+    {
+      "label": "p17612_ATP",
+      "protein_name": "KAPCA",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p17612.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p17612_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase p17612 (KAPCA) from source p17612.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudo"
+    },
+    {
+      "label": "o60674_ATP",
+      "protein_name": "JAK2",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o60674.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o60674_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase o60674 (JAK2) from source o60674.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudok"
+    },
+    {
+      "label": "p24941_ATP",
+      "protein_name": "CDK2",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p24941.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p24941_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase p24941 (CDK2) from source p24941.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudok"
+    },
+    {
+      "label": "q8ivt5_ATP",
+      "protein_name": "KSR1",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q8ivt5.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q8ivt5_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase q8ivt5 (KSR1) from source q8ivt5.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudok"
+    },
+    {
+      "label": "q13418_ATP",
+      "protein_name": "ILK",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q13418.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q13418_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase q13418 (ILK) from source q13418.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudoki"
+    },
+    {
+      "label": "p00533_ATP",
+      "protein_name": "EGFR",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p00533.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p00533_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase p00533 (EGFR) from source p00533.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudok"
+    },
+    {
+      "label": "p23458_ATP",
+      "protein_name": "JAK1",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p23458.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p23458_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase p23458 (JAK1) from source p23458.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudok"
+    },
+    {
+      "label": "q6vab6_ATP",
+      "protein_name": "KSR2",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q6vab6.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q6vab6_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase q6vab6 (KSR2) from source q6vab6.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudok"
+    },
+    {
+      "label": "q92519_ATP",
+      "protein_name": "TRIB2",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q92519.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q92519_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase q92519 (TRIB2) from source q92519.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudo"
+    },
+    {
+      "label": "q9y243_ATP",
+      "protein_name": "AKT3",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q9y243.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q9y243_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase q9y243 (AKT3) from source q9y243.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudok"
+    },
+    {
+      "label": "o15197_ATP",
+      "protein_name": "EPHB6",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o15197.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o15197_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase o15197 (EPHB6) from source o15197.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudo"
+    },
+    {
+      "label": "o43187_ATP",
+      "protein_name": "IRAK2",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o43187.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o43187_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase o43187 (IRAK2) from source o43187.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudo"
+    },
+    {
+      "label": "p21860_ATP",
+      "protein_name": "ERBB3",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p21860.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p21860_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase p21860 (ERBB3) from source p21860.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudo"
+    },
+    {
+      "label": "p25092_ATP",
+      "protein_name": "GUC2C",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p25092.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p25092_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase p25092 (GUC2C) from source p25092.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudo"
+    },
+    {
+      "label": "p28482_ATP",
+      "protein_name": "MK01",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p28482.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p28482_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase p28482 (MK01) from source p28482.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudok"
+    },
+    {
+      "label": "p29597_ATP",
+      "protein_name": "TYK2",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p29597.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p29597_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase p29597 (TYK2) from source p29597.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudok"
+    },
+    {
+      "label": "p51841_ATP",
+      "protein_name": "GUC2F",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p51841.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p51841_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase p51841 (GUC2F) from source p51841.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudo"
+    },
+    {
+      "label": "p52333_ATP",
+      "protein_name": "JAK3",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p52333.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p52333_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase p52333 (JAK3) from source p52333.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudok"
+    },
+    {
+      "label": "q05823_ATP",
+      "protein_name": "RN5A",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q05823.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q05823_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase q05823 (RN5A) from source q05823.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudok"
+    },
+    {
+      "label": "q13308_ATP",
+      "protein_name": "PTK7",
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q13308.pdb",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q13308_ATP",
+      "case_description": "Protein\u2013ATP holo",
+      "prompt_preview": "Simulate and analyze the holo kinase q13308 (PTK7) from source q13308.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudok"
+    }
+  ],
+  "sim_prompts": [
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p17612.pdb",
+      "label": "p17612_ATP",
+      "prompt": "Simulate and analyze the holo kinase p17612 (KAPCA) from source p17612.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p17612_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p17612_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "KAPCA"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o60674.pdb",
+      "label": "o60674_ATP",
+      "prompt": "Simulate and analyze the holo kinase o60674 (JAK2) from source o60674.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o60674_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o60674_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "JAK2"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p24941.pdb",
+      "label": "p24941_ATP",
+      "prompt": "Simulate and analyze the holo kinase p24941 (CDK2) from source p24941.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p24941_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p24941_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "CDK2"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q8ivt5.pdb",
+      "label": "q8ivt5_ATP",
+      "prompt": "Simulate and analyze the holo kinase q8ivt5 (KSR1) from source q8ivt5.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q8ivt5_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q8ivt5_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "KSR1"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q13418.pdb",
+      "label": "q13418_ATP",
+      "prompt": "Simulate and analyze the holo kinase q13418 (ILK) from source q13418.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q13418_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q13418_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "ILK"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p00533.pdb",
+      "label": "p00533_ATP",
+      "prompt": "Simulate and analyze the holo kinase p00533 (EGFR) from source p00533.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p00533_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p00533_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "EGFR"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p23458.pdb",
+      "label": "p23458_ATP",
+      "prompt": "Simulate and analyze the holo kinase p23458 (JAK1) from source p23458.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p23458_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p23458_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "JAK1"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q6vab6.pdb",
+      "label": "q6vab6_ATP",
+      "prompt": "Simulate and analyze the holo kinase q6vab6 (KSR2) from source q6vab6.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q6vab6_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q6vab6_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "KSR2"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q92519.pdb",
+      "label": "q92519_ATP",
+      "prompt": "Simulate and analyze the holo kinase q92519 (TRIB2) from source q92519.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q92519_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q92519_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "TRIB2"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q9y243.pdb",
+      "label": "q9y243_ATP",
+      "prompt": "Simulate and analyze the holo kinase q9y243 (AKT3) from source q9y243.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q9y243_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q9y243_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "AKT3"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o15197.pdb",
+      "label": "o15197_ATP",
+      "prompt": "Simulate and analyze the holo kinase o15197 (EPHB6) from source o15197.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o15197_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o15197_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "EPHB6"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o43187.pdb",
+      "label": "o43187_ATP",
+      "prompt": "Simulate and analyze the holo kinase o43187 (IRAK2) from source o43187.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o43187_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/o43187_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "IRAK2"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p21860.pdb",
+      "label": "p21860_ATP",
+      "prompt": "Simulate and analyze the holo kinase p21860 (ERBB3) from source p21860.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p21860_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p21860_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "ERBB3"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p25092.pdb",
+      "label": "p25092_ATP",
+      "prompt": "Simulate and analyze the holo kinase p25092 (GUC2C) from source p25092.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p25092_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p25092_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "GUC2C"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p28482.pdb",
+      "label": "p28482_ATP",
+      "prompt": "Simulate and analyze the holo kinase p28482 (MK01) from source p28482.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p28482_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p28482_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "MK01"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p29597.pdb",
+      "label": "p29597_ATP",
+      "prompt": "Simulate and analyze the holo kinase p29597 (TYK2) from source p29597.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p29597_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p29597_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "TYK2"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p51841.pdb",
+      "label": "p51841_ATP",
+      "prompt": "Simulate and analyze the holo kinase p51841 (GUC2F) from source p51841.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p51841_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p51841_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "GUC2F"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p52333.pdb",
+      "label": "p52333_ATP",
+      "prompt": "Simulate and analyze the holo kinase p52333 (JAK3) from source p52333.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p52333_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/p52333_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "JAK3"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q05823.pdb",
+      "label": "q05823_ATP",
+      "prompt": "Simulate and analyze the holo kinase q05823 (RN5A) from source q05823.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q05823_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q05823_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "RN5A"
+    },
+    {
+      "pdb": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q13308.pdb",
+      "label": "q13308_ATP",
+      "prompt": "Simulate and analyze the holo kinase q13308 (PTK7) from source q13308.pdb in directory /home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q13308_ATP. After two 200 ns replicates, compute the ten scalar dynamics descriptors (ATP COM distance/angle, pocket \u03c71 mean & SD, C\u03b1 RMSF mean & SD, N\u2194C DCCM mean, shared-reference PCA scalar), average across replicates, plot full 200 ns trajectories, and generate the HTML report. Steps: analysis -> reporter case=Protein\u2013ATP holo Case requirement: case_id=protein_with_ligand Run full MD pipeline for protein with ATP ligand Include the ligand (e.g. ATP) but exclude crystallographic Mg/ions from the source PDB.",
+      "analysis_prompt": null,
+      "task_scope": "full_pipeline",
+      "working_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q13308_ATP",
+      "case_id": "protein_with_ligand",
+      "case_description": "Protein\u2013ATP holo",
+      "case_directive": "Run full MD pipeline for protein with ATP ligand",
+      "protein_name": "PTK7"
+    }
+  ],
+  "run_pre_combined": true,
+  "pre_combined_plan": "Before per\u2011simulation analysis, perform cross\u2011simulation preprocessing: 1) Build a global MAFFT MSA of all 20 holo kinase sequences using KAPCA (p17612) as reference. 2) Identify the ATP\u2011binding pocket in KAPCA (residues within 15\u202f\u00c5 of ATP). 3) Map that pocket onto each protein via the consensus alignment to obtain pocket residue lists per system. 4) Store the consensus pocket mapping and alignment JSON in base/cross_sim/ for downstream analysis.",
+  "run_post_combined": true,
+  "post_combined_plan": "After all per\u2011simulation analysis and reporter steps complete, aggregate the ten scalar descriptors from each system, compute a Ward hierarchical clustering, generate a dendrogram and robust z\u2011score/IQR\u2011scaled heatmap, and produce a combined HTML report with the dendrogram, heatmap, feature table, and literature context. The report will also highlight a k=4 cut for interpretation but retain the full tree.",
+  "run_combined_analysis": true,
+  "num_combined_prompts": 1,
+  "combined_prompt": "After all per\u2011simulation analysis and reporter steps complete, aggregate the ten scalar descriptors from each system, compute a Ward hierarchical clustering, generate a dendrogram and robust z\u2011score/IQR\u2011scaled heatmap, and produce a combined HTML report with the dendrogram, heatmap, feature table, and literature context. The report will also highlight a k=4 cut for interpretation but retain the full tree.",
+  "combined_analysis_plan": "After all per\u2011simulation analysis and reporter steps complete, aggregate the ten scalar descriptors from each system, compute a Ward hierarchical clustering, generate a dendrogram and robust z\u2011score/IQR\u2011scaled heatmap, and produce a combined HTML report with the dendrogram, heatmap, feature table, and literature context. The report will also highlight a k=4 cut for interpretation but retain the full tree.",
+  "num_simulations": 20,
+  "labels": [
+    "p17612_ATP",
+    "o60674_ATP",
+    "p24941_ATP",
+    "q8ivt5_ATP",
+    "q13418_ATP",
+    "p00533_ATP",
+    "p23458_ATP",
+    "q6vab6_ATP",
+    "q92519_ATP",
+    "q9y243_ATP",
+    "o15197_ATP",
+    "o43187_ATP",
+    "p21860_ATP",
+    "p25092_ATP",
+    "p28482_ATP",
+    "p29597_ATP",
+    "p51841_ATP",
+    "p52333_ATP",
+    "q05823_ATP",
+    "q13308_ATP"
+  ],
+  "prompt_source": "llm",
+  "timestamp": "2026-09-23T12:27:51.475279",
+  "label": "overall"
+}

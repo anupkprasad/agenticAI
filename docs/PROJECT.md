@@ -74,7 +74,7 @@ Given a natural-language goal and either a PDB file or a UniProt accession, the 
   notes from this run.
 - **Review pauses** — `--HITL all` can pause after the compiled protocol,
   after shared MSA/pocket mapping, and after cross-system comparison.
-- **Programmer software list** — [`AVAILABLE_SOFTWARE.md`](../AVAILABLE_SOFTWARE.md)
+- **Programmer software list** — [`AVAILABLE_SOFTWARE.md`](../agentic/programmer/AVAILABLE_SOFTWARE.md)
   documents engines/libraries the Programmer may assume when generating tools.
 - **Cross-sim HPC pool** — multi-sim full pipeline preps in parallel (local
   workers), submits up to N SLURM jobs in parallel, then runs post-HPC

@@ -1,0 +1,71 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The user\u2019s goal is to produce a single HTML report summarising the 20\u202f\u00d7\u202f2 ATP\u2011holo trajectory analyses. The required data already exist in `analysis/analysis_summary.jsonl`. The report will embed the visualisations, display the key statistics, and provide a concise literature context. To enrich the report, we will perform a brief PubMed search for recent literature on kinase pseudokinases and MD\u2011based functional analyses.",
+  "overview": "1. Parse the analysis summary JSONL. 2. Generate a comprehensive HTML report embedding plots, statistics and literature references. 3. Include a literature search step to pull recent peer\u2011reviewed papers on pseudokinase dynamics and MD\u2011based functional annotation.",
+  "report_focus": [
+    "ATP\u2011pocket dynamic descriptors and their variance across systems",
+    "Hierarchical clustering results and identification of four major dynamic clusters",
+    "Functional implications for pseudokinase versus active kinase behaviour"
+  ],
+  "literature_queries": [
+    "\"pseudokinase\" AND \"ATP binding\" AND \"molecular dynamics\"",
+    "\"kinase dynamics\" AND \"principal component analysis\"",
+    "\"ATP pocket\" AND \"MD simulation\"",
+    "\"pseudokinase function\" AND \"dynamics\"",
+    "\"kinase cluster analysis\" AND \"MD trajectories\""
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse `analysis/analysis_summary.jsonl` to extract per\u2011system descriptors, clustering results, and image file paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "We need the analysis data and image references for the report."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create PubMed search queries tailored to the protein family and the analytical methods used.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "RMSF",
+          "DCCM",
+          "PCAs",
+          "ATP\u2011pocket dynamics"
+        ],
+        "user_goal": "Summarise ATP\u2011pocket dynamics and clustering of kinase/pseudokinase holo\u2011trajectories",
+        "protein_name": "pseudokinase",
+        "analysis_stats": {}
+      },
+      "reason": "To obtain recent literature that contextualises the findings."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Retrieve abstracts and metadata for the top PubMed hits generated in the previous step.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "pseudokinase ATP dynamics molecular dynamics",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "Collect contemporary references to include in the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a professional HTML report titled `report.html` that includes the dendrogram, heatmap, per\u2011system descriptor tables, key statistics cards, and the literature context.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": [],
+        "report_type": "comprehensive",
+        "output_file": "report.html",
+        "enriched_prompt": "Generate a scientific report summarising ATP\u2011pocket dynamics and clustering for 20 kinase/pseudokinase holo\u2011trajectories, with literature context on pseudokinase function and MD analyses."
+      },
+      "reason": "The final deliverable must be a single HTML file containing all requested visualisations and insights."
+    }
+  ]
+}

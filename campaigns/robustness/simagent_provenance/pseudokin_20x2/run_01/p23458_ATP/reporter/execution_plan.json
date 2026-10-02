@@ -1,0 +1,51 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The user wants a single\u2011simulation HTML report that embeds all trajectory analyses, key statistics, and literature context. The analysis data are already in `analysis/analysis_summary.jsonl`. We first parse that file, then optionally augment the report with recent MD\u2011simulation literature on pseudokinase ATP binding. Finally, we generate the report with the provided tool.",
+  "overview": "1. Read the pre\u2011generated analysis summary. 2. Search PubMed for recent literature on pseudokinase ATP molecular dynamics. 3. Generate a comprehensive HTML report that embeds all images and highlights the key statistics.",
+  "report_focus": [
+    "Dynamic descriptors of ATP binding",
+    "Pocket \u03c71 torsion statistics",
+    "C\u03b1 RMSF and DCCM correlations",
+    "Clustering of the 20 pseudokinase systems"
+  ],
+  "literature_queries": [
+    "\"pseudokinase ATP\" \"molecular dynamics\"",
+    "\"ATP binding\" \"pseudokinase\""
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Load the JSONL file containing all descriptor values, statistics, and image file paths.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "We need the analysis data to populate the report."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Retrieve a handful of recent papers that discuss pseudokinase ATP dynamics to provide literature context.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "pseudokinase ATP molecular dynamics",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "The report should include a concise literature background."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a modern, self\u2011contained HTML report with embedded images, key statistics, and literature citations.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": [],
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "This produces the final deliverable the user requested."
+    }
+  ]
+}

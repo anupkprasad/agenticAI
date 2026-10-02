@@ -1,0 +1,165 @@
+{
+  "timestamp": "2026-09-23T13:16:33.280635",
+  "llm_plan": {
+    "reasoning": "The analysis_summary.jsonl contains all required statistics and image paths, so the first step is to load it. To enrich the report with relevant literature, we will query UniProt for the protein\u2019s functional annotations, generate focused PubMed queries using the analysis types and the user goal, and then retrieve the top articles. Finally, the generate_html_report tool will weave the analysis data and literature references into a self\u2011contained, professional HTML document.",
+    "overview": "1\ufe0f\u20e3 Load analysis results\n2\ufe0f\u20e3 Obtain protein functional context (UniProt)\n3\ufe0f\u20e3 Generate PubMed search queries\n4\ufe0f\u20e3 Retrieve literature references\n5\ufe0f\u20e3 Build comprehensive HTML report",
+    "report_focus": [
+      "Quantitative comparison of ATP binding pocket dynamics",
+      "Structural flexibility and inter\u2011lobe communication",
+      "Consensus\u2011based PCA insights"
+    ],
+    "literature_queries": [
+      "Q13418 ATP binding pocket dynamics molecular dynamics",
+      "ATP axis angle protein kinases MD simulation",
+      "pseudokinase \u03c71 torsion dynamics study",
+      "C\u03b1 RMSF analysis kinase activity",
+      "DCCM inter\u2011lobe communication protein kinases",
+      "PCA dynamics holo kinase complexes"
+    ],
+    "estimated_complexity": "medium"
+  },
+  "execution": {
+    "total_steps": 5,
+    "completed_steps": 5,
+    "failed_steps": 0,
+    "success_rate": "100.0%"
+  },
+  "step_results": [
+    {
+      "step_name": "Read Analysis Summary",
+      "tool": "read_analysis_summary",
+      "success": true,
+      "result": {
+        "success": true,
+        "file_path": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q13418_ATP/analysis/analysis_summary.jsonl",
+        "total_entries": 1,
+        "entries": [
+          {
+            "timestamp": "2026-09-23, Time 17:02:23",
+            "analysis_type": "PDB_Input_Validation",
+            "statistics": {
+              "total_atoms": 4116,
+              "total_residues": 257
+            },
+            "files": {
+              "topology_file": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q13418_ATP/simsetup/protein.pdb"
+            },
+            "metadata": {
+              "components_available": {
+                "protein": true,
+                "ligand": true,
+                "water": false,
+                "ions": true,
+                "hydrogens": true
+              },
+              "human_readable_summary": "Protein: Chain A (254 residues) | Ligands: ATP | Ions: MG (\u00d72)",
+              "protein_sequences": {
+                "A": "LNFLTKLNENHSGELWKGRWQGNDIVVKVLKVRDWSTRKSRDFNEECPRLRIFSHPNVLPVLGACQSPPAPHPTLITHWMPYGSLYNVLHEGTNFVVDQSQAVKFALDMARGMAFLHTLEPLIPRHALNSRSVMIDEDMTARISMADVKFSFQCPGRMYAPAWVAPEALQKKPEDTNRRSADMWSFAVLLWELVTREVPFADLSNMEIGMKVALEGLRPTIPPGISPHVCKLMKICMNEDPAKRPKFDMIVPIL"
+              },
+              "source": "supervisor_validation"
+            }
+          }
+        ],
+        "analysis_types": {
+          "PDB_Input_Validation": 1
+        },
+        "timestamp": "2026-09-23T13:16:24.947016"
+      }
+    },
+    {
+      "step_name": "Get Protein Functional Annotations",
+      "tool": "search_uniprot",
+      "success": true,
+      "result": {
+        "success": true,
+        "query": "Q13418",
+        "total_entries": 1,
+        "entries": [
+          {
+            "accession": "Q13418",
+            "protein_name": "Scaffold protein ILK",
+            "organism": "Homo sapiens",
+            "function": "Scaffold protein which mediates protein-protein interactions during a range of cellular events including focal adhesion assembly, cell adhesion and cell migration (PubMed:17420447, PubMed:20005845, PubMed:30367047, PubMed:32528174). Regulates integrin-mediated signal transduction by contributing to inside-out integrin activation (By similarity). Recruits PARVA and LIMS1/PITCH to form the heterotrimeric IPP (ILK-PINCH-PARVIN) complex which binds to F-actin via the C-terminal tail of LIMS1 and the",
+            "url": "https://www.uniprot.org/uniprot/Q13418",
+            "reference_count": 33,
+            "key_references": [
+              {
+                "pmid": "8538749",
+                "doi": "10.1038/379091a0",
+                "title": "Regulation of cell adhesion and anchorage-dependent growth by a new beta 1-integrin-linked protein kinase.",
+                "journal": "Nature",
+                "year": 1996
+              },
+              {
+                "pmid": "10871859",
+                "doi": "10.1038/sj.onc.1203640",
+                "title": "Cloning of an isoform of integrin-linked kinase (ILK) that is upregulated in HT-144 melanoma cells following TGF-beta1 stimulation.",
+                "journal": "Oncogene",
+                "year": 2000
+              },
+              {
+                "pmid": "14702039",
+                "doi": "10.1038/ng1285",
+                "title": "Complete sequencing and characterization of 21,243 full-length human cDNAs.",
+                "journal": "Nat. Genet.",
+                "year": 2004
+              },
+              {
+                "pmid": "17974005",
+                "doi": "10.1186/1471-2164-8-399",
+                "title": "The full-ORF clone resource of the German cDNA consortium.",
+                "journal": "BMC Genomics",
+                "year": 2007
+              },
+              {
+                "pmid": "16554811",
+                "doi": "10.1038/nature04632",
+                "title": "Human chromosome 11 DNA sequence and analysis including novel gene identification.",
+                "journal": "Nature",
+                "year": 2006
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "step_name": "Generate PubMed Queries",
+      "tool": "generate_literature_queries",
+      "success": true,
+      "result": {
+        "skipped": true,
+        "reason": "literature handled by _ensure_literature_search"
+      }
+    },
+    {
+      "step_name": "Search PubMed for Each Query",
+      "tool": "search_pubmed",
+      "success": true,
+      "result": {
+        "skipped": true,
+        "reason": "literature handled by _ensure_literature_search"
+      }
+    },
+    {
+      "step_name": "Generate HTML Report",
+      "tool": "generate_html_report",
+      "success": true,
+      "result": {
+        "success": true,
+        "report_file": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_20x2/run_01/q13418_ATP/reporter/report.html",
+        "report_type": "comprehensive",
+        "file_size_kb": 32.431640625
+      }
+    }
+  ],
+  "analysis_data_summary": {
+    "entries_found": 1,
+    "analysis_types": {
+      "PDB_Input_Validation": 1
+    }
+  },
+  "literature_references": 13,
+  "issues": [],
+  "warnings": []
+}

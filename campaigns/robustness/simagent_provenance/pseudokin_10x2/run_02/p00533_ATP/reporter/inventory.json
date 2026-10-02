@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "timestamp": "2026-09-22T18:21:53.782463",
+  "stage": "reporter",
+  "label": "p00533_ATP",
+  "sim_root": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/run_02/p00533_ATP",
+  "stage_dir": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/run_02/p00533_ATP/reporter",
+  "pocket_mapped": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/run_02/cross_sim/pocket_mapped.json",
+  "global_mapped": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/run_02/cross_sim/global_mapped.json",
+  "files": {
+    "comprehensive_summary.json": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/run_02/p00533_ATP/reporter/comprehensive_summary.json",
+    "execution_log.txt": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/run_02/p00533_ATP/reporter/execution_log.txt",
+    "execution_plan.json": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/run_02/p00533_ATP/reporter/execution_plan.json",
+    "execution_plan.md": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/run_02/p00533_ATP/reporter/execution_plan.md",
+    "execution_report.md": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/run_02/p00533_ATP/reporter/execution_report.md",
+    "report.html": "/home/akp66103/workspace/agenticAI/campaigns/robustness/campaigns/pseudokin_10x2/run_02/p00533_ATP/reporter/report.html"
+  }
+}

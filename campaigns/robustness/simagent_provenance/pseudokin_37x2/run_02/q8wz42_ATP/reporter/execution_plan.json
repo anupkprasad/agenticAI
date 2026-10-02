@@ -1,0 +1,49 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The reporter only needs to transform the pre\u2011computed analysis results stored in the JSONL file into a polished, self\u2011contained HTML report.  The analysis data already contains all metric values and the file paths of the plots that should be embedded.  A short literature search on MD\u2011based studies of ATP\u2011binding pseudokinases will provide context for the findings.  No other external data or calculations are required.",
+  "overview": "1\ufe0f\u20e3 Read the `analysis_summary.jsonl` file.\n2\ufe0f\u20e3 Run a PubMed search for recent MD studies of ATP\u2011binding pseudokinases.\n3\ufe0f\u20e3 Generate a comprehensive HTML report that embeds all images, highlights key statistics, and cites the retrieved literature.",
+  "report_focus": [
+    "Quantitative descriptors of ATP binding pocket dynamics",
+    "Comparison of per\u2011replica versus averaged metrics",
+    "Placement of this system within the broader context of pseudokinase MD studies"
+  ],
+  "literature_queries": [
+    "pseudokinase ATP binding site molecular dynamics simulation"
+  ],
+  "estimated_complexity": "low",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the `analysis_summary.jsonl` file located in the analysis directory.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Load the full set of per\u2011replica and aggregated metrics, plus the image paths, needed for the report."
+    },
+    {
+      "name": "Literature Search",
+      "description": "Search PubMed for recent MD simulation studies of ATP\u2011binding pseudokinases to provide contextual background.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "pseudokinase ATP binding site molecular dynamics simulation",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "Gather up\u2011to\u2011date, relevant literature that can be cited in the report\u2019s discussion section."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive, self\u2011contained HTML file that embeds all analysis plots, displays key statistics in cards, and lists the literature references.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": {},
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "Produce the final deliverable that can be viewed in a web browser."
+    }
+  ]
+}

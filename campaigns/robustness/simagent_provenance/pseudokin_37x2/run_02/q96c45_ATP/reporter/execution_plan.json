@@ -1,0 +1,73 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The analysis workflow has already produced a JSONL file containing all per\u2011protein scalar descriptors, image paths, and computed statistics.  To produce a user\u2011friendly scientific report, we first load this summary, optionally enrich the context with recent literature, and then feed both the numerical results and the literature references into the `generate_html_report` tool, which automatically embeds images, adds key statistics cards, and creates a clean, professional layout.",
+  "overview": "The plan will:\n1. Load the analysis summary.\n2. Generate PubMed query strings tailored to the proteins and the analysis types performed.\n3. Retrieve relevant literature abstracts.\n4. Produce a comprehensive HTML report that includes visualizations, statistics, and literature context.",
+  "report_focus": [
+    "Summary of the ten scalar descriptors per protein",
+    "Cluster interpretation with Ward dendrogram and k=4 heatmap",
+    "Literature context linking ATP\u2011binding dynamics to pseudokinase function"
+  ],
+  "literature_queries": [
+    "pseudokinase ATP binding dynamics molecular dynamics",
+    "pseudokinase ATP COM distance analysis",
+    "pseudokinase ATP orientation RMSD studies",
+    "pseudokinase dihedral\u2011PCA entropy biomolecular simulation",
+    "pseudokinase pocket \u03c71 analysis",
+    "pseudokinase DCCM cluster analysis"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the analysis_summary.jsonl file to obtain per\u2011protein metrics, image file paths, and any metadata such as protein identifiers.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "We need the numerical results and image references to build the report."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create PubMed search queries based on the proteins analysed, the specific descriptors (ATP COM distance, orientation, \u03c71, RMSF, DCCM, dihedral\u2011PCA entropy), and the user\u2019s goal.  The queries will be used to fetch recent studies that discuss similar proteins or analysis methods.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "ATP COM distance",
+          "ATP orientation",
+          "pocket \u03c71",
+          "C\u03b1 RMSF",
+          "DCCM",
+          "dihedral\u2011PCA entropy"
+        ],
+        "user_goal": "For each of the 37 ATP\u2011holo trajectories, compute descriptors, map pockets, cluster, and report literature context.",
+        "protein_name": "pseudokinase",
+        "analysis_stats": {}
+      },
+      "reason": "Structured queries will target the most relevant recent literature for each analysis type."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Execute the generated PubMed queries and retrieve article metadata, abstracts, and citations.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 10
+      },
+      "reason": "Gather up\u2011to\u2011date scholarly context for inclusion in the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive HTML report that embeds all images (converted to base64), displays key statistics cards, and incorporates literature references.  The report will be stored as `report.html` in the reporter directory.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "literature_refs": [],
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "This is the final deliverable that the user expects."
+    }
+  ]
+}

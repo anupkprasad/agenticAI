@@ -1,0 +1,36 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The user wants a single\u2011simulation HTML report that incorporates all analysis results, visualisations and key statistics from the provided analysis_summary.jsonl file.  The workflow is straightforward: load the JSONL data, feed it to the report generator, and output a self\u2011contained report.  Literature search is optional; in this plan it is omitted to keep the process deterministic and avoid the need for dynamic query handling.",
+  "overview": "1. Parse the analysis_summary.jsonl file to obtain all scalar descriptors, images and metadata. 2. Pass the parsed data directly to generate_html_report, requesting a comprehensive HTML report named report.html.  The report will embed all visualisations, display statistical cards, and organise sections per analysis type.",
+  "report_focus": [
+    "ATP binding\u2011site dynamics and ligand COM distances",
+    "Pocket flexibility (\u03c71 torsion statistics)",
+    "Lobe\u2011to\u2011lobe inter\u2011domain correlations",
+    "Consensus RMSF and DCCM patterns",
+    "Entropy of shared\u2011reference dihedral PCA"
+  ],
+  "literature_queries": [],
+  "estimated_complexity": "low",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Parse the analysis_summary.jsonl file located in the analysis sub\u2011directory.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "Need the complete set of analysis results and image paths for the report."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a professional, comprehensive HTML report that embeds all visualisations and displays key statistics.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": {},
+        "output_file": "report.html",
+        "report_type": "comprehensive"
+      },
+      "reason": "Produce the final deliverable that meets the user\u2019s specifications."
+    }
+  ]
+}

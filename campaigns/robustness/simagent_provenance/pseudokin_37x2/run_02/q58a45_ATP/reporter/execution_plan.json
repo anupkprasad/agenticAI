@@ -1,0 +1,86 @@
+{
+  "timestamp": "N/A",
+  "reasoning": "The analysis_summary.jsonl file already contains all per\u2011replica metrics, the averaged ten\u2011scalar feature vector, the Ward clustering output (dendrogram and heatmap image paths) and the robustly scaled heatmap.  Therefore the report can be produced in a single pass by (1) reading the summary, (2) generating an HTML report that embeds all the images, shows the key statistics cards, and (3) augmenting the report with a brief literature context.  No further data processing is required.",
+  "overview": "1. Parse analysis_summary.jsonl to collect statistics and image file paths. 2. Search PubMed and bioRxiv for a small set of recent papers that discuss ATP binding to pseudokinases and the analysis methods used (RMSF, DCCM, PCA of torsions). 3. Use generate_html_report to create a single, self\u2011contained HTML report (report.html) that embeds all visualisations, shows key metrics, and includes the literature snippets.",
+  "report_focus": [
+    "ATP COM distance and orientation relative to the pocket axis",
+    "Side\u2011chain \u03c7\u2081 flexibility of pocket residues",
+    "Consensus C\u03b1 RMSF and lobe\u2011to\u2011lobe correlated motion",
+    "PCA of shared \u03c6/\u03c8/\u03c7\u2081 dynamics",
+    "Hierarchical clustering of the ten\u2011scalar feature vector"
+  ],
+  "literature_queries": [
+    "\"q58a45\" AND ATP binding AND pseudokinase",
+    "\"pseudokinase\" AND RMSF AND MD simulation",
+    "\"ATP binding\" AND DCCM AND pseudokinase",
+    "\"PCA\" AND dihedral dynamics AND ATP binding"
+  ],
+  "estimated_complexity": "medium",
+  "steps": [
+    {
+      "name": "Read Analysis Summary",
+      "description": "Load the per\u2011replica and averaged metrics, clustering images and any other plot paths from analysis_summary.jsonl.",
+      "tool_name": "read_analysis_summary",
+      "tool_params": {
+        "summary_file": "analysis_summary.jsonl"
+      },
+      "reason": "All quantitative results and figure locations are stored here."
+    },
+    {
+      "name": "Generate Literature Queries",
+      "description": "Create PubMed/bioRxiv search terms that target ATP\u2011binding pseudokinases and the specific analysis methods used.",
+      "tool_name": "generate_literature_queries",
+      "tool_params": {
+        "analysis_types": [
+          "RMSF",
+          "DCCM",
+          "PCA",
+          "ATP binding",
+          "pseudokinase"
+        ],
+        "user_goal": "Analyse ATP binding dynamics and conformational flexibility in the q58a45_ATP system.",
+        "protein_name": "q58a45",
+        "analysis_stats": null
+      },
+      "reason": "To retrieve up\u2011to\u2011date literature for contextual commentary."
+    },
+    {
+      "name": "Search PubMed",
+      "description": "Retrieve the most recent 3\u20135 papers matching the first query.",
+      "tool_name": "search_pubmed",
+      "tool_params": {
+        "query": "{{generated_query_1}}",
+        "max_results": 5,
+        "include_abstracts": true,
+        "max_age_years": 5
+      },
+      "reason": "Obtain peer\u2011reviewed literature relevant to ATP binding and MD analysis."
+    },
+    {
+      "name": "Search bioRxiv",
+      "description": "Retrieve the most recent 2\u20133 preprints matching the second query.",
+      "tool_name": "search_biorxiv",
+      "tool_params": {
+        "query": "{{generated_query_2}}",
+        "max_results": 3,
+        "max_age_years": 2
+      },
+      "reason": "Capture cutting\u2011edge, unpublished studies that may offer complementary insights."
+    },
+    {
+      "name": "Generate HTML Report",
+      "description": "Create a comprehensive report that embeds all figures, displays key statistics, and includes literature excerpts.",
+      "tool_name": "generate_html_report",
+      "tool_params": {
+        "analysis_data": "{{analysis_summary_json}}",
+        "literature_refs": [
+          "{{pubmed_results}}",
+          "{{biorxiv_results}}"
+        ],
+        "report_type": "comprehensive",
+        "output_file": "report.html"
+      },
+      "reason": "Deliver the final visual and textual product."
+    }
+  ]
+}
