@@ -14,10 +14,11 @@ system can:
    QC, plus optional family-scale modular dynamics and unsupervised classification)
 6. Produce HTML reports with literature references and interactive 3D views
 
-Active campaign trees (sims + manuscript draft) live under [`campaigns/`](campaigns/README.md)
-(gitignored). One-off regenerators stay in [`archive/`](archive/README.md).
-Example launcher:
-[`scripts/examples/run_simagent_example.sh`](scripts/examples/run_simagent_example.sh).
+Active campaign trees (sims + manuscript draft) live under `campaigns/`
+(gitignored locally). Published SimAgent robustness provenance — complete
+`run_01` for the 5-system and 37-system cohorts (agents + analysis plots/tables;
+no trajectories) — is under
+[`campaigns/robustness/simagent_provenance/`](campaigns/robustness/simagent_provenance/).
 
 **Full usage guide:** [TUTORIAL.md](TUTORIAL.md)
 
@@ -229,31 +230,31 @@ python SimAgent.py \
 python SimAgent.py --goal "..." [options]
 ```
 
-| Flag                     | Default                    | Description                                                                                                   |
-| ------------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `--goal`               | *(required)*             | Natural-language simulation goal                                                                              |
-| `--working-dir`        | `.`                      | Campaign base; each sim under`{dir}/{label}/`                                                               |
-| `--pdb-list`           | —                         | Explicit PDB list                                                                                             |
-| `--sim-dirs`           | —                         | Existing sim directories for analysis-only                                                                    |
-| `--subtask`            | all agents                 | `preprocess simsetup hpcjob analysis reporter`                                                              |
-| `--no-llm`             | off                        | Disable LLM planning (deterministic fallback)                                                                 |
-| `--llm-model`          | `gpt-oss:20b`            | Model name                                                                                                    |
-| `--llm-base-url`       | `http://localhost:11434` | LLM API base URL                                                                                              |
-| `--HITL`               | off                        | `error` or `all` — enable human-in-the-loop (default: off; or `campaign.yaml` `hitl`)                    |
-| `--campaign-yaml`      | shipped / `{dir}/campaign.yaml` | Mapping, retrieval k, gold columns, HITL defaults ([CAMPAIGN_AND_RETRIEVAL.md](docs/CAMPAIGN_AND_RETRIEVAL.md)) |
-| `--force-field`        | `amber99sb-ildn`         | GROMACS force field (e.g.`charmm36-jul2022`)                                                                |
-| `--water-model`        | `tip3p`                  | Water model                                                                                                   |
-| `--max-concurrent`     | `4`                      | Max concurrent sims (legacy)                                                                                  |
-| `--parallel-workers`   | `auto`                   | Max parallel local workers for prep / analysis+reporter (`auto` or integer; `1`=sequential)               |
-| `--parallel-mem-gb`    | phase default              | Estimated GiB RAM per parallel worker                                                                         |
-| `--parallel-cpus`      | phase default              | Estimated CPU cores per parallel worker                                                                       |
-| `--llm-concurrency`    | `auto` (4)               | Cap parallel workers to match Ollama`OLLAMA_NUM_PARALLEL` slots                                             |
-| `--allowed-hpc-jobs`   | auto                       | Max concurrent SLURM jobs in cross-sim HPC pool                                                               |
-| `--hpc-check-interval` | `2h`                     | SLURM poll interval during HPC pool wait (`2h`, `30m`, `7200`)                                          |
-| `--resume`             | off                        | Re-run only failed/incomplete multi-sim jobs                                                                  |
-| `--retry-labels`       | —                         | Force-retry specific simulation labels                                                                        |
-| `--combined-only`      | off                        | Only when N>1: combined analysis + report at`{base}/analysis/` and `{base}/reporter/combined_report.html` |
-| `--rep-num`            | `1`                      | Independent production replicates per label (`hpc/repXX/` + `analysis/avg/`) |
+| Flag                     | Default                          | Description                                                                                                    |
+| ------------------------ | -------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `--goal`               | *(required)*                   | Natural-language simulation goal                                                                               |
+| `--working-dir`        | `.`                            | Campaign base; each sim under`{dir}/{label}/`                                                                |
+| `--pdb-list`           | —                               | Explicit PDB list                                                                                              |
+| `--sim-dirs`           | —                               | Existing sim directories for analysis-only                                                                     |
+| `--subtask`            | all agents                       | `preprocess simsetup hpcjob analysis reporter`                                                               |
+| `--no-llm`             | off                              | Disable LLM planning (deterministic fallback)                                                                  |
+| `--llm-model`          | `gpt-oss:20b`                  | Model name                                                                                                     |
+| `--llm-base-url`       | `http://localhost:11434`       | LLM API base URL                                                                                               |
+| `--HITL`               | off                              | `error` or `all` — enable human-in-the-loop (default: off; or `campaign.yaml` `hitl`)                 |
+| `--campaign-yaml`      | shipped /`{dir}/campaign.yaml` | Mapping, retrieval k, gold columns, HITL defaults ([CAMPAIGN_AND_RETRIEVAL.md](docs/CAMPAIGN_AND_RETRIEVAL.md)) |
+| `--force-field`        | `amber99sb-ildn`               | GROMACS force field (e.g.`charmm36-jul2022`)                                                                 |
+| `--water-model`        | `tip3p`                        | Water model                                                                                                    |
+| `--max-concurrent`     | `4`                            | Max concurrent sims (legacy)                                                                                   |
+| `--parallel-workers`   | `auto`                         | Max parallel local workers for prep / analysis+reporter (`auto` or integer; `1`=sequential)                |
+| `--parallel-mem-gb`    | phase default                    | Estimated GiB RAM per parallel worker                                                                          |
+| `--parallel-cpus`      | phase default                    | Estimated CPU cores per parallel worker                                                                        |
+| `--llm-concurrency`    | `auto` (4)                     | Cap parallel workers to match Ollama`OLLAMA_NUM_PARALLEL` slots                                              |
+| `--allowed-hpc-jobs`   | auto                             | Max concurrent SLURM jobs in cross-sim HPC pool                                                                |
+| `--hpc-check-interval` | `2h`                           | SLURM poll interval during HPC pool wait (`2h`, `30m`, `7200`)                                           |
+| `--resume`             | off                              | Re-run only failed/incomplete multi-sim jobs                                                                   |
+| `--retry-labels`       | —                               | Force-retry specific simulation labels                                                                         |
+| `--combined-only`      | off                              | Only when N>1: combined analysis + report at`{base}/analysis/` and `{base}/reporter/combined_report.html`  |
+| `--rep-num`            | `1`                            | Independent production replicates per label (`hpc/repXX/` + `analysis/avg/`)                               |
 
 ---
 
@@ -319,22 +320,27 @@ when per-sim work is already complete.
 ## Repository Layout
 
 ```
-SimAgent.py       # CLI entry point
+SimAgent.py                # CLI entry point
+LICENSE                    # MIT
 environment.yml            # Conda environment (ollama_env)
+ollama_server.slurm        # Example Slurm job to serve Ollama on GPU nodes
 agentic/
   workflow.py              # LangGraph StateGraph orchestration
   supervisor/              # Routing, enrichment, multi-sim loop
-  planner/                 # Execution plans + knowledge base
+  planner/                 # Execution plans + disposition base
   preprocess/              # Structure download, clean, separate
   simsetup/                # Topology, solvation, MDP generation
   hpc/                     # SLURM submission and monitoring
   analysis/                # Trajectory analysis tools
   reporter/                # HTML reports and literature
+  programmer/              # Tool-authoring agent + AVAILABLE_SOFTWARE.md
 src/
   preprocess/              # PDB tools, phospho mapping, remodel
   simsetup/                # GROMACS system builder
   analysis/                # Combined cross-sim analysis
   reporter/                # Report generation
+tests/                     # Pytest suite
+campaigns/robustness/simagent_provenance/  # Published robustness run_01 provenance
 TUTORIAL.md                # End-to-end usage guide
 docs/
   PROJECT.md               # Product overview, layout, CLI, run outputs
@@ -344,23 +350,24 @@ docs/
   TOOLS.md                 # Dependencies + multi-chain / phospho mechanisms
   ANALYSIS_TOOLS.md        # Per-tool observables, theory, output names
   POOLS.md                 # Local parallel workers + SLURM HPC pool
+  OLLAMA_SETUP.md          # Install Ollama + pull gpt-oss:20b
 ```
 
 ---
 
 ## Documentation
 
-| Document                                              | Description                                              |
-| ----------------------------------------------------- | -------------------------------------------------------- |
-| [TUTORIAL.md](TUTORIAL.md)                             | Step-by-step workflows and troubleshooting               |
-| [docs/PROJECT.md](docs/PROJECT.md)                     | Product overview, repository layout, quick start, CLI    |
-| [docs/PIPELINE_WORKFLOW.md](docs/PIPELINE_WORKFLOW.md) | Agent order, directories, files, and flag examples       |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)           | LangGraph pipeline, state, and per-agent design          |
-| [docs/CONVENTIONS.md](docs/CONVENTIONS.md)             | Contributor coding and documentation rules               |
-| [docs/TOOLS.md](docs/TOOLS.md)                         | External dependencies and GROMACS/analysis mechanisms    |
-| [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md)       | Analysis tool calculations, theory, and standard outputs |
-| [docs/POOLS.md](docs/POOLS.md)                         | Local parallel workers and SLURM HPC pool                |
-| [docs/OLLAMA_SETUP.md](docs/OLLAMA_SETUP.md)           | Install Ollama server + pull `gpt-oss:20b` (not in conda) |
+| Document                                              | Description                                                |
+| ----------------------------------------------------- | ---------------------------------------------------------- |
+| [TUTORIAL.md](TUTORIAL.md)                             | Step-by-step workflows and troubleshooting                 |
+| [docs/PROJECT.md](docs/PROJECT.md)                     | Product overview, repository layout, quick start, CLI      |
+| [docs/PIPELINE_WORKFLOW.md](docs/PIPELINE_WORKFLOW.md) | Agent order, directories, files, and flag examples         |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)           | LangGraph pipeline, state, and per-agent design            |
+| [docs/CONVENTIONS.md](docs/CONVENTIONS.md)             | Contributor coding and documentation rules                 |
+| [docs/TOOLS.md](docs/TOOLS.md)                         | External dependencies and GROMACS/analysis mechanisms      |
+| [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md)       | Analysis tool calculations, theory, and standard outputs   |
+| [docs/POOLS.md](docs/POOLS.md)                         | Local parallel workers and SLURM HPC pool                  |
+| [docs/OLLAMA_SETUP.md](docs/OLLAMA_SETUP.md)           | Install Ollama server + pull`gpt-oss:20b` (not in conda) |
 
 ---
 
@@ -395,12 +402,12 @@ overlay-only combined analysis.
 
 **Typical outputs** under `{base}/analysis/`:
 
-| File | Role |
-|------|------|
-| `classification_features.csv` | Raw scalars (one row per system) |
-| `classification_features_zscore.csv` | Robust/IQR or classic z-scores — clustering input |
-| `classification_feature_selection.json` | LLM-chosen columns + scientific reasoning |
-| `classification_dendrogram_heatmap.png` | Dendrogram + feature heatmap panel |
+| File                                      | Role                                               |
+| ----------------------------------------- | -------------------------------------------------- |
+| `classification_features.csv`           | Raw scalars (one row per system)                   |
+| `classification_features_zscore.csv`    | Robust/IQR or classic z-scores — clustering input |
+| `classification_feature_selection.json` | LLM-chosen columns + scientific reasoning          |
+| `classification_dendrogram_heatmap.png` | Dendrogram + feature heatmap panel                 |
 
 See [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md) for metric groups, modular
 tools, normalization, and clustering.
@@ -432,153 +439,77 @@ this repository.
 
 ---
 
-## Use Case: Published horse MLKL validation (CHARMM36 / TIP3P)
+## Examples run in the project
 
-Replicate a typical published MLKL MD protocol:
+### 1. Paper cohort: 37 human (pseudo)kinase–ATP systems
 
-- CHARMM36 force field, TIP3P water
-- Dodecahedral box, ≥ 1.0 nm clearance on all sides, PBC
-- PME electrostatics, Verlet cutoff scheme
-- Steepest-descent minimization until Fmax &lt; 100 kJ/mol nm⁻¹
-- NVT heat to 310 K for 100 ps with position restraints
-- NPT at 310 K, 1 bar for 100 ps with position restraints
-- Production MD at 2 fs; dephosphorylated ~1739 ns, phosphorylated ~2882 ns
-
-### How this maps to AgenticAI
-
-| Published setting            | Pipeline default         | What to put in`--goal`                                                                |
-| ---------------------------- | ------------------------ | --------------------------------------------------------------------------------------- |
-| CHARMM36                     | `amber99sb-ildn`       | Use`--force-field charmm36-jul2022`                                                   |
-| TIP3P                        | `tip3p`                | Default (or say “TIP3P water”)                                                        |
-| Dodecahedron, 1 nm clearance | `cubic`, 1.2 nm        | **“dodecahedron box, 1.0 nm distance”**                                         |
-| Neutralize with Na⁺/Cl⁻    | Neutralize + 0.15 M NaCl | **“neutralize only, no added salt”** (`ion_concentration=0`)                  |
-| Minim Fmax&lt; 100           | `emtol=100`, steep     | Default`minim.mdp`                                                                    |
-| NVT 100 ps, posres, 310 K    | 50 000 steps × 2 fs    | Default`nvt.mdp`                                                                      |
-| NPT 100 ps, posres, 1 bar    | 50 000 steps × 2 fs    | Default`npt.mdp`                                                                      |
-| Production 2 fs              | `dt=0.002`             | Default`md.mdp`                                                                       |
-| Remodelled / strained input  | —                       | **“extended minimization”** (adds `minim2.mdp`; optional, not in every paper) |
-
-**Dodecahedron box:** implemented in `src/simsetup/box_builder.py` via `gmx editconf -bt dodecahedron -d <distance>`. The setup agent passes `box_type` and `box_distance` into `build_simulation_system` → `build_simulation_box`. Supported values: `cubic`, `dodecahedron`, `octahedron` (see `agentic/simsetup/config.yaml`).
-
-**Phosphorylation:** SEP/TPO/PTR stay on the protein chain; CHARMM36 dianionic mapping (SP2/THP2/TP2) runs in preprocess. Do not use ligand parameterization for phospho residues.
-
-**Production length:** `--goal` can set one duration (e.g. `2882 ns`); multisim applies the same `production_ns` to every PDB in one run. For exact 1739 ns vs 2882 ns, either run two separate jobs or edit `md.mdp` / `md.tpr` in one sim’s `simsetup/` after setup.
-
-### Example: horse MLKL dephospho + phospho (multisim)
-
-Place `chain_a_modelled.pdb` and `chain_a_modelled_phos.pdb` under `horse_MLKL/`, then:
+Locked natural-language objective used for the family-scale study in the
+manuscript (Supplementary Fig. for the robustness / end-to-end cohort). The same
+text is archived with the published provenance at
+[`campaigns/robustness/simagent_provenance/pseudokin_37x2/goal.txt`](campaigns/robustness/simagent_provenance/pseudokin_37x2/goal.txt).
 
 ```bash
 python SimAgent.py \
-  --goal "Replicate published MLKL validation MD: CHARMM36-jul2022 and TIP3P water.
-Use a dodecahedron simulation box with 1.0 nm clearance from the protein on all sides.
-Neutralize the system with sodium and chloride only (no additional salt concentration).
-Temperature 310 K, pressure 1 bar. Steepest descent minimization until Fmax below 100.
-NVT equilibration 100 ps and NPT equilibration 100 ps with position restraints on the protein.
-Production MD with 2 fs timestep. The structures are remodelled — use extended minimization.
-Preprocess and set up simulations for chain_a_modelled.pdb (dephosphorylated) and
-chain_a_modelled_phos.pdb (phosphorylated) in horse_MLKL/, then submit HPC jobs.
-Production: 1739 ns for dephosphorylated MLKL and 2882 ns for phosphorylated MLKL. Use 7 days waltime of HPC resources" \
-  --working-dir horse_MLKL \
-  --subtask preprocess simsetup hpcjob \
-  --force-field charmm36-jul2022
+  --goal "$(cat <<'EOF'
+I have 37 human protein–ATP holo structures in given working directory
+(one PDB per system). There are 32 pseudokinases and 5 ground-truth active kinases.
+Please run a full end-to-end comparative MD study on all of them.
+
+Systems (UniProt id : protein name):
+  o15197:EPHB6, o43187:IRAK2, o60674:JAK2, p00533:EGFR, p17612:KAPCA, p21860:ERBB3, p23458:JAK1, p24941:CDK2, p25092:GUC2C, p28482:MK01, p29597:TYK2, p51841:GUC2F, p52333:JAK3,
+  q05823:RN5A, q13308:PTK7, q13418:ILK, q58a45:PAN3, q5jzy3:EPHAA, q6vab6:KSR2, q7rtn6:STRAA, q7z7a4:PXK, q8iv63:VRK3, q8ivt5:KSR1, q8nb16:MLKL, q8ncb2:CAMKV, q8ne28:STKL1,
+  q8tea7:TBCK, q8wz42:TITIN, q92519:TRIB2, q96c45:ULK4, q96qs6:PSKH2, q9bxu1:STK31, q9c0k7:STRAB, q9nsy0:NRBP2, q9uhy1:NRBP, q9y243:AKT3, q9y616:IRAK3
+
+For each complex, preprocess the structure and set up GROMACS with
+AMBER99SB-ILDN, TIP3P water, 310 K, 1 bar, and 0.15 M NaCl.
+Run two independent 200 ns production MD replicates per system, wait for all
+simulations to finish, then analyze and plot the full 200 ns of every
+trajectory (do not truncate to a shorter window).
+
+Use KAPCA (p17612) as the reference to define the ATP-binding pocket
+(residues within 15 Å of ATP, unless a different cutoff is stated), map that
+pocket onto the other proteins with a global sequence alignment
+(MAFFT / star MSA), and plot both the global MSA and the pocket /
+high-consensus MSA panels.
+
+From both replicates (then average across replicates), extract these ten
+scalar dynamics descriptors for every system. All ten are required for
+clustering — do not drop any:
+
+1. ATP COM distance to the consensus pocket — mean
+2. ATP COM distance to the consensus pocket — standard deviation
+3. ATP orientation vs the pocket axis — mean axis angle
+4. ATP orientation vs the pocket axis — standard deviation of the axis angle
+5. Pocket side-chain χ₁ circular mean
+6. Pocket side-chain χ₁ circular standard deviation
+7. Flexibility of consensus-mapped Cα atoms — mean RMSF
+8. Flexibility of consensus-mapped Cα atoms — standard deviation of RMSF
+9. N-lobe ↔ C-lobe DCCM mean correlation
+10. Shared-reference φ/ψ/χ₁ dihedral PCA dynamics scalar
+    (pca_pka_ref_shared_dyn = √(d_g² + d_c² + pc_rms²) vs KAPCA in the
+     shared PKA PC space; do not substitute independent per-protein PCA
+     grid entropy)
+
+When all systems are done, assemble those ten descriptors into one feature
+table, run consensus hierarchical clustering, and write a single dendrogram +
+feature-heatmap panel (robust z-score / IQR scaling). Also write a combined
+HTML report with brief literature context. You may mark a k=4 cut for
+interpretation, but still emit the full tree.
+EOF
+)" \
+  --working-dir ./pseudokin_37x2/run_01 \
+  --force-field amber99sb-ildn \
+  --water-model tip3p \
+  --rep-num 2
 ```
 
-After simsetup, confirm in each `simsetup/` directory:
+Agent plans, logs, reports, and analysis plots for this `run_01` (and the
+smaller `pseudokin_5x2` robustness cohort) are in
+[`campaigns/robustness/simagent_provenance/`](campaigns/robustness/simagent_provenance/).
 
-- `minim.mdp` / optional `minim2.mdp` (if extended minim triggered)
-- `nvt.mdp`, `npt.mdp`, `md.mdp`
-- `topol.top`, `system.gro`
-- Box geometry in `boxed.gro` header (dodecahedron from `editconf`)
-
-If production lengths must differ, set `nsteps` in `md.mdp` before HPC copy:
-
-- 1739 ns → `nsteps = 869500000` (1739 × 10⁶ / 0.002)
-- 2882 ns → `nsteps = 1441000000`
-
-Or re-run simsetup with a single PDB and the matching ns in `--goal` per structure.
-
-### Strict single-stage minimization (paper-style only)
-
-If you do **not** want the extra `minim2` stage, omit “extended minimization” / “remodelled” from the goal and ensure `merged_missing_from_model.pdb` was not used. The HPC script runs `minim → nvt → npt → md` when `minim2.mdp` is absent.
-
-### Continue an interrupted HPC job
-
-If minim/minim2 finished but NVT failed (e.g. OpenMP thread mismatch), use the updated `*_run.sh` in `hpc/` (per-phase `OMP_NUM_THREADS`) or continue manually from `minim2.gro` with the NVT `grompp` / `mdrun` commands in that script.
-
-#### Examples run in the project
+### 2. Analysis-only: four completed systems
 
 ```bash
-# --- 8-sim ATP binding study (apo + holo) ---
-python SimAgent.py \
-  --goal "I want to study the effect of ATP binding in protein dynamics of these
-          four PDBs p21860.pdb, q8iv63.pdb, q8nb16.pdb, q8wz42.pdb which are
-          available in /pseudo1/ directory. Each pdb file has protein + ATP + MG.
-          Please preprocess and setup MD Simulation for 1 ns of all Pdbs with two
-          different cases: 1. Protein only, 2. Protein + ATP + MG therefore total
-          8 simulations. Once the simulation setups are done please submit the job
-          in HPC. The simulated protein are human pseudokinases and the name of
-          pseudokinase in the uniprotid are p21860: ERBB3, q8iv63: VRK3,
-          q8nb16: MLKL, q8wz42: TITIN.
-          For each system compute: (1) backbone RMSD over time to assess structural
-          stability, (2) per-residue RMSF to identify flexible and rigid regions,
-          also the RMSF bar plot near active sites (resid 150 to 200), (3) radius of
-          gyration to monitor compactness, (4) center-of-mass distance between the
-          bound ATP ligand and the catalytic pocket (pocket defined as all protein
-          atoms within 5 Å of ATP at frame 0) to track binding-site stability,
-          (5) Dynamic Cross-Correlation Matrix (DCCM) of Cα fluctuations to reveal
-          correlated and anti-correlated residue motions and allosteric communication
-          networks, DCCM diffs in holo and apo form of protein, and (6) secondary
-          structure (DSSP) time evolution of whole protein and active sites
-          (resid 150 to 200) which quantify αC-helix and activation-loop structural
-          dynamics. After per-simulation analysis, generate comparative overlay plots
-          and statistical tables across all pseudokinases. For the reporter agent,
-          retrieve relevant literature for each pseudokinase with its given name
-          focusing on activation-loop conformations, allosteric regulation, and
-          dynamics from MD simulations or experimental. Correlate findings from
-          simulation with literature in the final report." \
-  --working-dir pseudo1 \
-  --subtask preprocess simsetup hpcjob analysis reporter \
-  --resume
-
-# --- DCLK3–PSMA chain-B N-terminal segment ---
-python SimAgent.py \
-  --goal "I want to study the dynamics of the N-terminal segment of chain B in the
-          two PDBs, dclk3_psma3_in.pdb and dclk3_psma3_less_out.pdb, which are
-          available in the /dclk_PSMA/ directory. Please preprocess and set up
-          100 ns MD simulations for protein complex provided in both PDBs and
-          submit the jobs on the HPC after setup.
-          In the analysis the main focus should be on chain B from residues 1 to 34
-          and how this segment interacts with nearby residues in chain A. For each
-          simulation, compute backbone RMSD over time for the whole complex and for
-          chain B residues 1 to 34. Compute per residue RMSF for chain B residues
-          1 to 34. At frame 0, identify all chain A residues within 10 Å of chain B
-          residues 1 to 34, then compute RMSF for only those chain A residues
-          throughout the trajectory. Also track the center of mass distance and
-          minimum heavy atom distance between chain B residues 1 to 34 and those
-          nearby chain A residues over time to determine whether the N terminal
-          segment remains associated with chain A or moves away.
-          Finally, generate comparative plots and statistical tables for
-          dclk3_psma3_in.pdb versus dclk3_psma3_less_out.pdb, focusing on RMSD,
-          RMSF, contact stability, and distance changes. In the final report,
-          summarize which structure shows greater movement of chain B residues
-          1 to 34, whether this segment remains close to chain A, and whether nearby
-          chain A residues become more or less flexible during the simulations." \
-  --working-dir dclk_PSMA \
-  --subtask analysis reporter
-
-# --- DCLK3–PSMA4 single complex ---
-nohup python SimAgent.py \
-  --goal "Protein complex is formed by chain A (DCLK3 kinase, resid 525-782), chain B (PSMA4, resid 1-261) and chain C (DCX domain of DCLK3, resid 95-175), provided as dclk3_dcx_PSMA4_domains_frame75.pdb in ./dclk3_dcx_psma4/. Preprocess, set up, and run a 25 ns MD simulation of the protein complex.
-
-The main structural focus is chain B residues 1 to 34 and how this segment interacts with nearby residues in chain A. Compute backbone RMSD over time for the whole complex and for chain B residues 1 to 34. Compute per-residue RMSF for chain B residues 1 to 34. At frame 0, identify all chain A residues within 10 Å of chain B residues 1 to 34, then compute RMSF for only those chain A residues throughout the trajectory. Also track the center of mass distance and the minimum heavy-atom distance between chain B residues 1 to 34 and those nearby chain A residues over time, to determine whether the N-terminal segment remains associated with chain A or moves away.
-
-Also identify important residues and their interaction partners between the three proteins. For the B 1-34 vs chain A interface, and separately for the A-C and B-C interfaces, compute hydrogen-bond occupancy and salt-bridge distances over the trajectory. Report the persistent residue pairs (occupancy and partner identity), not only a neighbor list.
-
-In the final report, summarize movement of chain B residues 1 to 34, whether this segment remains close to chain A, whether nearby chain A residues become more or less flexible, and which residue-residue H-bonds and salt bridges are the main interaction partners at the A-B, A-C, and B-C interfaces." \
-  --working-dir dclk3_dcx_psma4 \
-  > ./dclk3_dcx_psma4/output.log 2>&1 &
-
 # --- Analysis-only: four completed systems ---
 python SimAgent.py \
   --goal "Simulation are already done for these uniprot ids: p23458.pdb, p29597.pdb,
@@ -597,209 +528,4 @@ python SimAgent.py \
           these simulated proteins." \
   --working-dir ./agenticB5R1 \
   --subtask analysis reporter
-
-# --- 38 holo: analysis + combined + phylogenetic comparison ---
-# Note: campaign data lives under ./campaigns/pseudoKin (gitignored local tree)
-nohup python SimAgent.py \
-  --goal "Simulations are already complete (~200 ns each) for thirty-eight
-          protein–ATP holo systems in ./pseudoKin: o15197, o43187, o60674, p00533,
-          p17612, p21860, p23458, p24941, p25092, p28482, p29597, p51841, p52333,
-          q05823, q13308, q13418, q58a45, q5jzy3, q6vab6, q7rtn6, q7z7a4, q8iv63,
-          q8ivt5, q8nb16, q8ncb2, q8ne28, q8tea7, q8wz42, q92519, q96c45, q96qs6,
-          q96s38, q9bxu1, q9c0k7, q9nsy0, q9uhy1, q9y243, q9y616.
-          Skip preprocess, simsetup, and HPC — run analysis and reporting only.
-          Per simulation, compute and plot: ligand–pocket COM distance, protein–ATP
-          contacts, pocket SASA, ligand residence/unbinding, pocket RMSF, ligand RMSF,
-          PCA on Cα, free-energy landscape at 310 K, FEL basin features, and export
-          representative PDB structures for each FEL basin (max 8).
-          Combined analysis: build an unsupervised classification feature table
-          (raw CSV, z-score CSV, XLSX), cluster with hierarchical clustering on the
-          z-score matrix (default k), and plot cluster PCA and dendrogram labeled with
-          protein names. After clustering, generate cluster-wise trajectory plots
-          (pocket SASA, COM distance, contacts, residence) and cluster-wise
-          pocket/ligand RMSF; also overlay ligand–pocket distance, pocket RMSF, and
-          ligand RMSF across all simulations.
-          Use id:name map o15197:EPHB6, o43187:IRAK2, o60674:JAK2, p00533:EGFR,
-          p17612:PKA, p21860:ERBB3, p23458:JAK1, p24941:CDK2, p25092:GUC2C,
-          p28482:MK01, p29597:TYK2, p51841:GUC2F, p52333:JAK3, q05823:RN5A,
-          q13308:PTK7, q13418:ILK, q58a45:PAN3, q5jzy3:EPHAA, q6vab6:KSR2,
-          q7rtn6:STRAA, q7z7a4:PXK, q8iv63:VRK3, q8ivt5:KSR1, q8nb16:MLKL,
-          q8ncb2:CAMKV, q8ne28:STKL1, q8tea7:TBCK, q8wz42:TITIN, q92519:TRIB2,
-          q96c45:ULK4, q96qs6:PSKH2, q96s38:KS6C1, q9bxu1:STK31, q9c0k7:STRAB,
-          q9nsy0:NRBP2, q9uhy1:NRBP, q9y243:AKT3, q9y616:IRAK3.
-          No manual class labels. Generate a combined HTML report with literature
-          context for each kinase/pseudokinase. Please build a phylogenetic tree from
-          the sequences and PDB structures of provided data and compare this with the
-          dynamics-based phylogenetic tree." \
-  --working-dir ./pseudoKin \
-  --subtask analysis reporter \
-  --combined-only > output.log 2>&1 &
-
-# Combined-only: reference-based FEL + reference-mapped pocket classification (38 holo pseudoKin)
-# Prerequisites: per-simulation analysis complete (trajectories + per-sim independent FEL in {uid}/analysis/).
-# Back up first if needed: cp -a pseudoKin/analysis pseudoKin/analysis_bckp
-#
-#   bash scripts/clean_pseudokin_combined_analysis.sh
-#   # optional: remove legacy mirrored reference copies under per-sim analysis/
-#   # CLEAN_PER_SIM_MIRROR=1 bash scripts/clean_pseudokin_combined_analysis.sh --per-sim-mirror
-#
-# Outputs (reference-based only; no classification_*):
-#   pseudoKin/analysis/reference_msa_alignment.*     — MSA + residue map (MLKL reference)
-#   pseudoKin/analysis/reference_fel/{uniprot}/       — reference-projected PCA + shared-bin FEL
-#   pseudoKin/analysis/reference_pocket/{uniprot}/    — MLKL-mapped pocket metrics
-#   pseudoKin/analysis/reference_grouping_features.*  — feature table for clustering (raw + z-score)
-#   pseudoKin/analysis/reference_clusters*            — hierarchical clustering + dendrogram/phylo/PCA
-#   pseudoKin/analysis/reference_pocket_*_by_cluster.png — pocket validation plots
-#   pseudoKin/analysis/reference_fel_*                — supplementary FEL-only landscape clustering
-
-nohup python SimAgent.py \
-  --goal "Simulations are complete for thirty-eight protein–ATP holo systems in
-          ./pseudoKin: o15197, o43187, o60674, p00533, p17612, p21860, p23458,
-          p24941, p25092, p28482, p29597, p51841, p52333, q05823, q13308, q13418,
-          q58a45, q5jzy3, q6vab6, q7rtn6, q7z7a4, q8iv63, q8ivt5, q8nb16, q8ncb2,
-          q8ne28, q8tea7, q8wz42, q92519, q96c45, q96qs6, q96s38, q9bxu1, q9c0k7,
-          q9nsy0, q9uhy1, q9y243, q9y616.
-          Run combined analysis only. Do not rerun per-simulation independent PCA/FEL
-          or ATP-proximity pocket analyses in {uniprot}/analysis/.
-          (1) Build consensus sequence alignment with reference_label=q8nb16 (MLKL)
-          and run the reference landscape pipeline: project every trajectory onto the
-          MLKL reference PCA basis and calculate shared-bin reference FELs at 310 K.
-          Save outputs only under pseudoKin/analysis/reference_fel/{uniprot}/ and
-          pseudoKin/analysis/reference_msa_alignment.*.
-          (2) Define the MLKL reference pocket as mapped consensus residues within
-          15 Å of ATP at frame 0, map to every protein, and run reference pocket
-          metrics batch: reference-pocket ATP COM distance, pocket-restricted H-bonds
-          (not heavy-atom contact counts), COM-distance-based residence, pocket RMSF,
-          pocket net formal charge, and pocket SASA when GROMACS is available. Save
-          per-protein outputs only under pseudoKin/analysis/reference_pocket/{uniprot}/.
-          (3) Unsupervised reference-structure classification: build
-          reference_grouping_features table using only reference_pocket + reference_fel
-          features (exclude independent FEL, ATP-proximity pocket, ligand RMSF, and
-          whole-protein SASA). Cluster hierarchically with k=5 on the z-score matrix.
-          Write reference_cluster_assignments.csv, reference_clusters.json,
-          reference_clusters_pca.png, reference_clusters_dendrogram.png, and
-          reference_clusters_phylo_tree.png — do not write classification_* outputs.
-          (4) Generate reference_pocket_* cluster-validation plots for COM distance,
-          H-bonds, residence, and consensus-index-aligned pocket RMSF. Supplementary:
-          reference FEL landscape clustering (reference_fel_dendrogram.png,
-          reference_fel_phylo_tree.png).
-          Use id:name map o15197:EPHB6, o43187:IRAK2, o60674:JAK2, p00533:EGFR,
-          p17612:PKA, p21860:ERBB3, p23458:JAK1, p24941:CDK2, p25092:GUC2C,
-          p28482:MK01, p29597:TYK2, p51841:GUC2F, p52333:JAK3, q05823:RN5A,
-          q13308:PTK7, q13418:ILK, q58a45:PAN3, q5jzy3:EPHAA, q6vab6:KSR2,
-          q7rtn6:STRAA, q7z7a4:PXK, q8iv63:VRK3, q8ivt5:KSR1, q8nb16:MLKL,
-          q8ncb2:CAMKV, q8ne28:STKL1, q8tea7:TBCK, q8wz42:TITIN, q92519:TRIB2,
-          q96c45:ULK4, q96qs6:PSKH2, q96s38:KS6C1, q9bxu1:STK31, q9c0k7:STRAB,
-          q9nsy0:NRBP2, q9uhy1:NRBP, q9y243:AKT3, q9y616:IRAK3.
-          Generate the combined HTML report with literature context." \
-  --working-dir ./pseudoKin \
-  --subtask analysis reporter \
-  --combined-only > ./pseudoKin/output.log 2>&1 &
-
-# Full pipeline (per-sim + combined): use --resume, NOT --combined-only.
-# Per sim (×38): ligand pocket COM, contacts, SASA, residence, pocket/ligand RMSF, PCA, FEL, basin PDBs.
-# Combined (after all per-sim): same reference steps as combined-only block above.
-
-nohup python SimAgent.py \
-  --goal "Simulations are already complete (~200 ns each) for thirty-eight
-          protein–ATP holo systems in ./pseudoKin: o15197, o43187, o60674, p00533,
-          p17612, p21860, p23458, p24941, p25092, p28482, p29597, p51841, p52333,
-          q05823, q13308, q13418, q58a45, q5jzy3, q6vab6, q7rtn6, q7z7a4, q8iv63,
-          q8ivt5, q8nb16, q8ncb2, q8ne28, q8tea7, q8wz42, q92519, q96c45, q96qs6,
-          q96s38, q9bxu1, q9c0k7, q9nsy0, q9uhy1, q9y243, q9y616.
-          Skip preprocess, simsetup, and HPC. For every simulation, run per-simulation
-          analysis and reporting: ligand pocket distance (ATP, protein atoms within
-          5 Å of ATP at frame 0), pocket-restricted contacts, pocket SASA, ligand
-          residence time, pocket RMSF and ligand RMSF, PCA on Cα, free-energy
-          landscape at 310 K from PC1 and PC2, FEL basin features, and export
-          representative PDB structures for each FEL basin (max 8).
-          After all per-simulation analyses complete, run the same combined reference
-          analysis as the --combined-only goal above (reference FEL, 15 Å MLKL
-          reference pocket with H-bonds and net charge, k=4 reference clustering with
-          reference_* outputs only). Use the same id:name map. Generate per-simulation
-          HTML reports and a combined HTML report with literature context." \
-  --working-dir ./pseudoKin \
-  --subtask analysis reporter \
-  --resume > ./pseudoKin/output.log 2>&1 &
-
-# --- 12 apo pseudokinases: full MD workflow ---
-nohup python SimAgent.py \
-  --goal "Run the full MD workflow (preprocess, simsetup, HPC submission, analysis,
-          and reporting) for twelve human apo pseudokinase systems in
-          ./pseudoKin_apo. Each PDB is protein-only with no ATP or cofactors. Set up
-          and run ~200 ns production MD for each apo protein. After setup, submit all
-          jobs to HPC and wait for completion before analysis.
-          Per simulation, compute and plot: backbone RMSD over time; per-residue
-          protein RMSF (whole protein and catalytic-pocket region); catalytic-pocket
-          SASA (pocket defined by kinase active-site residues at frame 0); radius of
-          gyration; PCA on Cα; free-energy landscape at 310 K from PC1 and PC2; FEL
-          basin features; and export representative PDB structures for each FEL basin
-          (max 8). Also compute DCCM on Cα fluctuations and DSSP secondary-structure
-          time evolution for the whole protein and the catalytic pocket /
-          activation-loop region.
-          Combined analysis: build an unsupervised classification feature table
-          (raw CSV, z-score CSV, XLSX) across all twelve apo systems; cluster with
-          hierarchical clustering on the z-score matrix (default k); plot cluster PCA
-          and a dendrogram labeled with protein names. After clustering, generate
-          cluster-wise trajectory plots (pocket SASA, backbone RMSD, radius of
-          gyration, and pocket RMSF) and cluster-wise protein RMSF; also overlay
-          pocket SASA, backbone RMSD, radius of gyration, and pocket RMSF across all
-          simulations.
-          Use id:name map o14936:CASK, p34925:RYK, q6p3w7:SCYL2, q6zs72:PEAK3,
-          q86yv5:PRAG1, q8iwb6:TEX14, q8ize3:PACE1, q96kg9:SCYL1, q96ru7:TRIB3,
-          q96ru8:TRIB1, q9h792:PEAK1, q9y4a5:TRRAP.
-          No manual class labels. Generate per-simulation HTML reports and a combined
-          HTML report with literature context for each pseudokinase. Build a
-          phylogenetic tree from sequences and PDB structures of the provided data and
-          compare it with a dynamics-based phylogenetic tree derived from the
-          simulation analyses." \
-  --working-dir ./pseudoKin_apo \
-  --allowed-hpc-jobs 4 \
-  --hpc-check-interval 60m \
-  --resume > ./pseudoKin_apo/output.log 2>&1 &
-
-# --- 8 holo agenticB5R1: analysis + combined classification ---
-python SimAgent.py \
-  --goal "Simulations are already complete (~200 ns each) for eight protein–ATP holo
-          systems in ./agenticB5R1: o15197, o43187, p21860, p23458, p29597, q7rtn6,
-          q8nb16, q9bxu1. Skip preprocess, simsetup, and HPC — run analysis and
-          reporting only.
-          Per simulation, compute and plot: ligand–pocket COM distance, protein–ATP
-          contacts, pocket SASA, ligand residence/unbinding, pocket RMSF, ligand RMSF,
-          PCA on Cα, free-energy landscape at 310 K, FEL basin features, and export
-          representative PDB structures for each FEL basin (max 8).
-          Combined analysis: build an unsupervised classification feature table
-          (raw CSV, z-score CSV, XLSX), cluster with hierarchical clustering on the
-          z-score matrix (default k), and plot cluster PCA and dendrogram labeled with
-          protein names. After clustering, generate cluster-wise trajectory plots
-          (pocket SASA, COM distance, contacts, residence) and cluster-wise
-          pocket/ligand RMSF; also overlay ligand–pocket distance, pocket RMSF, and
-          ligand RMSF across all simulations.
-          Use id:name map o15197:EPHB6, o43187:IRAK2, p21860:ERBB3, p23458:JAK1,
-          p29597:TYK2, q7rtn6:STRAA, q8nb16:MLKL, q9bxu1:STK31.
-          No manual class labels. Generate a combined HTML report with literature
-          context for each kinase/pseudokinase." \
-  --working-dir ./agenticB5R1 \
-  --subtask analysis reporter \
-  --combined-only
-
-# --- Continue existing production MD 100 ns → 200 ns ---
-nohup python SimAgent.py \
-  --goal "Use only the HPC Agent to continue the six existing GROMACS production runs
-          from 100 ns to a target total of 200 ns. For each --sim-dirs system,
-          continue deffnm=md from its checkpoint and append to the original md
-          production files; never use or modify mdWrap.xtc. Run the continuation tools
-          in order: inspect, prepare with target_total_ns=200, create the script,
-          submit exactly once, and monitor to a terminal state. Do not run
-          preprocessing, simulation setup, analysis, or reporting. Preserve existing
-          data, isolate failures, and report each manifest, SLURM job ID, scheduler
-          state, and final status." \
-  --working-dir ./pseudoKin_extend \
-  --sim-dirs ./pseudoKin_extend/o60674 ./pseudoKin_extend/p25092 \
-             ./pseudoKin_extend/q05823 ./pseudoKin_extend/q8tea7 \
-             ./pseudoKin_extend/q92519 ./pseudoKin_extend/q9nsy0 \
-  --subtask hpcjob \
-  --allowed-hpc-jobs 4 \
-  --hpc-check-interval 60m \
-  > ./pseudoKin_extend/output.log 2>&1 &
 ```

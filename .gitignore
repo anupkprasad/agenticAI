@@ -26,7 +26,6 @@ __pycache__/
 # Slurm scripts
 *.slurm
 !ollama_server.slurm
-!archive/ops/ollama_server.slurm
 
 # Local run / work directories
 # campaigns/ is ignored in the block below, with one published exception.
@@ -79,11 +78,10 @@ backup/
 tests/
 examples/
 
-# Archive: keep README; ignore heavy legacy blobs
-archive/legacy/backup/
-archive/legacy/tmp/
-archive/legacy/garbage/
-!archive/README.md
+# Local-only (not part of the published SimAgent tree)
+archive/
+llm_chat.py
+.github/copilot-instructions.md
 
 # Stray analysis outputs accidentally written to repo root
 /reference_pocket_*

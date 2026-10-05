@@ -427,10 +427,7 @@ def run_consensus_local_fel_batch(
         "Per-simulation PCA/FEL on **consensus-mapped Cα** residues from "
         f"`{cjson.name}`. Each trajectory is aligned to its **own frame 0** "
         "and fitted with a **local** PCA basis (not projected onto MLKL/EPHB6).\n\n"
-        "Regenerate via analysis tool ``run_consensus_local_fel_batch`` or:\n"
-        "```bash\n"
-        "python3 archive/scripts/pseudokin/run_consensus_local_fel_batch.py\n"
-        "```\n",
+        "Regenerate via analysis tool ``run_consensus_local_fel_batch``.\n",
         encoding="utf-8",
     )
     return {
