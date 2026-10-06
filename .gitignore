@@ -24,9 +24,9 @@ __pycache__/
 *_offsets.lock
 # Keep the published example starting structures
 !example/pseudo_apo_holo/*.pdb
-# Do not vendor GROMACS force-field trees from local example HPC dirs
-example/**/hpc/**/*.ff/
-example/**/hpc/amber99sb-ildn.ff/
+# GROMACS force-field trees (copied into sim dirs) — ignore anywhere
+amber99sb-ildn.ff/
+*.ff/
 # Logs & backups
 *.log
 *_old.py
