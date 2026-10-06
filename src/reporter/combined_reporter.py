@@ -2547,7 +2547,7 @@ def _generate_dssp_segment_heatmap(
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(12, 4.5))
-    cmap = plt.cm.get_cmap("tab10", 8)
+    cmap = plt.get_cmap("tab10", 8)
     im = ax.imshow(
         segment.T, aspect="auto", cmap=cmap,
         interpolation="nearest", vmin=1, vmax=8,

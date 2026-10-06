@@ -192,7 +192,7 @@ def compute_dssp_from_universe(
         fig, ax = plt.subplots(figsize=(12, 8))
         
         # Create heatmap
-        cmap = plt.cm.get_cmap('tab10', 8)
+        cmap = plt.get_cmap('tab10', 8)
         im = ax.imshow(numeric_array.T, aspect='auto', cmap=cmap, 
                       interpolation='nearest', vmin=1, vmax=8)
         

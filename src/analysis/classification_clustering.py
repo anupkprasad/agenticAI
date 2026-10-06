@@ -570,7 +570,7 @@ def _plot_cluster_scatter(
         return
     fig, ax = plt.subplots(figsize=(10, 8))
     clusters = sorted(set(cluster_ids))
-    cmap = plt.cm.get_cmap("tab10", max(len(clusters), 1))
+    cmap = plt.get_cmap("tab10", max(len(clusters), 1))
     for i, cid in enumerate(clusters):
         mask = np.array(cluster_ids) == cid
         ax.scatter(
@@ -760,7 +760,7 @@ def _cluster_color_map(
     if pal is not None:
         colors = {cid: pal[(int(cid) - 1) % len(pal)] for cid in clusters}
         return clusters, colors
-    cmap = plt.cm.get_cmap("tab10", max(len(clusters), 1))
+    cmap = plt.get_cmap("tab10", max(len(clusters), 1))
     colors = {cid: to_hex(cmap(i)) for i, cid in enumerate(clusters)}
     return clusters, colors
 
@@ -2276,7 +2276,7 @@ def _plot_metric_by_cluster_panels(
             for row in members
         }
     )
-    cmap = plt.cm.get_cmap("tab10", max(len(all_names), 1))
+    cmap = plt.get_cmap("tab10", max(len(all_names), 1))
     name_colors = {name: cmap(i) for i, name in enumerate(all_names)}
 
     n_panels = len(cluster_ids)

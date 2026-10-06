@@ -539,8 +539,20 @@ Output as JSON:
         )
 
         sim_dirs, labels = resolve_combined_sim_context(state)
-        _user_goal_text = state.get("user_goal_original") or state.get("user_goal", "")
-        _enriched_text = state.get("master_enriched_prompt") or state.get("enriched_prompt", "")
+        _user_goal_text = (
+            state.get("user_goal_original")
+            or state.get("user_goal")
+            or ""
+        )
+        _enriched_text = (
+            state.get("master_enriched_prompt")
+            or state.get("enriched_prompt")
+            or ""
+        )
+        if not isinstance(_user_goal_text, str):
+            _user_goal_text = str(_user_goal_text)
+        if not isinstance(_enriched_text, str):
+            _enriched_text = str(_enriched_text)
         _combined_text = f"{_user_goal_text} {_enriched_text}"
         raw_labels = [Path(d).name for d in sim_dirs]
         _label_name_map = _parse_label_name_map(_combined_text, sim_labels=raw_labels)
@@ -558,7 +570,7 @@ Output as JSON:
         from src.reporter.protein_identity import resolve_protein_identity
         from src.reporter.report_curator import build_combined_report_plan, display_names_for_sims
 
-        _goal_full = (_user_goal_text + " " + _enriched_text).strip()
+        _goal_full = f"{_user_goal_text} {_enriched_text}".strip()
         _report_policy = ReportFigurePolicy.from_config(
             self.config,
             report_type=state.get("report_type", "comprehensive"),
@@ -816,8 +828,20 @@ Output as JSON:
         # Resolve per-sim dirs and labels (fallback to sim_prompts when state is stale)
         sim_dirs, labels = resolve_combined_sim_context(state)
 
-        _user_goal_text = state.get("user_goal", "")
-        _enriched_text = state.get("master_enriched_prompt") or state.get("enriched_prompt", "")
+        _user_goal_text = (
+            state.get("user_goal_original")
+            or state.get("user_goal")
+            or ""
+        )
+        _enriched_text = (
+            state.get("master_enriched_prompt")
+            or state.get("enriched_prompt")
+            or ""
+        )
+        if not isinstance(_user_goal_text, str):
+            _user_goal_text = str(_user_goal_text)
+        if not isinstance(_enriched_text, str):
+            _enriched_text = str(_enriched_text)
         _combined_text = f"{_user_goal_text} {_enriched_text}"
         raw_labels = [Path(d).name for d in sim_dirs]
         _label_name_map = _parse_label_name_map(_combined_text, sim_labels=raw_labels)
@@ -849,7 +873,7 @@ Output as JSON:
             resolve_report_narrative,
         )
 
-        _goal_full = (_user_goal_text + " " + _enriched_text).strip()
+        _goal_full = f"{_user_goal_text} {_enriched_text}".strip()
         _report_policy = ReportFigurePolicy.from_config(
             self.config,
             report_type=state.get("report_type", "comprehensive"),
@@ -1734,8 +1758,11 @@ No need to specify image paths in tool_params - they're extracted from the analy
             state.get("user_goal_original")
             or state.get("master_enriched_prompt")
             or state.get("enriched_prompt")
-            or state.get("user_goal", "")
+            or state.get("user_goal")
+            or ""
         )
+        if not isinstance(user_goal, str):
+            user_goal = str(user_goal)
         report_focus_raw = state.get("report_focus") or ""
         report_focus = (
             " ".join(report_focus_raw)
@@ -1894,8 +1921,11 @@ No need to specify image paths in tool_params - they're extracted from the analy
             state.get("user_goal_original")
             or state.get("master_enriched_prompt")
             or state.get("enriched_prompt")
-            or state.get("user_goal", "")
+            or state.get("user_goal")
+            or ""
         )
+        if not isinstance(user_goal, str):
+            user_goal = str(user_goal)
         narrative = resolve_report_narrative(
             user_goal,
             enriched_prompt=state.get("enriched_prompt") or "",
