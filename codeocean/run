@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Code Ocean / local reproducible entry point for SimAgent_v1.0
+#
+# What this run does (cloud-safe):
+#   1) Install the package editable (if needed)
+#   2) Smoke-test imports + CLI
+#   3) Regenerate a feature-heatmap PNG from deposited CSV
+#
+# What it does NOT do:
+#   Full MD, SLURM HPC, or live Ollama LLM planning
+#   (those require a local/HPC environment — see README.md)
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# Capsule lives at repo/codeocean — repo root is parent
+REPO="$(cd "$HERE/.." && pwd)"
+RESULTS="${CODEOCEAN_RESULTS:-$HERE/results}"
+mkdir -p "$RESULTS"
+
+export PYTHONUNBUFFERED=1
+cd "$REPO"
+
+echo "=== SimAgent Code Ocean run ==="
+echo "  repo:    $REPO"
+echo "  results: $RESULTS"
+echo "  python:  $(command -v python || true) $(python -V 2>&1 || true)"
+
+if [[ ! -f "$REPO/SimAgent.py" ]]; then
+  echo "ERROR: SimAgent.py not found under $REPO" >&2
+  echo "Upload/clone the SimAgent_v1.0 branch so the capsule contains the full repo." >&2
+  exit 1
+fi
+
+# Editable install (idempotent)
+python -m pip install -e "$REPO" -q
+
+echo ""
+echo "--- Smoke test ---"
+python "$HERE/scripts/smoke_test.py"
+
+echo ""
+echo "--- Regenerate feature heatmap (5-system cohort excerpt) ---"
+python "$HERE/scripts/regenerate_feature_heatmap.py" \
+  --csv "$HERE/data/features/classification_features_zscore.csv" \
+  --out "$RESULTS/pseudokin_5x2_feature_heatmap.png" \
+  --title "SimAgent_v1.0 — 5-system feature matrix (z-scored)"
+
+# Record provenance of this run
+{
+  echo "SimAgent Code Ocean reproducible run"
+  echo "date: $(date -Is)"
+  echo "repo: $REPO"
+  echo "git:  $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  echo "branch: $(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+  echo "python: $(python -V 2>&1)"
+  echo "outputs:"
+  ls -la "$RESULTS"
+} | tee "$RESULTS/run_manifest.txt"
+
+echo ""
+echo "=== Done. Artifacts in $RESULTS ==="

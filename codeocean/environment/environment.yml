@@ -1,0 +1,90 @@
+# SimAgent conda environment — SimAgentEnv
+# ========================================
+#
+# Portable recipe for a new machine. Create with:
+#   conda env create -f environment.yml
+#   conda activate SimAgentEnv
+#   pip install -e .
+#
+# This env includes the *Ollama Python client* (`pip: ollama`) used by SimAgent.
+# The Ollama *server* and the `gpt-oss:20b` model are NOT in conda — install
+# them separately: see docs/OLLAMA_SETUP.md
+#
+# Related docs: docs/PROJECT.md, docs/TOOLS.md, example/TUTORIAL.md §7
+#
+name: SimAgentEnv
+channels:
+  - conda-forge
+dependencies:
+  # ===== Core Python =====
+  - python=3.11
+
+  # ===== Molecular Dynamics Simulation =====
+  - gromacs>=2024                # gmx — MD suite
+  - ambertools>=24               # antechamber, tleap, pdb4amber, cpptraj, …
+
+  # ===== Structure / chemistry (CLI) =====
+  - openbabel>=3.1
+  - parmed>=4.3
+  - mafft>=7                     # star / consensus MSA (family modular + pocket map)
+
+  # ===== Scientific Python =====
+  - numpy>=1.26
+  - scipy>=1.11
+  - pandas>=2.0
+  - matplotlib-base>=3.8
+  - pillow>=10
+  - scikit-learn>=1.4            # PCA / clustering helpers in analysis
+  - openpyxl>=3.1                # classification_features.xlsx export
+
+  # ===== LLM agent graph (conda) =====
+  - langgraph>=0.2
+  - langgraph-checkpoint
+  - langgraph-prebuilt
+  - langgraph-sdk
+
+  # ===== Network / serialization / tests =====
+  - paramiko>=3
+  - requests>=2.31
+  - pyyaml>=6
+  - orjson
+  - ormsgpack
+  - pytest>=8
+  - invoke>=2
+
+  # ===== Pip packages =====
+  - pip
+  - pip:
+      # --- MD analysis ---
+      - mdanalysis>=2.7
+      - pytraj>=2.0.5
+
+      # --- Chemistry / structure ---
+      - rdkit>=2023.9.1
+      - biopython>=1.83
+      - acpype>=2023.10.27
+      - openbabel-wheel>=3.1.1
+
+      # --- AmberTools Python modules ---
+      - amberutils>=21.0
+      - pdb4amber>=22.0
+      - pymsmt>=22.0
+      - sander>=22.0
+      - mmpbsa-py>=16.0
+      - edgembar>=3.0
+
+      # --- Structure preparation ---
+      - pdb2pqr>=3.6
+      - propka>=3.5
+      - packmol-memgen>=2023.1
+
+      # --- LLM client (talks to a *running* Ollama server) ---
+      - langchain>=0.3
+      - langchain-core>=0.3
+      - langsmith>=0.1
+      - ollama>=0.4               # Python API only — NOT the Ollama daemon
+
+      # --- Viz / utils ---
+      - seaborn>=0.13
+      - tqdm>=4.66
+      - uuid-utils>=0.9

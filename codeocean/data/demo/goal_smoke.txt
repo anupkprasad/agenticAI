@@ -1,0 +1,3 @@
+Smoke-test goal for Code Ocean: structures p21860.pdb, q8iv63.pdb, q8nb16.pdb,
+and q8wz42.pdb are in this folder (protein + ATP + Mg). This capsule does not
+run full MD or HPC. Use --no-llm for offline heuristic checks only.

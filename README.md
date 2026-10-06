@@ -418,6 +418,7 @@ docs/
 | Document                                              | Description                                                |
 | ----------------------------------------------------- | ---------------------------------------------------------- |
 | [example/TUTORIAL.md](example/TUTORIAL.md)             | Example campaign: run, track status, reports, provenance   |
+| [codeocean/README.md](codeocean/README.md)             | Code Ocean capsule (smoke run + figure regen for review)   |
 | [docs/PROJECT.md](docs/PROJECT.md)                     | Product overview, repository layout, quick start, CLI      |
 | [docs/PIPELINE_WORKFLOW.md](docs/PIPELINE_WORKFLOW.md) | Agent order, directories, files, and flag examples         |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)           | LangGraph pipeline, state, and per-agent design            |
