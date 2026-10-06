@@ -13,11 +13,20 @@ __pycache__/
 # Simulation data & artifacts
 *.pdb
 *.xtc
+*.trr
+*.edr
+*.cpt
 *.top
 *.tpr
 *.gro
 *.cache
-
+*_offsets.npz
+*_offsets.lock
+# Keep the published example starting structures
+!example/pseudo_apo_holo/*.pdb
+# Do not vendor GROMACS force-field trees from local example HPC dirs
+example/**/hpc/**/*.ff/
+example/**/hpc/amber99sb-ildn.ff/
 # Logs & backups
 *.log
 *_old.py
@@ -39,11 +48,6 @@ multi_run/
 tmp/
 garbage/
 benchmarks/
-# Ignore ad-hoc scripts at root of scripts/, but keep helpers + examples tracked
-scripts/*
-!scripts/promote_programmer_tool.py
-!scripts/examples/
-!scripts/examples/**
 pseudo_JAK/
 
 # Active local campaigns (~60G+ sims + manuscript drafts) — keep out of git.
@@ -76,6 +80,7 @@ agenticB5R1/
 agenticB5R1_t1/
 backup/
 tests/
+# Legacy plural path only; tracked demos live under example/
 examples/
 
 # Local-only (not part of the published SimAgent tree)

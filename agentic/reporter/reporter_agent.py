@@ -29,7 +29,11 @@ logger = logging.getLogger(__name__)
 _COMBINED_ANALYSIS_PLOT_GLOBS = (
     "*overlay*.png",
     "dccm_comparison.png",
+    "dccm_comparison_*.png",
     "dccm_*comparison*.png",
+    "*dccm*diff*heatmap*.png",
+    "*_dccm_diff_heatmap.png",
+    "dccm_apo_holo*panels*.png",
     "rmsf_segment*.png",
     "com_distance*.png",
     "dssp_comparison.png",
@@ -42,12 +46,21 @@ _COMBINED_ANALYSIS_PLOT_GLOBS = (
 
 
 def resolve_combined_sim_context(state: Dict[str, Any]) -> tuple:
-    """Return (sim_dirs, labels) for combined report/analysis."""
+    """Return (sim_dirs, labels) for combined report/analysis (healthy sims only)."""
+    from agentic.utils.sim_health import healthy_sim_labels
+
+    healthy = set(healthy_sim_labels(state))
+
     completed = state.get("completed_sim_states") or []
-    sim_dirs = [s["working_directory"] for s in completed if s.get("working_directory")]
-    labels = [s.get("label", f"sim_{i}") for i, s in enumerate(completed)]
-    if sim_dirs:
-        return sim_dirs, labels
+    if completed:
+        pairs = [
+            (s["working_directory"], s.get("label", f"sim_{i}"))
+            for i, s in enumerate(completed)
+            if s.get("working_directory")
+            and (not healthy or str(s.get("label", f"sim_{i}")) in healthy)
+        ]
+        if pairs:
+            return [p[0] for p in pairs], [p[1] for p in pairs]
 
     sim_prompts = state.get("sim_prompts") or []
     base = state.get("multi_sim_base_dir") or state.get("working_directory", "")
@@ -57,8 +70,13 @@ def resolve_combined_sim_context(state: Dict[str, Any]) -> tuple:
             sp.get("working_dir") or str(Path(base) / sp.get("label", f"sim_{i}"))
             for i, sp in enumerate(sim_prompts)
         ]
+    labels = list(state.get("sim_labels") or [])
     if not labels and sim_prompts:
         labels = [sp.get("label", f"sim_{i}") for i, sp in enumerate(sim_prompts)]
+    if healthy and labels and sim_dirs and len(labels) == len(sim_dirs):
+        filtered = [(d, lab) for d, lab in zip(sim_dirs, labels) if lab in healthy]
+        if filtered:
+            return [p[0] for p in filtered], [p[1] for p in filtered]
     return sim_dirs, labels
 
 
@@ -643,6 +661,11 @@ Output as JSON:
                 sim_dirs=sim_dirs,
                 labels=labels,
             )
+            literature_refs, literature_review, final_impression = (
+                self._sync_literature_citations(
+                    literature_refs, literature_review, final_impression
+                )
+            )
 
             report_plan = build_combined_report_plan(
                 overlay_plots,
@@ -975,6 +998,11 @@ Output as JSON:
                 combined_analysis_data, literature_refs, combined_state,
                 sim_dirs=sim_dirs,
                 labels=labels,
+            )
+            literature_refs, literature_review, final_impression = (
+                self._sync_literature_citations(
+                    literature_refs, literature_review, final_impression
+                )
             )
 
             report_plan = build_combined_report_plan(
@@ -1383,9 +1411,10 @@ No need to specify image paths in tool_params - they're extracted from the analy
         state: MDState
     ) -> List[Dict[str, Any]]:
         """Guaranteed literature search across PubMed, bioRxiv,
-        and UniProt. Returns up to 15 deduplicated references."""
+        and UniProt. Returns a short ranked candidate list (cited later)."""
         literature_refs: List[Dict[str, Any]] = []
-        MAX_REFS = 15
+        # Candidate pool for the LLM; uncited papers are pruned after writing.
+        MAX_REFS = 10
         try:
             from src.reporter.literature_search import (
                 generate_literature_queries, search_pubmed,
@@ -1646,12 +1675,28 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 literature_refs,
                 research_context,
                 max_refs=MAX_REFS,
+                min_score=12,
             )
 
         except Exception as e:
             logger.warning(f"Literature search failed: {e}", exc_info=True)
 
         return literature_refs[:MAX_REFS]
+
+    @staticmethod
+    def _sync_literature_citations(
+        literature_refs: List[Dict[str, Any]],
+        literature_review: Optional[str],
+        final_impression: Optional[str],
+    ) -> tuple:
+        """Prune uncited refs and renumber [n] by first appearance (review → impression)."""
+        from src.reporter.literature_search import sync_cited_literature
+
+        return sync_cited_literature(
+            literature_refs,
+            literature_review=literature_review,
+            final_impression=final_impression,
+        )
 
     def _retrieved_context(self, state: MDState, query: str = "") -> str:
         try:
@@ -1733,7 +1778,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
         analysis_text = build_analysis_summary_text(analysis_data, analysis_stats)
 
         lit_parts = []
-        for i, ref in enumerate(literature_refs[:12], 1):
+        for i, ref in enumerate(literature_refs[:8], 1):
             title = ref.get("title", "Unknown")
             abstract = ref.get("abstract") or ""
             score, note = score_literature_ref_relevance(ref, context)
@@ -1797,10 +1842,13 @@ No need to specify image paths in tool_params - they're extracted from the analy
 **Instructions:**
 - Prioritise papers whose primary subject is {protein_focus}; use related-family papers (e.g. other pseudokinases) only when they illuminate the same mechanism observed in this simulation
 - Read the abstracts and ONLY discuss papers genuinely relevant to the user's objective, the simulated system(s), and the analysis outputs above
-- Skip or downplay papers unrelated to the target protein(s), ligand/binding context (if applicable), or the performed analysis types ({', '.join(analysis_types[:8]) or 'MD dynamics'})
+- Skip papers unrelated to the target protein(s), ligand/binding context (if applicable), or the performed analysis types ({', '.join(analysis_types[:8]) or 'MD dynamics'}) — do not cite them at all
 - Write 3–4 paragraphs of substantive scientific prose connecting published work to THIS simulation study — dig out mechanistic insights, not generic summaries
 - Explicitly relate simulation findings to literature for the same or related systems — cite metrics that appear in the results above
-- Cite sources using bracket notation [1], [2], etc. matching the reference numbers above
+- Cite sources using bracket notation [1], [2], etc. matching the candidate numbers above
+- REQUIRED: include at least three in-text citations like [1] or [2] in the prose (the References section only lists cited papers when citations are present)
+- Cite in increasing order of first mention in THIS section (first paper you discuss = lowest number among those you use; introduce new citations sequentially)
+- Every paper you cite must be discussed in the prose; do not pad with unused citations
 - Do NOT simply list paper titles — synthesise and compare with the simulation outcomes
 - If a paper's abstract is missing or clearly irrelevant, do not cite it
 - Do NOT include section headers — output only the review paragraphs"""
@@ -1921,7 +1969,10 @@ No need to specify image paths in tool_params - they're extracted from the analy
 - Quote numbers that appear in the retrieved study notes or the analysis results; do not replace them with a generic stability summary
 - If the goal emphasises unsupervised classification or clustering, lead with how simulations group by dynamic regime (FEL/phylogenetic tree), what distinguishes each cluster (COM distance, contacts, pocket RMSF, ligand flexibility), and biological interpretation — do not repeat generic RMSD/Rg lists unless they support the classification story
 - If the goal emphasises apo vs holo or binding, integrate ligand–pocket coupling, contacts, and flexibility trends with literature
-- Cite relevant literature using bracket notation [1], [2], etc.
+- Cite ONLY literature that is directly relevant to these proteins / this study using bracket notation [1], [2], etc. matching the candidate list
+- REQUIRED: include at least two in-text citations like [1] or [2] when candidate papers are provided
+- Prefer citing papers already appropriate for the Literature Review; introduce citations in increasing order of first mention in THIS section
+- Do not cite a paper unless you discuss its finding in the prose
 - End with concise implications and suggested follow-up experiments or simulations
 - Do NOT include section headers — output only the impression paragraphs"""
 
@@ -2460,8 +2511,6 @@ No need to specify image paths in tool_params - they're extracted from the analy
                     # "kinase_report.html"); we always normalize to report.html.
                     params["output_file"] = "report.html"
                     params["analysis_data"] = analysis_data
-                    params["literature_refs"] = literature_refs
-                    params["literature_review"] = literature_review
                     # Pass system info from state
                     params["system_info"] = state.get("system_info")
                     protein_name, sim_label = self._resolve_protein_display_name(state)
@@ -2488,9 +2537,17 @@ No need to specify image paths in tool_params - they're extracted from the analy
                     params["include_visualizations"] = agent_input.include_visualizations
                     # Generate final impression using LLM
                     logger.info("  [exec] Generating LLM final impression...")
-                    params["final_impression"] = self._generate_final_impression(
+                    final_impression = self._generate_final_impression(
                         analysis_data, literature_refs, state
                     )
+                    literature_refs, literature_review, final_impression = (
+                        self._sync_literature_citations(
+                            literature_refs, literature_review, final_impression
+                        )
+                    )
+                    params["literature_refs"] = literature_refs
+                    params["literature_review"] = literature_review
+                    params["final_impression"] = final_impression
                     logger.info("  [exec] Final impression: %s",
                                 "generated" if params["final_impression"] else "skipped/unavailable")
                     # Extract PDB frames at analysis-driven timepoints for 3D viewer
@@ -2574,6 +2631,14 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 report_type=agent_input.report_type.value if hasattr(agent_input.report_type, "value") else str(agent_input.report_type),
                 include_visualizations=agent_input.include_visualizations,
             )
+            _fb_impression = self._generate_final_impression(
+                analysis_data, literature_refs, state
+            )
+            literature_refs, literature_review, _fb_impression = (
+                self._sync_literature_citations(
+                    literature_refs, literature_review, _fb_impression
+                )
+            )
             fallback_params = {
                 "working_dir": self.file_manager.agent_dir,
                 "analysis_data": analysis_data,
@@ -2587,7 +2652,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 "report_focus": " ".join(plan.report_focus) if isinstance(plan.report_focus, list) else (plan.report_focus or ""),
                 "max_figures_per_section": _fig_policy.max_figures_per_section,
                 "include_visualizations": agent_input.include_visualizations,
-                "final_impression": self._generate_final_impression(analysis_data, literature_refs, state),
+                "final_impression": _fb_impression,
                 "pdb_data": self._extract_pdb_for_viewer(state, analysis_data),
                 "enriched_prompt": state.get("enriched_prompt") or state.get("user_goal"),
                 "output_file": "report.html",

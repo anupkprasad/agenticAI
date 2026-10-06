@@ -10,7 +10,7 @@ names) and not the execution pools.
 acquisition, trajectory-analysis libraries, chain-residue map, LLM stack,
 plotting/HTML report, HPC clients, literature APIs, run summary, test tools.
 
-Packages are pinned loosely in `environment.yml` (conda environment `ollama_env`,
+Packages are pinned loosely in `environment.yml` (conda environment `SimAgentEnv`,
 Python 3.11). That env includes the **Ollama Python client**, not the Ollama
 daemon or model weights — see [OLLAMA_SETUP.md](OLLAMA_SETUP.md).
 Per-tool observables and output filenames:

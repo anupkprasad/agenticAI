@@ -20,7 +20,7 @@ Active campaign trees (sims + manuscript draft) live under `campaigns/`
 no trajectories) — is under
 [`campaigns/robustness/simagent_provenance/`](campaigns/robustness/simagent_provenance/).
 
-**Full usage guide:** [TUTORIAL.md](TUTORIAL.md)
+**Worked example (run / track / results):** [example/TUTORIAL.md](example/TUTORIAL.md)
 
 ---
 
@@ -45,26 +45,47 @@ no trajectories) — is under
 
 ---
 
-## Prerequisites
+## Installation
+
+### Step 1 — SimAgentEnv (conda)
+
+Scientific dependencies (GROMACS, AmberTools, MDAnalysis, LangChain, …) live in
+one conda environment named **`SimAgentEnv`**:
 
 ```bash
+git clone <this-repo-url> agenticAI
+cd agenticAI
 conda env create -f environment.yml
-conda activate ollama_env
+conda activate SimAgentEnv
+pip install -e .
 ```
 
-Optional: confirm your LLM endpoint is reachable (LLM planning is **on by default**):
+Confirm the CLI loads:
+
+```bash
+python SimAgent.py --help
+```
+
+**GROMACS** is included in this environment. For phosphorylated proteins with
+CHARMM36, install `charmm36-jul2022.ff` separately (see [Force fields](#force-fields)).
+
+### Step 2 — Ollama server (separate)
+
+The conda env only includes the **Ollama Python client**. It does **not** install
+the Ollama daemon or download model weights (those are large / machine-specific).
+
+Install the server and pull `gpt-oss:20b` once per machine:
+
+→ **[docs/OLLAMA_SETUP.md](docs/OLLAMA_SETUP.md)**
+
+Quick health check after the server is running:
 
 ```bash
 curl -s http://127.0.0.1:11434/api/tags
 ```
 
-Use `--no-llm` only for offline or deterministic fallback runs.
-
-**Ollama server + `gpt-oss:20b` are not inside conda.** Install them once per
-machine: **[docs/OLLAMA_SETUP.md](docs/OLLAMA_SETUP.md)**.
-
-**GROMACS** is included in the conda environment. For phosphorylated proteins with
-CHARMM36, install `charmm36-jul2022.ff` (see [Force fields](#force-fields)).
+LLM planning is **on by default**. Use `--no-llm` only for offline or
+deterministic fallback runs.
 
 ---
 
@@ -110,7 +131,8 @@ python SimAgent.py \
   --subtask analysis reporter
 ```
 
-More examples (resume, component cases, parameter overrides): [TUTORIAL.md](TUTORIAL.md)
+Hands-on walkthrough (apo/holo panel, status, reports, provenance):
+[example/TUTORIAL.md](example/TUTORIAL.md)
 
 ---
 
@@ -322,7 +344,7 @@ when per-sim work is already complete.
 ```
 SimAgent.py                # CLI entry point
 LICENSE                    # MIT
-environment.yml            # Conda environment (ollama_env)
+environment.yml            # Conda environment (SimAgentEnv)
 ollama_server.slurm        # Example Slurm job to serve Ollama on GPU nodes
 agentic/
   workflow.py              # LangGraph StateGraph orchestration
@@ -341,7 +363,8 @@ src/
   reporter/                # Report generation
 tests/                     # Pytest suite
 campaigns/robustness/simagent_provenance/  # Published robustness run_01 provenance
-TUTORIAL.md                # End-to-end usage guide
+example/                   # Runnable demo (pseudo_apo_holo) + use-case tutorial
+example/TUTORIAL.md        # Run / track / find results for the example campaign
 docs/
   PROJECT.md               # Product overview, layout, CLI, run outputs
   PIPELINE_WORKFLOW.md     # Agent order, directories, files, flag examples
@@ -359,7 +382,7 @@ docs/
 
 | Document                                              | Description                                                |
 | ----------------------------------------------------- | ---------------------------------------------------------- |
-| [TUTORIAL.md](TUTORIAL.md)                             | Step-by-step workflows and troubleshooting                 |
+| [example/TUTORIAL.md](example/TUTORIAL.md)             | Example campaign: run, track status, reports, provenance   |
 | [docs/PROJECT.md](docs/PROJECT.md)                     | Product overview, repository layout, quick start, CLI      |
 | [docs/PIPELINE_WORKFLOW.md](docs/PIPELINE_WORKFLOW.md) | Agent order, directories, files, and flag examples         |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)           | LangGraph pipeline, state, and per-agent design            |

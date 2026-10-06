@@ -244,6 +244,11 @@ def resolve_relevant_metrics(
     ):
         metrics |= set(BINDING_REPORT_METRICS)
 
+    # Explicit DCCM / cross-correlation language — keep even when the goal is
+    # classified as "broad dynamics" (detect_requested_metrics → None).
+    if re.search(r"\bdccm\b|cross[-\s]?correlation|correlated motion", lower):
+        metrics.add("dccm")
+
     # Explicit report_focus overrides (from LLM reporter plan).
     focus_map = {
         "stability": {"rmsd", "rg", "energy"},

@@ -363,6 +363,35 @@ def init_parallel_pool(state: Dict[str, Any], *, phase: str) -> Dict[str, Any]:
                 logger.info("Parallel pool: re-queued failed sim %s for retry", label)
             # else: keep terminal failed
         else:
+            # Fatal HPC / production failure: never queue analysis/reporter.
+            if phase == "analysis":
+                try:
+                    from agentic.utils.sim_health import should_skip_downstream_for_sim
+
+                    decision = should_skip_downstream_for_sim(
+                        state, label, working_dir=wd or rec.get("working_dir") or ""
+                    )
+                except Exception:
+                    decision = {"skip": False}
+                if decision.get("skip"):
+                    rec["status"] = "failed"
+                    rec["health"] = "failed"
+                    rec["error"] = str(decision.get("reason") or "production MD failed")[:400]
+                    rec["skip_reason"] = "downstream skipped: production not healthy"
+                    rec["completed_at"] = _utc_now()
+                    sims[label] = rec
+                    try:
+                        from agentic.utils.sim_health import record_fatal_sim_failure
+
+                        record_fatal_sim_failure(
+                            state,
+                            label,
+                            reason=str(rec["error"]),
+                            stage="hpc",
+                        )
+                    except Exception:
+                        logger.debug("fatal mark skipped for %s", label, exc_info=True)
+                    continue
             job = build_per_sim_job_spec(state, sp, phase=phase)
             if job_already_complete(job):
                 rec["status"] = "skipped"

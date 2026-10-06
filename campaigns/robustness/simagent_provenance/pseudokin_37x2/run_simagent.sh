@@ -32,7 +32,14 @@ if [[ ! -d "$WD" ]]; then
   exit 1
 fi
 
-CONDA_ENV_BIN="${CONDA_ENV_BIN:-$HOME/conda_envs/ollama_env/bin}"
+# Prefer SimAgentEnv; fall back to legacy ollama_env if present.
+if [[ -z "${CONDA_ENV_BIN:-}" ]]; then
+  if [[ -x "${HOME}/conda_envs/SimAgentEnv/bin/python" ]]; then
+    CONDA_ENV_BIN="${HOME}/conda_envs/SimAgentEnv/bin"
+  else
+    CONDA_ENV_BIN="${HOME}/conda_envs/ollama_env/bin"
+  fi
+fi
 export PATH="$CONDA_ENV_BIN:$PATH"
 export LD_LIBRARY_PATH="${CONDA_ENV_BIN%/bin}/lib:${LD_LIBRARY_PATH:-}"
 PYTHON="${CONDA_ENV_BIN}/python"

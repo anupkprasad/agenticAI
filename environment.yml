@@ -1,17 +1,18 @@
-# AgenticAI Conda Environment — ollama_env
+# SimAgent conda environment — SimAgentEnv
 # ========================================
 #
 # Portable recipe for a new machine. Create with:
 #   conda env create -f environment.yml
-#   conda activate ollama_env
+#   conda activate SimAgentEnv
+#   pip install -e .
 #
 # This env includes the *Ollama Python client* (`pip: ollama`) used by SimAgent.
 # The Ollama *server* and the `gpt-oss:20b` model are NOT in conda — install
 # them separately: see docs/OLLAMA_SETUP.md
 #
-# Related docs: docs/PROJECT.md, docs/TOOLS.md, TUTORIAL.md §7
+# Related docs: docs/PROJECT.md, docs/TOOLS.md, example/TUTORIAL.md §7
 #
-name: ollama_env
+name: SimAgentEnv
 channels:
   - conda-forge
 dependencies:

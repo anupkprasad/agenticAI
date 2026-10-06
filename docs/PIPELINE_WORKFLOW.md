@@ -194,6 +194,11 @@ not the folder names.
 | `md.edr`, `md.log` | Energy / log |
 | `inventory.json` | Bound `md.tpr` / `mdWrap.xtc` paths |
 
+**Shared analysis timescale:** production MDP defaults to
+`nstxout-compressed = 50000` at `dt = 0.002` ps → **100 ps / frame
+(10 frames / ns)**. PBC wrap (`mdWrap.xtc`) uses the same interval
+(`wrap_dt_ps=100`) so every simulation is compared on one time grid.
+
 Analysis reads trajectories from `{sim}/hpc/` on the shared filesystem.
 `download_results` is not part of the default plan.
 
@@ -207,6 +212,7 @@ but never calls `sbatch` (keeps existing `md.tpr` / `mdWrap.xtc`).
 |------|------|
 | `analysis_summary.jsonl` | Per-sim completion marker (needed for `--combined-only` / resume skip) |
 | `rmsd.png`, `rmsf.dat`, `gyration.dat`, … | Goal-selected observables |
+| `dccm_comparison.png` (or `_1.png`, `_2.png`, …) | Combined DCCM: ≤9 panels in a 3×3 grid; more panels → extra pages |
 | `{base}/analysis/statistical_summary.json` | Cross-sim table |
 | `{base}/analysis/classification_features.csv` | When the goal asks for classification |
 | `{base}/analysis/classification_features_zscore.csv` | Robust/IQR z-scores for clustering |
@@ -471,9 +477,11 @@ Only HPC agent files under each sim’s `hpc/` are the target (new/extended
 
 | Question | Path |
 |----------|------|
-| Did the run finish / skip a holo case? | `{base}/run_summary.md` |
+| Did the run finish / which sims failed? | `{base}/run_summary.md` (+ `health` / `failed` counts) |
+| Live pool status / healthy vs failed | `{base}/supervisor/pool_status.json` |
 | Why did the planner choose those tools? | `{base}/planner/master_plan.md` or `{sim}/planner/execution_plan.md` |
 | Resume / pool job IDs | `{base}/supervisor/state.jsonl` |
+| Token usage | `{base}/llm_usage.json` |
 | Conversation + LLM calls | `{base}/agent_conversation.log` and `{sim}/agent_conversation.log` |
 | Trajectory | `{sim}/hpc/md.xtc` or `mdWrap.xtc` |
 | Per-sim science | `{sim}/analysis/` + `{sim}/reporter/report.html` |

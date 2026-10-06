@@ -180,10 +180,14 @@ def build_slurm_script_params(
         "gromacs_module",
         "topology_file",
         "input_structure",
+        "exclude_nodes",
     ):
-        if key in defaults:
+        if key in defaults and defaults[key] not in (None, ""):
             params[key] = defaults[key]
     state = workflow_state or {}
+    # Per-run override (CLI/env/campaign) wins over config.yaml.
+    if state.get("hpc_exclude_nodes"):
+        params["exclude_nodes"] = state["hpc_exclude_nodes"]
     if state.get("user_email"):
         params["email"] = state["user_email"]
     return params

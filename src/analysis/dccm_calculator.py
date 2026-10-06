@@ -16,12 +16,13 @@ particularly informative for pseudokinase comparisons.
 
 Public @tool functions:
   1. calculate_dccm        — per-simulation DCCM + heatmap
-  2. plot_dccm_comparison  — side-by-side heatmaps (+ optional Δ panel for 2 sims)
+  2. plot_dccm_comparison  — 3×3-grid heatmaps (+ optional Δ; paginated if >9)
   3. plot_dccm_difference  — Δ DCCM heatmap (e.g. protein+ATP minus protein-only)
 """
 import os
 import csv
 import logging
+import math
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -29,6 +30,11 @@ from langchain.tools import tool
 from .summary_logger import append_analysis_summary
 
 logger = logging.getLogger(__name__)
+
+# Combined DCCM figure layout: at most 3×3 panels per PNG page.
+DCCM_COMPARE_MAX_COLS = 3
+DCCM_COMPARE_MAX_ROWS = 3
+DCCM_COMPARE_MAX_PER_PAGE = DCCM_COMPARE_MAX_COLS * DCCM_COMPARE_MAX_ROWS
 
 # Fixed colour scales for combined DCCM figures (no per-matrix auto-normalisation).
 DCCM_CORR_VMIN = -1.0
@@ -232,6 +238,9 @@ def compute_dccm_from_universe(
     if not HAS_MDA or not HAS_NUMPY:
         return {"success": False, "error": "MDAnalysis and NumPy are required for DCCM"}
 
+    from .selection_policy import ensure_ca_selection
+
+    selection = ensure_ca_selection(selection)
     prefix = output_prefix or "dccm"
     atoms = u.select_atoms(selection)
     if len(atoms) == 0:
@@ -248,7 +257,8 @@ def compute_dccm_from_universe(
         positions[out_idx] = atoms.positions.copy()
 
     dccm = _compute_dccm_matrix(positions)
-    residue_ids = [int(r.resid) for r in atoms.residues]
+    # Cα selection → one atom per residue; use atom.resid to keep matrix size aligned.
+    residue_ids = [int(a.resid) for a in atoms]
 
     strong_pairs = []
     for i in range(n_atoms):
@@ -420,6 +430,50 @@ def calculate_dccm(
         return {"success": False, "error": str(e)}
 
 
+def _dccm_comparison_page_paths(output_file: str, n_pages: int) -> List[str]:
+    """Return page filenames: stem.png (1 page) or stem_1.png … stem_N.png."""
+    stem = Path(output_file).stem
+    suffix = Path(output_file).suffix or ".png"
+    if n_pages <= 1:
+        return [f"{stem}{suffix}"]
+    return [f"{stem}_{i}{suffix}" for i in range(1, n_pages + 1)]
+
+
+def _draw_dccm_panel(
+    ax,
+    mat: "np.ndarray",
+    res_ids: List[int],
+    title: str,
+    *,
+    cmap: str,
+    vmin: float,
+    vmax: float,
+    cbar_label: str,
+) -> None:
+    n = len(res_ids)
+    step = max(1, n // 8)
+    tick_pos = list(range(0, n, step))
+    tick_labels = [str(res_ids[i]) for i in tick_pos]
+    im = ax.imshow(
+        mat,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        aspect="equal",
+        interpolation="nearest",
+        origin="lower",
+    )
+    ax.set_title(title, fontsize=10, fontweight="bold")
+    ax.set_xticks(tick_pos)
+    ax.set_xticklabels(tick_labels, fontsize=6, rotation=45, ha="right")
+    ax.set_yticks(tick_pos)
+    ax.set_yticklabels(tick_labels, fontsize=6)
+    ax.set_xlabel("Residue", fontsize=8)
+    ax.set_ylabel("Residue", fontsize=8)
+    cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(cbar_label, fontsize=9)
+
+
 @tool
 def plot_dccm_comparison(
     dccm_files: List[str],
@@ -430,41 +484,36 @@ def plot_dccm_comparison(
     vmax: float = DCCM_CORR_VMAX,
     diff_vmin: float = DCCM_DIFF_VMIN,
     diff_vmax: float = DCCM_DIFF_VMAX,
-    figsize_per_panel: float = 5.0,
+    figsize_per_panel: float = 4.0,
     dpi: int = 200,
     cmap: str = DCCM_CMAP,
     cmap_diff: str = DCCM_DIFF_CMAP,
 ) -> Dict[str, Any]:
     """
-    Create a side-by-side comparison heatmap of DCCM matrices from multiple
-    simulations for combined / multi-simulation reports.
+    Create DCCM comparison heatmaps for combined / multi-simulation reports.
 
-    Reads the per-simulation DCCM CSV files produced by ``calculate_dccm``
-    (columns: residue_i, residue_j, correlation) and renders them as a
-    single multi-panel figure.  Residue axes are aligned across panels.
+    Panels are laid out in a **3×3 grid** (max 9 per PNG).  If more than 9
+    panels are needed, additional pages are written as ``stem_1.png``,
+    ``stem_2.png``, … (from *output_file*).  A single page keeps the original
+    filename (e.g. ``dccm_comparison.png``).
 
-    A difference panel (last simulation minus first) is appended when exactly
-    two simulations are compared **and** they share identical residue numbering
-    (e.g. apo vs holo of the same protein). For cross-protein comparisons
-    (JAK1 vs TYK2), each panel shows the full matrix and no Δ panel is drawn
-    because residue indices are not structurally equivalent.
+    A difference panel (last − first) is appended when exactly two simulations
+    share identical residue numbering (e.g. apo vs holo). Cross-protein
+    comparisons keep each full matrix with no Δ panel.
 
     Args:
         dccm_files: Ordered list of DCCM CSV file paths (one per simulation).
-            Each file must have columns ``residue_i, residue_j, correlation``.
         labels: Human-readable labels (one per file, same order).
-        output_file: Output image filename (e.g. ``"dccm_comparison.png"``).
-            Saved inside *working_dir*.
-        working_dir: Directory where the figure is written.
-        vmin: Common colour scale minimum (default: −1.0).
-        vmax: Common colour scale maximum (default: +1.0).
-        figsize_per_panel: Width (and height) in inches for each panel
-            (default: 5.0).
+        output_file: Base image filename (e.g. ``"dccm_comparison.png"``).
+        working_dir: Directory where figure(s) are written.
+        vmin / vmax: Shared colour scale for correlation panels.
+        figsize_per_panel: Inches per panel edge (default: 4.0).
         dpi: Image resolution (default: 200).
         cmap: Matplotlib diverging colormap (default: ``"RdBu_r"``).
 
     Returns:
-        Dict with ``success``, ``output_path``, ``n_panels``, ``message``.
+        Dict with ``success``, ``output_path`` (first page), ``output_paths``,
+        ``n_panels``, ``n_pages``, ``message``.
     """
     if not HAS_NUMPY:
         return {"success": False, "error": "NumPy not available"}
@@ -475,7 +524,6 @@ def plot_dccm_comparison(
                 "error": "dccm_files and labels must have the same length"}
 
     Path(working_dir).mkdir(parents=True, exist_ok=True)
-    output_path = str(Path(working_dir) / output_file)
 
     # ── Load matrices ────────────────────────────────────────────────────────
     matrices: List[np.ndarray] = []
@@ -493,8 +541,6 @@ def plot_dccm_comparison(
             return {"success": False,
                     "error": f"Failed to read {fpath}: {e}"}
 
-    # Same-protein runs (apo/holo, replicates) share residue IDs → align + optional Δ.
-    # Cross-protein comparisons keep each full matrix; no Δ panel.
     same_numbering = (
         len(residue_sets) >= 2
         and all(set(residue_sets[0]) == set(rs) for rs in residue_sets[1:])
@@ -512,80 +558,87 @@ def plot_dccm_comparison(
         add_diff = False
         n_residues = max(len(rs) for rs in residue_sets)
 
-    n_panels = len(matrices) + (1 if add_diff else 0)
-
-    fig, axes = plt.subplots(
-        1, n_panels,
-        figsize=(figsize_per_panel * n_panels + 1, figsize_per_panel + 1),
-    )
-    if n_panels == 1:
-        axes = [axes]
-
-    for ax, mat, label, res_ids in zip(
-        axes[: len(matrices)], matrices, labels, panel_residue_sets
-    ):
-        n = len(res_ids)
-        step = max(1, n // 8)
-        tick_pos = list(range(0, n, step))
-        tick_labels = [str(res_ids[i]) for i in tick_pos]
-        im = ax.imshow(
-            mat, cmap=cmap, vmin=vmin, vmax=vmax,
-            aspect="auto", interpolation="nearest", origin="lower",
-        )
-        ax.set_title(label, fontsize=10, fontweight="bold")
-        ax.set_xticks(tick_pos)
-        ax.set_xticklabels(tick_labels, fontsize=6, rotation=45, ha="right")
-        ax.set_yticks(tick_pos)
-        ax.set_yticklabels(tick_labels, fontsize=6)
-        ax.set_xlabel("Residue", fontsize=8)
-        ax.set_ylabel("Residue", fontsize=8)
-
-    # ── Shared colorbar on the last matrix panel ─────────────────────────────
-    cbar_ax = axes[len(matrices) - 1]
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=mcolors.Normalize(vmin=vmin, vmax=vmax))
-    sm.set_array([])
-    cbar = fig.colorbar(sm, ax=cbar_ax, fraction=0.046, pad=0.04)
-    cbar.set_label("C$_{ij}$", fontsize=9)
-
-    # ── Optional difference panel (same protein / identical numbering only) ─
+    # Build ordered panel list: (matrix, res_ids, title, is_diff)
+    panels: List[Tuple[np.ndarray, List[int], str, bool]] = []
+    for mat, label, res_ids in zip(matrices, labels, panel_residue_sets):
+        panels.append((mat, res_ids, label, False))
     if add_diff:
-        diff = matrices[1] - matrices[0]
-        ax_diff = axes[-1]
-        step = max(1, n_residues // 8)
-        tick_pos = list(range(0, n_residues, step))
-        tick_labels = [str(panel_residue_sets[0][i]) for i in tick_pos]
-        im_diff = ax_diff.imshow(
-            diff, cmap=cmap_diff, vmin=diff_vmin, vmax=diff_vmax,
-            aspect="auto", interpolation="nearest", origin="lower",
+        panels.append(
+            (
+                matrices[1] - matrices[0],
+                panel_residue_sets[0],
+                f"Δ ({labels[1]} − {labels[0]})",
+                True,
+            )
         )
-        ax_diff.set_title(f"Δ ({labels[1]} − {labels[0]})", fontsize=10)
-        ax_diff.set_xticks(tick_pos)
-        ax_diff.set_xticklabels(tick_labels, fontsize=6, rotation=45, ha="right")
-        ax_diff.set_yticks(tick_pos)
-        ax_diff.set_yticklabels(tick_labels, fontsize=6)
-        ax_diff.set_xlabel("Residue", fontsize=8)
-        cbar_diff = fig.colorbar(im_diff, ax=ax_diff, fraction=0.046, pad=0.04)
-        cbar_diff.set_label("ΔC$_{ij}$", fontsize=9)
 
-    title = "Dynamic Cross-Correlation Matrix Comparison"
+    n_panels = len(panels)
+    n_pages = max(1, math.ceil(n_panels / DCCM_COMPARE_MAX_PER_PAGE))
+    page_names = _dccm_comparison_page_paths(output_file, n_pages)
+    output_paths: List[str] = []
+
+    base_title = "Dynamic Cross-Correlation Matrix Comparison"
     if len(matrices) == 2 and not add_diff:
-        title += " (cross-protein: no Δ panel — residue numbers are not equivalent)"
-    fig.suptitle(title, fontsize=13, fontweight="bold", y=1.02)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=dpi, bbox_inches="tight")
-    plt.close(fig)
+        base_title += (
+            " (cross-protein: no Δ panel — residue numbers are not equivalent)"
+        )
+
+    for page_idx, page_name in enumerate(page_names):
+        start = page_idx * DCCM_COMPARE_MAX_PER_PAGE
+        page_panels = panels[start : start + DCCM_COMPARE_MAX_PER_PAGE]
+        n_page = len(page_panels)
+        ncols = min(DCCM_COMPARE_MAX_COLS, n_page)
+        nrows = max(1, math.ceil(n_page / ncols))
+
+        fig, axes = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(
+                figsize_per_panel * ncols + 0.8,
+                figsize_per_panel * nrows + 1.2,
+            ),
+            squeeze=False,
+        )
+        flat_axes = [axes[r][c] for r in range(nrows) for c in range(ncols)]
+
+        for ax, (mat, res_ids, title, is_diff) in zip(flat_axes, page_panels):
+            _draw_dccm_panel(
+                ax,
+                mat,
+                res_ids,
+                title,
+                cmap=cmap_diff if is_diff else cmap,
+                vmin=diff_vmin if is_diff else vmin,
+                vmax=diff_vmax if is_diff else vmax,
+                cbar_label="ΔC$_{ij}$" if is_diff else "C$_{ij}$",
+            )
+
+        for ax in flat_axes[n_page:]:
+            ax.axis("off")
+
+        page_title = base_title
+        if n_pages > 1:
+            page_title = f"{base_title} ({page_idx + 1}/{n_pages})"
+        fig.suptitle(page_title, fontsize=13, fontweight="bold", y=1.01)
+        plt.tight_layout()
+        out_path = str(Path(working_dir) / page_name)
+        plt.savefig(out_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+        output_paths.append(out_path)
 
     return {
         "success": True,
-        "output_path": output_path,
+        "output_path": output_paths[0],
+        "output_paths": output_paths,
         "n_panels": n_panels,
+        "n_pages": n_pages,
         "n_residues_aligned": n_residues,
         "difference_panel": add_diff,
         "same_residue_numbering": same_numbering,
         "message": (
-            f"DCCM comparison figure ({n_panels} panels, "
+            f"DCCM comparison figure ({n_panels} panels across {n_pages} page(s), "
             f"{'aligned ' if same_numbering else ''}{n_residues} residues) "
-            f"saved to {output_path}"
+            f"saved to {', '.join(output_paths)}"
         ),
     }
 

@@ -453,7 +453,7 @@ class LigandTopologyGenerator:
                 "success": False,
                 "error": (
                     "Neither acpype nor antechamber available on PATH. "
-                    "Activate conda env ollama_env (has acpype) or "
+                    "Activate conda env SimAgentEnv (has acpype) or "
                     "`module load AmberTools`, then retry."
                 ),
                 "dependencies": deps

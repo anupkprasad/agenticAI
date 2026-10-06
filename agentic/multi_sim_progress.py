@@ -318,8 +318,10 @@ def first_incomplete_post_hpc_sim(state: Dict[str, Any]) -> Optional[str]:
         rec = _sim_record(progress, label)
         if not rec:
             continue
+        if rec.get("status") in ("failed", "skipped"):
+            continue
         agent_map = rec.get("agents") or {}
-        if any(agent_map.get(a) != "done" for a in agents):
+        if any(agent_map.get(a) not in ("done", "skipped") for a in agents):
             return label
     return None
 
@@ -332,8 +334,10 @@ def all_per_sim_agents_done(state: Dict[str, Any]) -> bool:
         rec = _sim_record(progress, label)
         if not rec:
             return False
+        if rec.get("status") in ("failed", "skipped"):
+            continue
         agent_map = rec.get("agents") or {}
-        if any(agent_map.get(a) != "done" for a in agents):
+        if any(agent_map.get(a) not in ("done", "skipped") for a in agents):
             return False
     return bool(progress.get("sim_order"))
 
@@ -630,7 +634,11 @@ def sync_parallel_pool_to_multi_sim_progress(state: Dict[str, Any]) -> None:
                 sim_rec["status"] = "done"
             elif pool_status == "failed":
                 sim_rec["status"] = "failed"
+                sim_rec["health"] = "failed"
                 sim_rec["error"] = pool_rec.get("error")
+                for a in prep_agents:
+                    if a in agent_map or a in agents_req:
+                        agent_map[a] = "failed"
             elif pool_status == "running":
                 sim_rec["status"] = "in_progress"
                 for a in prep_agents:
@@ -665,7 +673,11 @@ def sync_parallel_pool_to_multi_sim_progress(state: Dict[str, Any]) -> None:
                 sim_rec["status"] = "pending"
         elif pool_status == "failed":
             sim_rec["status"] = "failed"
+            sim_rec["health"] = "failed"
             sim_rec["error"] = pool_rec.get("error")
+            for key in ("analysis", "reporter"):
+                if agent_map.get(key) not in ("done",):
+                    agent_map[key] = "skipped"
         elif pool_status == "running":
             sim_rec["status"] = "in_progress"
             if reporter_done:
@@ -773,6 +785,9 @@ def mark_agent_status(
     rec = _sim_record(progress, sim_label)
     if not rec:
         return
+    if str(rec.get("status") or "").lower() == "failed" and status != "failed":
+        # Do not resurrect a fatally failed simulation via agent completion.
+        return
     agents = rec.setdefault("agents", {})
     internal = _CHECKPOINT_TO_AGENT.get(agent_key, agent_key)
     if internal == "simsetup":
@@ -786,7 +801,9 @@ def mark_agent_status(
         agents[internal] = status
 
     req = progress.get("required_agents") or []
-    if req and all(agents.get(a) == "done" for a in req):
+    if status == "failed" or str(rec.get("health") or "").lower() == "failed":
+        rec["status"] = "failed"
+    elif req and all(agents.get(a) in ("done", "skipped") for a in req):
         rec["status"] = "done"
     elif any(agents.get(a) == "done" for a in req):
         rec["status"] = "in_progress"
@@ -871,10 +888,12 @@ def _next_pending_agent(progress: Dict[str, Any], sim_label: str) -> Optional[st
     rec = _sim_record(progress, sim_label)
     if not rec:
         return None
+    if rec.get("status") in ("failed", "skipped"):
+        return None
     agents = progress.get("required_agents") or []
     done = rec.get("agents") or {}
     for a in agents:
-        if done.get(a) != "done":
+        if done.get(a) not in ("done", "skipped"):
             return a
     return None
 
@@ -1210,27 +1229,84 @@ def _stats_csv_has_multiple_sims(path: Path) -> bool:
     return ok >= 2
 
 
+def _expected_combined_labels(state: Optional[Dict[str, Any]]) -> List[str]:
+    """Labels combined analysis must cover — prefer currently healthy production sims."""
+    if not state:
+        return []
+    prompts = state.get("sim_prompts") or []
+    all_labels: List[str] = []
+    healthy: List[str] = []
+    try:
+        from agentic.utils.sim_health import production_health, is_reuse_hpc
+    except Exception:
+        production_health = None  # type: ignore[assignment]
+        is_reuse_hpc = None  # type: ignore[assignment]
+
+    for sp in prompts:
+        label = str(sp.get("label") or "").strip()
+        if not label:
+            continue
+        all_labels.append(label)
+        wd = sp.get("working_dir") or ""
+        if production_health and wd:
+            try:
+                ok = bool(
+                    production_health(
+                        wd,
+                        reuse_hpc=bool(is_reuse_hpc(state)) if is_reuse_hpc else False,
+                    ).get("healthy")
+                )
+            except Exception:
+                ok = False
+            if ok:
+                healthy.append(label)
+    # Healthy-only so a 5/8 partial combined is not "done" after more sims finish.
+    return healthy if healthy else all_labels
+
+
 def _combined_analysis_done_on_disk(
     base: Path,
     state: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """True when base-level combined analysis produced usable multi-sim artifacts.
 
-    A single-sim failed attempt can leave ``rmsd_stats.csv`` / a 1-label marker;
-    those must not count as done when the campaign expects multiple sims.
+    Partial overlays from a subset of sims must not count as done once more
+    simulations become healthy (e.g. after ``--resume`` repairs failed jobs).
     """
     analysis_dir = base / "analysis"
     if not analysis_dir.is_dir():
         return False
 
-    expected_labels: List[str] = []
-    if state:
+    expected_labels = _expected_combined_labels(state)
+    if not expected_labels and state:
         expected_labels = [
             str(sp.get("label") or "").strip()
             for sp in (state.get("sim_prompts") or [])
             if sp.get("label")
         ]
 
+    # Authoritative: completion marker must list every expected (healthy) label.
+    marker = analysis_dir / "combined_analysis_complete.json"
+    if marker.is_file():
+        try:
+            import json as _json
+
+            data = _json.loads(marker.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        labels = [str(x) for x in (data.get("labels") or []) if x]
+        if expected_labels and len(expected_labels) >= 2:
+            have = {x.lower() for x in labels}
+            need = {x.lower() for x in expected_labels}
+            return need.issubset(have) and bool(data.get("success", True))
+        if len(labels) >= 2 and bool(data.get("success", True)):
+            return True
+
+    # Known multi-sim set without a covering marker → not done (ignore stale overlays).
+    if expected_labels and len(expected_labels) >= 2:
+        return False
+
+    # Legacy / unknown label set: keep artifact heuristics.
     strong = (
         analysis_dir / "classification_features.csv",
         analysis_dir / "classification_clusters.json",
@@ -1242,34 +1318,24 @@ def _combined_analysis_done_on_disk(
         return True
     if any(analysis_dir.glob("*_overlay.png")):
         return True
-
     for stats_name in ("rmsd_stats.csv", "rmsf_stats.csv"):
         stats_path = analysis_dir / stats_name
         if stats_path.is_file() and _stats_csv_has_multiple_sims(stats_path):
             return True
-
-    marker = analysis_dir / "combined_analysis_complete.json"
-    if not marker.is_file():
-        return False
-    try:
-        import json as _json
-
-        data = _json.loads(marker.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    labels = [str(x) for x in (data.get("labels") or []) if x]
-    if expected_labels and len(expected_labels) >= 2:
-        have = {x.lower() for x in labels}
-        need = {x.lower() for x in expected_labels}
-        return need.issubset(have) and bool(data.get("success", True))
-    # Without an expected multi-sim set, require the marker itself to list ≥2 sims.
-    return len(labels) >= 2 and bool(data.get("success", True))
+    return False
 
 
-def _combined_reporter_done_on_disk(base: Path) -> bool:
-    """True when the base-level combined HTML report exists."""
+def _combined_reporter_done_on_disk(
+    base: Path,
+    state: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True when combined HTML exists and combined analysis is not stale."""
     reporter_dir = base / "reporter"
-    return (reporter_dir / "combined_report.html").is_file()
+    if not (reporter_dir / "combined_report.html").is_file():
+        return False
+    if state is not None and not _combined_analysis_done_on_disk(base, state=state):
+        return False
+    return True
 
 
 def reconcile_multisim_progress_from_disk(
@@ -1331,7 +1397,7 @@ def reconcile_multisim_progress_from_disk(
         or state.get("combined_only")
         or progress.get("combined")
         or _combined_analysis_done_on_disk(base, state=state)
-        or _combined_reporter_done_on_disk(base)
+        or _combined_reporter_done_on_disk(base, state=state)
     )
     if wants_combined:
         combined = progress.setdefault(
@@ -1340,7 +1406,7 @@ def reconcile_multisim_progress_from_disk(
         )
         if _combined_analysis_done_on_disk(base, state=state):
             combined["analysis"] = "done"
-        if _combined_reporter_done_on_disk(base):
+        if _combined_reporter_done_on_disk(base, state=state):
             combined["reporter"] = "done"
         state["run_combined_analysis"] = True
         state["run_post_combined"] = True
@@ -1460,13 +1526,13 @@ def _sim_all_agents_done(progress: Dict[str, Any], sim_label: str) -> bool:
     rec = _sim_record(progress, sim_label)
     if not rec:
         return False
-    if rec.get("status") == "failed":
+    if rec.get("status") in ("failed", "skipped"):
         return True
     agents = progress.get("required_agents") or []
     done = rec.get("agents") or {}
     if not agents:
         return rec.get("status") == "done"
-    return all(done.get(a) == "done" for a in agents)
+    return all(done.get(a) in ("done", "skipped") for a in agents)
 
 
 def _route_after_per_sim_continue(
@@ -1873,13 +1939,20 @@ def multisim_workflow_incomplete(progress: Optional[Dict[str, Any]]) -> bool:
         return False
     for label in progress.get("sim_order") or []:
         rec = _sim_record(progress, label)
-        if rec and rec.get("status") != "done":
+        if not rec:
             return True
-        if rec:
+        if rec.get("status") in ("failed", "skipped"):
+            continue
+        if rec.get("status") != "done":
             agents = progress.get("required_agents") or []
             done = rec.get("agents") or {}
-            if any(done.get(a) != "done" for a in agents):
-                return True
+            if agents and all(done.get(a) in ("done", "skipped") for a in agents):
+                continue
+            return True
+        agents = progress.get("required_agents") or []
+        done = rec.get("agents") or {}
+        if any(done.get(a) not in ("done", "skipped") for a in agents):
+            return True
     combined = progress.get("combined")
     if combined:
         if combined.get("analysis") != "done" or combined.get("reporter") != "done":

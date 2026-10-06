@@ -8,8 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agentic.llm_usage import load_usage_summary, format_usage_terminal
-
 
 def _sim_status(sim: Dict[str, Any]) -> str:
     if sim.get("skipped"):
@@ -85,10 +83,26 @@ def _simulations_from_hpc_pool(final_state: Dict[str, Any]) -> List[Dict[str, An
         rec = pool_sims.get(label) or {}
         prep = rec.get("prep_status")
         hpc = rec.get("hpc_status")
-        if prep in ("done", "skipped") and hpc in ("completed", "skipped"):
-            status = "success"
-        elif hpc == "failed" or prep == "failed":
+        wd = sp.get("working_dir") or rec.get("working_dir") or ""
+        health = "pending"
+        try:
+            from agentic.utils.sim_health import should_skip_downstream_for_sim
+
+            decision = should_skip_downstream_for_sim(
+                final_state, label or "", working_dir=wd
+            )
+            if decision.get("skip") or hpc == "failed" or prep == "failed":
+                health = "failed"
+            elif decision.get("health_label") == "healthy":
+                health = "healthy"
+        except Exception:
+            if hpc == "failed" or prep == "failed":
+                health = "failed"
+        if health == "failed":
             status = "failed"
+        elif prep in ("done", "skipped") and hpc in ("completed", "skipped"):
+            status = "success"
+            health = "healthy"
         elif hpc in ("submitted", "running"):
             status = "submitted"
         elif prep == "pending":
@@ -99,10 +113,11 @@ def _simulations_from_hpc_pool(final_state: Dict[str, Any]) -> List[Dict[str, An
             {
                 "label": label,
                 "status": status,
+                "health": health,
                 "success": status == "success",
                 "skipped": prep == "skipped" or hpc == "skipped",
                 "skip_reason": rec.get("skip_reason"),
-                "working_directory": sp.get("working_dir") or rec.get("working_dir"),
+                "working_directory": wd,
                 "job_id": rec.get("job_id"),
                 "job_status": hpc,
                 "prep_status": prep,
@@ -142,6 +157,33 @@ def _simulations_merged_from_state(final_state: Dict[str, Any]) -> List[Dict[str
             or ""
         ).upper()
         agents = rec.get("agents") or {}
+        health = "pending"
+        fatal_reason = ""
+        try:
+            from agentic.utils.sim_health import (
+                production_health,
+                is_reuse_hpc,
+                should_skip_downstream_for_sim,
+            )
+
+            decision = should_skip_downstream_for_sim(
+                final_state, label, working_dir=wd
+            )
+            if decision.get("skip"):
+                health = "failed"
+                fatal_reason = str(decision.get("reason") or "")
+            else:
+                ph = decision.get("health") or production_health(
+                    wd, reuse_hpc=is_reuse_hpc(final_state)
+                )
+                health = "healthy" if ph.get("healthy") else "pending"
+        except Exception:
+            pass
+
+        if rec.get("status") == "failed" or agents.get("hpc") == "failed":
+            health = "failed"
+            fatal_reason = fatal_reason or rec.get("error") or "simulation failed"
+
         disk_done = (
             rec.get("status") == "done"
             or (
@@ -150,20 +192,29 @@ def _simulations_merged_from_state(final_state: Dict[str, Any]) -> List[Dict[str
             )
             or bool(job_info and job_info.get("complete"))
         )
-        success = bool((sim and _sim_succeeded(sim)) or disk_done or job_id)
-        if job_info and job_info.get("complete"):
+        # Analysis artifacts alone do not make a dead MD "success".
+        success = False
+        if health == "failed":
+            status = "failed"
+            success = False
+        elif job_info and job_info.get("complete"):
             status = "success"
+            success = True
+            health = "healthy"
         elif job_id and job_status not in terminal:
             status = "submitted"
             success = True
-        elif success:
+        elif disk_done and health != "failed":
             status = "success"
+            success = True
+            health = "healthy"
         elif sim:
             status = _sim_status(sim)
-            # Stale failed snapshot with a live job should not stay failed.
-            if status == "failed" and job_id:
+            if status == "failed" and job_id and health != "failed":
                 status = "submitted"
                 success = True
+            else:
+                success = status == "success"
         elif agents.get("analysis") == "done" and agents.get("reporter") != "done":
             status = "in_progress"
             success = False
@@ -173,18 +224,24 @@ def _simulations_merged_from_state(final_state: Dict[str, Any]) -> List[Dict[str
         else:
             status = "pending"
             success = False
+        errors = []
+        if not success:
+            errors = list((sim or {}).get("errors") or [])
+            if fatal_reason and fatal_reason not in errors:
+                errors = [fatal_reason] + errors
         return {
             "label": label,
             "status": status,
+            "health": health,
             "success": success,
             "skipped": bool((sim or {}).get("skipped")),
-            "skip_reason": (sim or {}).get("skip_reason"),
+            "skip_reason": (sim or {}).get("skip_reason") or rec.get("skip_reason"),
             "working_directory": wd,
             "job_id": job_id,
             "job_status": job_status or (sim or {}).get("job_status"),
             "topology": (sim or {}).get("topology"),
             "trajectory_path": (sim or {}).get("trajectory_path"),
-            "errors": [] if success else list((sim or {}).get("errors") or []),
+            "errors": errors[:10],
             "warnings": ((sim or {}).get("warnings") or [])[:5],
         }
 
@@ -239,9 +296,8 @@ def build_run_summary(
 
     combined_dir = str(Path(working_dir) / "combinedAnalysis")
     analysis_dir = final_state.get("analysis_directory") or str(Path(working_dir) / "analysis")
-    llm_usage = load_usage_summary(working_dir)
-    if llm_usage:
-        llm_usage["_path"] = str(Path(working_dir) / "llm_usage.json")
+    n_healthy = sum(1 for s in simulations if s.get("health") == "healthy" or s.get("status") == "success")
+    n_unhealthy = sum(1 for s in simulations if s.get("health") == "failed" or s.get("status") == "failed")
 
     science: Dict[str, Any] = {}
     try:
@@ -277,9 +333,11 @@ def build_run_summary(
             "source_pdbs": len(final_state.get("pdb_list") or pdb_list),
             "missing_from_plan": missing,
             "completed_success": n_success,
+            "healthy": n_healthy,
+            "failed": n_failed,
+            "unhealthy": n_unhealthy,
             "submitted_running": n_submitted,
             "skipped": n_skipped,
-            "failed": n_failed,
             "pending": n_pending,
             "in_progress": n_in_progress,
             "snapshots_recorded": len(completed),
@@ -295,7 +353,7 @@ def build_run_summary(
         "warnings": list(final_state.get("warnings") or [])[:20],
         "log_file": str(Path(working_dir) / "agent_conversation.log"),
         "execution_report": str(Path(working_dir) / "supervisor" / "execution_report.md"),
-        "llm_usage": llm_usage,
+        "llm_usage_file": str(Path(working_dir) / "llm_usage.json"),
     }
 
 
@@ -331,6 +389,7 @@ def format_run_summary_terminal(summary: Dict[str, Any]) -> str:
         if missing:
             lines.append(f"  Not in master plan: {', '.join(missing)}")
         lines.append(f"  Succeeded: {counts.get('completed_success', 0)}")
+        lines.append(f"  Healthy:   {counts.get('healthy', counts.get('completed_success', 0))}")
         pending_n = counts.get("pending", 0)
         in_prog = counts.get("in_progress", 0)
         if pending_n or in_prog:
@@ -346,10 +405,13 @@ def format_run_summary_terminal(summary: Dict[str, Any]) -> str:
             for sim in sims:
                 label = sim.get("label", "?")
                 status = sim.get("status", "unknown")
+                health = sim.get("health") or ("failed" if status == "failed" else "—")
                 icon = {"success": "✓", "skipped": "⊘", "failed": "✗"}.get(status, "?")
-                line = f"    {icon} {label} — {status}"
+                line = f"    {icon} {label} — {status} [{health}]"
                 if sim.get("skip_reason"):
                     line += f" ({sim['skip_reason']})"
+                elif sim.get("errors"):
+                    line += f" ({sim['errors'][0][:80]})"
                 elif sim.get("job_id"):
                     line += f" (job {sim['job_id']})"
                 lines.append(line)
@@ -369,9 +431,10 @@ def format_run_summary_terminal(summary: Dict[str, Any]) -> str:
     if summary.get("reporter_output"):
         lines.append(f"  Report: {summary['reporter_output']}")
 
-    usage_block = format_usage_terminal(summary.get("llm_usage"))
-    if usage_block:
-        lines.append(usage_block)
+    usage_path = summary.get("llm_usage_file") or str(
+        Path(summary.get("working_directory") or ".") / "llm_usage.json"
+    )
+    lines.append(f"  LLM usage file: {usage_path}")
 
     lines.append("")
     lines.append(f"  Summary file: {Path(summary['working_directory']) / 'run_summary.md'}")
@@ -401,6 +464,7 @@ def format_run_summary_markdown(summary: Dict[str, Any]) -> str:
         f"| Total simulations | {counts.get('total_simulations', '—')} |",
         f"| Source PDBs | {counts.get('source_pdbs', '—')} |",
         f"| Succeeded | {counts.get('completed_success', 0)} |",
+        f"| Healthy | {counts.get('healthy', counts.get('completed_success', 0))} |",
         f"| Skipped | {counts.get('skipped', 0)} |",
         f"| Failed | {counts.get('failed', 0)} |",
         "",
@@ -442,6 +506,8 @@ def format_run_summary_markdown(summary: Dict[str, Any]) -> str:
             label = sim.get("label", "?")
             status = sim.get("status", "unknown")
             lines.append(f"### {label} — {status}")
+            if sim.get("health"):
+                lines.append(f"- **Health:** {sim['health']}")
             if sim.get("working_directory"):
                 lines.append(f"- **Directory:** `{sim['working_directory']}`")
             if sim.get("job_id"):
@@ -481,33 +547,17 @@ def format_run_summary_markdown(summary: Dict[str, Any]) -> str:
     if summary.get("reporter_output"):
         lines.append(f"- Reporter output: `{summary['reporter_output']}`")
 
-    llm_usage = summary.get("llm_usage") or {}
-    if llm_usage.get("billing_enabled") or llm_usage.get("total_tokens"):
-        lines.extend(["", "## LLM token usage", ""])
-        lines.append(f"| Metric | Value |")
-        lines.append(f"|--------|-------|")
-        lines.append(f"| Calls | {llm_usage.get('calls', 0)} |")
-        lines.append(f"| Prompt tokens | {int(llm_usage.get('prompt_tokens') or 0):,} |")
-        lines.append(f"| Completion tokens | {int(llm_usage.get('completion_tokens') or 0):,} |")
-        lines.append(f"| Total tokens | {int(llm_usage.get('total_tokens') or 0):,} |")
-        if llm_usage.get("limit"):
-            lines.append(
-                f"| Budget | {int(llm_usage.get('total_tokens') or 0):,} / "
-                f"{int(llm_usage['limit']):,} |"
-            )
-        by_agent = llm_usage.get("by_agent") or {}
-        if by_agent:
-            lines.append("")
-            lines.append("### By agent")
-            lines.append("")
-            for agent, vals in sorted(by_agent.items()):
-                lines.append(
-                    f"- **{agent}:** {int(vals.get('total_tokens', 0)):,} tokens "
-                    f"({int(vals.get('calls', 0))} calls)"
-                )
-        usage_path = llm_usage.get("_path") or str(Path(summary.get("working_directory", "")) / "llm_usage.json")
-        lines.append("")
-        lines.append(f"Full usage log: `{usage_path}`")
+    usage_path = summary.get("llm_usage_file") or str(
+        Path(summary.get("working_directory") or ".") / "llm_usage.json"
+    )
+    lines.extend(
+        [
+            "",
+            "## LLM usage",
+            "",
+            f"Token ledger is kept only in `{usage_path}` (not duplicated here).",
+        ]
+    )
 
     return "\n".join(lines)
 

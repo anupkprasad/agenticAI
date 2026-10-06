@@ -175,10 +175,27 @@ The framework persists a JSON checkpoint at `{working_dir}/supervisor/state.json
 In multi-sim mode, each simulation also mirrors state under
 `{base}/{label}/supervisor/state.jsonl` while that sim is active.
 
+Checkpoints are **content-compact** (bulky fields omitted or truncated) but
+**pretty-printed** (`indent=2`) so editors can syntax-highlight them. Full
+`user_goal` / campaign specs live on disk under `campaign/`; per-sim analysis
+matrices and reports stay under `{label}/`. Orchestration only needs labels,
+dirs, agent ladder, and **health**.
+
 | File | Scope | Purpose |
 |------|--------|---------|
 | `{base}/supervisor/state.jsonl` | Project root | Overall routing: enrichment, master plan, combined phase, final report |
 | `{base}/{label}/supervisor/state.jsonl` | One simulation | Per-sim progress: validation, execution plan, analysis/reporter outputs, errors |
+| `{base}/supervisor/pool_status.json` | Project root | Live per-sim agent ladder + `health` (`healthy` / `failed` / `pending`) |
+
+**Per-sim health (fatal vs soft):**
+
+- A simulation is **healthy** when production MD finished with usable topology +
+  trajectory (`md.tpr` + production traj, finished `md.log`, or `--reuse-hpc`).
+- **Fatal** HPC/prep failure → that sim is marked `failed`; analysis and reporter
+  are **skipped for that system only**; other sims continue; combined science uses
+  healthy labels only.
+- Soft analysis/report issues (plot tools, literature rate limits) stay warnings
+  and do **not** fail the simulation.
 
 **Startup behaviour:**
 

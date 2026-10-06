@@ -877,11 +877,13 @@ def build_html_content(
             html_parts.append("</div>")
 
         if literature_refs:
-            display_refs = literature_refs[:10]
+            display_refs = literature_refs
             html_parts.append(
                 f"<h3>References</h3>"
-                f"<p>{len(literature_refs)} relevant publications identified "
-                f"(showing top {len(display_refs)} by relevance to your study):</p>"
+                f"<p>{len(display_refs)} publication"
+                f"{'s' if len(display_refs) != 1 else ''} cited in the "
+                f"Literature Review and Final Impression "
+                f"(numbered by first appearance):</p>"
             )
 
             for idx, ref in enumerate(display_refs, 1):

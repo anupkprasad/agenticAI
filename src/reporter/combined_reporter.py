@@ -695,6 +695,7 @@ def _parse_refs_from_html(html_path: Optional[str]) -> List[Dict[str, Any]]:
         if title_link_m:
             raw_url = title_link_m.group(1)
             ref["title"] = _html_mod.unescape(re.sub(r"<[^>]+>", "", title_link_m.group(2))).strip()
+            ref["url"] = raw_url
             if "doi.org/" in raw_url:
                 ref["doi"] = raw_url.replace("https://doi.org/", "").replace("http://doi.org/", "")
             elif "pubmed" in raw_url:
@@ -1309,34 +1310,56 @@ def _build_literature_html(
     refs: List[Dict[str, Any]],
     literature_review: Optional[str] = None,
 ) -> str:
-    """Render contextual literature review narrative and reference list."""
-    if not refs and not literature_review:
+    """Render Literature Review narrative only (References go at report end)."""
+    if not literature_review:
         return ""
-    display = refs  # already capped at max_refs by caller
 
     parts = ["<h2>&#128218; Literature Review</h2>"]
+    parts.append('<div class="literature-review">')
+    for paragraph in literature_review.split("\n\n"):
+        paragraph = paragraph.strip()
+        if paragraph:
+            parts.append(f"<p>{_format_report_paragraph(paragraph)}</p>")
+    parts.append("</div>")
+    return "\n".join(parts)
 
-    if literature_review:
-        parts.append('<div class="literature-review">')
-        for paragraph in literature_review.split("\n\n"):
-            paragraph = paragraph.strip()
-            if paragraph:
-                parts.append(f"<p>{_format_report_paragraph(paragraph)}</p>")
-        parts.append("</div>")
 
-    if not display:
+def _build_references_section_html(refs: List[Dict[str, Any]]) -> str:
+    """Render the terminal References section (cited-only, or empty notice).
+
+    Always placed at the end of the combined report. Lists only papers that
+    survived citation sync (in-text ``[n]``). When none were cited, writes an
+    explicit empty message instead of omitting the section.
+    """
+    parts = [
+        "<h2>&#128218; References</h2>",
+    ]
+    if not refs:
+        parts.append(
+            '<p class="no-references" style="color:#4b5563;font-style:italic;">'
+            "No relevant reference.</p>"
+        )
         return "\n".join(parts)
 
     parts.append(
-        f"<h3 style='margin-top:1.4em;color:#1e40af;'>References</h3>"
-        f"<p>Top {len(display)} publications selected for relevance to the study "
-        f"objectives and simulation findings:</p>"
+        f"<p>{len(refs)} publication{'s' if len(refs) != 1 else ''} cited in the "
+        f"Literature Review and Combined Final Impression "
+        f"(numbered by first appearance):</p>"
     )
 
-    for idx, ref in enumerate(display, 1):
+    for idx, ref in enumerate(refs, 1):
         title = _html_mod.escape(ref.get("title", "Unknown"))
-        doi = ref.get("doi", "")
-        pmid = ref.get("pmid", "")
+        doi = (ref.get("doi") or "").strip()
+        pmid = str(ref.get("pmid") or "").strip()
+        # Prefer explicit url; else derive from DOI / PMID so hyperlinks survive
+        # re-imports that only carry a bare url field.
+        raw_url = (ref.get("url") or ref.get("link") or "").strip()
+        if not raw_url and doi:
+            raw_url = f"https://doi.org/{doi}"
+        elif not raw_url and pmid:
+            raw_url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+        if raw_url and "doi.org/" in raw_url and not doi:
+            doi = raw_url.replace("https://doi.org/", "").replace("http://doi.org/", "").strip()
         source = ref.get("source", "")
         source_badge = (
             f'<span class="sim-badge">{_html_mod.escape(source)}</span>' if source else ""
@@ -1344,23 +1367,15 @@ def _build_literature_html(
 
         parts.append('<div class="reference">')
 
-        # Title with link
-        if doi:
+        if raw_url:
             parts.append(
                 f'<div class="reference-title">[{idx}] '
-                f'<a href="https://doi.org/{_html_mod.escape(doi)}" target="_blank">'
-                f'{title}</a>{source_badge}</div>'
-            )
-        elif pmid:
-            parts.append(
-                f'<div class="reference-title">[{idx}] '
-                f'<a href="https://pubmed.ncbi.nlm.nih.gov/{_html_mod.escape(pmid)}/" target="_blank">'
+                f'<a href="{_html_mod.escape(raw_url)}" target="_blank">'
                 f'{title}</a>{source_badge}</div>'
             )
         else:
             parts.append(f'<div class="reference-title">[{idx}] {title}{source_badge}</div>')
 
-        # Authors
         authors = ref.get("authors", [])
         if authors:
             author_str = ", ".join(authors[:5])
@@ -1368,7 +1383,6 @@ def _build_literature_html(
                 author_str += " et al."
             parts.append(f'<div class="reference-authors">{_html_mod.escape(author_str)}</div>')
 
-        # Journal + year
         journal = ref.get("journal", "")
         year = ref.get("year", "")
         if journal or year:
@@ -1379,7 +1393,6 @@ def _build_literature_html(
                 meta += f" ({year})"
             parts.append(f'<div class="reference-meta">{meta}</div>')
 
-        # DOI / PMID links
         id_parts = []
         if doi:
             id_parts.append(
@@ -1837,12 +1850,17 @@ def _collect_comparative_panel_plot_paths(
 
     dccm_combined = _find_dccm_apo_holo_panel_plots(overlay_plots)
     if not dccm_combined:
-        dccm_combined = _dedupe_dccm_combined_plots([
-            p for p in overlay_plots
-            if "dccm" in Path(p).name.lower()
-        ])
+        dccm_diff = _find_dccm_diff_heatmap_plots(overlay_plots)
+        if dccm_diff:
+            dccm_combined = dccm_diff
+        else:
+            dccm_combined = _dedupe_dccm_combined_plots([
+                p for p in overlay_plots
+                if "dccm" in Path(p).name.lower()
+            ])
     _has_dccm_comparison = any(
-        "comparison" in Path(p).name.lower() for p in dccm_combined
+        "comparison" in Path(p).name.lower() or "diff" in Path(p).name.lower()
+        for p in dccm_combined
     )
     if not _has_dccm_comparison:
         for _, pth in _find_per_sim_plots(sim_dirs, labels, "dccm_heatmap"):
@@ -2150,6 +2168,22 @@ def _find_dccm_apo_holo_panel_plots(overlay_plots: List[str]) -> List[str]:
         if "dccm_apo_holo" in Path(p).name.lower() and "panels" in Path(p).name.lower()
     ]
     return sorted(panels, key=lambda p: Path(p).name.lower())
+
+
+def _find_dccm_diff_heatmap_plots(overlay_plots: List[str]) -> List[str]:
+    """Return combined apo–holo ΔDCCM heatmaps (e.g. ``VRK3_dccm_diff_heatmap.png``)."""
+    plots = []
+    for p in overlay_plots:
+        name = Path(p).name.lower()
+        if "dccm" not in name:
+            continue
+        if "dccm_apo_holo" in name and "panels" in name:
+            continue
+        if "comparison" in name:
+            continue
+        if "diff" in name or "difference" in name:
+            plots.append(p)
+    return sorted(plots, key=lambda p: Path(p).name.lower())
 
 
 def _find_dssp_comparison_plot(overlay_plots: List[str]) -> Optional[str]:
@@ -3023,18 +3057,45 @@ def _build_comparative_dynamics_section(
         pocket_body,
     )
 
-    # ── Panel E: Apo | Holo | ΔDCCM triptychs only (stacked, full width) ──
+    # ── Panel E: Apo | Holo | ΔDCCM (triptychs, diff heatmaps, or per-sim) ──
     dccm_panel_plots = _find_dccm_apo_holo_panel_plots(overlay_plots)
+    dccm_diff_plots = _find_dccm_diff_heatmap_plots(overlay_plots)
     dccm_ov = _find_overlay_by_type(overlay_plots, "dccm")
+    dccm_per_sim: List[str] = []
+    if not (dccm_panel_plots or dccm_diff_plots or dccm_ov):
+        for _, pth in _find_per_sim_plots(sim_dirs, labels, "dccm_heatmap"):
+            if pth:
+                dccm_per_sim.append(pth)
+        if not dccm_per_sim:
+            for _, pth in _find_per_sim_plots(sim_dirs, labels, "dccm"):
+                if pth and pth not in dccm_per_sim:
+                    dccm_per_sim.append(pth)
+
     if dccm_panel_plots:
         dccm_body = (
             '<p style="font-size:12px;color:#6b7280;margin:0 0 10px;">'
             'Each row: Apo DCCM | Holo DCCM | \u0394(holo \u2212 apo)</p>'
             + _img_stack(dccm_panel_plots, "DCCM apo holo delta")
         )
+    elif dccm_diff_plots:
+        dccm_body = (
+            '<p style="font-size:12px;color:#6b7280;margin:0 0 10px;">'
+            'Apo\u2013holo \u0394DCCM heatmaps (one figure per protein)</p>'
+            + _img_stack(dccm_diff_plots, "DCCM difference")
+        )
+    elif dccm_ov:
+        dccm_body = _img(dccm_ov, "DCCM heatmap")
+    elif dccm_per_sim:
+        dccm_body = (
+            '<p style="font-size:12px;color:#6b7280;margin:0 0 10px;">'
+            'Per-simulation DCCM heatmaps</p>'
+            + _img_stack(dccm_per_sim, "DCCM heatmap")
+        )
     else:
-        dccm_body = _img(dccm_ov, "DCCM heatmap") if dccm_ov else _missing("No DCCM apo/holo panels found")
-    has_dccm_data = bool(dccm_panel_plots or dccm_ov)
+        dccm_body = _missing("No DCCM apo/holo panels or difference heatmaps found")
+    has_dccm_data = bool(
+        dccm_panel_plots or dccm_diff_plots or dccm_ov or dccm_per_sim
+    )
 
     panel_e = _panel(
         "E", "DCCM Apo | Holo | \u0394DCCM",
@@ -3328,7 +3389,28 @@ def generate_combined_html_report(
             protein_name=protein_name,
             user_goal=user_goal,
         )
+    # Sync citations → references (cited-only, first-appearance order) if caller
+    # did not already prune. Safe no-op when already synced.
+    try:
+        from src.reporter.literature_search import sync_cited_literature
+
+        final_text_pre = (
+            final_impression.strip()
+            if final_impression and final_impression.strip()
+            else ""
+        )
+        agg_refs, literature_review, synced_final = sync_cited_literature(
+            agg_refs,
+            literature_review=literature_review,
+            final_impression=final_text_pre or None,
+        )
+        if synced_final is not None:
+            final_impression = synced_final
+    except Exception as exc:
+        logger.debug("combined literature citation sync skipped: %s", exc)
+
     literature_html = _build_literature_html(agg_refs, literature_review=literature_review)
+    references_html = _build_references_section_html(agg_refs)
 
     # Final impression: prefer LLM synthesis with literature citations; else rule-based.
     final_text = (
@@ -3451,11 +3533,15 @@ def generate_combined_html_report(
 
 <div class="section-divider"></div>
 
+{literature_html}
+
+{"<div class='section-divider'></div>" if literature_html else ""}
+
 {final_html}
 
-{"<div class='section-divider'></div>" if final_html else ""}
+<div class="section-divider"></div>
 
-{literature_html}
+{references_html}
 
 </div>
 <footer>Generated by SimAgent Multi-Simulation Reporter &nbsp;|&nbsp; {now}</footer>

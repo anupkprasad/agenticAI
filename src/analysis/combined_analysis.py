@@ -610,28 +610,27 @@ def run_combined_dccm_analysis(
     dpi: int = 200,
 ) -> Dict[str, Any]:
     """
-    Collect per-simulation DCCM CSV files and generate a side-by-side
-    comparison heatmap for multi-simulation reports.
+    Collect per-simulation DCCM CSV files and generate comparison heatmaps
+    for multi-simulation reports (3×3 grid; paginated as ``*_1.png``,
+    ``*_2.png``, … when more than 9 panels).
 
     Searches each simulation's ``analysis/`` sub-directory for a file whose
-    name starts with ``"dccm"`` and ends with ``".csv"``.  The found CSV files
-    are passed to ``plot_dccm_comparison`` to produce a single figure
-    comparing the correlation matrices across all simulations.
+    name starts with ``"dccm"`` and ends with ``".csv"``.
 
     Args:
         sim_dirs: List of per-simulation root directories (same order as
             *labels*).
         labels: Human-readable labels for each simulation (one per sim_dir).
-        working_dir: Output directory where the comparison figure is saved.
-        output_file: Filename for the comparison PNG (default:
+        working_dir: Output directory where the comparison figure(s) are saved.
+        output_file: Base filename for the comparison PNG (default:
             ``"dccm_comparison.png"``).
         vmin: Colour scale minimum (default: −1.0).
         vmax: Colour scale maximum (default: +1.0).
         dpi: Image resolution (default: 200).
 
     Returns:
-        Dict with ``success``, ``output_path``, ``found_files``,
-        ``missing_sims``, and ``message``.
+        Dict with ``success``, ``output_path``, ``output_paths``,
+        ``found_files``, ``missing_sims``, and ``message``.
     """
     from src.analysis.dccm_calculator import plot_dccm_comparison as _plot_dccm
 
@@ -688,9 +687,14 @@ def run_combined_dccm_analysis(
         append_analysis_summary(
             working_dir=working_dir,
             analysis_type="Combined_DCCM",
-            statistics={"n_simulations_compared": len(found_files)},
+            statistics={
+                "n_simulations_compared": len(found_files),
+                "n_pages": result.get("n_pages", 1),
+            },
             files={
                 "comparison_figure": result.get("output_path", ""),
+                "comparison_figures": result.get("output_paths")
+                or ([result.get("output_path")] if result.get("output_path") else []),
                 "dccm_csv_files": found_files,
             },
             metadata={

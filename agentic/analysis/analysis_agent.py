@@ -2556,24 +2556,26 @@ Return ONLY JSON:
         state["analysis_directory"] = analysis_dir
 
         # Resolve per-sim directories and labels from completed_sim_states
-        completed = state.get("completed_sim_states") or []
-        sim_dirs: List[str] = []
-        labels: List[str] = []
-        seen_labels: set = set()
-        for snap in completed:
-            label = snap.get("label")
-            wd = snap.get("working_directory")
-            if not label or not wd or label in seen_labels:
-                continue
-            seen_labels.add(label)
-            sim_dirs.append(wd)
-            labels.append(label)
+        from agentic.reporter.reporter_agent import resolve_combined_sim_context
 
-        # Fall back to sim_working_dirs from planner if no completed states yet
+        sim_dirs, labels = resolve_combined_sim_context(state)
+        seen_labels: set = set(labels)
+
+        # Fall back already handled inside resolve_combined_sim_context.
         if not sim_dirs:
-            sim_dirs = state.get("sim_working_dirs") or []
-            sim_prompts = state.get("sim_prompts") or []
-            labels = [p.get("label", f"sim_{i}") for i, p in enumerate(sim_prompts)]
+            completed = state.get("completed_sim_states") or []
+            for snap in completed:
+                label = snap.get("label")
+                wd = snap.get("working_directory")
+                if not label or not wd or label in seen_labels:
+                    continue
+                seen_labels.add(label)
+                sim_dirs.append(wd)
+                labels.append(label)
+            if not sim_dirs:
+                sim_dirs = state.get("sim_working_dirs") or []
+                sim_prompts = state.get("sim_prompts") or []
+                labels = [p.get("label", f"sim_{i}") for i, p in enumerate(sim_prompts)]
 
         # Filesystem / tool labels must stay as on-disk directory names
         # (e.g. p17612_ATP). Display remapping is applied only for plots/reports.
@@ -2820,11 +2822,16 @@ Return ONLY JSON:
                             output_file="dccm_comparison.png",
                         )
                         if dccm_cmp.get("success"):
-                            dccm_plots.append(dccm_cmp["output_path"])
+                            paths = dccm_cmp.get("output_paths") or [
+                                dccm_cmp["output_path"]
+                            ]
+                            dccm_plots.extend(p for p in paths if p)
                             log_agent_action(
                                 "analysis", "DCCM comparison generated",
                                 {
                                     "output": dccm_cmp.get("output_path"),
+                                    "outputs": paths,
+                                    "n_pages": dccm_cmp.get("n_pages", 1),
                                     "simulations": dccm_labels,
                                 },
                             )
@@ -3973,8 +3980,11 @@ Return ONLY JSON:
         entry of ``state["ligand_resnames"]``, else ``"ATP"`` (kinase–ATP default).
         Pass ``state["wrap_ligand"]="auto"`` to scan common ligand groups.
         The output dt (ps) can be overridden via ``state["wrap_dt_ps"]``
-        (default 100 ps). Set ``state["force_pbc_wrap"]=True`` to rebuild an
-        existing ``mdWrap.xtc``.
+        (default **100 ps** ⇒ **10 frames / ns**). Production MDP default
+        ``nstxout-compressed=50000`` at ``dt=0.002`` ps matches the same
+        spacing, so all sims share one analysis timescale after wrap.
+        Set ``state["force_pbc_wrap"]=True`` to rebuild an existing
+        ``mdWrap.xtc``.
         """
         if state.get("skip_pbc_wrap"):
             logger.info("_wrap_trajectory_pbc: skip_pbc_wrap=True — skipping")
@@ -5920,6 +5930,11 @@ If the Enriched User Goal says "RMSF only" (or similar exclusive language), plan
 {CHAIN_SELECTION_LLM_NOTE}
 {_pca_fel_block}
 {_classification_block}
+- **RMSF / DCCM selection — ALWAYS Cα only:**
+  For calculate_rmsf and calculate_dccm you MUST set
+  selection="protein and name CA" (or "(protein and resid X:Y) and name CA" for a segment).
+  NEVER use selection="protein" (all atoms) — that produces per-atom profiles that break
+  residue overlays. The framework will coerce non-Cα selections, but plans must be correct.
 - **DCCM — only when the User Goal explicitly names DCCM for this simulation:**
   Include calculate_dccm only if DCCM is requested in the User Goal for this run.
   Do NOT add DCCM because the global project mentions it for other proteins.
@@ -7154,6 +7169,29 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 tool_params = self._inject_consensus_family_params(
                     step.tool_name, tool_params, state
                 )
+
+                # Whole-protein RMSF/DCCM must use Cα — LLM often passes "protein".
+                if step.tool_name in ("calculate_rmsf", "calculate_dccm"):
+                    from src.analysis.selection_policy import (
+                        DEFAULT_CA_SELECTION,
+                        ensure_ca_selection,
+                    )
+
+                    before = tool_params.get("selection")
+                    tool_params["selection"] = ensure_ca_selection(
+                        before or DEFAULT_CA_SELECTION
+                    )
+                    if tool_params.get("align_selection"):
+                        tool_params["align_selection"] = ensure_ca_selection(
+                            tool_params["align_selection"]
+                        )
+                    if before != tool_params["selection"]:
+                        logger.info(
+                            "Forced Cα selection for %s: %r → %r",
+                            step.tool_name,
+                            before,
+                            tool_params["selection"],
+                        )
 
                 # Resolve list-type file parameters (e.g. data_files for plot tools).
                 # LLMs often pass wrong absolute paths; normalise to agent_dir/<basename>.

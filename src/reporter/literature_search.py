@@ -290,13 +290,49 @@ def score_literature_ref_relevance(
     return score, note
 
 
+def _ref_mentions_study_proteins(
+    ref: Dict[str, Any],
+    protein_names: List[str],
+    protein_ids: Optional[List[str]] = None,
+) -> bool:
+    """True when title/abstract mentions a named study protein / UniProt id."""
+    names = [n for n in list(protein_names or []) + list(protein_ids or []) if n]
+    if not names:
+        return False
+    haystack = " ".join(
+        filter(
+            None,
+            [
+                ref.get("title") or "",
+                ref.get("abstract") or "",
+                ref.get("journal") or "",
+            ],
+        )
+    ).lower()
+    for name in names:
+        token = str(name).strip().lower()
+        if len(token) >= 3 and token in haystack:
+            return True
+    return False
+
+
 def rank_literature_refs(
     refs: List[Dict[str, Any]],
     context: Dict[str, Any],
-    max_refs: int = 15,
-    min_score: int = 8,
+    max_refs: int = 10,
+    min_score: int = 12,
 ) -> List[Dict[str, Any]]:
-    """Re-rank literature by relevance to protein, user goal, and simulation findings."""
+    """Re-rank literature by relevance to protein, user goal, and simulation findings.
+
+    Prefer papers that name a study protein. Generic MD/theme hits without a
+    protein match are demoted so the reporter is not flooded with off-topic refs.
+    """
+    protein_names = list(context.get("protein_names") or [])
+    protein_ids = list(context.get("protein_ids") or [])
+    primary = context.get("primary_gene")
+    if primary and primary not in protein_names:
+        protein_names = [primary] + protein_names
+
     scored: List[Tuple[int, Dict[str, Any]]] = []
     for ref in refs:
         score, note = score_literature_ref_relevance(ref, context)
@@ -307,16 +343,108 @@ def rank_literature_refs(
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # Keep papers that match at least one protein/theme when possible.
-    filtered = [r for s, r in scored if s >= min_score]
-    if len(filtered) < 2:
-        filtered = [r for _, r in scored[:max_refs]]
+    protein_hits = [
+        r
+        for s, r in scored
+        if s >= min_score
+        and _ref_mentions_study_proteins(r, protein_names, protein_ids)
+    ]
+    theme_hits = [r for s, r in scored if s >= min_score]
+    if len(protein_hits) >= 2:
+        filtered = protein_hits[:max_refs]
+    elif protein_hits:
+        # Fill remaining slots with high-scoring theme papers only if needed.
+        rest = [r for r in theme_hits if r not in protein_hits]
+        filtered = (protein_hits + rest)[:max_refs]
+    elif len(theme_hits) >= 2:
+        filtered = theme_hits[:max_refs]
     else:
-        filtered = filtered[:max_refs]
+        filtered = [r for _, r in scored[:max_refs]]
 
     for r in filtered:
         r.pop("_relevance_score", None)
     return filtered
+
+
+_CITE_BRACKET_RE = re.compile(r"\[(\d+)\]")
+
+
+def citation_first_appearance_order(*texts: Optional[str]) -> List[int]:
+    """Return citation numbers in order of first appearance across *texts*."""
+    order: List[int] = []
+    seen: set = set()
+    for text in texts:
+        if not text:
+            continue
+        for match in _CITE_BRACKET_RE.finditer(text):
+            num = int(match.group(1))
+            if num not in seen:
+                seen.add(num)
+                order.append(num)
+    return order
+
+
+def remap_citation_brackets(text: Optional[str], mapping: Dict[int, int]) -> Optional[str]:
+    """Rewrite ``[old]`` → ``[new]`` using *mapping*; drop unknown brackets."""
+    if not text:
+        return text
+
+    def _sub(match: re.Match) -> str:
+        old = int(match.group(1))
+        new = mapping.get(old)
+        if new is None:
+            return ""
+        return f"[{new}]"
+
+    return _CITE_BRACKET_RE.sub(_sub, text)
+
+
+def sync_cited_literature(
+    literature_refs: List[Dict[str, Any]],
+    literature_review: Optional[str] = None,
+    final_impression: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], Optional[str], Optional[str]]:
+    """Keep only references cited in review/impression; renumber by first use.
+
+    Reading order is Literature Review → Final Impression.  The first paper
+    cited becomes ``[1]``, the next distinct paper ``[2]``, and so on.  Papers
+    never cited are dropped from the reference list.
+    """
+    refs = list(literature_refs or [])
+    if not refs:
+        return [], literature_review, final_impression
+
+    appearance = citation_first_appearance_order(literature_review, final_impression)
+    valid = [n for n in appearance if 1 <= n <= len(refs)]
+    if not valid:
+        # Cited-only bibliography: if the prose has no [n] markers, drop all
+        # retrieved papers so the References section can say none were cited.
+        logger.info(
+            "sync_cited_literature: no in-text citations; clearing %d uncited refs",
+            len(refs),
+        )
+        return [], literature_review, final_impression
+
+    mapping = {old: new for new, old in enumerate(valid, 1)}
+    pruned = [refs[old - 1] for old in valid]
+    new_review = remap_citation_brackets(literature_review, mapping)
+    new_impression = remap_citation_brackets(final_impression, mapping)
+    # Collapse whitespace left by dropped invalid citations.
+    if new_review:
+        new_review = re.sub(r"[ \t]{2,}", " ", new_review)
+        new_review = re.sub(r" +([.,;:])", r"\1", new_review)
+    if new_impression:
+        new_impression = re.sub(r"[ \t]{2,}", " ", new_impression)
+        new_impression = re.sub(r" +([.,;:])", r"\1", new_impression)
+
+    logger.info(
+        "sync_cited_literature: kept %d/%d cited refs (order %s → %s)",
+        len(pruned),
+        len(refs),
+        valid,
+        list(range(1, len(pruned) + 1)),
+    )
+    return pruned, new_review, new_impression
 
 
 def extract_analysis_stats_from_entries(

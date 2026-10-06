@@ -879,7 +879,14 @@ def merge_hitl_context_into_state_jsonl(state: Dict[str, Any]) -> bool:
                 saved["working_directory"] = base
             entry["state"] = saved
             entry["hitl_session_updated"] = datetime.now().isoformat()
-            path.write_text(json.dumps(entry, indent=2, default=str) + "\n", encoding="utf-8")
+            from agentic.utils.state_persistence import (
+                compact_state_for_persistence,
+                format_state_jsonl_entry,
+            )
+
+            if isinstance(entry.get("state"), dict):
+                entry["state"] = compact_state_for_persistence(entry["state"])
+            path.write_text(format_state_jsonl_entry(entry), encoding="utf-8")
             logger.info("HITL session persisted to %s (%s)", path, list(overlay.keys()))
             ok = True
         except Exception as exc:

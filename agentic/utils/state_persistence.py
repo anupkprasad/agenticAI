@@ -102,6 +102,7 @@ _BASE_MULTISIM_OMIT: Set[str] = {
     "analysis_warnings",
     "enriched_prompt",
     "rephrased_goal",
+    "structured_prompt",
     "reporter_output",
     "reporter_plan",
     "reporter_file_info",
@@ -132,6 +133,19 @@ _BASE_MULTISIM_OMIT: Set[str] = {
     "simsetup_dir",
     "hpc_dir",
     "reporter_dir",
+    "analysis_retrieved_context",
+    "system_info",
+    "trajectory_paths",
+    "knowledge_context",
+    "retrieved_tools",
+    "master_enriched_prompt",
+}
+
+_TRUNCATE_STRINGS_BASE: Dict[str, int] = {
+    "user_goal": 1200,
+    "user_goal_original": 2000,
+    "combined_analysis_plan": 800,
+    "analysis_retrieved_context": 400,
 }
 
 _SIM_PROMPT_KEEP = frozenset({
@@ -262,6 +276,48 @@ def compact_state_for_persistence(state: Dict[str, Any]) -> Dict[str, Any]:
             out["sim_prompts"] = _compact_sim_prompts(out["sim_prompts"])
         if out.get("parallel_pool"):
             out["parallel_pool"] = _compact_parallel_pool(out["parallel_pool"])
+        for key, limit in _TRUNCATE_STRINGS_BASE.items():
+            val = out.get(key)
+            if isinstance(val, str) and len(val) > limit:
+                out[key] = val[:limit] + f"\n… [{len(val)} chars truncated for state file]"
+        # CampaignSpec is reloaded from campaign/state.json — keep a short stamp only.
+        spec = out.get("campaign_spec")
+        if isinstance(spec, dict) and len(json.dumps(spec, default=str)) > 1500:
+            out["campaign_spec"] = {
+                "mode": spec.get("mode"),
+                "n_systems": spec.get("n_systems"),
+                "family_modular": spec.get("family_modular"),
+                "labels": (spec.get("labels") or [])[:40],
+            }
+        # Drop bulky progress history; keep status / health / agents / dirs.
+        progress = out.get("multi_sim_progress")
+        if isinstance(progress, dict):
+            slim_sims = {}
+            for lab, rec in (progress.get("sims") or {}).items():
+                if not isinstance(rec, dict):
+                    continue
+                slim_sims[lab] = {
+                    k: rec[k]
+                    for k in (
+                        "status",
+                        "health",
+                        "working_dir",
+                        "error",
+                        "agents",
+                        "index",
+                        "skip_reason",
+                    )
+                    if k in rec
+                }
+            out["multi_sim_progress"] = {
+                "version": progress.get("version"),
+                "phase": progress.get("phase"),
+                "active_sim_label": progress.get("active_sim_label"),
+                "required_agents": progress.get("required_agents"),
+                "sim_order": progress.get("sim_order"),
+                "sims": slim_sims,
+                "combined": progress.get("combined"),
+            }
 
     for key, limit in _TRUNCATE_STRINGS.items():
         val = out.get(key)
@@ -341,6 +397,7 @@ def build_full_agent_ladder(
     wd = _sim_working_dir(state, label, rec)
     phase = pool_phase or (state.get("parallel_pool") or {}).get("phase")
     multi_phase = state.get("multi_sim_phase")
+    status_force_failed = False
 
     ladder = {key: _normalize_agent_status(agents.get(key)) for key in _AGENT_LADDER}
 
@@ -435,10 +492,21 @@ def build_full_agent_ladder(
                 ladder["simsetup"] = "pending"
 
         if per_sim_analysis_done_on_disk(wd):
-            ladder["analysis"] = "done"
+            if ladder["hpc"] != "failed":
+                ladder["analysis"] = "done"
         if per_sim_reporter_done_on_disk(wd):
-            ladder["analysis"] = "done"
-            ladder["reporter"] = "done"
+            if ladder["hpc"] != "failed":
+                ladder["analysis"] = "done"
+                ladder["reporter"] = "done"
+
+    # Fatal HPC: do not promote analysis/reporter from leftover files.
+    if ladder["hpc"] == "failed":
+        ladder["analysis"] = "skipped"
+        ladder["reporter"] = "skipped"
+        # Historical wrong analysis after a dead MD still leaves overall failed.
+        status_force_failed = True
+    else:
+        status_force_failed = False
 
     # Reached analysis (or later) ⇒ upstream stages are complete unless failed.
     # Only apply this promotion when *this* sim's prep is done (or we are past
@@ -481,6 +549,16 @@ def build_full_agent_ladder(
     status = _normalize_agent_status(rec.get("status")) or _normalize_agent_status(worker) or "pending"
     if status == "in_progress" and worker == "running":
         status = "in_progress"
+    if ladder["hpc"] == "failed" or rec.get("health") == "failed" or status_force_failed:
+        status = "failed"
+    health_label = "failed" if status == "failed" else (
+        "healthy" if ladder["hpc"] == "done" and ladder.get("analysis") in ("done", "skipped", "pending")
+        else "pending"
+    )
+    if status == "failed":
+        health_label = "failed"
+    elif ladder["hpc"] == "done" and status in ("done", "skipped"):
+        health_label = "healthy"
     entry: Dict[str, Any] = {
         "preprocessing": ladder["preprocessing"],
         "simsetup": ladder["simsetup"],
@@ -488,6 +566,7 @@ def build_full_agent_ladder(
         "analysis": ladder["analysis"],
         "reporter": ladder["reporter"],
         "status": status,
+        "health": health_label,
     }
     if worker is not None:
         entry["worker"] = worker
@@ -497,9 +576,35 @@ def build_full_agent_ladder(
         entry["slurm"] = hpc_rec.get("last_slurm_state")
     if hpc_rec and hpc_rec.get("skip_reason"):
         entry["note"] = hpc_rec.get("skip_reason")
+    if rec.get("skip_reason") and not entry.get("note"):
+        entry["note"] = rec.get("skip_reason")
     if rec.get("error") or (hpc_rec or {}).get("error"):
         entry["error"] = rec.get("error") or (hpc_rec or {}).get("error")
     return entry
+
+
+def _annotate_health_counts(snap: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure pool_status includes healthy/failed lists derived from per-sim health."""
+    sims = snap.get("simulations") or {}
+    healthy_labels = [
+        lab for lab, det in sims.items()
+        if isinstance(det, dict) and det.get("health") == "healthy"
+    ]
+    unhealthy_labels = [
+        lab for lab, det in sims.items()
+        if isinstance(det, dict)
+        and (
+            det.get("health") == "failed"
+            or det.get("status") == "failed"
+            or det.get("hpc") == "failed"
+        )
+    ]
+    snap["healthy"] = sorted(healthy_labels)
+    snap["healthy_count"] = len(healthy_labels)
+    failed = set(snap.get("failed") or []) | set(unhealthy_labels)
+    snap["failed"] = sorted(failed)
+    snap["failed_count"] = len(failed)
+    return snap
 
 
 def build_pool_status_snapshot(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -546,7 +651,7 @@ def build_pool_status_snapshot(state: Dict[str, Any]) -> Optional[Dict[str, Any]
                 pool_phase="prep" if (state.get("parallel_pool") or {}).get("phase") == "prep" else None,
             )
         snap["simulations"] = enriched
-        return snap
+        return _annotate_health_counts(snap)
 
     parallel_pool = state.get("parallel_pool")
     if parallel_pool:
@@ -618,7 +723,7 @@ def build_pool_status_snapshot(state: Dict[str, Any]) -> Optional[Dict[str, Any]
                 )
                 snap["done_count"] = len(snap["done"])
                 snap["workflow_phase"] = "complete"
-            return snap
+            return _annotate_health_counts(snap)
 
     if phase in ("executing_sims", "combined_analysis", "combined_reporter", "complete"):
         try:
@@ -628,14 +733,14 @@ def build_pool_status_snapshot(state: Dict[str, Any]) -> Optional[Dict[str, Any]
                 reconcile_multisim_progress_from_disk(state)
         except Exception as exc:
             logger.debug("pool_status disk reconcile skipped: %s", exc)
-        return _snapshot_from_multi_sim_progress(state)
+        return _annotate_health_counts(_snapshot_from_multi_sim_progress(state))
 
     if state.get("hpc_pool_status_snapshot"):
-        return dict(state["hpc_pool_status_snapshot"])
+        return _annotate_health_counts(dict(state["hpc_pool_status_snapshot"]))
     if state.get("parallel_pool_status"):
         out = dict(state["parallel_pool_status"])
         out.setdefault("workflow_phase", phase)
-        return out
+        return _annotate_health_counts(out)
     return None
 
 
@@ -715,6 +820,15 @@ def _snapshot_from_multi_sim_progress(state: Dict[str, Any]) -> Dict[str, Any]:
     workers = int(state.get("parallel_workers_resolved") or 0)
     pool_type = "parallel_analysis" if workers > 1 else "sequential"
 
+    healthy_labels = [
+        lab for lab, det in sim_details.items()
+        if isinstance(det, dict) and det.get("health") == "healthy"
+    ]
+    unhealthy_labels = [
+        lab for lab, det in sim_details.items()
+        if isinstance(det, dict) and det.get("health") == "failed"
+    ]
+
     snap: Dict[str, Any] = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "workflow_phase": state.get("multi_sim_phase"),
@@ -728,11 +842,13 @@ def _snapshot_from_multi_sim_progress(state: Dict[str, Any]) -> Dict[str, Any]:
         "running": sorted(set(by_status["running"])),
         "pending": sorted(by_status["pending"]),
         "done": sorted(by_status["done"]),
-        "failed": sorted(by_status["failed"]),
+        "failed": sorted(set(by_status["failed"]) | set(unhealthy_labels)),
+        "healthy": sorted(healthy_labels),
         "submitted": sorted(by_status["submitted"]),
         "pending_count": len(by_status["pending"]),
         "done_count": len(by_status["done"]),
-        "failed_count": len(by_status["failed"]),
+        "failed_count": len(set(by_status["failed"]) | set(unhealthy_labels)),
+        "healthy_count": len(healthy_labels),
         "submitted_count": len(by_status["submitted"]),
     }
     if progress.get("combined"):
@@ -750,12 +866,52 @@ def write_pool_status_json(state: Dict[str, Any], supervisor_dir: Path) -> None:
         )
 
 
+def refresh_multisim_progress_for_persist(state: Dict[str, Any]) -> None:
+    """Sync parallel-pool + on-disk artifacts into ``multi_sim_progress`` before save.
+
+    ``pool_status.json`` already reconciles live ladder status from disk/pools.
+    ``state.jsonl`` must do the same *before* serialization — otherwise
+    ``multi_sim_progress.sims[*].status`` can remain ``pending`` after a
+    successful parallel analysis / combined report run.
+    """
+    if not state.get("is_multi_simulation"):
+        return
+    try:
+        from agentic.multi_sim_progress import (
+            ensure_multi_sim_progress,
+            reconcile_multisim_progress_from_disk,
+            sync_parallel_pool_to_multi_sim_progress,
+        )
+
+        if state.get("sim_prompts"):
+            ensure_multi_sim_progress(state)
+        if state.get("parallel_pool"):
+            sync_parallel_pool_to_multi_sim_progress(state)
+        if state.get("multi_sim_progress") or state.get("sim_prompts"):
+            reconcile_multisim_progress_from_disk(state)
+    except Exception as exc:
+        logger.debug("progress refresh before persist skipped: %s", exc)
+
+
+def format_state_jsonl_entry(entry: Dict[str, Any]) -> str:
+    """Pretty-print a ``state.jsonl`` checkpoint for readable editor viewing.
+
+    The file still holds a single JSON object (overwritten each save); indent
+    is for humans / VS Code syntax highlighting, not append-only JSONL lines.
+    """
+    import json
+
+    return json.dumps(entry, default=str, indent=2) + "\n"
+
+
 def save_workflow_state_quiet(state: Dict[str, Any]) -> None:
     """Persist ``state.jsonl`` without updating execution_report.md (pool polls)."""
     import json
     from datetime import datetime
 
     from agentic.multi_sim_progress import ensure_multi_sim_progress, multisim_workflow_incomplete
+
+    refresh_multisim_progress_for_persist(state)
 
     if state.get("is_multi_simulation") and state.get("sim_prompts"):
         ensure_multi_sim_progress(state)
@@ -795,7 +951,7 @@ def save_workflow_state_quiet(state: Dict[str, Any]) -> None:
         "workflow_status": persist_status,
         "state": serializable_state,
     }
-    state_path.write_text(json.dumps(entry, indent=2, default=str) + "\n", encoding="utf-8")
+    state_path.write_text(format_state_jsonl_entry(entry), encoding="utf-8")
 
     write_pool_status_json(state, supervisor_dir)
     try:

@@ -19,7 +19,7 @@ Default SimAgent flags (already match this guide):
 
 | Piece | Role | Where it lives |
 |-------|------|----------------|
-| Conda env `ollama_env` | GROMACS, MDAnalysis, LangChain, `ollama` Python package | `environment.yml` |
+| Conda env `SimAgentEnv` | GROMACS, MDAnalysis, LangChain, `ollama` Python package | `environment.yml` |
 | **Ollama server** | Runs models, listens on port **11434** | OS install or Singularity/Docker |
 | **Model `gpt-oss:20b`** | Weights pulled into Ollama’s model store | `ollama pull gpt-oss:20b` |
 
@@ -112,13 +112,14 @@ Restart `ollama serve` after changing these.
 ```bash
 cd /path/to/agenticAI
 conda env create -f environment.yml
-conda activate ollama_env
+conda activate SimAgentEnv
+pip install -e .
 ```
 
 ### 2.6 Run SimAgent against local Ollama
 
 ```bash
-conda activate ollama_env
+conda activate SimAgentEnv
 
 python SimAgent.py \
   --goal "Preprocess and setup MD for my_protein.pdb" \
@@ -215,7 +216,7 @@ endpoint.
 
 ## 7. Checklist (new computer)
 
-1. [ ] `conda env create -f environment.yml` && `conda activate ollama_env`
+1. [ ] `conda env create -f environment.yml` && `conda activate SimAgentEnv` && `pip install -e .`
 2. [ ] Install **Ollama server** (this guide §2.1)
 3. [ ] `ollama serve` && `curl http://127.0.0.1:11434/api/tags`
 4. [ ] `ollama pull gpt-oss:20b`

@@ -537,7 +537,7 @@ class MDSupervisor:
                 return self._setup_combined_analysis(state, mode="pre")
 
             analysis_done = _combined_analysis_done_on_disk(base, state=state)
-            reporter_done = _combined_reporter_done_on_disk(base)
+            reporter_done = _combined_reporter_done_on_disk(base, state=state)
             if multi_sim_phase in ("combined_analysis", "post_combined") and not analysis_done:
                 logger.info(
                     "SUPERVISOR [multi-sim]: Combined analysis pending — entering setup"
@@ -889,7 +889,7 @@ class MDSupervisor:
                 from agentic.multi_sim_progress import _combined_reporter_done_on_disk
 
                 base = Path(_get_multi_sim_base_dir(state))
-                if not _combined_reporter_done_on_disk(base):
+                if not _combined_reporter_done_on_disk(base, state=state):
                     logger.info(
                         "SUPERVISOR [multi-sim]: Combined reporter pending — continuing"
                     )
@@ -3553,8 +3553,14 @@ class MDSupervisor:
                     serializable[k] = v
                 except (TypeError, ValueError):
                     serializable[k] = str(v)
+            from agentic.utils.state_persistence import (
+                compact_state_for_persistence,
+                format_state_jsonl_entry,
+            )
+
+            compact = compact_state_for_persistence(serializable)
             state_path.write_text(
-                json.dumps({"sim_index": sim_index, "state": serializable}, indent=2, default=str) + "\n",
+                format_state_jsonl_entry({"sim_index": sim_index, "state": compact}),
                 encoding="utf-8",
             )
             logger.info(f"Saved per-sim state to {state_path}")
@@ -4774,7 +4780,9 @@ class MDSupervisor:
                     state["reporter_dir"] = str(Path(base) / "reporter")
                     state["analysis_dir"] = str(Path(base) / "analysis")
                     state["analysis_directory"] = str(Path(base) / "analysis")
-                combined_done = bool(base and _combined_reporter_done_on_disk(Path(base)))
+                combined_done = bool(
+                    base and _combined_reporter_done_on_disk(Path(base), state=state)
+                )
                 force_reporter = bool(
                     state.get("combined_only")
                     or state.get("force_combined_reporter")

@@ -88,13 +88,16 @@ def compute_metric_from_session(
 
     if tool_name == "calculate_rmsf":
         from .rmsf_calculator import compute_rmsf_from_universe
+        from .selection_policy import DEFAULT_CA_SELECTION, ensure_ca_selection
 
         return compute_rmsf_from_universe(
             universe,
-            selection=params.get("selection", "protein and name CA"),
+            selection=ensure_ca_selection(params.get("selection", DEFAULT_CA_SELECTION)),
             output_file=params.get("output_file"),
             align_trajectory=not skip_align and bool(params.get("align_trajectory", True)),
-            align_selection=params.get("align_selection"),
+            align_selection=ensure_ca_selection(
+                params.get("align_selection") or params.get("selection") or DEFAULT_CA_SELECTION
+            ),
             skip_align=skip_align,
             **common,
         )
@@ -112,10 +115,11 @@ def compute_metric_from_session(
 
     if tool_name == "calculate_dccm":
         from .dccm_calculator import compute_dccm_from_universe
+        from .selection_policy import DEFAULT_CA_SELECTION, ensure_ca_selection
 
         return compute_dccm_from_universe(
             universe,
-            selection=params.get("selection", "protein and name CA"),
+            selection=ensure_ca_selection(params.get("selection", DEFAULT_CA_SELECTION)),
             output_prefix=params.get("output_prefix"),
             frame_interval=int(params.get("frame_interval", 1) or 1),
             save_matrix_csv=bool(params.get("save_matrix_csv", True)),

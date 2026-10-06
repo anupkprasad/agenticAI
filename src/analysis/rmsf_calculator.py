@@ -52,6 +52,12 @@ def compute_rmsf_from_universe(
         reference = u.copy()
         align.AlignTraj(u, reference, select=align_sel, in_memory=True).run()
 
+    from .selection_policy import ensure_ca_selection
+
+    selection = ensure_ca_selection(selection)
+    if align_selection:
+        align_selection = ensure_ca_selection(align_selection)
+
     atoms = u.select_atoms(selection)
     if len(atoms) == 0:
         return {"success": False, "error": f"No atoms selected with selection: {selection}"}
@@ -188,7 +194,11 @@ def calculate_rmsf(
                 },
                 working_dir=working_dir,
             )
-            selection = resolved.get("selection", selection)
+            from .selection_policy import ensure_ca_selection
+
+            selection = ensure_ca_selection(resolved.get("selection", selection))
+            if align_selection:
+                align_selection = ensure_ca_selection(align_selection)
             logger.info(f"Calculating RMSF using MDAnalysis for {trajectory_file}")
             result = compute_rmsf_from_universe(
                 mda.Universe(topology_file, trajectory_file),

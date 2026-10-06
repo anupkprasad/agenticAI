@@ -22,7 +22,8 @@ def create_slurm_script(
     time_limit: str = "5-00:00:00",
     gpu_count: int = 1,
     email: Optional[str] = None,
-    gromacs_module: str = "GROMACS/2024.4-foss-2023b-CUDA-12.4.0-PLUMED-2.9.2"
+    gromacs_module: str = "GROMACS/2024.4-foss-2023b-CUDA-12.4.0-PLUMED-2.9.2",
+    exclude_nodes: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create SLURM job submission script for GROMACS simulation.
@@ -40,6 +41,7 @@ def create_slurm_script(
         gpu_count: Number of GPUs
         email: Email for notifications
         gromacs_module: GROMACS module to load
+        exclude_nodes: Comma-separated nodes for ``#SBATCH --exclude``
         
     Returns:
         Dict with script path and configuration
@@ -61,7 +63,8 @@ def create_slurm_script(
             "time_limit": time_limit,
             "gpu_count": gpu_count,
             "email": email,
-            "gromacs_module": gromacs_module
+            "gromacs_module": gromacs_module,
+            "exclude_nodes": exclude_nodes,
         })
         
         return result

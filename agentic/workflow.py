@@ -892,6 +892,10 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
     def _save_workflow_state(self, state: MDState):
         """Save serializable workflow state to working_dir/supervisor/state.jsonl."""
         try:
+            from agentic.utils.state_persistence import refresh_multisim_progress_for_persist
+
+            refresh_multisim_progress_for_persist(state)
+
             if state.get("is_multi_simulation") and state.get("sim_prompts"):
                 from agentic.multi_sim_progress import ensure_multi_sim_progress
 
@@ -955,11 +959,14 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 "workflow_status": persist_status,
                 "state": serializable_state,
             }
-            
-            state_path.write_text(json.dumps(entry, indent=2, default=str) + "\n", encoding="utf-8")
 
-            from agentic.utils.state_persistence import write_pool_status_json
+            from agentic.utils.state_persistence import (
+                format_state_jsonl_entry,
+                write_pool_status_json,
+            )
             from agentic.campaign.snapshots import persist_state_snapshots
+
+            state_path.write_text(format_state_jsonl_entry(entry), encoding="utf-8")
 
             write_pool_status_json(state, supervisor_dir)
             persist_state_snapshots(state)
@@ -972,7 +979,7 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                     per_sim_supervisor = current_dir / "supervisor"
                     per_sim_supervisor.mkdir(parents=True, exist_ok=True)
                     (per_sim_supervisor / "state.jsonl").write_text(
-                        json.dumps(entry, indent=2, default=str) + "\n",
+                        format_state_jsonl_entry(entry),
                         encoding="utf-8",
                     )
             
@@ -1410,6 +1417,14 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
 
                 if state.get("resume_failed_only") and not state.get("combined_only"):
                     reconcile_multisim_progress_from_disk(state, working_dir)
+                    # If HPC is in the CLI pipeline, reopen failed/unhealthy sims even
+                    # when a prior run left hpc_pool_phase_complete=True.
+                    try:
+                        from agentic.multi_sim_hpc_pool import reopen_failed_hpc_for_resume
+
+                        reopen_failed_hpc_for_resume(state)
+                    except Exception as exc:
+                        logger.debug("[resume] HPC reopen skipped: %s", exc)
                     # Sequential resume binding fights hpc/parallel pool orchestration.
                     phase_now = state.get("multi_sim_phase")
                     if phase_now not in ("hpc_pool", "parallel_pool"):

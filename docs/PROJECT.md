@@ -92,7 +92,7 @@ Given a natural-language goal and either a PDB file or a UniProt accession, the 
 
 ```
 SimAgent.py            # CLI entry point
-environment.yml                 # Conda environment (ollama_env, Python 3.11)
+environment.yml                 # Conda environment (SimAgentEnv, Python 3.11)
 agentic/
     state.py                    # MDState TypedDict — central shared state (~65 fields)
     workflow.py                 # LangGraph StateGraph (12 nodes)
@@ -160,7 +160,8 @@ explanation only in chat or code comments. Full CLI flags:
 ```bash
 # 1. Create the environment
 conda env create -f environment.yml
-conda activate ollama_env
+conda activate SimAgentEnv
+pip install -e .
 
 # 2. Basic run from a local PDB (LLM on by default, no HITL)
 python SimAgent.py \
@@ -232,9 +233,10 @@ After every run the following are written to the base working directory:
 
 | File | Description |
 |------|-------------|
-| `run_summary.md` | Human-readable run outcome: mode, counts, per-sim status, **science completeness** |
-| `run_summary.json` | Same data in structured JSON for scripts |
+| `run_summary.md` | Human-readable run outcome: mode, counts, per-sim status/**health**, **science completeness** |
+| `run_summary.json` | Same data in structured JSON (no token ledger — see `llm_usage.json`) |
 | `llm_usage.json` | Token totals tagged by workflow node (`planner`, `analysis`, `reporter`, …) |
+| `supervisor/pool_status.json` | Live pool: per-sim ladder, `healthy` / `failed` lists and counts |
 | `agent_conversation.log` | Full agent dialogue, LLM prompts/responses, routing decisions |
 | `planner/master_plan.md` | Multi-sim master plan with per-case prompts and combined analysis plan |
 | `campaign/state.json` | Versioned campaign snapshot (spec hash, stages, science contract) |

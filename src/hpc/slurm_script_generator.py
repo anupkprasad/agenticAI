@@ -26,6 +26,7 @@ def generate_slurm_script(
     gpu_count: int = 1,
     email: Optional[str] = None,
     gromacs_module: str = "GROMACS/2024.4-foss-2023b-CUDA-12.4.0-PLUMED-2.9.2",
+    exclude_nodes: Optional[str] = None,
     output_script: Optional[str] = None
 ) -> Dict[str, Any]:
     """
@@ -52,6 +53,7 @@ def generate_slurm_script(
         gpu_count: Number of GPUs to request (default: 1)
         email: Email address for job notifications (optional)
         gromacs_module: GROMACS module name to load (default: GROMACS/2024.4-foss-2023b-CUDA-12.4.0-PLUMED-2.9.2)
+        exclude_nodes: Comma-separated node names for ``#SBATCH --exclude`` (optional)
         output_script: Output script path (default: <job_name>_run.sh in working_dir)
         
     Returns:
@@ -102,6 +104,11 @@ def generate_slurm_script(
 #SBATCH --output=%x_%j.out
 #SBATCH --gres=gpu:{gpu_count}
 """
+        if exclude_nodes:
+            # Allow "ra7-6" or "ra7-6,ra7-7" (strip whitespace)
+            excl = ",".join(n.strip() for n in str(exclude_nodes).split(",") if n.strip())
+            if excl:
+                slurm_header += f"#SBATCH --exclude={excl}\n"
         
         # Add email notifications if provided
         if email:

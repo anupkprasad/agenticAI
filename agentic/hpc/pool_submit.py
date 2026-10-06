@@ -241,6 +241,15 @@ def submit_simulation_job(
             "success": False,
             "error": copy_result.get("error", "copy_simulation_files failed"),
         }
+    # SLURM scripts hardcode system.gro — refuse submit if ions/prep never finished.
+    if not (hpc_dir / "system.gro").is_file() and not (simsetup_dir / "system.gro").is_file():
+        err = (
+            f"Missing system.gro under {simsetup_dir} (and hpc/). "
+            "Prep must finish ion addition before HPC submit."
+        )
+        with temporary_log_file(log_path):
+            log_agent_action("hpc", "HPC submit blocked — incomplete prep", {"error": err})
+        return {"success": False, "error": err}
     if seed is not None:
         from src.analysis.replicate_paths import (
             apply_gen_seed_to_mdp_dir,
