@@ -169,6 +169,12 @@ matching `--llm-model` / `--llm-base-url`). Offline heuristic plans: `--no-llm`.
 Hands-on walkthrough (apo/holo panel, status, reports, provenance):
 [example/TUTORIAL.md](example/TUTORIAL.md)
 
+**Worked-example combined report (inspect results here):**
+[`example/pseudo_apo_holo/reporter/combined_report.html`](example/pseudo_apo_holo/reporter/combined_report.html)
+· [GitHub file](https://github.com/anupkprasad/agenticAI/blob/SimAgent_v1.0/example/pseudo_apo_holo/reporter/combined_report.html)
+· [HTML preview](https://htmlpreview.github.io/?https://raw.githubusercontent.com/anupkprasad/agenticAI/SimAgent_v1.0/example/pseudo_apo_holo/reporter/combined_report.html)
+(third-party preview; if it fails on this ~8–10 MB file, download from GitHub and open locally)
+
 ---
 
 ## Prompt Engineering Guide
@@ -418,6 +424,7 @@ docs/
 | Document                                              | Description                                                |
 | ----------------------------------------------------- | ---------------------------------------------------------- |
 | [example/TUTORIAL.md](example/TUTORIAL.md)             | Example campaign: run, track status, reports, provenance   |
+| [codeocean/README.md](codeocean/README.md)             | Code Ocean capsule (smoke run + figure regen for review)   |
 | [docs/PROJECT.md](docs/PROJECT.md)                     | Product overview, repository layout, quick start, CLI      |
 | [docs/PIPELINE_WORKFLOW.md](docs/PIPELINE_WORKFLOW.md) | Agent order, directories, files, and flag examples         |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)           | LangGraph pipeline, state, and per-agent design            |
