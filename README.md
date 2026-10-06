@@ -169,6 +169,12 @@ matching `--llm-model` / `--llm-base-url`). Offline heuristic plans: `--no-llm`.
 Hands-on walkthrough (apo/holo panel, status, reports, provenance):
 [example/TUTORIAL.md](example/TUTORIAL.md)
 
+**Worked-example combined report (inspect results here):**
+[`example/pseudo_apo_holo/reporter/combined_report.html`](example/pseudo_apo_holo/reporter/combined_report.html)
+· [GitHub file](https://github.com/anupkprasad/agenticAI/blob/SimAgent_v1.0/example/pseudo_apo_holo/reporter/combined_report.html)
+· [HTML preview](https://htmlpreview.github.io/?https://raw.githubusercontent.com/anupkprasad/agenticAI/SimAgent_v1.0/example/pseudo_apo_holo/reporter/combined_report.html)
+(third-party preview; if it fails on this ~8–10 MB file, download from GitHub and open locally)
+
 ---
 
 ## Prompt Engineering Guide

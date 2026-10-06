@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
 # Code Ocean / local reproducible entry point for SimAgent_v1.0
 #
-# What this run does (cloud-safe):
-#   1) Install the package editable (if needed)
-#   2) Smoke-test imports + CLI
-#   3) Regenerate a feature-heatmap PNG from deposited CSV
+# Intended use on Code Ocean:
+#   - Create conda env SimAgentEnv from codeocean/environment/environment.yml
+#   - Run: bash codeocean/run
 #
-# What it does NOT do:
-#   Full MD, SLURM HPC, or live Ollama LLM planning
-#   (those require a local/HPC environment — see README.md)
+# This run (CPU, minutes):
+#   1) pip install -e .
+#   2) Smoke-test imports + CLI (--no-llm supported; no Ollama server needed)
+#   3) Regenerate summary figures from DEPOSITED example/pseudo_apo_holo tables
+#   4) Regenerate a small feature-matrix heatmap from a robustness CSV excerpt
+#
+# NOT executed here (too heavy / not available in a typical capsule):
+#   - ACPYPE ligand parameterization
+#   - GROMACS MD system setup and production
+#   - Ollama LLM planning
+#   - SLURM / HPC job submission
+#
+# Full campaign outputs: example/pseudo_apo_holo/ + example/TUTORIAL.md
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# Capsule lives at repo/codeocean — repo root is parent
 REPO="$(cd "$HERE/.." && pwd)"
 RESULTS="${CODEOCEAN_RESULTS:-$HERE/results}"
 mkdir -p "$RESULTS"
@@ -24,6 +32,10 @@ echo "=== SimAgent Code Ocean run ==="
 echo "  repo:    $REPO"
 echo "  results: $RESULTS"
 echo "  python:  $(command -v python || true) $(python -V 2>&1 || true)"
+echo ""
+echo "  Scope: install + smoke test + figure regen from deposited tables."
+echo "  Skipped: ACPYPE parameterization, GROMACS MD setup/production,"
+echo "           Ollama LLM server, and SLURM HPC (use example/pseudo_apo_holo)."
 
 if [[ ! -f "$REPO/SimAgent.py" ]]; then
   echo "ERROR: SimAgent.py not found under $REPO" >&2
@@ -31,12 +43,17 @@ if [[ ! -f "$REPO/SimAgent.py" ]]; then
   exit 1
 fi
 
-# Editable install (idempotent)
 python -m pip install -e "$REPO" -q
 
 echo ""
-echo "--- Smoke test ---"
+echo "--- Smoke test (framework import + CLI; no LLM server required) ---"
 python "$HERE/scripts/smoke_test.py"
+
+echo ""
+echo "--- Regenerate overlay bars from deposited example/pseudo_apo_holo tables ---"
+python "$HERE/scripts/regenerate_overlay_stats.py" \
+  --data-dir "$HERE/data/example_overlays" \
+  --out-dir "$RESULTS"
 
 echo ""
 echo "--- Regenerate feature heatmap (5-system cohort excerpt) ---"
@@ -45,7 +62,6 @@ python "$HERE/scripts/regenerate_feature_heatmap.py" \
   --out "$RESULTS/pseudokin_5x2_feature_heatmap.png" \
   --title "SimAgent_v1.0 — 5-system feature matrix (z-scored)"
 
-# Record provenance of this run
 {
   echo "SimAgent Code Ocean reproducible run"
   echo "date: $(date -Is)"
@@ -53,9 +69,20 @@ python "$HERE/scripts/regenerate_feature_heatmap.py" \
   echo "git:  $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   echo "branch: $(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
   echo "python: $(python -V 2>&1)"
+  echo ""
+  echo "NOTE: Figures are regenerated from deposited tables taken from"
+  echo "example/pseudo_apo_holo (and a small robustness CSV excerpt)."
+  echo "ACPYPE parameterization, GROMACS MD setup/production, Ollama, and"
+  echo "SLURM HPC are not re-run here (computationally heavy for Code Ocean)."
+  echo "Full campaign provenance: example/pseudo_apo_holo/ + example/TUTORIAL.md"
+  echo ""
   echo "outputs:"
   ls -la "$RESULTS"
 } | tee "$RESULTS/run_manifest.txt"
 
 echo ""
 echo "=== Done. Artifacts in $RESULTS ==="
+echo "IMPORTANT — inspect the full combined report (main example deliverable):"
+echo "  example/pseudo_apo_holo/reporter/combined_report.html"
+echo "  (Code Ocean: open via file browser; GitHub: see codeocean/README.md links)"
+echo "Tutorial: example/TUTORIAL.md"

@@ -174,9 +174,17 @@ Base path: `example/pseudo_apo_holo/`.
 
 ### Combined (start here)
 
+> **Main deliverable — open this first**  
+> [`pseudo_apo_holo/reporter/combined_report.html`](pseudo_apo_holo/reporter/combined_report.html)  
+> Comparative HTML report (RMSD, RMSF, Rg, COM, ΔDCCM, DSSP, literature, final impression).
+>
+> - **Local:** `xdg-open example/pseudo_apo_holo/reporter/combined_report.html` (or double-click the file)
+> - **GitHub (`SimAgent_v1.0`):** [view in repo](https://github.com/anupkprasad/agenticAI/blob/SimAgent_v1.0/example/pseudo_apo_holo/reporter/combined_report.html) · [rendered preview](https://htmlpreview.github.io/?https://raw.githubusercontent.com/anupkprasad/agenticAI/SimAgent_v1.0/example/pseudo_apo_holo/reporter/combined_report.html) (third-party; large file — download + open locally if preview fails)
+> - **Code Ocean:** open the same path in the capsule **file browser**
+
 | Path | What it is |
 |------|------------|
-| `reporter/combined_report.html` | **Main deliverable** — comparative panels (RMSD, RMSF, Rg, COM, ΔDCCM, DSSP), literature, final impression |
+| `reporter/combined_report.html` | **Main deliverable** — see callout above |
 | `analysis/rmsd_overlay.png` | Cross-sim RMSD overlay |
 | `analysis/rmsf_overlay.png` | Cross-sim RMSF overlay |
 | `analysis/rg_overlay.png` | Radius of gyration overlay |
@@ -185,13 +193,6 @@ Base path: `example/pseudo_apo_holo/`.
 | `analysis/dssp_comparison.png` | Secondary-structure comparison |
 | `analysis/*_stats.csv` | Summary statistics tables |
 | `run_summary.md` | Success / health counts for all eight sims |
-
-Open the combined report in a browser:
-
-```bash
-# local machine with a GUI, or copy the HTML elsewhere
-xdg-open example/pseudo_apo_holo/reporter/combined_report.html
-```
 
 ### Per simulation
 

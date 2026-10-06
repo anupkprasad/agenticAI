@@ -72,7 +72,11 @@ def main() -> int:
     _ok(f"LLMClient constructible for offline use (available={client.available})")
 
     print("\nSmoke test passed.")
-    print("Note: full MD / Ollama / SLURM campaigns are not executed in this capsule.")
+    print(
+        "Note: this capsule does not re-run ACPYPE parameterization, "
+        "GROMACS MD setup/production, Ollama, or SLURM. "
+        "See example/pseudo_apo_holo/ and example/TUTORIAL.md for full provenance."
+    )
     return 0
 
 
