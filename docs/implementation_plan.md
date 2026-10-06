@@ -74,7 +74,7 @@ Science completeness now requires pocket-metric artifacts as well as the four
 `consensus_*` dirs.
 ### P0.2 Versioned campaign + per-sim `state.json`
 
-**Why.** Resume today merges two truncated JSONL streams
+**Why.** Resume used to lean only on truncated supervisor checkpoints
 (`base/supervisor/state.jsonl` and `{label}/supervisor/state.jsonl`).
 `file_registry` and analysis pointers get dropped. There is no schema version
 or spec hash.
@@ -85,8 +85,11 @@ or spec hash.
   completed campaign stages, science contract, `campaign_spec`.
 - Write `{label}/state.json`: completed per-sim stages, resolved `hpc/repXX`
   topo/traj, science-complete record.
-- Keep JSONL as the append-only / last-checkpoint log.
-- Resume overlays the JSON snapshot first when JSONL is missing spec or stages.
+- Keep `{base}/supervisor/state.jsonl` as the overwriteable resume checkpoint
+  (pretty-printed single JSON object; historical `.jsonl` name) plus
+  `pool_status.json` for the live agent ladder.
+- Resume overlays the JSON snapshot first when the supervisor checkpoint is
+  missing spec or stages.
 
 **Done when.** Every workflow persist writes both JSON snapshots; a unit test
 round-trips schema version + spec hash.

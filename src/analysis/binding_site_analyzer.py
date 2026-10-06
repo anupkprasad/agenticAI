@@ -154,7 +154,6 @@ def _find_gmx() -> Optional[str]:
     home = os.environ.get("HOME", "").strip()
     if home:
         candidates.append(f"{home}/conda_envs/SimAgentEnv/bin/gmx")
-        candidates.append(f"{home}/conda_envs/ollama_env/bin/gmx")
 
     seen: set[str] = set()
     for cmd in candidates:

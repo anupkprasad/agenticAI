@@ -118,15 +118,22 @@ Restart the Ollama server after changing these. Use the same value for
 
 1. **Master plan** — planner builds per-sim prompts as usual.
 2. **Parallel pool** — up to N worker processes each run one simulation's agents.
-3. **Poll** — main process updates `parallel_pool_status` in `state.jsonl` every 30s (no terminal/log spam).
+3. **Poll** — main process refreshes `{base}/supervisor/pool_status.json` and
+   overwrites `state.jsonl` periodically (no terminal/log spam).
 4. **Combined work** — after all per-sim jobs finish, combined analysis/reporter runs at base dir.
 
 Monitor live workers:
 
 ```bash
-watch -n 5 cat pseudoKin/supervisor/pool_status.json
-# or
-tail -1 pseudoKin/supervisor/state.jsonl | jq '.state.parallel_pool_status'
+# Preferred: compact live ladder + phase
+watch -n 5 cat my_study/supervisor/pool_status.json
+
+# Full checkpoint (pretty-printed single JSON object — not append-only lines)
+python -c "import json; from pathlib import Path
+st=json.loads(Path('my_study/supervisor/state.jsonl').read_text())['state']
+print('phase', st.get('multi_sim_phase'))
+print('parallel', (st.get('parallel_pool') or {}).get('phase'))
+"
 ```
 
 Sims with existing outputs (`analysis_summary.jsonl`, `report.html`, or simsetup files) are **skipped**.
@@ -138,15 +145,16 @@ On **Ctrl+C / kill / disconnect**, the framework saves an interrupt checkpoint:
 disk, and `workflow_status` is set to `in_progress:interrupted`. Run again
 with `--resume` and the same `--working-dir`.
 
-While the pool runs, `pool_status.json` is the live source of truth. It reflects
+While the pool runs, **`pool_status.json` is the live source of truth**. It reflects
 the active stage:
 
 - **parallel prep/analysis** — worker slots (`parallel_pool`)
 - **HPC pool** — per-sim `prep` + `hpc` status and SLURM job IDs (matches terminal HPC summary)
-- **sequential post-HPC** — per-sim agent status from `multi_sim_progress`
+- **sequential / combined post-HPC** — full agent ladder from disk + `multi_sim_progress`
 
-`multi_sim_progress` is kept in sync on every checkpoint so both sections of
-`state.jsonl` agree.
+Before each `state.jsonl` write, the framework syncs `parallel_pool` and on-disk
+artifacts into `multi_sim_progress` so the checkpoint does not leave completed
+sims stuck as `pending` after a successful run.
 
 ### State
 

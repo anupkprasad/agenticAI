@@ -88,11 +88,19 @@ Given a natural-language goal and either a PDB file or a UniProt accession, the 
   analysis plots, DCCM and DCCM-difference heatmaps, a science-completeness
   banner for family campaigns, and a 3Dmol.js viewer with trajectory
   snapshots and PNG export.
+
+**Hands-on demo:** [example/TUTORIAL.md](../example/TUTORIAL.md) walks through
+the published `example/pseudo_apo_holo/` campaign (run, track status, reports,
+provenance). Framework install and CLI remain in this file and [README.md](../README.md).
+
 ## Repository Layout
 
 ```
-SimAgent.py            # CLI entry point
+SimAgent.py                     # CLI entry point
 environment.yml                 # Conda environment (SimAgentEnv, Python 3.11)
+example/
+    TUTORIAL.md                 # Use-case guide: run / track / find results
+    pseudo_apo_holo/            # Published apo/holo demo (PDBs, goal, plots, report)
 agentic/
     state.py                    # MDState TypedDict — central shared state (~65 fields)
     workflow.py                 # LangGraph StateGraph (12 nodes)
@@ -106,7 +114,7 @@ agentic/
     analysis/                   # MDAnalysisAgent: traj metrics, modular family tools,
                                 #   combined overlays, LLM feature selection + clustering
     reporter/                   # ReporterAgent: HTML report, literature, 3D viewer
-    utils/                      # Logging, SecureFileManager, plan persistence
+    utils/                      # Logging, SecureFileManager, plan persistence, state_persistence
     multi_sim_progress.py       # Per-sim / family-modular completion checks
 src/
     analysis/                   # Trajectory tools, classification collector/clustering,
@@ -140,6 +148,7 @@ docs/                           # Project documentation (you are here)
 | Doc | What it covers |
 |-----|----------------|
 | [PROJECT.md](PROJECT.md) | This page — product overview, layout, quick start, CLI, run outputs |
+| [example/TUTORIAL.md](../example/TUTORIAL.md) | Hands-on apo/holo demo: run, track status, reports, provenance |
 | [PIPELINE_WORKFLOW.md](PIPELINE_WORKFLOW.md) | Agent order, directories, files, and flag examples |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | LangGraph, shared state, agents, directory layout |
 | [CONVENTIONS.md](CONVENTIONS.md) | Coding and documentation rules for contributors |
@@ -236,7 +245,8 @@ After every run the following are written to the base working directory:
 | `run_summary.md` | Human-readable run outcome: mode, counts, per-sim status/**health**, **science completeness** |
 | `run_summary.json` | Same data in structured JSON (no token ledger — see `llm_usage.json`) |
 | `llm_usage.json` | Token totals tagged by workflow node (`planner`, `analysis`, `reporter`, …) |
-| `supervisor/pool_status.json` | Live pool: per-sim ladder, `healthy` / `failed` lists and counts |
+| `supervisor/pool_status.json` | **Primary live status** — per-sim agent ladder, `workflow_phase`, healthy/failed counts |
+| `supervisor/state.jsonl` | Pretty-printed checkpoint (single JSON object; name is historical). Prefer `pool_status.json` for “is it done?” |
 | `agent_conversation.log` | Full agent dialogue, LLM prompts/responses, routing decisions |
 | `planner/master_plan.md` | Multi-sim master plan with per-case prompts and combined analysis plan |
 | `campaign/state.json` | Versioned campaign snapshot (spec hash, stages, science contract) |

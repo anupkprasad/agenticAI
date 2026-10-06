@@ -5,6 +5,10 @@ __pycache__/
 .env
 *.pyc
 .conda/
+*.egg-info/
+*.egg
+build/
+dist/
 
 # IDE / editor
 .cursor/
@@ -27,6 +31,9 @@ __pycache__/
 # GROMACS force-field trees (copied into sim dirs) — ignore anywhere
 amber99sb-ildn.ff/
 *.ff/
+# ACPYPE ligand parameterization workdirs (generated under simsetup/)
+*.acpype/
+ligand_acpype_input.acpype/
 # Logs & backups
 *.log
 *_old.py

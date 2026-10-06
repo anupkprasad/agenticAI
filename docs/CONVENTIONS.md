@@ -169,11 +169,13 @@ uses the registry automatically.
   `AGENTIC_*` and CLI `--HITL` / `--campaign-yaml` override. See
   [CAMPAIGN_AND_RETRIEVAL.md](CAMPAIGN_AND_RETRIEVAL.md).
 
-### Workflow state files (`state.jsonl`)
+### Workflow state files (`state.jsonl` + `pool_status.json`)
 
-The framework persists a JSON checkpoint at `{working_dir}/supervisor/state.jsonl`.
-In multi-sim mode, each simulation also mirrors state under
-`{base}/{label}/supervisor/state.jsonl` while that sim is active.
+The framework persists a checkpoint at `{working_dir}/supervisor/state.jsonl`.
+Despite the `.jsonl` suffix, the file is a **single pretty-printed JSON object**
+(`{"timestamp", "workflow_status", "state": {...}}`) overwritten on each save —
+not an append-only NDJSON stream. In multi-sim mode, each simulation also mirrors
+state under `{base}/{label}/supervisor/state.jsonl` while that sim is active.
 
 Checkpoints are **content-compact** (bulky fields omitted or truncated) but
 **pretty-printed** (`indent=2`) so editors can syntax-highlight them. Full
@@ -183,9 +185,13 @@ dirs, agent ladder, and **health**.
 
 | File | Scope | Purpose |
 |------|--------|---------|
-| `{base}/supervisor/state.jsonl` | Project root | Overall routing: enrichment, master plan, combined phase, final report |
+| `{base}/supervisor/pool_status.json` | Project root | **Preferred live view** — per-sim agent ladder + `workflow_phase` + health counts |
+| `{base}/supervisor/state.jsonl` | Project root | Resume checkpoint: enrichment, master plan, pools, `multi_sim_progress`, combined phase |
 | `{base}/{label}/supervisor/state.jsonl` | One simulation | Per-sim progress: validation, execution plan, analysis/reporter outputs, errors |
-| `{base}/supervisor/pool_status.json` | Project root | Live per-sim agent ladder + `health` (`healthy` / `failed` / `pending`) |
+
+On every persist, `multi_sim_progress` is refreshed from the parallel/HPC pool and
+on-disk artifacts **before** writing `state.jsonl`, then `pool_status.json` is
+rewritten from the same state.
 
 **Per-sim health (fatal vs soft):**
 

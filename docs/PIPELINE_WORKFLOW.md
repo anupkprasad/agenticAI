@@ -14,6 +14,9 @@ pool sizing ([POOLS.md](POOLS.md)), analysis theory
 
 Entry point: `python SimAgent.py --goal "..." --working-dir <dir>`.
 
+For a published end-to-end demo (status files, reports, provenance), see
+[example/TUTORIAL.md](../example/TUTORIAL.md).
+
 ---
 
 ## Agent order (always the same)
@@ -77,7 +80,8 @@ only; each simulation’s agent work lives under its label directory.
 - `agent_conversation.log` — input validation, enrichment, master plan summary, pool milestones
 - `planner/master_plan.md` (+ `.json`) — short campaign summary
 - `run_summary.md` / `run_summary.json`
-- `supervisor/state.jsonl`, pool status
+- `supervisor/pool_status.json` — **live** per-sim ladder + phase (check this first while a run is active)
+- `supervisor/state.jsonl` — pretty-printed resume checkpoint (`multi_sim_progress`, pools, job IDs)
 - `campaign/state.json` — versioned campaign snapshot
 - Combined `analysis/` + `reporter/combined_report.html` **only when** `len(sim_prompts) > 1`
 - Optional `cross_sim/` — pre-combined pocket/MSA/consensus artifacts + `inventory.json`
@@ -478,9 +482,9 @@ Only HPC agent files under each sim’s `hpc/` are the target (new/extended
 | Question | Path |
 |----------|------|
 | Did the run finish / which sims failed? | `{base}/run_summary.md` (+ `health` / `failed` counts) |
-| Live pool status / healthy vs failed | `{base}/supervisor/pool_status.json` |
+| Live pool status / healthy vs failed | `{base}/supervisor/pool_status.json` (**preferred**) |
+| Resume checkpoint / job IDs / `multi_sim_progress` | `{base}/supervisor/state.jsonl` |
 | Why did the planner choose those tools? | `{base}/planner/master_plan.md` or `{sim}/planner/execution_plan.md` |
-| Resume / pool job IDs | `{base}/supervisor/state.jsonl` |
 | Token usage | `{base}/llm_usage.json` |
 | Conversation + LLM calls | `{base}/agent_conversation.log` and `{sim}/agent_conversation.log` |
 | Trajectory | `{sim}/hpc/md.xtc` or `mdWrap.xtc` |

@@ -345,6 +345,11 @@ C_{ij} = \frac{\langle \Delta\mathbf{r}_i \cdot \Delta\mathbf{r}_j \rangle}{\sqr
 
 **Output:** `dccm_matrix.csv`, `dccm_heatmap.png`
 
+**Combined / report:** apo–holo difference maps are written under `{base}/analysis/`
+as `{PROTEIN}_dccm_diff_heatmap.png` (and related CSV). The combined HTML report
+embeds those ΔDCCM figures in Comparative Dynamics **Panel E** when DCCM is in
+the goal or enriched prompt (see [example/TUTORIAL.md](../example/TUTORIAL.md)).
+
 ---
 
 ### `calculate_trajectory_pca`

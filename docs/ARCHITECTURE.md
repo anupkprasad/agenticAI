@@ -104,7 +104,7 @@ base_dir/
         simsetup/               # topology, coordinates, MDP files, chain_residue_map.json
         hpc/                    # SLURM script, trajectories
         analysis/               # plots, CSVs, summary JSON, inventory.json
-        reporter/               # per-sim HTML report
+        reporter/               # per-sim HTML report (report.html)
         planner/                # execution_plan.md/json
         supervisor/             # execution_report.md, state.jsonl
         state.json              # versioned per-sim snapshot
@@ -116,20 +116,21 @@ base_dir/
     campaign/
         state.json              # versioned campaign snapshot (spec hash, stages)
         campaign.yaml           # optional local override of shipped defaults
-    combinedAnalysis/           # alternate combined output location
     reporter/
         combined_report.html    # cross-simulation comparison report
-    planner/
-        master_plan.md          # multi-sim plan with per-case + pre/post plans
-        master_plan.json
-        knowledge_index.json    # retrieved knowledge chunk cache
     supervisor/
-        state.jsonl
+        state.jsonl             # pretty-printed resume checkpoint
+        pool_status.json        # live per-sim ladder (preferred while running)
         execution_report.md
-    agent_conversation.log      # full run log
-    run_summary.md              # human-readable run outcome table
-    run_summary.json            # structured run outcome data
+    planner/
+        master_plan.md
+    run_summary.md / .json
+    llm_usage.json
+    agent_conversation.log
 ```
+
+Published demo layout and how to track a live run:
+[example/TUTORIAL.md](../example/TUTORIAL.md).
 
 ### Isolation and concurrency
 

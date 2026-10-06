@@ -4,7 +4,7 @@ Ensure MD toolchain binaries are on PATH for local agent runs.
 Cluster jobs often inherit an interactive shell with ``module load`` and a
 conda env; nohup / bare ``python`` launches do not. Ligand setup then fails
 with ``Neither acpype nor antechamber available`` even though both exist in
-``SimAgentEnv`` (or legacy ``ollama_env``) or AmberTools modules.
+``SimAgentEnv`` or AmberTools modules.
 
 This helper is safe to call repeatedly (idempotent).
 """
@@ -21,13 +21,11 @@ logger = logging.getLogger(__name__)
 
 _BOOTSTRAPPED = False
 
-# Prefer SimAgentEnv; fall back to legacy ollama_env / other local envs.
+# Prefer SimAgentEnv; optionally other local envs that may hold MD tools.
 _CONDA_BIN_CANDIDATES = (
     Path.home() / "conda_envs" / "SimAgentEnv" / "bin",
-    Path.home() / "conda_envs" / "ollama_env" / "bin",
     Path.home() / "conda_envs" / "mdagent" / "bin",
     Path("/home/akp66103/conda_envs/SimAgentEnv/bin"),
-    Path("/home/akp66103/conda_envs/ollama_env/bin"),
 )
 
 _AMBER_MODULES = (

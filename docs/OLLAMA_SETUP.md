@@ -222,3 +222,4 @@ endpoint.
 4. [ ] `ollama pull gpt-oss:20b`
 5. [ ] Optional: install CHARMM36 ff if you use phospho / CHARMM (see README)
 6. [ ] `python SimAgent.py ... --llm-model gpt-oss:20b --llm-base-url http://127.0.0.1:11434`
+7. [ ] Optional smoke-test: [example/TUTORIAL.md](../example/TUTORIAL.md) (`pseudo_apo_holo`)
