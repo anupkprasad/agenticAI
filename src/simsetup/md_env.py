@@ -21,12 +21,30 @@ logger = logging.getLogger(__name__)
 
 _BOOTSTRAPPED = False
 
-# Prefer SimAgentEnv; optionally other local envs that may hold MD tools.
-_CONDA_BIN_CANDIDATES = (
-    Path.home() / "conda_envs" / "SimAgentEnv" / "bin",
-    Path.home() / "conda_envs" / "mdagent" / "bin",
-    Path("/home/akp66103/conda_envs/SimAgentEnv/bin"),
-)
+# Standard conda locations for SimAgentEnv (no machine-specific prefixes).
+def _simagent_conda_bin_dirs() -> List[Path]:
+    dirs: List[Path] = []
+    seen: set[str] = set()
+
+    def _add(path: Path) -> None:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            dirs.append(path)
+
+    if os.environ.get("CONDA_DEFAULT_ENV") == "SimAgentEnv":
+        prefix = os.environ.get("CONDA_PREFIX", "").strip()
+        if prefix:
+            _add(Path(prefix) / "bin")
+
+    conda_exe = os.environ.get("CONDA_EXE") or shutil.which("conda")
+    if conda_exe:
+        base = Path(conda_exe).resolve().parent.parent
+        _add(base / "envs" / "SimAgentEnv" / "bin")
+
+    _add(Path.home() / ".conda" / "envs" / "SimAgentEnv" / "bin")
+    return dirs
+
 
 _AMBER_MODULES = (
     "AmberTools/23.6-foss-2023b",
@@ -119,7 +137,7 @@ def ensure_md_toolchain(*, force: bool = False) -> dict:
 
     # 1) conda env bins (acpype lives here on this cluster)
     conda_bins: List[Path] = []
-    for cand in _CONDA_BIN_CANDIDATES:
+    for cand in _simagent_conda_bin_dirs():
         if not cand.is_dir():
             continue
         if (cand / "acpype").is_file() or (cand / "antechamber").is_file():

@@ -35,9 +35,32 @@ if [[ ! -d "$WD" ]]; then
   exit 1
 fi
 
-# Use SimAgentEnv (override with CONDA_ENV_BIN if needed).
+# Prefer activated SimAgentEnv, else standard conda envs path.
+# Override with CONDA_ENV_BIN.
 if [[ -z "${CONDA_ENV_BIN:-}" ]]; then
-  CONDA_ENV_BIN="${HOME}/conda_envs/SimAgentEnv/bin"
+  if [[ "${CONDA_DEFAULT_ENV:-}" == "SimAgentEnv" && -x "${CONDA_PREFIX:-}/bin/python" ]]; then
+    CONDA_ENV_BIN="${CONDA_PREFIX}/bin"
+  else
+    _conda_base=""
+    if command -v conda >/dev/null 2>&1; then
+      _conda_base="$(conda info --base 2>/dev/null || true)"
+    fi
+    for cand in \
+      ${_conda_base:+"${_conda_base}/envs/SimAgentEnv/bin"} \
+      "${HOME}/.conda/envs/SimAgentEnv/bin"; do
+      if [[ -n "${cand:-}" && -x "${cand}/python" ]]; then
+        CONDA_ENV_BIN="$cand"
+        break
+      fi
+    done
+    unset _conda_base
+  fi
+fi
+if [[ -z "${CONDA_ENV_BIN:-}" || ! -x "${CONDA_ENV_BIN}/python" ]]; then
+  echo "ERROR: SimAgentEnv python not found." >&2
+  echo "  Create with: conda env create -f environment.yml && conda activate SimAgentEnv" >&2
+  echo "  Or set CONDA_ENV_BIN." >&2
+  exit 1
 fi
 export PATH="$CONDA_ENV_BIN:$PATH"
 export LD_LIBRARY_PATH="${CONDA_ENV_BIN%/bin}/lib:${LD_LIBRARY_PATH:-}"

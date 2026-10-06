@@ -1839,7 +1839,9 @@ def main(argv=None):
                              "Valid values: preprocess simsetup hpcjob analysis reporter. "
                              "Omit to run the full pipeline."))
     parser.add_argument("--no-llm", action="store_true",
-                       help="Disable LLM planning (deterministic fallback; not recommended)")
+                       help=("Disable LLM planning and use heuristic / registry-based "
+                             "plans only. Without this flag, a reachable Ollama server "
+                             "or --llm-api-key is required."))
     parser.add_argument("--llm-model", default="gpt-oss:20b",
                        help="LLM model to use")
     parser.add_argument("--llm-base-url", default="http://localhost:11434",
@@ -2167,6 +2169,11 @@ def main(argv=None):
         provider=getattr(args, "llm_provider", "auto") or "auto",
     )
     if use_llm:
+        try:
+            llm_client.require_ready()
+        except RuntimeError as exc:
+            print(f"\nERROR: {exc}", file=sys.stderr, flush=True)
+            sys.exit(2)
         _budget = llm_client.usage.limit
         _usage_path = f"{working_dir}/llm_usage.json"
         if llm_client.usage.billing_enabled and _budget:
@@ -2192,7 +2199,11 @@ def main(argv=None):
                 f"\n  LLM usage: tracking enabled (no budget) → {_usage_path}",
                 flush=True,
             )
-    
+    else:
+        print(
+            "\n  LLM disabled (--no-llm): using heuristic / registry-based plans.",
+            flush=True,
+        )    
     # Set up logging inside working_dir (not at project root)
     log_path = str(Path(working_dir) / "agent_conversation.log")
     set_log_file(log_path)

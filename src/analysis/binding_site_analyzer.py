@@ -151,9 +151,13 @@ def _find_gmx() -> Optional[str]:
     conda_prefix = os.environ.get("CONDA_PREFIX", "").strip()
     if conda_prefix:
         candidates.append(str(Path(conda_prefix) / "bin" / "gmx"))
+    conda_exe = os.environ.get("CONDA_EXE") or shutil.which("conda")
+    if conda_exe:
+        base = Path(conda_exe).resolve().parent.parent
+        candidates.append(str(base / "envs" / "SimAgentEnv" / "bin" / "gmx"))
     home = os.environ.get("HOME", "").strip()
     if home:
-        candidates.append(f"{home}/conda_envs/SimAgentEnv/bin/gmx")
+        candidates.append(f"{home}/.conda/envs/SimAgentEnv/bin/gmx")
 
     seen: set[str] = set()
     for cmd in candidates:

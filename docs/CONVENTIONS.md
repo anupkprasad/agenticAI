@@ -112,8 +112,10 @@ uses the registry automatically.
 
 ## LLM Integration
 
-- **Always provide a fallback.** Every LLM call must have a deterministic code
-  path for when the LLM is unreachable.
+- **LLM is required by default.** Startup fails unless Ollama is reachable or an
+  API key is set. Pass `--no-llm` for heuristic / registry-based plans only.
+- **Always provide a mid-run fallback.** If an LLM call fails after startup,
+  agents should still have a deterministic code path where practical.
 - **Mock mode:** set `_is_mock_mode = True` for testing without an LLM server.
 - **Structured prompts:** include an explicit output-format instruction in every
   LLM prompt (e.g. "Return JSON with keys: ...").

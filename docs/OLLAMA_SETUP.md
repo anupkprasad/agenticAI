@@ -128,8 +128,11 @@ python SimAgent.py \
   --llm-model gpt-oss:20b
 ```
 
-Omit `--llm-*` flags to use the same defaults. Use `--no-llm` only for
-offline / deterministic fallback (weaker planning).
+Omit `--llm-*` flags to use the same defaults. **A reachable LLM is required**
+unless you pass `--no-llm` (heuristic / registry-based plans only).
+
+If Ollama is down and no API key is set, SimAgent exits with setup guidance
+instead of silently mocking the LLM.
 
 ---
 
@@ -153,9 +156,9 @@ python SimAgent.py \
   --llm-model gpt-oss:20b
 ```
 
-There is **no `--api-key` flag** in SimAgent. If you need authenticated
-cloud APIs, put an Ollama-compatible proxy in front and point
-`--llm-base-url` at that proxy.
+There is an `--llm-api-key` flag (also `LLM_API_KEY` / `OPENAI_API_KEY`) for
+OpenAI-compatible APIs. For a local Ollama server, no key is needed — point
+`--llm-base-url` at the host.
 
 ---
 
@@ -208,7 +211,8 @@ endpoint.
 | `Connection refused` on `:11434` | Start `ollama serve` (or the desktop app) |
 | Model not found | `ollama pull gpt-oss:20b` then `ollama list` |
 | Very slow / OOM on GPU | Close other GPU jobs; reduce `OLLAMA_NUM_PARALLEL`; use a larger GPU |
-| SimAgent plans are empty / fallback | Check `agent_conversation.log` for LLM errors; confirm `--llm-model` spelling |
+| SimAgent exits: no reachable LLM | Start Ollama, or set `--llm-api-key`, or pass `--no-llm` |
+| SimAgent plans are empty / mid-run fallback | Check `agent_conversation.log` for LLM errors; confirm `--llm-model` spelling |
 | Conda env created but LLM missing | Normal — install this guide’s server + model; conda only has the client |
 | New machine `conda env create` fails on pins | Use the portable `environment.yml` in the repo root (no machine `prefix:`) |
 

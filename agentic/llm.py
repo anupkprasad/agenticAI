@@ -207,6 +207,99 @@ class LLMClient:
             return True
         return not self._is_mock_mode and (self._client is not None or bool(self.base_url))
 
+    def check_reachable(self, timeout: float = 5.0) -> Tuple[bool, str]:
+        """Probe whether the configured LLM backend is usable.
+
+        Returns ``(ok, detail)``. OpenAI-compatible mode only requires an API
+        key; Ollama mode must respond on ``/api/tags``.
+        """
+        if self.provider == "openai":
+            if self.api_key:
+                return True, (
+                    f"OpenAI-compatible API key configured "
+                    f"(base_url={self.base_url}, model={self.model})"
+                )
+            return False, (
+                "LLM provider is 'openai' but no API key was set "
+                "(--llm-api-key or LLM_API_KEY / OPENAI_API_KEY)"
+            )
+
+        if not self.base_url:
+            return False, "No --llm-base-url configured for Ollama"
+
+        if requests is None:
+            return False, "Python 'requests' package is required to reach Ollama"
+
+        tags_url = urllib.parse.urljoin(self.base_url.rstrip("/") + "/", "api/tags")
+        try:
+            resp = requests.get(tags_url, timeout=timeout)
+        except Exception as exc:
+            return False, f"Cannot reach Ollama at {self.base_url}: {exc}"
+
+        if resp.status_code != 200:
+            return False, (
+                f"Ollama at {self.base_url} returned HTTP {resp.status_code} "
+                f"for /api/tags"
+            )
+
+        try:
+            data = resp.json() if resp.content else {}
+        except Exception:
+            data = {}
+        models = data.get("models") if isinstance(data, dict) else None
+        if isinstance(models, list) and self.model:
+            names = {
+                str(m.get("name") or m.get("model") or "")
+                for m in models
+                if isinstance(m, dict)
+            }
+            # Accept exact name or prefix match (e.g. gpt-oss:20b vs tagged variants)
+            want = self.model.strip()
+            matched = any(
+                n == want or n.startswith(want) or want.startswith(n.split(":")[0])
+                for n in names
+                if n
+            )
+            if not matched:
+                listed = ", ".join(sorted(n for n in names if n)[:8]) or "(none)"
+                return True, (
+                    f"Ollama reachable at {self.base_url}, but model "
+                    f"'{self.model}' not found in /api/tags "
+                    f"(have: {listed}). Run: ollama pull {self.model}"
+                )
+
+        return True, f"Ollama reachable at {self.base_url} (model={self.model})"
+
+    def require_ready(self, timeout: float = 5.0) -> None:
+        """Raise ``RuntimeError`` with setup guidance if the LLM is unavailable."""
+        ok, detail = self.check_reachable(timeout=timeout)
+        if ok:
+            # Model-missing case still returns ok=True with a warning in detail.
+            if "not found in /api/tags" in detail:
+                logger.warning(detail)
+                print(f"\n  WARNING: {detail}", flush=True)
+            return
+
+        raise RuntimeError(
+            "No reachable LLM backend.\n\n"
+            f"  Detail: {detail}\n\n"
+            "SimAgent requires an LLM by default for planning.\n\n"
+            "Options:\n"
+            "  1) Local / remote Ollama:\n"
+            "       ollama serve\n"
+            f"       ollama pull {self.model}\n"
+            "       curl http://HOST:11434/api/tags\n"
+            f"     Then: --llm-base-url {self.base_url or 'http://127.0.0.1:11434'} "
+            f"--llm-model {self.model}\n\n"
+            "  2) Paid / OpenAI-compatible API:\n"
+            "       --llm-provider openai --llm-api-key \"$OPENAI_API_KEY\" \\\n"
+            "       --llm-base-url https://api.openai.com/v1 --llm-model <model>\n"
+            "     (or set LLM_API_KEY / OPENAI_API_KEY)\n\n"
+            "  3) Heuristic / registry-based plans only (no LLM):\n"
+            "       --no-llm\n\n"
+            "See docs/OLLAMA_SETUP.md"
+        )
+
     def _openai_chat(self, prompt: str, system: Optional[str] = None, **kwargs: Any) -> str:
         if requests is None:
             raise RuntimeError("requests package is required for OpenAI API calls")

@@ -79,7 +79,7 @@ Given a natural-language goal and either a PDB file or a UniProt accession, the 
 - **Cross-sim HPC pool** — multi-sim full pipeline preps in parallel (local
   workers), submits up to N SLURM jobs in parallel, then runs post-HPC
   analysis/reporter (see [POOLS.md](POOLS.md)).
-- **Graceful LLM fallback** — deterministic heuristic routing when LLM unavailable.
+- **Required LLM by default** — Ollama or API key; use `--no-llm` for heuristic / registry-based plans only.
 - **Run audit trail** — `agent_conversation.log`, `execution_plan.md`,
   `execution_report.md`, `run_summary.md`, `run_summary.json`, and
   `llm_usage.json` (tokens tagged by workflow node) at the base working
@@ -172,40 +172,55 @@ conda env create -f environment.yml
 conda activate SimAgentEnv
 pip install -e .
 
-# 2. Basic run from a local PDB (LLM on by default, no HITL)
-python SimAgent.py \
-    --goal "Run MD simulation of my_protein.pdb" \
-    --working-dir /work/run1
+# 2. Confirm Ollama (or use --llm-api-key / --no-llm)
+curl -s http://127.0.0.1:11434/api/tags
 
-# 3. From a UniProt accession (downloads AlphaFold, extracts domain)
+# 3. Full pipeline from a local PDB (omit --subtask = all agents)
 python SimAgent.py \
-    --goal "Study ATP binding dynamics of UniProt P21860 ERBB3 kinase domain" \
+    --goal "Run MD for my_protein.pdb, submit to HPC, analyze, and report" \
+    --working-dir /work/run1 \
+    --llm-model gpt-oss:20b \
+    --llm-base-url http://127.0.0.1:11434
+
+# 4. UniProt accession (full pipeline)
+python SimAgent.py \
+    --goal "Study ATP binding of UniProt P21860 ERBB3 kinase domain;
+            download AlphaFold, extract domain, run MD, analyze, report" \
     --working-dir /work/erbb3 \
-    --subtask preprocess simsetup hpcjob
+    --llm-model gpt-oss:20b \
+    --llm-base-url http://127.0.0.1:11434
 
-# 4. Custom LLM endpoint (Ollama must be running)
-python SimAgent.py \
-    --goal "Simulate the kinase-ligand complex" \
-    --llm-base-url http://localhost:11434
-
-# 5. Multi-protein comparative study (explicit PDB list)
+# 5. Multi-protein comparative study (full pipeline)
 python SimAgent.py \
     --goal "Compare pseudokinase dynamics for p21860, q8iv63 — apo and ATP-bound" \
     --pdb-list p21860.pdb q8iv63.pdb \
     --working-dir /work/pseudo \
-    --subtask preprocess simsetup hpcjob
+    --llm-model gpt-oss:20b \
+    --llm-base-url http://127.0.0.1:11434
 
-# 6. Interactive checkpoints
+# 6. Setup + HPC only (intentional subset)
+python SimAgent.py \
+    --goal "Preprocess, setup, and submit MD for my_protein.pdb" \
+    --working-dir /work/run1 \
+    --subtask preprocess simsetup hpcjob \
+    --llm-model gpt-oss:20b \
+    --llm-base-url http://127.0.0.1:11434
+
+# 7. Analysis + report only
+python SimAgent.py \
+    --goal "Analyse existing trajectory in /work/run1/hpc" \
+    --working-dir /work/run1 \
+    --subtask analysis reporter \
+    --llm-model gpt-oss:20b \
+    --llm-base-url http://127.0.0.1:11434
+
+# 8. Interactive checkpoints
 python SimAgent.py \
     --goal "..." \
     --working-dir /work/run1 \
+    --llm-model gpt-oss:20b \
+    --llm-base-url http://127.0.0.1:11434 \
     --HITL all
-
-# 7. Subtask mode (run only specific agents)
-python SimAgent.py \
-    --subtask analysis reporter \
-    --goal "Analyse existing trajectory in /work/run1/hpc" \
-    --working-dir /work/run1
 ```
 
 ## CLI Reference
@@ -217,7 +232,7 @@ python SimAgent.py \
 | `--pdb-list` | *(none)* | Explicit PDB file list for multi-sim |
 | `--sim-dirs` | *(none)* | Existing sim dirs for analysis-only multi-sim |
 | `--subtask` | *(all)* | Agents to run: `preprocess simsetup hpcjob analysis reporter` |
-| `--no-llm` | `False` | Disable LLM-powered routing and planning |
+| `--no-llm` | `False` | Heuristic / registry plans only (skips LLM requirement) |
 | `--llm-model` | `gpt-oss:20b` | Ollama model name |
 | `--llm-base-url` | `http://127.0.0.1:11434` | Ollama server URL |
 | `--HITL` | off | `error` or `all` — enable human-in-the-loop (or `campaign.yaml` `hitl`) |

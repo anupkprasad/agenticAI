@@ -60,6 +60,10 @@ conda activate SimAgentEnv
 pip install -e .
 ```
 
+Conda places `SimAgentEnv` in its default envs directory (no custom `--prefix`).
+Activate it before running SimAgent or use the example launchers, which resolve
+the env the same way.
+
 Confirm the CLI loads:
 
 ```bash
@@ -84,42 +88,67 @@ Quick health check after the server is running:
 curl -s http://127.0.0.1:11434/api/tags
 ```
 
-LLM planning is **on by default**. Use `--no-llm` only for offline or
-deterministic fallback runs.
+LLM planning is **on by default** and **requires** a reachable Ollama server
+or an API key (`--llm-api-key` / `OPENAI_API_KEY`). If neither is available,
+SimAgent exits with setup guidance. Use `--no-llm` only for offline
+heuristic / registry-based planning.
 
 ---
 
 ## Quick Start
 
-### Single simulation from a local PDB
+Prerequisites: `SimAgentEnv` activated, and either a reachable Ollama server
+(`curl -s http://127.0.0.1:11434/api/tags`) or an API key. Omit `--subtask` to
+run the **full** pipeline (`preprocess simsetup hpcjob analysis reporter`).
+Pass `--subtask` only when you intentionally want a subset of stages.
+
+### Single simulation from a local PDB (full pipeline)
 
 ```bash
 python SimAgent.py \
-  --goal "Preprocess and setup MD for my_protein.pdb for 50 ns, then submit to HPC" \
+  --goal "Preprocess and setup MD for my_protein.pdb for 50 ns, submit to HPC,
+          then analyze (RMSD, RMSF, Rg) and write a report." \
   --working-dir /work/run1 \
-  --subtask preprocess simsetup hpcjob
+  --llm-model gpt-oss:20b \
+  --llm-base-url http://127.0.0.1:11434
 ```
 
-### UniProt accession (download + domain extraction)
+### UniProt accession (download + domain extraction, full pipeline)
 
 ```bash
 python SimAgent.py \
   --goal "Study ATP binding of UniProt P21860 (ERBB3). Download AlphaFold PDB,
-          extract kinase domain, run 1 ns MD for protein-only and protein+ATP+MG.
-          Submit to HPC." \
+          extract kinase domain, run 1 ns MD for protein-only and protein+ATP+MG,
+          submit to HPC, then analyze and report." \
   --working-dir /work/erbb3 \
-  --subtask preprocess simsetup hpcjob
+  --llm-model gpt-oss:20b \
+  --llm-base-url http://127.0.0.1:11434
 ```
 
-### Multi-protein comparative study
+### Multi-protein comparative study (full pipeline)
 
 ```bash
 python SimAgent.py \
-  --goal "Run 100 ns MD for each pseudokinase and submit to HPC.
+  --goal "Run 100 ns MD for each pseudokinase, submit to HPC, then analyze and
+          write a combined report.
           Names: p21860=ERBB3, q8iv63=VRK3, q8nb16=MLKL, q8wz42=TITIN." \
   --pdb-list p21860.pdb q8iv63.pdb q8nb16.pdb q8wz42.pdb \
   --working-dir /work/pseudo \
-  --subtask preprocess simsetup hpcjob
+  --llm-model gpt-oss:20b \
+  --llm-base-url http://127.0.0.1:11434
+```
+
+### Setup + HPC only (no analysis yet)
+
+Use `--subtask` when you only want these stages:
+
+```bash
+python SimAgent.py \
+  --goal "Preprocess and setup MD for my_protein.pdb for 50 ns, then submit to HPC." \
+  --working-dir /work/run1 \
+  --subtask preprocess simsetup hpcjob \
+  --llm-model gpt-oss:20b \
+  --llm-base-url http://127.0.0.1:11434
 ```
 
 ### Analysis-only on completed trajectories
@@ -128,8 +157,14 @@ python SimAgent.py \
 python SimAgent.py \
   --goal "Compute RMSD, RMSF, Rg, DCCM, DSSP and generate the report." \
   --working-dir /work/run1 \
-  --subtask analysis reporter
+  --subtask analysis reporter \
+  --llm-model gpt-oss:20b \
+  --llm-base-url http://127.0.0.1:11434
 ```
+
+Remote Ollama: change `--llm-base-url` to `http://GPU_HOST:11434`.
+Paid API: add `--llm-provider openai --llm-api-key "$OPENAI_API_KEY"` (and a
+matching `--llm-model` / `--llm-base-url`). Offline heuristic plans: `--no-llm`.
 
 Hands-on walkthrough (apo/holo panel, status, reports, provenance):
 [example/TUTORIAL.md](example/TUTORIAL.md)
@@ -259,7 +294,7 @@ python SimAgent.py --goal "..." [options]
 | `--pdb-list`           | —                               | Explicit PDB list                                                                                              |
 | `--sim-dirs`           | —                               | Existing sim directories for analysis-only                                                                     |
 | `--subtask`            | all agents                       | `preprocess simsetup hpcjob analysis reporter`                                                               |
-| `--no-llm`             | off                              | Disable LLM planning (deterministic fallback)                                                                  |
+| `--no-llm`             | off                              | Heuristic / registry-based plans only (no LLM required)                                                        |
 | `--llm-model`          | `gpt-oss:20b`                  | Model name                                                                                                     |
 | `--llm-base-url`       | `http://localhost:11434`       | LLM API base URL                                                                                               |
 | `--HITL`               | off                              | `error` or `all` — enable human-in-the-loop (default: off; or `campaign.yaml` `hitl`)                 |
@@ -391,49 +426,6 @@ docs/
 | [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md)       | Analysis tool calculations, theory, and standard outputs   |
 | [docs/POOLS.md](docs/POOLS.md)                         | Local parallel workers and SLURM HPC pool                  |
 | [docs/OLLAMA_SETUP.md](docs/OLLAMA_SETUP.md)           | Install Ollama server + pull`gpt-oss:20b` (not in conda) |
-
----
-
-## Example: unsupervised classification (protein–ATP panel)
-
-Use when trajectories already exist and you want a **feature matrix** for
-clustering — **without** manual labels. Two common styles:
-
-**A. Classic binding + Cartesian FEL features**
-
-```bash
-python SimAgent.py \
-  --goal "Simulations are complete for 35 protein–ATP holo systems under ./agenticB5R1/<label>/. For each trajectory run: ligand pocket distance, protein–ATP contacts, pocket SASA, ligand residence/unbinding analysis, pocket RMSF, ligand RMSF, PCA on Cα, free-energy landscape at 310 K, and FEL basin features. After all per-simulation analyses, build an unsupervised classification feature table (raw CSV + z-score CSV) across all systems. In combined analysis, overlay ligand pocket distance and protein RMSF. Generate a combined HTML report." \
-  --working-dir ./agenticB5R1 \
-  --subtask analysis reporter
-```
-
-**B. Family modular comparative dynamics** (scientific descriptors; LLM selects columns)
-
-```bash
-python SimAgent.py \
-  --goal "Five protein–ATP holo systems under ./pseudokin_5x2/run_01/. Use KAPCA (p17612) as the reference pocket (residues within 15 Å of ATP), map via global MSA. From replicates (average across reps): ATP–pocket COM distance mean/std, pocket axis orientation mean/std, consensus Cα RMSF mean/std, pocket χ₁ circular mean, N↔C DCCM correlation, independent dihedral PCA landscape entropy. Assemble a feature table, hierarchical clustering dendrogram with feature heatmap (robust scaling OK; do not fix k), and a combined HTML report." \
-  --working-dir ./pseudokin_5x2/run_01 \
-  --rep-num 2 \
-  --subtask analysis reporter \
-  --combined-only
-```
-
-Classification runs **only** when the goal asks for classification / clustering /
-a feature matrix / family modular comparative descriptors — not during ordinary
-overlay-only combined analysis.
-
-**Typical outputs** under `{base}/analysis/`:
-
-| File                                      | Role                                               |
-| ----------------------------------------- | -------------------------------------------------- |
-| `classification_features.csv`           | Raw scalars (one row per system)                   |
-| `classification_features_zscore.csv`    | Robust/IQR or classic z-scores — clustering input |
-| `classification_feature_selection.json` | LLM-chosen columns + scientific reasoning          |
-| `classification_dendrogram_heatmap.png` | Dendrogram + feature heatmap panel                 |
-
-See [docs/ANALYSIS_TOOLS.md](docs/ANALYSIS_TOOLS.md) for metric groups, modular
-tools, normalization, and clustering.
 
 ---
 

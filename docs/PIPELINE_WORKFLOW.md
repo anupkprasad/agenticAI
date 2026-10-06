@@ -258,7 +258,7 @@ Full filename list: [ANALYSIS_TOOLS.md](ANALYSIS_TOOLS.md#standard-output-filena
 | `--rep-num N` | N production replicates per label | Nested `hpc/repXX`, `analysis/repXX`, `analysis/avg/` (metrics mean±std; not averaged .xtc) |
 | `--hpc-check-interval 3m` | Poll SLURM more often | Same files; shorter wait between checks |
 | `--llm-concurrency` / `--parallel-workers` | Local worker count | Same tree; more `{label}/` dirs fill in parallel |
-| `--no-llm` | Heuristic routing / plans | Same folders; weaker tool selection |
+| `--no-llm` | Heuristic / registry plans (required if no LLM) | Same folders; weaker tool selection |
 | `--force-field` / `--water-model` | SimSetup parameters | Same filenames; different `.top` / `.mdp` |
 | `--reuse-hpc` | Full pipeline without `sbatch` | Keeps existing `hpc/md.tpr` and `hpc/mdWrap.xtc` |
 | `--prompt "…"` | Overrides enriched prompt | Does not change folder layout |
