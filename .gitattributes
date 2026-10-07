@@ -1,0 +1,13 @@
+# Keep GitHub language stats focused on the Python package, not deposited reports.
+# Reporter HTML (often multi‑MB with embedded images) otherwise dominates Linguist.
+
+# Generated / deposited HTML reports and provenance
+example/**/*.html linguist-generated=true
+campaigns/**/*.html linguist-generated=true
+**/reporter/**/*.html linguist-generated=true
+**/combined_report.html linguist-generated=true
+**/report.html linguist-generated=true
+
+# Large campaign logs are not source either
+campaigns/**/*.log linguist-generated=true
+example/**/*.log linguist-generated=true
