@@ -53,12 +53,16 @@ Scientific dependencies (GROMACS, AmberTools, MDAnalysis, LangChain, …) live i
 one conda environment named **`SimAgentEnv`**:
 
 ```bash
-git clone <this-repo-url> agenticAI
+git clone https://github.com/anupkprasad/agenticAI.git
 cd agenticAI
 conda env create -f environment.yml
 conda activate SimAgentEnv
 pip install -e .
 ```
+
+Cloning the default branch (`main`) is enough for normal use. The manuscript /
+Code Ocean freeze lives on branch `SimAgent_v1.0` (`git clone -b SimAgent_v1.0 …`)
+and is optional unless you need that peer-review packaging.
 
 Conda places `SimAgentEnv` in its default envs directory (no custom `--prefix`).
 Activate it before running SimAgent or use the example launchers, which resolve
