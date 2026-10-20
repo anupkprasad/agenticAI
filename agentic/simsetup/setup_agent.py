@@ -442,7 +442,37 @@ class SimulationSetupAgent:
                     # LLM unavailable — fall back; human_rec is already in additional_instructions
                     plan = self._create_setup_plan(agent_input, state)
             else:
-                plan = self._create_setup_plan(agent_input, state)
+                prior = ((exec_plan or {}).get("structured_plans") or {}).get("setup")
+                force_replan = bool(state.get("force_replan") or state.get("setup_force_replan"))
+                if (
+                    not force_replan
+                    and isinstance(prior, dict)
+                    and prior.get("steps")
+                ):
+                    logger.info(
+                        "setup: reusing structured plan (%d steps), not re-planning",
+                        len(prior.get("steps") or []),
+                    )
+                    plan = SimSetupPlan(
+                        reasoning=prior.get("reasoning") or "Compiled setup plan",
+                        overview=prior.get("overview") or "Reuse structured setup plan",
+                        steps=[
+                            SimSetupStep(
+                                name=s.get("name", ""),
+                                description=s.get("description", ""),
+                                tool_name=s.get("tool_name", ""),
+                                tool_params=s.get("tool_params", {}),
+                                reason=s.get("reason", ""),
+                            )
+                            for s in (prior.get("steps") or [])
+                            if s.get("tool_name")
+                        ],
+                        potential_issues=prior.get("potential_issues") or [],
+                        recommendations=prior.get("recommendations") or [],
+                    )
+                    plan = self._normalize_multi_rep_setup_plan(plan, state)
+                else:
+                    plan = self._create_setup_plan(agent_input, state)
 
             try:
                 _rn = int(state.get("rep_num") or 1)
@@ -1493,6 +1523,30 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                                             shutil.copy2(state_value, str(simsetup_path))
                                             logger.info(f"Copied {filename} from {state_value} to simsetup")
                                             break
+
+                # P0: force protein inputs from cleaned_pdb — never trust LLM-hallucinated
+                # paths like domain_clean.pdb that do not exist on disk.
+                cleaned = state.get("cleaned_pdb")
+                if cleaned and Path(cleaned).is_file():
+                    dest_name = Path(cleaned).name
+                    dest = Path(simsetup_dir) / dest_name
+                    if not dest.exists():
+                        shutil.copy2(str(cleaned), str(dest))
+                        logger.info(
+                            "Copied cleaned_pdb %s → simsetup/%s", cleaned, dest_name
+                        )
+                    for pk in ("protein_file", "pdb_file", "protein_pdb"):
+                        if pk not in tool_params:
+                            continue
+                        prev = tool_params.get(pk)
+                        if Path(str(prev or "")).name != dest_name:
+                            logger.warning(
+                                "Overriding %s=%r → %s (cleaned_pdb)",
+                                pk,
+                                prev,
+                                dest_name,
+                            )
+                            tool_params[pk] = dest_name
                 
                 # ALWAYS force output_dir and working_dir to simsetup directory
                 # regardless of what the LLM plan suggests — prevents file leaks

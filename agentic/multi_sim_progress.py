@@ -367,6 +367,10 @@ def per_sim_family_modular_done_on_disk(working_dir: str) -> bool:
         "consensus_DCCM",
         "consensus_PCA",
     )
+    # Accept either on-disk name (canonical consensus_PCA or legacy _ref).
+    aliases = {
+        "consensus_PCA": ("consensus_PCA", "consensus_PCA_ref"),
+    }
     search_dirs = [analysis_dir]
     avg = analysis_dir / "avg"
     if avg.is_dir():
@@ -374,13 +378,19 @@ def per_sim_family_modular_done_on_disk(working_dir: str) -> bool:
     search_dirs.extend(sorted(analysis_dir.glob("rep*")))
 
     def _dir_has_output(d: Path, name: str) -> bool:
-        target = d / name
-        if not target.is_dir():
-            return False
-        # Any json/csv/dat under the modular dir counts as produced output.
-        return any(target.glob("*.json")) or any(target.glob("*.csv")) or any(
-            target.glob("*.dat")
-        ) or any(target.glob("*.npz"))
+        for cand in aliases.get(name, (name,)):
+            target = d / cand
+            if not target.is_dir():
+                continue
+            # Any json/csv/dat under the modular dir counts as produced output.
+            if (
+                any(target.glob("*.json"))
+                or any(target.glob("*.csv"))
+                or any(target.glob("*.dat"))
+                or any(target.glob("*.npz"))
+            ):
+                return True
+        return False
 
     # Prefer avg/ when present: multi-rep fan-out writes modular results there
     # or under each rep. Accept if every needed dir exists in any search root
@@ -429,7 +439,10 @@ def _working_dir_requests_paper_ward4(working_dir: str) -> bool:
     return _working_dir_requests_family_modular(working_dir)
 
 
-def per_sim_analysis_done_on_disk(working_dir: str) -> bool:
+def per_sim_analysis_done_on_disk(
+    working_dir: str,
+    state: Optional[Dict[str, Any]] = None,
+) -> bool:
     """True when per-sim analysis produced real metric artifacts (not stub-only).
 
     ``analysis_summary.jsonl`` alone is insufficient: a failed/retry loop can
@@ -445,6 +458,9 @@ def per_sim_analysis_done_on_disk(working_dir: str) -> bool:
     When the enclosing campaign ``goal.txt`` requests family modular dynamics,
     also require the four modular ``consensus_*`` output directories — contacts
     or RMSD alone must not short-circuit that analysis.
+
+    When the goal explicitly names metrics (RMSD/RMSF/Rg/…), every requested
+    data file must be present — a lone RMSD no longer completes a 3-metric goal.
     """
     analysis_dir = Path(working_dir) / "analysis"
     summary_ok = (analysis_dir / "analysis_summary.jsonl").is_file()
@@ -465,6 +481,7 @@ def per_sim_analysis_done_on_disk(working_dir: str) -> bool:
         "rmsd.dat",
         "rmsd.png",
         "rmsf.dat",
+        "gyration.dat",
         "pca_projections.dat",
         "fel_basins.png",
         "fel_features.json",
@@ -486,7 +503,7 @@ def per_sim_analysis_done_on_disk(working_dir: str) -> bool:
         if any((d / name).is_file() for name in strong_markers):
             base_ok = True
             break
-        for pattern in ("rmsd*", "rmsf*", "pca_*", "fel_*", "*contacts*", "*residence*"):
+        for pattern in ("rmsd*", "rmsf*", "gyration*", "pca_*", "fel_*", "*contacts*", "*residence*"):
             if any(d.glob(pattern)):
                 base_ok = True
                 break
@@ -495,6 +512,14 @@ def per_sim_analysis_done_on_disk(working_dir: str) -> bool:
     # Pocket COM alone is a mandatory inject, not a complete analysis.
     if not base_ok:
         return False
+    # Intent-aware completeness when goal names specific metrics
+    try:
+        from agentic.campaign.contracts import required_metric_files_missing
+
+        if required_metric_files_missing(working_dir, state=state):
+            return False
+    except Exception:
+        pass
     return True
 
 
@@ -1229,6 +1254,79 @@ def _stats_csv_has_multiple_sims(path: Path) -> bool:
     return ok >= 2
 
 
+def _stats_csv_labels(path: Path) -> set:
+    """Simulation labels present in a combined stats CSV (first column)."""
+    labels: set = set()
+    try:
+        lines = [
+            ln.strip()
+            for ln in path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if ln.strip()
+        ]
+    except OSError:
+        return labels
+    for row in lines[1:]:
+        parts = row.split(",")
+        if not parts:
+            continue
+        lower = row.lower()
+        if "no such file" in lower or ",[errno" in lower:
+            continue
+        lab = parts[0].strip().strip('"').lower()
+        if lab and lab != "simulation":
+            labels.add(lab)
+    return labels
+
+
+def post_combined_artifacts_ok(
+    analysis_dir: str | Path,
+    expected_labels: Optional[List[str]] = None,
+) -> bool:
+    """True when base/analysis has usable multi-sim overlay / stats artifacts.
+
+    Used for post-combined success (artifact-based) so optional LLM step
+    failures (comparison tables, multipanel) do not block the reporter.
+    """
+    adir = Path(analysis_dir)
+    if not adir.is_dir():
+        return False
+
+    overlays = sorted(adir.glob("*_overlay.png"))
+    strong = (
+        adir / "classification_features.csv",
+        adir / "classification_clusters.json",
+        adir / "com_distance_overlay.png",
+        adir / "ligand_rmsf_overlay.png",
+        adir / "pocket_rmsf_overlay.png",
+    )
+    has_strong = any(p.is_file() for p in strong) or bool(overlays)
+    if not has_strong:
+        return False
+
+    need = {str(x).strip().lower() for x in (expected_labels or []) if str(x).strip()}
+    if len(need) < 2:
+        # Unknown / single-label set: overlays or multi-row stats are enough
+        if overlays:
+            return True
+        return any(
+            (adir / name).is_file() and _stats_csv_has_multiple_sims(adir / name)
+            for name in ("rmsd_stats.csv", "rmsf_stats.csv", "rg_stats.csv")
+        )
+
+    # Require at least one stats table covering every expected label, or
+    # enough overlay plots when stats are missing but overlays exist.
+    for stats_name in ("rmsd_stats.csv", "rmsf_stats.csv", "rg_stats.csv"):
+        stats_path = adir / stats_name
+        if not stats_path.is_file():
+            continue
+        have = _stats_csv_labels(stats_path)
+        if need.issubset(have):
+            return True
+
+    # Overlay-only fallback: at least one overlay + marker labels elsewhere
+    return len(overlays) >= 1
+
+
 def _expected_combined_labels(state: Optional[Dict[str, Any]]) -> List[str]:
     """Labels combined analysis must cover — prefer currently healthy production sims."""
     if not state:
@@ -1286,6 +1384,8 @@ def _combined_analysis_done_on_disk(
         ]
 
     # Authoritative: completion marker must list every expected (healthy) label.
+    # If the marker says success=false but overlays/stats on disk cover the
+    # expected sims, treat as done (optional LLM steps may have failed).
     marker = analysis_dir / "combined_analysis_complete.json"
     if marker.is_file():
         try:
@@ -1295,34 +1395,30 @@ def _combined_analysis_done_on_disk(
         except Exception:
             data = {}
         labels = [str(x) for x in (data.get("labels") or []) if x]
+        have = {x.lower() for x in labels}
         if expected_labels and len(expected_labels) >= 2:
-            have = {x.lower() for x in labels}
             need = {x.lower() for x in expected_labels}
-            return need.issubset(have) and bool(data.get("success", True))
-        if len(labels) >= 2 and bool(data.get("success", True)):
+            labels_ok = need.issubset(have)
+            if labels_ok and bool(data.get("success", True)):
+                return True
+            if labels_ok and post_combined_artifacts_ok(
+                analysis_dir, expected_labels=expected_labels
+            ):
+                return True
+        elif len(labels) >= 2 and (
+            bool(data.get("success", True))
+            or post_combined_artifacts_ok(analysis_dir, expected_labels=labels)
+        ):
             return True
 
-    # Known multi-sim set without a covering marker → not done (ignore stale overlays).
+    # Known multi-sim set: allow artifact-based done without a success marker
     if expected_labels and len(expected_labels) >= 2:
-        return False
+        return post_combined_artifacts_ok(
+            analysis_dir, expected_labels=expected_labels
+        )
 
     # Legacy / unknown label set: keep artifact heuristics.
-    strong = (
-        analysis_dir / "classification_features.csv",
-        analysis_dir / "classification_clusters.json",
-        analysis_dir / "com_distance_overlay.png",
-        analysis_dir / "ligand_rmsf_overlay.png",
-        analysis_dir / "pocket_rmsf_overlay.png",
-    )
-    if any(path.is_file() for path in strong):
-        return True
-    if any(analysis_dir.glob("*_overlay.png")):
-        return True
-    for stats_name in ("rmsd_stats.csv", "rmsf_stats.csv"):
-        stats_path = analysis_dir / stats_name
-        if stats_path.is_file() and _stats_csv_has_multiple_sims(stats_path):
-            return True
-    return False
+    return post_combined_artifacts_ok(analysis_dir, expected_labels=None)
 
 
 def _combined_reporter_done_on_disk(

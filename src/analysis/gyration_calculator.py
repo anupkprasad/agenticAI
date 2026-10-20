@@ -49,10 +49,11 @@ def finalize_rg_result(
     max_rg = float(np.max(rg_arr))
 
     output_filename = output_file or "rg.dat"
+    # MDAnalysis ts.time is picoseconds — write ns to match rmsd.dat / combined plots.
     with open(output_filename, "w") as f:
-        f.write("# Time(ps)\tRg(Angstrom)\n")
+        f.write("# Time(ns)\tRg(Angstrom)\n")
         for t, rg in zip(times_arr, rg_arr):
-            f.write(f"{t:.4f}\t{rg:.4f}\n")
+            f.write(f"{float(t) / 1000.0:.4f}\t{rg:.4f}\n")
 
     if working_dir:
         try:

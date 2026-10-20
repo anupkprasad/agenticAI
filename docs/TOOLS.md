@@ -59,7 +59,7 @@ These modules enable starting from a UniProt accession with no local PDB file.
 |--------|------|------|
 | **Request parser** | `src/preprocess/structure_request_parser.py` | Extracts UniProt ID, domain label, residue ranges from natural language |
 | **AlphaFold source** | `src/preprocess/structure_sources/alphafold.py` | Downloads predicted structure from AlphaFold API (default) |
-| **RCSB source** | `src/preprocess/structure_sources/rcsb.py` | Downloads experimental structure from RCSB PDB (fallback) |
+| **RCSB source** | `src/preprocess/structure_sources/rcsb.py` | UniProt→experimental PDB lookup, or direct download by PDB ID |
 | **Source registry** | `src/preprocess/structure_sources/registry.py` | Priority-ordered pluggable download backends |
 | **UniProt domain source** | `src/preprocess/domain_sources/uniprot.py` | Queries UniProt REST API for Domain/Region feature annotations |
 | **Domain registry** | `src/preprocess/domain_sources/registry.py` | `lookup_domain_range()` with offline fallback table |
@@ -67,7 +67,8 @@ These modules enable starting from a UniProt accession with no local PDB file.
 | **Acquire structure tool** | `src/preprocess/acquire_structure_tool.py` | End-to-end: download → domain trim → validate |
 | **Domain lookup tool** | `src/preprocess/domain_lookup_tool.py` | `lookup_domain_range_tool` (LangChain `@tool`) for the Preprocessing agent |
 | **Structure validator** | `src/preprocess/structure_validator.py` | Missing residue check, broken backbone (Cα–Cα > 4.5 Å), component availability |
-| **Structure downloader** | `src/preprocess/structure_downloader.py` | `download_structure` tool wrapping AlphaFold + RCSB backends |
+| **Structure downloader** | `src/preprocess/structure_downloader.py` | `download_structure` (UniProt) + `download_pdb_by_id` (RCSB ID) |
+| **Sequence downloader** | `src/preprocess/sequence_downloader.py` | `download_protein_sequence` UniProt/RCSB FASTA (not required for MD) |
 
 ### External APIs used for structure acquisition
 
@@ -76,6 +77,10 @@ These modules enable starting from a UniProt accession with no local PDB file.
 | AlphaFold EBI API | Fetch predicted PDB by UniProt accession | `https://alphafold.ebi.ac.uk/api/prediction/{accession}` |
 | RCSB PDB REST API | Fetch experimental PDB by entry ID | `https://files.rcsb.org/download/{id}.pdb` |
 | UniProt REST API | Domain / Region feature annotations | `https://rest.uniprot.org/uniprotkb/{accession}` |
+| UniProt FASTA | Canonical sequence download | `https://rest.uniprot.org/uniprotkb/{accession}.fasta` |
+| RCSB FASTA | Polymer sequence(s) for a PDB entry | `https://www.rcsb.org/fasta/entry/{id}/download` |
+
+**Note:** UniProt does not host independent 3D coordinate files for MD. Structure-by-UniProt uses AlphaFold DB and/or RCSB; sequence FASTA is optional and does not replace a structure.
 
 ---
 

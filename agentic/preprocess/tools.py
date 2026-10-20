@@ -13,7 +13,8 @@ from src.utils.pdb_analyzer import analyze_pdb
 from src.preprocess.hydrogen_adder import add_hydrogens
 from src.preprocess.structure_validator import validate_structure
 from src.preprocess.complex_separator import separate_complex_components
-from src.preprocess.structure_downloader import download_structure
+from src.preprocess.structure_downloader import download_structure, download_pdb_by_id
+from src.preprocess.sequence_downloader import download_protein_sequence
 from src.preprocess.domain_extractor import extract_domain
 from src.preprocess.acquire_structure_tool import acquire_protein_structure
 from src.preprocess.domain_lookup_tool import lookup_domain_range_tool
@@ -32,6 +33,8 @@ __all__ = [
     "validate_structure",
     "separate_complex_components",
     "download_structure",
+    "download_pdb_by_id",
+    "download_protein_sequence",
     "extract_domain",
     "acquire_protein_structure",
     "lookup_domain_range_tool",
@@ -58,6 +61,8 @@ def get_preprocessing_tools() -> list:
         acquire_protein_structure,
         lookup_domain_range_tool,
         download_structure,
+        download_pdb_by_id,
+        download_protein_sequence,
         extract_domain,
         detect_missing_structure_elements,
         remodel_structure,
@@ -131,6 +136,8 @@ class PreprocessingToolExecutor:
             "acquire_protein_structure": acquire_protein_structure,
             "lookup_domain_range_tool": lookup_domain_range_tool,
             "download_structure": download_structure,
+            "download_pdb_by_id": download_pdb_by_id,
+            "download_protein_sequence": download_protein_sequence,
             "extract_domain": extract_domain,
             "detect_missing_structure_elements": detect_missing_structure_elements,
             "remodel_structure": remodel_structure,

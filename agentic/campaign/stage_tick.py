@@ -174,8 +174,14 @@ def stage_already_done(state: Dict[str, Any], stage: str) -> bool:
     if key == "hpc" and (state.get("job_id") or state.get("reuse_hpc")):
         sim = _sim_dir(state)
         return bool(sim and hpc_done_on_disk(sim))
-    if key == "analysis" and state.get("analysis_results"):
-        return True
+    if key == "analysis":
+        # Never trust analysis_results alone — require disk science (or verify flag).
+        if state.get("analysis_science_ok") is False:
+            return False
+        sim = _sim_dir(state)
+        if sim is not None and analysis_done_on_disk(sim):
+            return True
+        return False
     return False
 
 

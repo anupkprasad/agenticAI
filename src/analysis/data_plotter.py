@@ -1049,8 +1049,19 @@ def plot_multipanel(
                        ha='center', va='center', transform=ax.transAxes)
                 continue
             
-            x_data = data_columns[0]
+            x_data = list(data_columns[0])
             y_data = data_columns[1]
+
+            # New gyration.dat is Time(ns); legacy files may still be Time(ps).
+            # Normalize so combined_metrics always plots Time (ns).
+            xlabel_hint = None
+            if xlabels is not None and idx < len(xlabels):
+                xlabel_hint = xlabels[idx]
+            elif len(column_names) > 0:
+                xlabel_hint = column_names[0]
+            x_data, xlabel_resolved = _normalize_time_x_to_ns(
+                x_data, column_names, 0, xlabel=xlabel_hint
+            )
             
             # Determine plot type
             plot_type = plot_types[idx] if idx < len(plot_types) else "line"
@@ -1067,7 +1078,9 @@ def plot_multipanel(
                 ax.bar(x_data, y_data, color=color, alpha=0.7)
             
             # Set labels
-            if xlabels is not None and idx < len(xlabels):
+            if xlabel_resolved:
+                ax.set_xlabel(xlabel_resolved, fontsize=11, fontweight='bold')
+            elif xlabels is not None and idx < len(xlabels):
                 ax.set_xlabel(xlabels[idx], fontsize=11, fontweight='bold')
             elif len(column_names) > 0:
                 ax.set_xlabel(column_names[0], fontsize=11, fontweight='bold')
@@ -1081,7 +1094,7 @@ def plot_multipanel(
             if titles is not None and idx < len(titles):
                 ax.set_title(titles[idx], fontsize=12, fontweight='bold')
             else:
-                ax.set_title(Path(data_file).stem.replace('_', ' ').title(), 
+                ax.set_title(Path(rel_file).stem.replace('_', ' ').title(), 
                            fontsize=12, fontweight='bold')
             
             # Grid

@@ -12,7 +12,8 @@ from agentic.campaign.spec import CampaignSpec, spec_from_state
 
 logger = logging.getLogger(__name__)
 
-# Visualisation-only tools. A failed plot must not fail the simulation.
+# Visualisation-only / redundant helpers. Failures must not fail the simulation
+# when core metric artifacts (or combined overlays) are already on disk.
 NONCRITICAL_ANALYSIS_TOOLS = frozenset(
     {
         "plot_md_data",
@@ -25,6 +26,9 @@ NONCRITICAL_ANALYSIS_TOOLS = frozenset(
         "plot_combined_data",
         "plot_reference_msa_alignment",
         "plot_global_mapped_alignment",
+        # Often redundant after run_combined_analysis wrote *_stats.csv / overlays
+        "compute_comparison_table",
+        "collect_metric_files",
     }
 )
 
@@ -54,19 +58,96 @@ def is_noncritical_analysis_tool(tool_name: str) -> bool:
 
 
 def decide_analysis_success(*, artifact_ok: bool, critical_issues: Sequence[str]) -> bool:
-    """Pass if required artifacts exist, or if only non-critical steps failed."""
-    if artifact_ok:
-        return True
-    return not bool(critical_issues)
+    """Pass only when artifacts exist AND no critical calculator failures remain."""
+    if critical_issues:
+        return False
+    return bool(artifact_ok)
+
+
+def required_metric_files_missing(
+    working_dir: str,
+    state: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Return missing data files for metrics explicitly requested in the goal."""
+    try:
+        from agentic.planner.planning_guidelines import (
+            STANDARD_OUTPUT_ALTERNATES,
+            STANDARD_OUTPUT_FILES,
+            detect_requested_metrics_union,
+        )
+    except Exception:
+        return []
+
+    texts: List[str] = []
+    if state:
+        for key in (
+            "user_goal_original",
+            "user_goal",
+            "master_enriched_prompt",
+            "enriched_prompt",
+            "analysis_instructions",
+        ):
+            val = state.get(key)
+            if val:
+                texts.append(str(val))
+    # Campaign goal.txt next to the sim folder
+    wd = Path(working_dir)
+    for cand in (wd.parent / "goal.txt", wd / "goal.txt"):
+        if cand.is_file():
+            try:
+                texts.append(cand.read_text(encoding="utf-8", errors="ignore"))
+            except OSError:
+                pass
+    metrics = detect_requested_metrics_union(*texts) if texts else None
+    if not metrics:
+        return []
+
+    search = _search_dirs(str(wd))
+    if not search:
+        search = [wd / "analysis"]
+
+    missing: List[str] = []
+    for metric in sorted(metrics):
+        if metric in {"gyration"}:
+            metric = "rg"
+        spec = STANDARD_OUTPUT_FILES.get(metric) or {}
+        data_name = spec.get("data")
+        if not data_name:
+            continue
+        alts = (STANDARD_OUTPUT_ALTERNATES.get(metric) or {}).get("data") or ()
+        names = (data_name, *alts)
+        found = any(
+            (d / name).is_file() and (d / name).stat().st_size > 0
+            for d in search
+            for name in names
+        )
+        if not found:
+            missing.append(f"requested metric {metric}: {data_name}")
+    return missing
 
 
 def _dir_has_output(root: Path, name: str) -> bool:
-    target = root / name
-    if not target.is_dir():
-        return False
-    return any(
-        target.glob(pat) for pat in ("*.json", "*.csv", "*.dat", "*.npz")
-    )
+    from agentic.campaign.family_recipe import FAMILY_MODULAR_DIR_ALIASES
+
+    candidates = [name]
+    alias = FAMILY_MODULAR_DIR_ALIASES.get(name)
+    if alias:
+        candidates.append(alias)
+    # Also accept legacy consensus_PCA_ref when looking for consensus_PCA
+    if name == "consensus_PCA":
+        candidates.append("consensus_PCA_ref")
+    for cand_name in candidates:
+        target = root / cand_name
+        if not target.is_dir():
+            continue
+        # Consume glob results — generator objects themselves are always truthy.
+        if any(
+            True
+            for pat in ("*.json", "*.csv", "*.dat", "*.npz")
+            for _ in target.glob(pat)
+        ):
+            return True
+    return False
 
 
 def _search_dirs(working_dir: str) -> List[Path]:
@@ -126,12 +207,45 @@ def per_sim_science_complete(
         return {"ok": False, "missing": ["working_dir"], "reason": "missing working_dir"}
 
     if spec is None or not spec.family_modular:
-        summary = wd / "analysis" / "analysis_summary.jsonl"
-        ok = summary.is_file()
+        # Align with per_sim_analysis_done_on_disk: summary alone is not science.
+        try:
+            from agentic.multi_sim_progress import per_sim_analysis_done_on_disk
+
+            ok = per_sim_analysis_done_on_disk(str(wd), state=state)
+        except TypeError:
+            try:
+                from agentic.multi_sim_progress import per_sim_analysis_done_on_disk
+
+                ok = per_sim_analysis_done_on_disk(str(wd))
+            except Exception:
+                ok = (wd / "analysis" / "analysis_summary.jsonl").is_file()
+        except Exception:
+            summary = wd / "analysis" / "analysis_summary.jsonl"
+            ok = summary.is_file()
+        missing: List[str] = []
+        if not ok:
+            missing.append("analysis science artifacts (rmsd/rmsf/pca/… + summary)")
+        # Intent-aware: when the goal names specific metrics, require each data file.
+        intent_missing = required_metric_files_missing(str(wd), state=state)
+        if intent_missing:
+            missing.extend(intent_missing)
+            ok = False
+        # Also require HPC trajectory so analysis cannot be "complete" without MD.
+        hpc = wd / "hpc"
+        has_traj = False
+        if hpc.is_dir():
+            has_traj = any(
+                p.is_file()
+                for pat in ("*.xtc", "*.trr", "rep*/*.xtc", "rep*/*.trr")
+                for p in hpc.glob(pat)
+            )
+        if not has_traj:
+            missing.append("hpc trajectory (.xtc/.trr)")
+            ok = False
         return {
-            "ok": ok,
-            "missing": [] if ok else ["analysis/analysis_summary.jsonl"],
-            "reason": "" if ok else "no analysis_summary.jsonl",
+            "ok": bool(ok) and not missing,
+            "missing": missing,
+            "reason": "" if (ok and not missing) else "; ".join(missing),
         }
 
     missing: List[str] = []

@@ -38,7 +38,7 @@ except ImportError:
 
 def identify_pocket_atoms(
     universe: "mda.Universe",
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     protein_selection: str = "protein",
     cutoff: float = 5.0,
 ) -> Tuple[Any, List[int], Dict[str, Any]]:
@@ -78,7 +78,7 @@ def resolve_pocket_atoms(
     universe: "mda.Universe",
     *,
     pocket_resids: Optional[List[int]] = None,
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     protein_selection: str = "protein",
     pocket_cutoff: float = 5.0,
 ) -> Tuple[Any, List[int], Dict[str, Any]]:
@@ -279,7 +279,7 @@ def compute_protein_ligand_contacts_from_universe(
     *,
     topology_file: str,
     trajectory_file: str,
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     protein_selection: str = "protein",
     contact_cutoff: float = 4.0,
     hbond_distance: float = 3.0,
@@ -455,7 +455,7 @@ def compute_ligand_residence_from_universe(
     *,
     topology_file: str,
     trajectory_file: str,
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     protein_selection: str = "protein",
     pocket_cutoff: float = 5.0,
     bound_distance_A: float = 5.0,
@@ -527,7 +527,7 @@ def compute_pocket_rmsf_from_universe(
     *,
     topology_file: str,
     trajectory_file: str,
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     protein_selection: str = "protein",
     pocket_cutoff: float = 5.0,
     output_file: Optional[str] = None,
@@ -597,7 +597,7 @@ def compute_ligand_rmsf_from_universe(
     *,
     topology_file: str,
     trajectory_file: str,
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     protein_selection: str = "protein",
     output_file: Optional[str] = None,
     output_json: Optional[str] = None,
@@ -669,7 +669,7 @@ def compute_ligand_rmsf_from_universe(
 def calculate_protein_ligand_contacts(
     topology_file: str,
     trajectory_file: str,
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     protein_selection: str = "protein",
     contact_cutoff: float = 4.0,
     hbond_distance: float = 3.0,
@@ -690,7 +690,7 @@ def calculate_protein_ligand_contacts(
     Args:
         topology_file: Topology file (.gro, .pdb, .tpr).
         trajectory_file: Trajectory file (.xtc, .trr, .dcd).
-        ligand_selection: Ligand selection string (default ``"resname ATP"``).
+        ligand_selection: Ligand selection string (default empty — set explicitly or via campaign ligand_resnames).
         protein_selection: Protein selection string (default ``"protein"``).
         contact_cutoff: Heavy-atom contact cutoff in Å.
         hbond_distance: H-bond donor-acceptor cutoff in Å.
@@ -737,7 +737,7 @@ def calculate_protein_ligand_contacts(
 def calculate_pocket_sasa(
     topology_file: str,
     trajectory_file: str,
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     protein_selection: str = "protein",
     pocket_cutoff: float = 5.0,
     probe_radius: float = 0.14,
@@ -872,7 +872,7 @@ def calculate_pocket_sasa(
 def analyze_ligand_residence(
     topology_file: str,
     trajectory_file: str,
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     protein_selection: str = "protein",
     pocket_cutoff: float = 5.0,
     bound_distance_A: float = 5.0,
@@ -897,7 +897,7 @@ def analyze_ligand_residence(
     Args:
         topology_file: Topology file (.gro, .pdb, .tpr).
         trajectory_file: Trajectory file (.xtc, .trr, .dcd).
-        ligand_selection: Ligand selection string (default ``"resname ATP"``).
+        ligand_selection: Ligand selection string (default empty — set explicitly or via campaign ligand_resnames).
         protein_selection: Protein selection string (default ``"protein"``).
         pocket_cutoff: Pocket-definition cutoff in Å.
         bound_distance_A: Bound-state cutoff distance in Å.
@@ -943,7 +943,7 @@ def analyze_ligand_residence(
 def calculate_pocket_rmsf(
     topology_file: str,
     trajectory_file: str,
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     protein_selection: str = "protein",
     pocket_cutoff: float = 5.0,
     output_file: Optional[str] = None,
@@ -1004,7 +1004,7 @@ def calculate_pocket_rmsf(
 def calculate_ligand_rmsf(
     topology_file: str,
     trajectory_file: str,
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     protein_selection: str = "protein",
     output_file: Optional[str] = None,
     output_json: Optional[str] = None,
@@ -1027,7 +1027,7 @@ def calculate_ligand_rmsf(
     Args:
         topology_file: Topology file (.gro, .pdb, .tpr).
         trajectory_file: Trajectory file (.xtc, .trr, .dcd).
-        ligand_selection: Ligand selection string (default ``"resname ATP"``).
+        ligand_selection: Ligand selection string (default empty — set explicitly or via campaign ligand_resnames).
         protein_selection: Protein selection used for alignment context.
         output_file: Output data filename.
         output_json: Output JSON summary filename.

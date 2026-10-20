@@ -3,8 +3,8 @@
 #SBATCH --partition=kannan_p               # --partition=kannan_p, gpu_p   GPU partition (adjust if needed)
 #SBATCH --nodes=1                       # Use 1 node
 #SBATCH --ntasks=1                      # Single task
-#SBATCH --cpus-per-task=64              # CPU threads per task
-#SBATCH --mem=200G                      # Memory per node
+#SBATCH --cpus-per-task=16              # CPU threads per task
+#SBATCH --mem=120G                      # Memory per node
 #SBATCH --time=7-0:00:00               # Max runtime: 3 days
 #SBATCH --gres=gpu:1                     # Number of GPUs
 #SBATCH --mail-user=akp66103@uga.edu     # Email notifications
@@ -18,7 +18,7 @@ module load CUDA/12.8.0   # adjust to your HPC available version
 # Set environment variables for Ollama (optional but recommended)
 export OLLAMA_MODELS=/home/akp66103/ollama_models
 export OLLAMA_CACHE=/home/akp66103/ollama_cache
-export OLLAMA_NUM_THREADS=64
+export OLLAMA_NUM_THREADS=16
 export OLLAMA_CONTEXT_LENGTH=4096
 export OLLAMA_FLASH_ATTENTION=true
 # Concurrent LLM requests (match --llm-concurrency / AGENTIC_LLM_CONCURRENCY default).

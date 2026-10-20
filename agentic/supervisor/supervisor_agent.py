@@ -572,11 +572,84 @@ class MDSupervisor:
                     state, "final_report", "Combined multi-sim workflow complete"
                 )
                 return state
-            # combined_reporter but analysis artifacts incomplete — re-run analysis
+            # combined_reporter but analysis artifacts incomplete — re-run analysis.
+            # Cap re-entries so a false-negative disk gate cannot burn recursion.
             if multi_sim_phase == "combined_reporter" and not analysis_done:
+                from agentic.multi_sim_progress import (
+                    _expected_combined_labels,
+                    post_combined_artifacts_ok,
+                )
+
+                reenter = int(state.get("combined_analysis_reenter_count") or 0)
+                max_reenter = int(state.get("combined_analysis_max_reenter") or 2)
+                labels = _expected_combined_labels(state) or [
+                    str(sp.get("label") or "")
+                    for sp in (state.get("sim_prompts") or [])
+                    if sp.get("label")
+                ]
+                if post_combined_artifacts_ok(
+                    Path(base) / "analysis", expected_labels=labels or None
+                ):
+                    marker = Path(base) / "analysis" / "combined_analysis_complete.json"
+                    try:
+                        import json as _json
+                        from datetime import datetime as _dt
+
+                        marker.parent.mkdir(parents=True, exist_ok=True)
+                        marker.write_text(
+                            _json.dumps(
+                                {
+                                    "success": True,
+                                    "repaired": True,
+                                    "timestamp": _dt.now().isoformat(timespec="seconds"),
+                                    "labels": labels,
+                                    "stage": "post_combined",
+                                },
+                                indent=2,
+                            )
+                            + "\n",
+                            encoding="utf-8",
+                        )
+                    except Exception:
+                        logger.debug("combined marker repair failed", exc_info=True)
+                    logger.info(
+                        "SUPERVISOR [multi-sim]: Combined overlays on disk — "
+                        "repairing marker and advancing to reporter"
+                    )
+                    state["plan_executed"] = False
+                    state["current_agent_idx"] = 1
+                    state["working_directory"] = str(base)
+                    state["next_node"] = "reporter"
+                    log_supervisor_routing(
+                        state, "reporter", "Combined artifacts repaired — reporter"
+                    )
+                    return state
+
+                if reenter >= max_reenter:
+                    state.setdefault("errors", []).append(
+                        f"Combined analysis incomplete after {max_reenter} re-entries; "
+                        "advancing to reporter with available artifacts"
+                    )
+                    logger.warning(
+                        "SUPERVISOR [multi-sim]: Combined re-enter cap (%s) reached — "
+                        "forcing reporter",
+                        max_reenter,
+                    )
+                    state["plan_executed"] = False
+                    state["current_agent_idx"] = 1
+                    state["working_directory"] = str(base)
+                    state["next_node"] = "reporter"
+                    log_supervisor_routing(
+                        state, "reporter", "Combined re-enter cap — force reporter"
+                    )
+                    return state
+
+                state["combined_analysis_reenter_count"] = reenter + 1
                 logger.info(
                     "SUPERVISOR [multi-sim]: Combined reporter pending but analysis "
-                    "incomplete — re-entering combined analysis"
+                    "incomplete — re-entering combined analysis (%s/%s)",
+                    reenter + 1,
+                    max_reenter,
                 )
                 return self._setup_combined_analysis(state, mode="post")
 
@@ -4344,14 +4417,26 @@ class MDSupervisor:
                 return self._assign_field_agent_tasks(state)
             
             # Check retry limit
-            retry_count = state.get("preprocess_retry_count", 0)
+            retry_count = int(state.get("preprocess_retry_count") or 0)
             if retry_count >= 3:
-                state["errors"].append("Preprocessing failed after 3 retries")
-                state["current_agent_idx"] = current_agent_idx + 1
-                return self._assign_field_agent_tasks(state)
+                state["errors"].append(
+                    "Preprocessing failed after 3 retries — marking failed (not skip-ahead)"
+                )
+                sim_label = state.get("current_sim_label") or "unknown"
+                try:
+                    from agentic.multi_sim_progress import mark_agent_status
+
+                    mark_agent_status(state, str(sim_label), "preprocessing", "failed")
+                except Exception:
+                    pass
+                state["next_node"] = "supervisor"
+                state["plan_executed"] = False
+                return state
             
             state["next_node"] = "preprocess"
-            state["preprocess_retry_count"] = retry_count + 1
+            # Count attempts only after a prior incomplete preprocess (not every hub revisit)
+            if retry_count == 0 or not state.get("cleaned_pdb"):
+                state["preprocess_retry_count"] = retry_count + 1
             logger.info("FIELD_AGENT_ASSIGNMENT: Routing to preprocessing")
             log_supervisor_routing(state, "preprocess", "Executing preprocessing agent")
             return state
@@ -4412,18 +4497,39 @@ class MDSupervisor:
                         sim_label = sim_prompts[sim_idx].get("label", sim_label)
 
                     state["errors"].append(
-                        f"SimSetup failed after 3 retries for {sim_label} — continuing with next simulation"
+                        f"SimSetup failed after 3 retries for {sim_label} — marking failed (not plan_executed)"
                     )
-                    state["plan_executed"] = True
+                    try:
+                        from agentic.multi_sim_progress import mark_agent_status
+
+                        mark_agent_status(state, sim_label, "simsetup", "failed")
+                    except Exception:
+                        pass
+                    try:
+                        from agentic.campaign.memory import remember_episode
+
+                        remember_episode(
+                            state=state,
+                            stage="simsetup",
+                            error=f"SimSetup failed after 3 retries for {sim_label}",
+                            label=sim_label,
+                            tool="supervisor",
+                            fix="Inspect simsetup/ artifacts; do not treat as plan_executed",
+                        )
+                    except Exception:
+                        pass
+                    # Advance multi-sim loop without claiming the plan succeeded.
+                    state["plan_executed"] = False
                     state["next_node"] = "supervisor"
+                    state["setup_science_ok"] = False
                     logger.warning(
-                        "SimSetup exhausted 3 retries for multi-sim case %s — advancing to next simulation",
+                        "SimSetup exhausted 3 retries for multi-sim case %s — failed, not plan_executed",
                         sim_label,
                     )
                     log_supervisor_routing(
                         state,
                         "supervisor",
-                        f"SimSetup failed after 3 retries for {sim_label}; advancing multi-sim loop",
+                        f"SimSetup failed after 3 retries for {sim_label}; mark failed and continue",
                     )
                     return state
 
@@ -4435,7 +4541,9 @@ class MDSupervisor:
                 return state
             
             state["next_node"] = "setup"
-            state["setup_retry_count"] = retry_count + 1
+            # Increment on first dispatch or after verify/setup failure — not on every hub tick
+            if retry_count == 0 or state.get("setup_science_ok") is False:
+                state["setup_retry_count"] = retry_count + 1
             logger.info("FIELD_AGENT_ASSIGNMENT: Routing to simsetup")
             log_supervisor_routing(state, "setup", "Executing simsetup agent")
             return state

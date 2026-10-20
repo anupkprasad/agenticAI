@@ -498,12 +498,27 @@ def metric_for_plot_path(path: str) -> Optional[str]:
     return None
 
 
+# Infrastructure / bookkeeping entries — never promote into the HTML report body.
+_SKIP_ANALYSIS_TYPES = frozenset({
+    "pdb_input_validation",
+    "trajectorybatch",
+    "trajectory_batch",
+    "trajectory_qc",
+    "inventory",
+    "wrap",
+    "pbc_wrap",
+})
+
+
 def score_analysis_entry(
     analysis_type: str,
     relevant_metrics: FrozenSet[str],
     has_statistics: bool = False,
 ) -> float:
     """Higher score → more important to include in the report."""
+    atype_key = (analysis_type or "").strip().lower().replace(" ", "_")
+    if atype_key in _SKIP_ANALYSIS_TYPES or atype_key.startswith("pdb_"):
+        return 0.0
     metric = metric_for_analysis_type(analysis_type)
     if metric and metric in relevant_metrics:
         score = 10.0
@@ -516,7 +531,8 @@ def score_analysis_entry(
         return score
     if metric:
         return 1.0
-    return 0.5 if has_statistics else 0.0
+    # Unknown types with only stats — omit (avoid report bloat)
+    return 0.0
 
 
 def score_plot_path(path: str, relevant_metrics: FrozenSet[str]) -> float:
@@ -606,6 +622,21 @@ def select_images_from_entry(
     max_n = policy.max_figures_per_section
     if policy.report_type == "executive":
         max_n = min(max_n, 2)
+    # Prefer one primary plot per metric section (drop multipanel when singles exist)
+    has_primary = any(
+        "multipanel" not in Path(p).name.lower()
+        and "combined_metrics" not in Path(p).name.lower()
+        for _, _, p in scored
+    )
+    if has_primary:
+        scored = [
+            item for item in scored
+            if "multipanel" not in Path(item[2]).name.lower()
+            and "combined_metrics" not in Path(item[2]).name.lower()
+        ]
+    # One figure per analysis section by default for focused MD goals
+    if len(relevant) <= 4:
+        max_n = min(max_n, 1)
 
     # FELFeatures: only annotated basin map (skip raw fel_pc1_pc2 landscape)
     if analysis_type in {"FELFeatures", "FELBasinStructures"}:
@@ -869,3 +900,62 @@ def summarize_findings_for_literature(
             lines.append(f"- {atype}: {stat_str}")
 
     return "\n".join(lines)
+
+
+def build_figure_catalog_for_prompt(
+    selected_entries: Optional[Sequence[Dict[str, Any]]] = None,
+    *,
+    max_figures: int = 8,
+) -> List[str]:
+    """Return planned figure labels (``figN. Caption``) for LLM prompts.
+
+    Mirrors HTML numbering: one primary plot per selected analysis entry.
+    """
+    catalog: List[str] = []
+    n = 0
+    for entry in selected_entries or []:
+        atype = str(entry.get("analysis_type") or "Analysis").replace("_", " ")
+        files = entry.get("files") or {}
+        has_plot = any(
+            isinstance(v, str) and str(v).lower().endswith((".png", ".pdf", ".svg", ".jpg"))
+            for v in files.values()
+        ) if isinstance(files, dict) else False
+        if not has_plot and not (entry.get("statistics") or {}):
+            continue
+        if has_plot:
+            n += 1
+            # Prefer metric-like short captions
+            low = atype.lower()
+            if "rmsd" in low and "rmsf" not in low:
+                caption = "RMSD"
+            elif "rmsf" in low:
+                caption = "RMSF"
+            elif "gyration" in low or low in {"rg", "radius of gyration"}:
+                caption = "Radius of Gyration"
+            else:
+                caption = atype
+            catalog.append(f"fig{n}. {caption}")
+        if len(catalog) >= max_figures:
+            break
+    return catalog
+
+
+def grounded_numeric_claims(
+    selected_entries: Optional[Sequence[Dict[str, Any]]] = None,
+    max_values: int = 24,
+) -> List[str]:
+    """Flatten allowed numeric values from selected analyses for claim grounding."""
+    out: List[str] = []
+    for entry in selected_entries or []:
+        stats = entry.get("statistics") or {}
+        if not isinstance(stats, dict):
+            continue
+        atype = entry.get("analysis_type") or "analysis"
+        for k, v in stats.items():
+            if isinstance(v, float):
+                out.append(f"{atype}.{k}={v:.4g}")
+            elif isinstance(v, int):
+                out.append(f"{atype}.{k}={v}")
+            if len(out) >= max_values:
+                return out
+    return out

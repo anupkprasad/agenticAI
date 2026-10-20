@@ -63,7 +63,7 @@ def _pocket_selection(
 def calculate_ligand_axis_angle(
     topology_file: str,
     trajectory_file: str,
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     pocket_selection: str = "",
     pocket_mapped: str = "",
     label: str = "",
@@ -79,6 +79,11 @@ def calculate_ligand_axis_angle(
     """
     if not HAS_DEPS:
         return {"success": False, "error": "MDAnalysis and numpy are required"}
+    if not (ligand_selection or "").strip():
+        return {
+            "success": False,
+            "error": "ligand_selection is required (no silent ATP default)",
+        }
     from src.analysis.consensus_pocket import _axis_angle_deg, _principal_axis
 
     pocket_sel = _pocket_selection(pocket_mapped, pocket_selection, label) or "protein"

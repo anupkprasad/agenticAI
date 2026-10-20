@@ -407,15 +407,20 @@ class MDAnalysisAgent:
             )
         return (
             "**SCOPE — POST-COMBINED CROSS-SIMULATION (project base):**\n"
-            "- Use cross-simulation tools: run_combined_*, plot_combined_overlay, "
-            "collect_metric_files, compute_comparison_table.\n"
+            "- Prefer ONE call to run_combined_analysis(sim_dirs, labels, metrics=[...]) — "
+            "it writes *_overlay.png and *_stats.csv. Do not also call collect_metric_files "
+            "or compute_comparison_table for the same metrics unless you need a custom table.\n"
             "- When the user names specific proteins or simulations (e.g. JAK1 and TYK2 only), "
             "pass ONLY those sim_dirs and labels — do not include other simulations.\n"
-            "- Plan ONLY the metrics and deliverables the user requested; do not add Rg, COM, "
-            "DCCM, RMSD, or other analyses unless explicitly asked.\n"
-            "- For overlay plots use run_combined_analysis with a metrics list (e.g. [\"rmsf\"] "
-            "only) or collect_metric_files + plot_combined_overlay.\n"
+            "- Plan ONLY the metrics the user requested; do not add Rg, COM, DCCM, RMSD, "
+            "energy, or other analyses unless explicitly asked.\n"
+            "- For overlay plots use run_combined_analysis with a metrics list "
+            "(e.g. [\"rmsf\"] only) or collect_metric_files + plot_combined_overlay.\n"
+            "- If you call compute_comparison_table, pass data_files (per-sim .dat paths) "
+            "aligned with labels — or labels+sim_dirs+metric so the runtime can synthesize them.\n"
             "- Per-trajectory calculate_* tools are for single-sim rerun; prefer combined tools here.\n"
+            "- Do NOT feed *_stats.csv into plot_multipanel / plot_md_data — those are tables, "
+            "not time series. Use per-sim .dat files or *_overlay.png from run_combined_analysis.\n"
         )
 
     def _format_combined_sim_context_for_hitl(self, state: MDState) -> str:
@@ -1700,11 +1705,33 @@ Output as JSON:
             else "combined_analysis_complete.json"
         )
         marker = Path(analysis_dir) / marker_name
+        step_success = bool(success)
+
+        # Post-combined: prefer on-disk overlays/stats over LLM step success
+        # (optional compute_comparison_table / multipanel often fail harmlessly).
+        if not is_pre:
+            try:
+                from agentic.multi_sim_progress import post_combined_artifacts_ok
+
+                artifact_ok = post_combined_artifacts_ok(
+                    analysis_dir, expected_labels=labels
+                )
+            except Exception:
+                artifact_ok = False
+            success = bool(step_success) or bool(artifact_ok)
+            if artifact_ok and not step_success:
+                logger.info(
+                    "Post-combined: step success=%s but overlays/stats on disk — "
+                    "treating as success",
+                    step_success,
+                )
+
         try:
             marker.write_text(
                 _json.dumps(
                     {
                         "success": success,
+                        "step_success": step_success,
                         "timestamp": _dt.now().isoformat(timespec="seconds"),
                         "labels": labels,
                         "sim_dirs": sim_dirs,
@@ -1805,17 +1832,29 @@ Output as JSON:
             state["run_pre_combined"] = True
             return
 
+        # Post-combined: only advance to reporter when artifacts (or step success)
+        # justify it. Callers pass effective success after overlay checks.
         combined = progress.setdefault("combined", {})
-        combined["analysis"] = "done"
-        combined["reporter"] = combined.get("reporter") or "pending"
-        progress["phase"] = "combined_reporter"
-        progress["active_agent"] = "reporter"
-        progress["active_sim_label"] = None
-        state["multi_sim_progress"] = progress
-        state["multi_sim_phase"] = "combined_reporter"
-        state["current_agent_idx"] = 1
-        state["run_combined_analysis"] = True
-        state["run_post_combined"] = True
+        if success:
+            combined["analysis"] = "done"
+            combined["reporter"] = combined.get("reporter") or "pending"
+            progress["phase"] = "combined_reporter"
+            progress["active_agent"] = "reporter"
+            progress["active_sim_label"] = None
+            state["multi_sim_progress"] = progress
+            state["multi_sim_phase"] = "combined_reporter"
+            state["current_agent_idx"] = 1
+            state["run_combined_analysis"] = True
+            state["run_post_combined"] = True
+        else:
+            combined["analysis"] = "failed"
+            progress["phase"] = "combined_analysis"
+            progress["active_agent"] = "analysis"
+            state["multi_sim_progress"] = progress
+            state["multi_sim_phase"] = "combined_analysis"
+            logger.warning(
+                "Post-combined marked unsuccessful (no usable overlays/stats yet)"
+            )
 
     def _populate_combined_results_from_execution(
         self,
@@ -2036,6 +2075,15 @@ Output as JSON:
                     labels=labels,
                     success=success,
                 )
+                # Re-read effective success after artifact-based mark
+                try:
+                    from agentic.multi_sim_progress import post_combined_artifacts_ok
+
+                    success = success or post_combined_artifacts_ok(
+                        analysis_dir, expected_labels=labels
+                    )
+                except Exception:
+                    pass
             log_agent_completion("analysis", stage_name, state, success)
             if hitl_should_interact(state):
                 state["hitl_checkpoint_subtype"] = (
@@ -2051,8 +2099,10 @@ Output as JSON:
             elif is_pre:
                 # Supervisor advances to per-sim execution after disk marker.
                 state["next_node"] = "supervisor"
-            else:
+            elif success:
                 state["next_node"] = "reporter"
+            else:
+                state["next_node"] = "supervisor"
             return state
 
         except Exception as exc:
@@ -2368,18 +2418,36 @@ Return ONLY JSON:
                     and "build_consensus_sequence_alignment" not in i
                 ]
                 ref_sim = sim_dirs[labels.index(ref_label)] if ref_label in labels else sim_dirs[0]
-                pocket_res = define_pocket_mapped_residues.invoke(
-                    {
-                        "working_dir": analysis_dir,
-                        "reference_label": ref_label,
-                        "sim_dir": ref_sim,
-                        "consensus_json": "global_consensus_msa.json",
-                        "ligand_selection": "resname ATP",
-                        "pocket_cutoff_A": 15,
-                        "pocket_filter": "global_consensus_msa",
-                    }
+                from agentic.campaign.ligand_context import resolve_ligand_selection
+
+                _lig = resolve_ligand_selection(
+                    None, state, allow_atp_default=False
                 )
-                if not (pocket_res or {}).get("success"):
+                if not _lig:
+                    # Infer from holo-style labels only (never invent for apo)
+                    joined = " ".join(str(x) for x in labels).lower()
+                    if any(tok in joined for tok in ("_atp", "atp_mg", "_gtp", "holo")):
+                        _lig = "resname ATP" if "gtp" not in joined else "resname GTP"
+                if not _lig:
+                    logger.info(
+                        "Skipping define_pocket_mapped_residues — no ligand declared"
+                    )
+                    pocket_res = {"success": True, "skipped": True}
+                else:
+                    pocket_res = define_pocket_mapped_residues.invoke(
+                        {
+                            "working_dir": analysis_dir,
+                            "reference_label": ref_label,
+                            "sim_dir": ref_sim,
+                            "consensus_json": "global_consensus_msa.json",
+                            "ligand_selection": _lig,
+                            "pocket_cutoff_A": 15,
+                            "pocket_filter": "global_consensus_msa",
+                        }
+                    )
+                if (pocket_res or {}).get("skipped"):
+                    pass
+                elif not (pocket_res or {}).get("success"):
                     issues.append(
                         f"define_pocket_mapped_residues: "
                         f"{(pocket_res or {}).get('error') or pocket_res}"
@@ -3977,8 +4045,8 @@ Return ONLY JSON:
         Set ``state["force_pbc_wrap"]=True`` to force a fresh wrap.
 
         The ligand name is taken from ``state["wrap_ligand"]``, else the first
-        entry of ``state["ligand_resnames"]``, else ``"ATP"`` (kinase–ATP default).
-        Pass ``state["wrap_ligand"]="auto"`` to scan common ligand groups.
+        entry of ``state["ligand_resnames"]``, else ``"auto"`` (scan common
+        ligand groups — never invent ATP for apo runs).
         The output dt (ps) can be overridden via ``state["wrap_dt_ps"]``
         (default **100 ps** ⇒ **10 frames / ns**). Production MDP default
         ``nstxout-compressed=50000`` at ``dt=0.002`` ps matches the same
@@ -4127,11 +4195,11 @@ Return ONLY JSON:
             )
             return
 
-        # Ligand: explicit wrap_ligand > ligand_resnames > ATP default
+        # Ligand: explicit wrap_ligand > ligand_resnames > auto-detect (not ATP-hardcoded)
         ligand = state.get("wrap_ligand")
         if not ligand:
             ligand_resnames = state.get("ligand_resnames") or []
-            ligand = ligand_resnames[0] if ligand_resnames else "ATP"
+            ligand = ligand_resnames[0] if ligand_resnames else "auto"
 
         # Output dt
         dt = int(state.get("wrap_dt_ps", 100))
@@ -4459,6 +4527,35 @@ Return ONLY JSON:
         """
         try:
             self._attach_retrieved_context(state, agent_input)
+
+            # P0: refuse to plan/execute without real HPC trajectory + topology.
+            ready, gate_reason = self._hpc_inputs_ready_for_analysis(state)
+            if not ready:
+                logger.error("Analysis gated: %s", gate_reason)
+                log_agent_action(
+                    "analysis",
+                    "Skipped — HPC trajectory/topology not ready",
+                    {"reason": gate_reason},
+                )
+                out_dir = state.get("analysis_directory") or state.get(
+                    "analysis_dir", "./working_dir/analysis"
+                )
+                return AnalysisAgentOutput(
+                    success=False,
+                    plan=AnalysisPlan(
+                        reasoning=gate_reason,
+                        overview="Skipped: missing HPC inputs",
+                        steps=[],
+                    ),
+                    result=AnalysisExecutionResult(
+                        success=False,
+                        report=gate_reason,
+                        issues=[gate_reason],
+                        warnings=[],
+                        output_directory=str(out_dir),
+                    ),
+                )
+
             # Step 1: LLM analyzes available data and creates plan.
             # When human_recommendation is set, replan on top of the existing plan
             # so the recommendation is actually applied (not bypassed).
@@ -4488,17 +4585,23 @@ Return ONLY JSON:
                     # LLM unavailable — fall back; human_rec is already in additional_instructions
                     plan = self._create_analysis_plan_llm(agent_input, state)
             else:
-                retry_n = int(state.get("analysis_retry_count") or 0)
                 prior = ((exec_plan or {}).get("structured_plans") or {}).get("analysis")
-                if retry_n > 0 and isinstance(prior, dict) and prior.get("steps"):
+                force_replan = bool(state.get("force_replan") or state.get("analysis_force_replan"))
+                # Plan→execute: reuse a compiled structured plan whenever present
+                # (first pass or retry). LLM replan only when forced or missing.
+                if (
+                    not force_replan
+                    and isinstance(prior, dict)
+                    and prior.get("steps")
+                ):
                     logger.info(
-                        "analysis: retry %s — reusing compiled plan (%d steps), not re-planning",
-                        retry_n,
+                        "analysis: reusing structured plan (%d steps), not re-planning",
                         len(prior.get("steps") or []),
                     )
+                    state["_analysis_plan_source"] = "structured_reuse"
                     plan = AnalysisPlan(
-                        reasoning=prior.get("reasoning") or "Retry of compiled analysis plan",
-                        overview=prior.get("overview") or "Retry analysis",
+                        reasoning=prior.get("reasoning") or "Compiled analysis plan",
+                        overview=prior.get("overview") or "Reuse structured analysis plan",
                         steps=[
                             AnalysisStep(
                                 name=s.get("name", ""),
@@ -4753,6 +4856,10 @@ Return ONLY JSON:
             plan_dict = self._inject_mandatory_steps(plan_dict, agent_input, state)
             plan_dict = self._ensure_requested_metric_steps(plan_dict, agent_input, state)
             plan_dict = self._filter_plan_steps_by_intent(plan_dict, state, agent_input)
+            # Re-inject plots after intent filter — filter can drop plot_multipanel
+            # (combined_metrics.png) and plot_md_data steps even when .dat metrics remain.
+            plan_dict = self._inject_missing_metric_plots(plan_dict)
+            plan_dict = self._ensure_combined_metrics_multipanel(plan_dict)
             # Family modular tools MUST be last: intent filter can drop LLM-omitted
             # tools that _ensure_requested_metric_steps just added; ensure must win.
             plan_dict = self._ensure_family_modular_dynamics_steps(plan_dict, agent_input, state)
@@ -4900,11 +5007,18 @@ Return ONLY JSON:
                     or is_metric_output_filename(str(df), requested)
                     for df in data_files
                 )
+                # combined_metrics.png is a QC overview spanning allowed metrics —
+                # keep it whenever its input .dat files are in-scope.
+                is_combined = out_name == "combined_metrics.png" or tool in {
+                    "plot_multipanel",
+                    "plot_md_multipanel",
+                }
                 plot_ok = (
                     not out_name
                     or out_name in allowed_plot_files
                     or is_metric_output_filename(out_name, requested)
                     or Path(out_name).stem in {Path(str(df)).stem for df in data_files}
+                    or is_combined
                 )
                 if data_ok and plot_ok:
                     filtered.append(step)
@@ -5305,18 +5419,22 @@ Return ONLY JSON:
                 },
                 "reason": "Family modular: DCCM N↔C feature",
             },
-            "calculate_consensus_pocket_metrics": {
+        }
+        from agentic.campaign.ligand_context import ligand_selection_from_state
+
+        _lig_sel = ligand_selection_from_state(state, default=None)
+        if _lig_sel:
+            canonical["calculate_consensus_pocket_metrics"] = {
                 "name": "Ligand–pocket COM + axis-angle",
-                "description": "ATP COM distance and orientation vs pocket_mapped residues",
+                "description": "Ligand COM distance and orientation vs pocket_mapped residues",
                 "tool_params": {
                     "topology_file": topo_name,
                     "trajectory_file": traj_name,
-                    "ligand_selection": "resname ATP",
+                    "ligand_selection": _lig_sel,
                     "output_prefix": "reference_pocket",
                 },
-                "reason": "Family modular: pocket–ATP COM + axis-angle",
-            },
-        }
+                "reason": "Family modular: pocket–ligand COM + axis-angle",
+            }
 
         drop_tools = {
             "calculate_free_energy_landscape",
@@ -5743,6 +5861,211 @@ Return ONLY JSON:
             logger.info("_inject_missing_metric_plots: added %d plot step(s)", injected)
             plan_dict["steps"] = steps
         return plan_dict
+
+    def _ensure_combined_metrics_multipanel(self, plan_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensure plot_multipanel → combined_metrics.png when ≥2 standard .dat metrics exist."""
+        steps = list(plan_dict.get("steps") or [])
+        if any(
+            s.get("tool_name") in {"plot_multipanel", "plot_md_multipanel"}
+            for s in steps
+        ):
+            return plan_dict
+
+        _DAT_LABEL: Dict[str, tuple] = {
+            "rmsd": ("Time (ns)", "RMSD (Å)", "RMSD"),
+            "rmsf": ("Residue", "RMSF (Å)", "RMSF"),
+            "gyration": ("Time (ns)", "Rg (Å)", "Radius of Gyration"),
+            "rg": ("Time (ns)", "Rg (Å)", "Radius of Gyration"),
+            "energy": ("Time (ns)", "Energy (kJ/mol)", "Energy"),
+        }
+        panel_files: List[str] = []
+        xlabels: List[str] = []
+        ylabels: List[str] = []
+        titles: List[str] = []
+        for s in steps:
+            out = str((s.get("tool_params") or {}).get("output_file", ""))
+            if not out.endswith(".dat"):
+                continue
+            fname = Path(out).name
+            for key, (xl, yl, tl) in _DAT_LABEL.items():
+                if key in fname.lower() and fname not in panel_files:
+                    panel_files.append(fname)
+                    xlabels.append(xl)
+                    ylabels.append(yl)
+                    titles.append(tl)
+                    break
+        if len(panel_files) < 2:
+            return plan_dict
+
+        steps.append({
+            "name": "Create Combined Metrics Plot",
+            "description": "Multi-panel summary figure of standard MD metrics.",
+            "tool_name": "plot_multipanel",
+            "tool_params": {
+                "data_files": panel_files,
+                "output_file": "combined_metrics.png",
+                "layout": "vertical",
+                "titles": titles,
+                "xlabels": xlabels,
+                "ylabels": ylabels,
+            },
+            "reason": "Mandatory combined QC plot for each simulation.",
+        })
+        plan_dict["steps"] = steps
+        logger.info(
+            "_ensure_combined_metrics_multipanel: injected plot_multipanel (%s)",
+            panel_files,
+        )
+        return plan_dict
+
+    def _plot_step_output_present(self, step: Any, analysis_dir: str) -> bool:
+        """True when a plot/non-critical step's expected PNG already exists."""
+        params = getattr(step, "tool_params", None) or {}
+        if not isinstance(params, dict):
+            return False
+        out = params.get("output_file") or params.get("plot_file") or params.get("figure_path")
+        if not out:
+            return False
+        name = Path(str(out)).name
+        if not name.lower().endswith((".png", ".pdf", ".svg", ".jpg", ".jpeg")):
+            return False
+        return (Path(analysis_dir) / name).is_file()
+
+    def _ensure_plots_for_dat_on_disk(
+        self,
+        analysis_dir: str,
+        execution_log: List[str],
+        generated_files: Dict[str, str],
+        warnings: List[str],
+    ) -> None:
+        """Create missing PNGs from existing .dat/.csv metric files (post-batch safety net)."""
+        adir = Path(analysis_dir)
+        if not adir.is_dir():
+            return
+        try:
+            from src.analysis.data_plotter import plot_md_data, plot_multipanel
+        except Exception as exc:
+            warnings.append(f"Could not import plotters for post-hoc plots: {exc}")
+            return
+
+        ylabel_by_stem = {
+            "rmsd": ("Time (ns)", "RMSD (Å)"),
+            "rmsf": ("Residue", "RMSF (Å)"),
+            "gyration": ("Time (ns)", "Rg (Å)"),
+            "rg": ("Time (ns)", "Rg (Å)"),
+            "energy": ("Time (ns)", "Energy (kJ/mol)"),
+        }
+        panel_files: List[str] = []
+        xlabels: List[str] = []
+        ylabels: List[str] = []
+        titles: List[str] = []
+        wd = str(adir)
+
+        def _is_stats_or_feature_table(path: Path) -> bool:
+            """Skip summary tables — they are not time-series panels."""
+            name = path.name.lower()
+            stem = path.stem.lower()
+            if stem.endswith("_stats") or name.endswith("_stats.csv"):
+                return True
+            if name.startswith("classification_") or "features" in stem:
+                return True
+            if name in {"statistical_summary.json", "statistical_summary.csv"}:
+                return True
+            return False
+
+        # Prefer .dat time series; CSVs only for known metric stems (not *_stats).
+        candidates = sorted(adir.glob("*.dat")) + sorted(adir.glob("*.csv"))
+        for dat in candidates:
+            if _is_stats_or_feature_table(dat):
+                continue
+            stem = dat.stem
+            png = adir / f"{stem}.png"
+            stem_l = stem.lower()
+            if stem_l.startswith("fel_") or ("fel" in stem_l and "grid" in stem_l):
+                continue
+            xl, yl = "Time (ns)", "Value"
+            matched_key = None
+            for key, (x0, y0) in ylabel_by_stem.items():
+                # Exact stem or metric prefix — but not rmsd_stats (already skipped)
+                if stem_l == key or stem_l.startswith(key + "_"):
+                    xl, yl = x0, y0
+                    matched_key = key
+                    break
+            if "rmsf" in stem_l:
+                xl = "Residue"
+            # Multipanel only from .dat (or exact metric stem .csv like gyration.csv)
+            use_in_panel = (
+                matched_key
+                and dat.suffix.lower() == ".dat"
+                and dat.name not in panel_files
+            )
+            if use_in_panel:
+                panel_files.append(dat.name)
+                xlabels.append(xl)
+                ylabels.append(yl)
+                titles.append(matched_key.upper())
+
+            if png.is_file():
+                # Still attach plot path to analysis_summary when missing.
+                try:
+                    from src.analysis.summary_logger import update_analysis_summary_with_files
+                    from src.analysis.data_plotter import _infer_analysis_type
+
+                    atype = _infer_analysis_type(str(png), [str(dat)], wd)
+                    if atype:
+                        update_analysis_summary_with_files(
+                            working_dir=wd,
+                            analysis_type=atype,
+                            additional_files={"plot": str(png)},
+                        )
+                except Exception:
+                    pass
+                if str(png) not in generated_files:
+                    generated_files[str(png)] = f"Existing plot for {dat.name}"
+                continue
+            try:
+                result = plot_md_data.func(
+                    data_files=[str(dat)],
+                    output_file=str(png),
+                    xlabel=xl,
+                    ylabel=yl,
+                    titles=[stem],
+                    working_dir=wd,
+                )
+                if result.get("success") and png.is_file():
+                    generated_files[str(png)] = f"Post-hoc plot for {dat.name}"
+                    execution_log.append(f"✓ Post-hoc plot: {png.name}")
+                else:
+                    warnings.append(
+                        f"Post-hoc plot failed for {dat.name}: {result.get('error')}"
+                    )
+            except Exception as exc:
+                warnings.append(f"Post-hoc plot failed for {dat.name}: {exc}")
+
+        combined = adir / "combined_metrics.png"
+        if len(panel_files) >= 2 and not combined.is_file():
+            try:
+                result = plot_multipanel.func(
+                    data_files=[str(adir / f) for f in panel_files],
+                    output_file=str(combined),
+                    layout="vertical",
+                    titles=titles,
+                    xlabels=xlabels,
+                    ylabels=ylabels,
+                    working_dir=wd,
+                )
+                if result.get("success") and combined.is_file():
+                    generated_files[str(combined)] = "Post-hoc combined metrics plot"
+                    execution_log.append("✓ Post-hoc plot: combined_metrics.png")
+                else:
+                    # Non-fatal: overlays/stats already satisfy combined success
+                    warnings.append(
+                        f"Post-hoc combined_metrics.png failed: {result.get('error')}"
+                    )
+            except Exception as exc:
+                warnings.append(f"Post-hoc combined_metrics.png failed: {exc}")
+        elif combined.is_file() and str(combined) not in generated_files:
+            generated_files[str(combined)] = "Existing combined metrics plot"
 
     def _sim_label_from_state(self, state: MDState) -> str:
         wd = str(state.get("working_directory") or "")
@@ -6394,11 +6717,11 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             _lig_resname = (
                 self._detect_ligand_resname(agent_input, state)
                 if state
-                else "ATP"
+                else None
             )
-            _is_holo = state and self._is_holo_simulation(state, agent_input)
+            _is_holo = bool(state) and self._is_holo_simulation(state, agent_input)
 
-            if "com" in requested and _is_holo:
+            if "com" in requested and _is_holo and _lig_resname:
                 steps.extend([
                     AnalysisStep(
                         name="Ligand Pocket Distance",
@@ -6433,7 +6756,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     ),
                 ])
 
-            if "contacts" in requested and _is_holo:
+            if "contacts" in requested and _is_holo and _lig_resname:
                 steps.extend([
                     AnalysisStep(
                         name="Protein-Ligand Contacts",
@@ -6461,7 +6784,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     ),
                 ])
 
-            if "pocket_sasa" in requested and _is_holo:
+            if "pocket_sasa" in requested and _is_holo and _lig_resname:
                 steps.extend([
                     AnalysisStep(
                         name="Pocket SASA",
@@ -6489,7 +6812,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     ),
                 ])
 
-            if "residence" in requested and _is_holo:
+            if "residence" in requested and _is_holo and _lig_resname:
                 steps.extend([
                     AnalysisStep(
                         name="Ligand Residence",
@@ -6517,7 +6840,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     ),
                 ])
 
-            if "pocket_rmsf" in requested and _is_holo:
+            if "pocket_rmsf" in requested and _is_holo and _lig_resname:
                 steps.extend([
                     AnalysisStep(
                         name="Pocket RMSF",
@@ -6546,7 +6869,7 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     ),
                 ])
 
-            if "ligand_rmsf" in requested and _is_holo:
+            if "ligand_rmsf" in requested and _is_holo and _lig_resname:
                 steps.extend([
                     AnalysisStep(
                         name="Ligand RMSF",
@@ -7031,7 +7354,9 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             from agentic.campaign.spec import spec_from_state
 
             retry_n = int(state.get("analysis_retry_count") or 0)
-            skip_plots = retry_n > 0
+            # On retry, skip plot tools only when their PNG already exists.
+            # Never skip post-hoc PNG materialization — retry_count>0 was
+            # leaving .dat-only analysis with no figures in the report.
             
             for i, step in enumerate(plan.steps):
                 # Validate tool name - skip invalid placeholder names
@@ -7062,10 +7387,14 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         })
                         continue
 
-                if skip_plots and is_noncritical_analysis_tool(step.tool_name):
+                if (
+                    retry_n > 0
+                    and is_noncritical_analysis_tool(step.tool_name)
+                    and self._plot_step_output_present(step, str(analysis_dir))
+                ):
                     skip_msg = (
-                        f"Skipping step {i+1} '{step.name}': plot/non-critical "
-                        f"on analysis retry {retry_n}"
+                        f"Skipping step {i+1} '{step.name}': plot output already on disk "
+                        f"(analysis retry {retry_n})"
                     )
                     execution_log.append(f"\n⚠ {skip_msg}")
                     warnings.append(skip_msg)
@@ -7096,6 +7425,42 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 
                 # Prepare tool parameters
                 tool_params = dict(step.tool_params) if step.tool_params else {}
+
+                # Never invent ATP: inject declared ligands or strip silent defaults
+                if "ligand_selection" in tool_params or step.tool_name in {
+                    "calculate_consensus_pocket_metrics",
+                    "define_pocket_mapped_residues",
+                    "define_reference_consensus_pocket",
+                    "calculate_ligand_axis_angle",
+                    "calculate_ligand_pocket_distance",
+                }:
+                    from agentic.campaign.ligand_context import (
+                        apply_ligand_selection,
+                        resolve_ligand_selection,
+                    )
+
+                    tool_params = apply_ligand_selection(tool_params, state)
+                    resolved_lig = resolve_ligand_selection(
+                        tool_params.get("ligand_selection"), state
+                    )
+                    if resolved_lig:
+                        tool_params["ligand_selection"] = resolved_lig
+                    elif step.tool_name in {
+                        "calculate_consensus_pocket_metrics",
+                        "define_pocket_mapped_residues",
+                        "define_reference_consensus_pocket",
+                        "calculate_ligand_axis_angle",
+                        "calculate_ligand_pocket_distance",
+                    }:
+                        execution_log.append(
+                            f"⚠ Skipped {step.tool_name}: no ligand declared (apo-safe)"
+                        )
+                        results[step.name] = {
+                            "success": True,
+                            "skipped": True,
+                            "message": "no ligand_selection",
+                        }
+                        continue
 
                 if is_combined_analysis_tool(step.tool_name):
                     task_text = state.get("hitl_chat_task") or agent_input.user_goal or ""
@@ -7203,6 +7568,20 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         for fref in tool_params[lp]:
                             fref = str(fref)
                             basename = os.path.basename(fref)
+                            # Multipanel/plot must not ingest *_stats.csv tables
+                            if step.tool_name in {
+                                "plot_multipanel",
+                                "plot_md_multipanel",
+                                "plot_md_data",
+                            }:
+                                stem_l = Path(basename).stem.lower()
+                                if stem_l.endswith("_stats") or "classification_" in basename.lower():
+                                    logger.info(
+                                        "Dropping summary table %s from %s data_files",
+                                        basename,
+                                        step.tool_name,
+                                    )
+                                    continue
                             resolved_list.append(os.path.join(agent_dir, basename))
                         logger.debug(f"  Resolved {lp}: {tool_params[lp]} -> {resolved_list}")
                         tool_params[lp] = resolved_list
@@ -7211,7 +7590,19 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 
                 # Use batched trajectory result when available
                 if i in batch_results and batch_results[i].get("success"):
-                    result = batch_results[i]
+                    result = dict(batch_results[i])
+                    # Batch writers often return basename-only paths; resolve under analysis_dir
+                    agent_dir = str(self.file_manager.agent_dir)
+                    for file_key in (
+                        "output_file", "plot_file", "csv_file", "heatmap_file",
+                        "timeseries_file", "figure_path",
+                    ):
+                        fref = result.get(file_key)
+                        if not fref:
+                            continue
+                        fref_s = str(fref)
+                        if not os.path.isabs(fref_s):
+                            result[file_key] = os.path.join(agent_dir, os.path.basename(fref_s))
                     execution_log.append(
                         f"✓ Success (trajectory batch): {result.get('message', 'Step completed')}"
                     )
@@ -7298,6 +7689,16 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     if fail_fast:
                         execution_log.append("⚠ Stopping execution (fail_fast enabled)")
                         break
+
+            # Safety net: if trajectory batch wrote .dat but plot steps were skipped
+            # or filtered, materialize PNGs from files already on disk.
+            # Always run — including analysis retries — so reports get figures.
+            self._ensure_plots_for_dat_on_disk(
+                str(analysis_dir),
+                execution_log,
+                generated_files,
+                warnings,
+            )
             
             execution_log_str = "\n".join(execution_log)
             
@@ -7307,7 +7708,27 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             spec = spec_from_state(state)
             wd = state.get("working_directory") or ""
             artifact_ok = False
-            if spec and spec.family_modular and wd:
+            # Combined / post-combined: judge overlays at base/analysis, not per-sim .dat
+            if self._is_combined_analysis_phase(state) or state.get("hitl_view_combined"):
+                try:
+                    from agentic.multi_sim_progress import post_combined_artifacts_ok
+
+                    adir = (
+                        state.get("analysis_dir")
+                        or state.get("analysis_directory")
+                        or (str(Path(wd) / "analysis") if wd else "")
+                    )
+                    labels = []
+                    for sp in state.get("sim_prompts") or []:
+                        lab = sp.get("label")
+                        if lab:
+                            labels.append(str(lab))
+                    artifact_ok = post_combined_artifacts_ok(
+                        adir, expected_labels=labels or None
+                    )
+                except Exception:
+                    artifact_ok = False
+            elif spec and spec.family_modular and wd:
                 artifact_ok = bool(per_sim_science_complete(wd, spec=spec).get("ok"))
             elif wd:
                 try:
@@ -7321,8 +7742,17 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     "Required analysis artifacts are on disk; "
                     "remaining step errors are non-blocking"
                 )
+            # When combined overlays exist, demote remaining issues to warnings
+            # so optional table/plot steps cannot fail the whole combined stage.
+            critical = list(issues)
+            if artifact_ok and (
+                self._is_combined_analysis_phase(state) or state.get("hitl_view_combined")
+            ):
+                for msg in issues:
+                    warnings.append(f"non-blocking after overlays: {msg}")
+                critical = []
             success = decide_analysis_success(
-                artifact_ok=artifact_ok, critical_issues=issues
+                artifact_ok=artifact_ok, critical_issues=critical
             )
             
             return AnalysisExecutionResult(
@@ -7444,9 +7874,11 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             pass
 
         # --- 1. Try state fields first (set by HPC / simsetup agent) --------
+        # Do NOT use cleaned_pdb / preprocess coordinates as analysis topology —
+        # MDA needs the production system (md.tpr) matching the trajectory.
         _STATE_KEYS = {
-            "topology":   ["topology", "coordinates", "cleaned_pdb"],
-            "trajectory":  ["trajectory_path"],
+            "topology":   ["tpr_file", "topology"],
+            "trajectory":  ["trajectory_path", "trajectory"],
             "energy":      ["energy_file"],
         }
         for ftype, keys in _STATE_KEYS.items():
@@ -7497,10 +7929,17 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                     return str(cand.resolve())
             return None
 
-        # Reject a state topology that is ligand-only / GROMACS text .top
+        # Reject unsuitable / preprocess-only topologies from state
         if "topology" in resolved:
-            topo_name = Path(resolved["topology"]).name
-            if topo_name in _TOPO_SKIP or Path(resolved["topology"]).suffix.lower() == ".top":
+            topo_path = Path(resolved["topology"])
+            topo_name = topo_path.name
+            suf = topo_path.suffix.lower()
+            if (
+                topo_name in _TOPO_SKIP
+                or suf == ".top"
+                or suf == ".pdb"
+                or "preprocess" in str(topo_path).replace("\\", "/").lower()
+            ):
                 logger.warning(
                     "_resolve_input_files: rejecting unsuitable topology %s",
                     resolved["topology"],
@@ -7508,6 +7947,28 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                 del resolved["topology"]
 
         analysis_dir = state.get("analysis_dir") or self.file_manager.agent_dir
+
+        # Prefer md.tpr from hpc/analysis even when a weaker state topo exists
+        for search in (Path(input_dir), Path(analysis_dir)):
+            picked = _pick_topology(search)
+            if not picked:
+                continue
+            if "topology" not in resolved or Path(picked).suffix.lower() == ".tpr":
+                if (
+                    "topology" not in resolved
+                    or Path(resolved["topology"]).suffix.lower() != ".tpr"
+                    or Path(picked).name == "md.tpr"
+                ):
+                    if Path(picked).suffix.lower() == ".tpr" or "topology" not in resolved:
+                        resolved["topology"] = picked
+                        logger.debug(
+                            "_resolve_input_files: topology from %s → %s",
+                            search,
+                            picked,
+                        )
+                        if Path(picked).suffix.lower() == ".tpr":
+                            break
+
         for ftype, exts in _EXT_MAP.items():
             if ftype in resolved:
                 continue
@@ -7547,6 +8008,31 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
             logger.info(f"_resolve_input_files: resolved {list(resolved.keys())}")
 
         return resolved
+
+    def _hpc_inputs_ready_for_analysis(self, state: MDState) -> tuple:
+        """Return (ready, reason). Require real trajectory + production topology."""
+        try:
+            resolved = self._resolve_input_files(state)
+        except Exception as exc:
+            return False, f"Could not resolve HPC inputs: {exc}"
+        traj = resolved.get("trajectory")
+        topo = resolved.get("topology")
+        if not traj or not Path(traj).is_file():
+            return (
+                False,
+                "No HPC trajectory (.xtc/.trr) found — run HPC (or restore hpc/) before analysis",
+            )
+        if not topo or not Path(topo).is_file():
+            return (
+                False,
+                "No production topology (md.tpr) found under hpc/ — cannot analyze trajectory",
+            )
+        if Path(topo).suffix.lower() == ".pdb":
+            return (
+                False,
+                f"Topology is preprocess PDB ({Path(topo).name}); need md.tpr matching the trajectory",
+            )
+        return True, ""
 
     def _classify_file_type(self, key_or_extension: str, file_path: str = "") -> str:
         """Classify file type based on parameter name or extension."""

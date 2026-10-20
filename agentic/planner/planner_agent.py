@@ -414,6 +414,7 @@ def _enrich_protein_name_from_goal(uid: str, current_name: str, *goal_texts: str
     try:
         from src.reporter.protein_identity import (
             _gene_from_goal,
+            _is_placeholder_name,
             _looks_like_uniprot,
             _parse_id_name_map,
         )
@@ -421,14 +422,22 @@ def _enrich_protein_name_from_goal(uid: str, current_name: str, *goal_texts: str
         return current_name
 
     combined = " ".join(t for t in goal_texts if t)
-    id_map = _parse_id_name_map(combined)
-    if uid.lower() in id_map:
-        return id_map[uid.lower()]
-    if current_name and not _looks_like_uniprot(current_name) and current_name.upper() != uid.upper():
-        return current_name
+    # Prefer gene from goal (DCLK3) before id:name maps — those often capture
+    # "q9c098: Preprocess the …" stage verbs.
     gene = _gene_from_goal(uid, combined)
-    if gene:
+    if gene and not _is_placeholder_name(gene):
         return gene
+    id_map = _parse_id_name_map(combined)
+    mapped = id_map.get(uid.lower()) if uid else None
+    if mapped and not _is_placeholder_name(mapped):
+        return mapped
+    if (
+        current_name
+        and not _looks_like_uniprot(current_name)
+        and not _is_placeholder_name(current_name)
+        and current_name.upper() != uid.upper()
+    ):
+        return current_name
     return current_name
 
 

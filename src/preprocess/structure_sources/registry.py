@@ -15,6 +15,8 @@ _SOURCES: Dict[str, StructureSource] = {
     "rcsb": RCSBSource(),
 }
 
+_RCSB = _SOURCES["rcsb"]
+
 
 def get_structure_source(name: str) -> Optional[StructureSource]:
     """Return a registered source by name."""
@@ -72,3 +74,8 @@ def download_structure(
         "attempts": attempts,
         "available_sources": list(_SOURCES.keys()),
     }
+
+
+def download_pdb_id(pdb_id: str, output_path: str) -> Dict[str, Any]:
+    """Download an experimental structure directly by RCSB PDB ID (e.g. 6VC0)."""
+    return _RCSB.download_by_pdb_id(pdb_id, output_path)

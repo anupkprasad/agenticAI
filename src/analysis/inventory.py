@@ -295,6 +295,41 @@ def write_stage_inventory_for_state(state: Optional[Dict[str, Any]], stage: str)
         extra["hpc_dir"] = str(state.get("hpc_dir") or "")
     if folder == "preprocess":
         extra["cleaned_pdb"] = str(state.get("cleaned_pdb") or "")
+        domain_lookup = state.get("domain_lookup")
+        if isinstance(domain_lookup, dict) and domain_lookup:
+            extra["domain_lookup"] = {
+                k: domain_lookup.get(k)
+                for k in (
+                    "domain_lookup_success",
+                    "domain_lookup_source",
+                    "domain_lookup_description",
+                    "domain_lookup_message",
+                    "domain_lookup_error",
+                    "residue_range",
+                    "start_resid",
+                    "end_resid",
+                )
+                if domain_lookup.get(k) not in (None, "")
+            }
+        if state.get("domain_context"):
+            extra["domain_context"] = str(state.get("domain_context"))
+        sar = state.get("structure_acquisition_result")
+        if isinstance(sar, dict) and sar:
+            extra["structure_acquisition"] = {
+                k: sar.get(k)
+                for k in (
+                    "success",
+                    "source",
+                    "uniprot_id",
+                    "pdb_id",
+                    "domain_label",
+                    "start_resid",
+                    "end_resid",
+                    "pdb_file",
+                    "output_file",
+                )
+                if sar.get(k) not in (None, "")
+            }
     if folder == "simsetup":
         extra["topology"] = str(state.get("topology") or "")
         extra["coordinates"] = str(state.get("coordinates") or "")

@@ -332,7 +332,16 @@ _METRIC_PATTERNS: Dict[str, tuple[str, ...]] = {
         r"closest[-\s]?approach",
         r"min(?:imum)?\s+distance\s+between",
     ),
-    "energy": (r"\benergy\b", r"\bedr\b"),
+    # Avoid bare "energy" (force field, free-energy landscape, binding energy).
+    "energy": (
+        r"potential\s+energy",
+        r"analyze_energy",
+        r"\bedr\b",
+        r"energy\.dat",
+        r"\benergy\s+(?:analysis|overlay|plot|profile|decomposition|timeseries)\b",
+        r"\b(?:total|kinetic)\s+energy\b",
+        r"\benergy\s+and\s+(?:rmsd|rmsf|rg)\b",
+    ),
     "pca": (
         r"\bpca\b",
         r"principal component",
@@ -571,7 +580,7 @@ def _normalize_metric_false_positives(text: str, found: Set[str]) -> None:
         or re.search(r"pocket\s+sasa|binding[-\s]?site\s+sasa", lower)
     ):
         found.discard("sasa")
-    if "energy" in found and re.search(r"free[-\s]?energy", lower):
+    if "energy" in found and re.search(r"free[-\s]?energy|energy\s+landscape", lower):
         if not re.search(
             r"potential\s+energy|analyze_energy|\bedr\b|energy\.dat|"
             r"mean\s+potential|energy\s+analysis",
@@ -580,7 +589,8 @@ def _normalize_metric_false_positives(text: str, found: Set[str]) -> None:
             found.discard("energy")
     if "energy" in found and re.search(
         r"energy\s+minim|minimisation|minimization|minimiz(?:e|ed|ing)|"
-        r"equilibrat",
+        r"equilibrat|force\s*field|amber|charmm|binding\s+energy|"
+        r"activation\s+energy|interaction\s+energy",
         lower,
     ):
         if not re.search(
@@ -589,6 +599,14 @@ def _normalize_metric_false_positives(text: str, found: Set[str]) -> None:
             lower,
         ):
             found.discard("energy")
+    # Bare "energy" leftover with no explicit potential/edr intent → drop
+    if "energy" in found and not re.search(
+        r"potential\s+energy|analyze_energy|\bedr\b|energy\.dat|"
+        r"energy\s+(?:analysis|overlay|plot|profile|decomposition|timeseries)|"
+        r"(?:total|kinetic)\s+energy",
+        lower,
+    ):
+        found.discard("energy")
     # Consensus φ/ψ/χ₁ should not also force limited backbone Ramachandran tool
     if "backbone_dihedrals" in found and (
         "consensus_torsions" in found

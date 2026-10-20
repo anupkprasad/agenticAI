@@ -33,13 +33,49 @@ def acquire_structure_from_request(
     if not request:
         return {
             "success": False,
-            "error": "No UniProt accession found in request text",
+            "error": "No UniProt accession or PDB ID found in request text",
         }
 
     os.makedirs(working_dir, exist_ok=True)
-    uid = request["uniprot_id"]
+    uid = request.get("uniprot_id")
+    pdb_id = request.get("pdb_id")
     basename = build_output_basename(request)
     log = []
+
+    # Direct RCSB download by PDB entry ID
+    if not uid and pdb_id:
+        from .structure_downloader import download_pdb_by_id
+
+        full_pdb = os.path.join(working_dir, f"{str(pdb_id).lower()}.pdb")
+        log.append(f"Step 1: Download RCSB structure {pdb_id}")
+        dl = download_pdb_by_id.func(pdb_id=pdb_id, output_file=full_pdb)
+        if not dl.get("success"):
+            return {
+                "success": False,
+                "error": dl.get("error", "PDB ID download failed"),
+                "structure_request": request,
+                "log": log,
+                "download_result": dl,
+            }
+        log.append(f"  Downloaded via {dl.get('source')} → {full_pdb}")
+        current_pdb = full_pdb
+        log.append("Step 2: Validate structure")
+        validation = validate_structure.func(pdb_file=current_pdb, check_domain=False)
+        log.append(
+            f"  Validation: issues={len(validation.get('issues', []))}, "
+            f"warnings={len(validation.get('warnings', []))}"
+        )
+        return {
+            "success": validation.get("success", False),
+            "structure_request": request,
+            "raw_download": full_pdb,
+            "pdb_file": current_pdb,
+            "output_file": current_pdb,
+            "download_result": dl,
+            "extract_result": None,
+            "validation": validation,
+            "log": log,
+        }
 
     full_pdb = os.path.join(working_dir, f"{uid.lower()}.pdb")
     log.append(f"Step 1: Download structure for {uid} (source={source})")

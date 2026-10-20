@@ -2,6 +2,7 @@
 
 from .registry import (
     download_structure,
+    download_pdb_id,
     get_structure_source,
     list_structure_sources,
     DEFAULT_SOURCE_ORDER,
@@ -15,6 +16,7 @@ __all__ = [
     "AlphaFoldSource",
     "RCSBSource",
     "download_structure",
+    "download_pdb_id",
     "get_structure_source",
     "list_structure_sources",
     "DEFAULT_SOURCE_ORDER",

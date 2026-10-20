@@ -31,12 +31,18 @@ FAMILY_POST_CALCULATIONS: List[str] = [
     "compute_shared_pka_ref_dyn_features",
 ]
 
+# Per-sim modular dirs written by pin tools. ``consensus_PCA`` is the on-disk
+# name from ``run_independent_dynamics_fel``; shared PKA-ref dyn is combined-stage.
 FAMILY_MODULAR_DIRS: List[str] = [
     "consensus_dihedrals",
     "consensus_rmsf",
     "consensus_DCCM",
-    "consensus_PCA_ref",
+    "consensus_PCA",
 ]
+# Accept legacy name from older campaigns / docs.
+FAMILY_MODULAR_DIR_ALIASES: Dict[str, str] = {
+    "consensus_PCA_ref": "consensus_PCA",
+}
 
 # Paper fig3 / sharedpcdyn Ward columns (exact names).
 FAMILY_FEATURE_COLUMNS: List[str] = [
@@ -64,19 +70,25 @@ FAMILY_METRIC_GROUPS: List[str] = [
 
 def build_shared_analysis_protocol(
     gold_columns: Optional[List[str]] = None,
+    ligand_selection: Optional[str] = None,
 ) -> AnalysisRecipe:
     """Shared analysis protocol cloned onto every system. Not generated per protein by an LLM."""
-    steps = [
-        RecipeStep(
-            name="Ligand–pocket COM + axis-angle",
-            tool_name="calculate_consensus_pocket_metrics",
-            description="ATP COM distance and orientation vs pocket_mapped residues",
-            tool_params={
-                "ligand_selection": "resname ATP",
-                "output_prefix": "reference_pocket",
-            },
-            reason="Campaign descriptor: pocket_mapped COM + axis-angle (15 Å KAPCA ∩ global_consensus_msa)",
-        ),
+    lig_sel = (ligand_selection or "").strip() or None
+    steps = []
+    if lig_sel:
+        steps.append(
+            RecipeStep(
+                name="Ligand–pocket COM + axis-angle",
+                tool_name="calculate_consensus_pocket_metrics",
+                description="Ligand COM distance and orientation vs pocket_mapped residues",
+                tool_params={
+                    "ligand_selection": lig_sel,
+                    "output_prefix": "reference_pocket",
+                },
+                reason="Campaign descriptor: pocket_mapped COM + axis-angle",
+            )
+        )
+    steps.extend([
         RecipeStep(
             name="Consensus dihedrals (φ/ψ/χ₁)",
             tool_name="calculate_consensus_torsions",
@@ -98,7 +110,7 @@ def build_shared_analysis_protocol(
             tool_params={"output_dir": "consensus_DCCM"},
             reason="Family modular: DCCM N↔C feature",
         ),
-    ]
+    ])
     cols = list(gold_columns) if gold_columns else list(FAMILY_FEATURE_COLUMNS)
     return AnalysisRecipe(
         steps=steps,

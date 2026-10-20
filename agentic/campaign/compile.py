@@ -65,16 +65,44 @@ def compile_campaign_spec(state: Optional[Dict[str, Any]] = None) -> CampaignSpe
         settings_dict = {}
         gold = []
     if family:
+        from agentic.campaign.ligand_context import ligand_selection_from_state
+
+        lig_sel = ligand_selection_from_state(state, default=None)
+        # Infer ATP from holo-style labels when components not yet populated.
+        if not lig_sel:
+            joined = " ".join(labels).lower()
+            if any(tok in joined for tok in ("_atp", "atp_mg", "holo")):
+                lig_sel = "resname ATP"
+        pin = list(REQUIRED_CALCULATIONS)
+        pin_pre = list(REQUIRED_SHARED_SETUP)
+        if not lig_sel:
+            pin = [t for t in pin if t != "calculate_consensus_pocket_metrics"]
+            pin_pre = [
+                t
+                for t in pin_pre
+                if t
+                not in {
+                    "define_pocket_mapped_residues",
+                    "map_pocket_mapped_residues",
+                }
+            ]
+        recipe = build_shared_analysis_protocol(
+            gold_columns=gold or None,
+            ligand_selection=lig_sel,
+        )
+        pre_recipe = build_shared_setup_protocol(
+            settings=settings, ligand_selection=lig_sel
+        )
         spec = CampaignSpec(
             mode="family_modular",
             n_systems=len(labels),
             labels=labels,
             family_modular=True,
-            analysis_recipe=build_shared_analysis_protocol(gold_columns=gold or None),
-            pre_combined_recipe=build_shared_setup_protocol(settings=settings),
+            analysis_recipe=recipe,
+            pre_combined_recipe=pre_recipe,
             contract=family_contract(),
-            pin_tools=list(REQUIRED_CALCULATIONS),
-            pin_pre_tools=list(REQUIRED_SHARED_SETUP),
+            pin_tools=pin,
+            pin_pre_tools=pin_pre,
             allow_partial_combined=allow_partial,
             original_goal=str(original),
             settings=settings_dict,

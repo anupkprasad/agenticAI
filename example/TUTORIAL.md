@@ -25,13 +25,13 @@ repository [README](../README.md) and [docs/](../docs/).
 
 ## 1. What this example does
 
-| Item | Detail |
-|------|--------|
-| **Proteins** | ERBB3 (`p21860`), VRK3 (`q8iv63`), MLKL (`q8nb16`), TITIN (`q8wz42`) |
-| **Systems** | Apo (protein only) + holo (protein + ATP + Mg) → **8** simulations |
-| **MD** | 1 ns production, AMBER99SB-ILDN / TIP3P, 310 K, 1 bar, 0.15 M NaCl |
+| Item               | Detail                                                                                                            |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| **Proteins** | ERBB3 (`p21860`), VRK3 (`q8iv63`), MLKL (`q8nb16`), TITIN (`q8wz42`)                                      |
+| **Systems**  | Apo (protein only) + holo (protein + ATP + Mg) →**8** simulations                                          |
+| **MD**       | 1 ns production, AMBER99SB-ILDN / TIP3P, 310 K, 1 bar, 0.15 M NaCl                                                |
 | **Analyses** | Backbone RMSD, Cα RMSF (+ active-site 150–200), Rg, ATP–pocket COM (holo), Cα DCCM (+ apo–holo ΔDCCM), DSSP |
-| **Outputs** | Per-sim plots/reports + combined overlays + `combined_report.html` |
+| **Outputs**  | Per-sim plots/reports + combined overlays +`combined_report.html`                                               |
 
 Inputs already in the folder: `p21860.pdb`, `q8iv63.pdb`, `q8nb16.pdb`,
 `q8wz42.pdb`, plus [`goal.txt`](pseudo_apo_holo/goal.txt) and
@@ -123,10 +123,10 @@ Force one label again: `--retry-labels p21860_ATP_MG`.
 
 **Primary live views** (open these first — they show stage/status directly):
 
-| File | What you see |
-|------|----------------|
+| File                                                                          | What you see                                                                                                                                                                                                                                                                             |
+| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`supervisor/pool_status.json`](pseudo_apo_holo/supervisor/pool_status.json) | **Best live dashboard.** Per-sim ladder (`preprocessing` → `simsetup` → `hpc` → `analysis` → `reporter`), pool counts (`running` / `pending` / `done` / `failed`), and `workflow_phase` (e.g. `hpc_pool`, `parallel_analysis`, `combined_reporter`). |
-| [`supervisor/state.jsonl`](pseudo_apo_holo/supervisor/state.jsonl) | Full supervisor checkpoint (pretty-printed JSON). Use for resume/debug: `multi_sim_phase`, `hpc_pool`, `parallel_pool`, `completed_sim_states`. Prefer `pool_status.json` for a quick “is it done?” check. |
+| [`supervisor/state.jsonl`](pseudo_apo_holo/supervisor/state.jsonl)           | Full supervisor checkpoint (pretty-printed JSON). Use for resume/debug:`multi_sim_phase`, `hpc_pool`, `parallel_pool`, `completed_sim_states`. Prefer `pool_status.json` for a quick “is it done?” check.                                                                    |
 
 ```bash
 BASE=example/pseudo_apo_holo
@@ -150,19 +150,19 @@ print("parallel done:", sum(1 for r in sims.values() if r.get("status")=="done")
 PY
 ```
 
-| Other checks | Command / file |
-|--------------|----------------|
-| Live log | `tail -f example/pseudo_apo_holo/simagent_nohup.log` |
-| Still running? | `kill -0 "$(cat example/pseudo_apo_holo/simagent_nohup.pid)" && echo running` |
-| Campaign outcome | `example/pseudo_apo_holo/run_summary.md` (and `.json`) |
-| Per-sim health | Sections under `## Simulations` in `run_summary.md` |
-| LLM token use | `example/pseudo_apo_holo/llm_usage.json` |
+| Other checks     | Command / file                                                                  |
+| ---------------- | ------------------------------------------------------------------------------- |
+| Live log         | `tail -f example/pseudo_apo_holo/simagent_nohup.log`                          |
+| Still running?   | `kill -0 "$(cat example/pseudo_apo_holo/simagent_nohup.pid)" && echo running` |
+| Campaign outcome | `example/pseudo_apo_holo/run_summary.md` (and `.json`)                      |
+| Per-sim health   | Sections under`## Simulations` in `run_summary.md`                          |
+| LLM token use    | `example/pseudo_apo_holo/llm_usage.json`                                      |
 
 Typical multi-sim phases (`pool_status.json` → `workflow_phase` / `state.jsonl` → `multi_sim_phase`):
 
-1. **Prep** — preprocess + simsetup for all cases  
-2. **HPC pool** — up to `--allowed-hpc-jobs` SLURM jobs at once  
-3. **Post-HPC** — parallel analysis + reporter, then combined analysis + report  
+1. **Prep** — preprocess + simsetup for all cases
+2. **HPC pool** — up to `--allowed-hpc-jobs` SLURM jobs at once
+3. **Post-HPC** — parallel analysis + reporter, then combined analysis + report
 
 Pool design: [docs/POOLS.md](../docs/POOLS.md).
 
@@ -174,25 +174,23 @@ Base path: `example/pseudo_apo_holo/`.
 
 ### Combined (start here)
 
-> **Main deliverable — open this first**  
-> [`pseudo_apo_holo/reporter/combined_report.html`](pseudo_apo_holo/reporter/combined_report.html)  
-> Comparative HTML report (RMSD, RMSF, Rg, COM, ΔDCCM, DSSP, literature, final impression).
+> **Main deliverable — open this first**[`pseudo_apo_holo/reporter/combined_report.html`](pseudo_apo_holo/reporter/combined_report.html)Comparative HTML report (RMSD, RMSF, Rg, COM, ΔDCCM, DSSP, literature, final impression).
 >
 > - **Local:** `xdg-open example/pseudo_apo_holo/reporter/combined_report.html` (or double-click the file)
 > - **GitHub (`SimAgent_v1.0`):** [view in repo](https://github.com/anupkprasad/agenticAI/blob/SimAgent_v1.0/example/pseudo_apo_holo/reporter/combined_report.html) · [rendered preview](https://htmlpreview.github.io/?https://raw.githubusercontent.com/anupkprasad/agenticAI/SimAgent_v1.0/example/pseudo_apo_holo/reporter/combined_report.html) (third-party; large file — download + open locally if preview fails)
 > - **Code Ocean:** open the same path in the capsule **file browser**
 
-| Path | What it is |
-|------|------------|
-| `reporter/combined_report.html` | **Main deliverable** — see callout above |
-| `analysis/rmsd_overlay.png` | Cross-sim RMSD overlay |
-| `analysis/rmsf_overlay.png` | Cross-sim RMSF overlay |
-| `analysis/rg_overlay.png` | Radius of gyration overlay |
-| `analysis/com_distance_overlay.png` | ATP–pocket COM (holo) |
-| `analysis/*_dccm_diff_heatmap.png` | Apo–holo ΔDCCM per protein (e.g. `VRK3_`, `MLKL_`, `TITIN_`) |
-| `analysis/dssp_comparison.png` | Secondary-structure comparison |
-| `analysis/*_stats.csv` | Summary statistics tables |
-| `run_summary.md` | Success / health counts for all eight sims |
+| Path                                  | What it is                                                          |
+| ------------------------------------- | ------------------------------------------------------------------- |
+| `reporter/combined_report.html`     | **Main deliverable** — see callout above                     |
+| `analysis/rmsd_overlay.png`         | Cross-sim RMSD overlay                                              |
+| `analysis/rmsf_overlay.png`         | Cross-sim RMSF overlay                                              |
+| `analysis/rg_overlay.png`           | Radius of gyration overlay                                          |
+| `analysis/com_distance_overlay.png` | ATP–pocket COM (holo)                                              |
+| `analysis/*_dccm_diff_heatmap.png`  | Apo–holo ΔDCCM per protein (e.g.`VRK3_`, `MLKL_`, `TITIN_`) |
+| `analysis/dssp_comparison.png`      | Secondary-structure comparison                                      |
+| `analysis/*_stats.csv`              | Summary statistics tables                                           |
+| `run_summary.md`                    | Success / health counts for all eight sims                          |
 
 ### Per simulation
 
@@ -218,20 +216,20 @@ Labels in this example: `p21860`, `p21860_ATP_MG`, `q8iv63`, `q8iv63_ATP_MG`,
 Use these files when you need to audit **what** ran, **why**, and **with which
 inputs** — without re-reading the full trajectory.
 
-| Layer | Path | Use it for |
-|-------|------|------------|
-| Campaign snapshot | `campaign/state.json` | Spec hash, stages, science contract |
-| Campaign memory | `campaign/memory.jsonl` | Notes / errors remembered across the study |
-| Supervisor checkpoint | `supervisor/state.jsonl` | Routing, combined phase, pool restore |
-| Master plan | `planner/master_plan.md` | Cross-sim plan and per-case prompts |
-| Campaign dialogue | `agent_conversation.log` | Enrichment, master plan, combined steps |
-| Per-sim plan | `{label}/planner/execution_plan.md` | Tools chosen for that system |
-| Per-sim report | `{label}/supervisor/execution_report.md` | What completed / warnings |
-| Per-sim dialogue | `{label}/agent_conversation.log` | Preprocess → reporter for one label |
-| Stage inventory | `{label}/{stage}/inventory.json` | Indexed artifacts for that stage |
-| Per-sim state | `{label}/state.json` | Completed stages for that simulation |
-| Analysis summary | `{label}/analysis/analysis_summary.jsonl` | Each metric run + output paths |
-| Combined analysis log | `analysis/execution_report.md` | Overlay / ΔDCCM / DSSP aggregation |
+| Layer                 | Path                                        | Use it for                                 |
+| --------------------- | ------------------------------------------- | ------------------------------------------ |
+| Campaign snapshot     | `campaign/state.json`                     | Spec hash, stages, science contract        |
+| Campaign memory       | `campaign/memory.jsonl`                   | Notes / errors remembered across the study |
+| Supervisor checkpoint | `supervisor/state.jsonl`                  | Routing, combined phase, pool restore      |
+| Master plan           | `planner/master_plan.md`                  | Cross-sim plan and per-case prompts        |
+| Campaign dialogue     | `agent_conversation.log`                  | Enrichment, master plan, combined steps    |
+| Per-sim plan          | `{label}/planner/execution_plan.md`       | Tools chosen for that system               |
+| Per-sim report        | `{label}/supervisor/execution_report.md`  | What completed / warnings                  |
+| Per-sim dialogue      | `{label}/agent_conversation.log`          | Preprocess → reporter for one label       |
+| Stage inventory       | `{label}/{stage}/inventory.json`          | Indexed artifacts for that stage           |
+| Per-sim state         | `{label}/state.json`                      | Completed stages for that simulation       |
+| Analysis summary      | `{label}/analysis/analysis_summary.jsonl` | Each metric run + output paths             |
+| Combined analysis log | `analysis/execution_report.md`            | Overlay / ΔDCCM / DSSP aggregation        |
 
 Quick greps:
 
@@ -295,11 +293,11 @@ Natural-language goal tips (framework-wide):
 
 ## Related documentation
 
-| Doc | When to open it |
-|-----|-----------------|
-| [README.md](../README.md) | Install, CLI reference, output layout, features |
-| [docs/OLLAMA_SETUP.md](../docs/OLLAMA_SETUP.md) | Ollama server + `gpt-oss:20b` |
-| [docs/POOLS.md](../docs/POOLS.md) | Local workers + SLURM HPC pool |
-| [docs/PIPELINE_WORKFLOW.md](../docs/PIPELINE_WORKFLOW.md) | Stage order and directory contracts |
-| [docs/ANALYSIS_TOOLS.md](../docs/ANALYSIS_TOOLS.md) | What each analysis tool computes |
-| [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) | LangGraph agents and state |
+| Doc                                                      | When to open it                                 |
+| -------------------------------------------------------- | ----------------------------------------------- |
+| [README.md](../README.md)                                 | Install, CLI reference, output layout, features |
+| [docs/OLLAMA_SETUP.md](../docs/OLLAMA_SETUP.md)           | Ollama server +`gpt-oss:20b`                  |
+| [docs/POOLS.md](../docs/POOLS.md)                         | Local workers + SLURM HPC pool                  |
+| [docs/PIPELINE_WORKFLOW.md](../docs/PIPELINE_WORKFLOW.md) | Stage order and directory contracts             |
+| [docs/ANALYSIS_TOOLS.md](../docs/ANALYSIS_TOOLS.md)       | What each analysis tool computes                |
+| [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md)           | LangGraph agents and state                      |

@@ -1581,43 +1581,141 @@ def _extract_pdb_paths_from_goal(goal: str) -> list:
     return _filter_remodel_donor_pdbs(goal, paths)
 
 
-def _build_pdb_list_from_uniprot_goal(goal: str, working_dir: str) -> List[Dict[str, Any]]:
-    """
-    Build synthetic PDB entries from UniProt IDs when no local PDB is provided.
+def _entries_from_structure_targets(
+    targets: List[Dict[str, Any]],
+    working_dir: str,
+) -> List[Dict[str, Any]]:
+    """Map validated structure targets to synthetic PDB path entries."""
+    entries: List[Dict[str, Any]] = []
+    for t in targets or []:
+        uid = t.get("uniprot_id")
+        pid = t.get("pdb_id")
+        label = (uid or pid or "structure").lower()
+        pdb_name = f"{label}.pdb"
+        pdb_path = str((Path(working_dir) / pdb_name).resolve())
+        domain = t.get("domain_label")
+        entries.append(
+            {
+                "uniprot_id": uid,
+                "pdb_id": None if uid else pid,
+                "protein_name": t.get("protein_name"),
+                "pdb_path": pdb_path,
+                "pdb_name": pdb_name,
+                "structure_source": t.get("structure_source")
+                or ("alphafold" if uid else "rcsb"),
+                "domain_label": domain,
+                "start_resid": t.get("start_resid"),
+                "end_resid": t.get("end_resid"),
+                "extract_domain": bool(t.get("extract_domain") or domain),
+            }
+        )
+    return entries
 
-    Each entry maps a placeholder path ({working_dir}/{uniprot}.pdb) to download
+
+def _build_pdb_list_from_uniprot_goal(
+    goal: str,
+    working_dir: str,
+    llm: Any = None,
+) -> List[Dict[str, Any]]:
+    """
+    Build synthetic PDB entries from UniProt IDs or RCSB PDB IDs when no local
+    PDB path is provided in the goal.
+
+    Order of operations:
+      1. Deterministic regex / structured parse (primary)
+      2. Optional LLM gap-fill when parse is empty but the goal clearly asks
+         to download / AlphaFold a structure — every ID is shape-validated
+
+    Each entry maps a placeholder path ({working_dir}/{id}.pdb) to download
     metadata consumed by the preprocess agent and multi-sim orchestration.
     """
     from src.preprocess.structure_request_parser import (
         extract_uniprot_ids,
+        extract_pdb_ids,
         extract_protein_name,
         parse_structure_request,
+        goal_requests_structure_download,
+        interpret_fuzzy_structure_goal,
     )
 
     parsed = parse_structure_request(goal)
     uniprot_ids = extract_uniprot_ids(goal)
-    if not uniprot_ids:
-        return []
+    pdb_ids = extract_pdb_ids(goal)
+
+    # Shared domain / source intent from the goal applies to every UniProt ID
+    # (e.g. "download … for both … extract the pseudokinase domain").
+    shared_domain = (parsed or {}).get("domain_label") if parsed else None
+    shared_source = (parsed or {}).get("structure_source", "auto") if parsed else "auto"
+    shared_extract = bool((parsed or {}).get("extract_domain")) if parsed else False
 
     entries: List[Dict[str, Any]] = []
     for uid in uniprot_ids:
         req = parsed if parsed and parsed.get("uniprot_id") == uid else None
-        protein_name = (req or {}).get("protein_name") or extract_protein_name(goal, uid)
+        protein_name = extract_protein_name(goal, uid)
+        if req and req.get("protein_name") and str(req.get("protein_name")).upper() not in {
+            "TWO", "BOTH", "ALL", "EACH", "THE", "AND",
+        }:
+            protein_name = req.get("protein_name")
         pdb_name = f"{uid.lower()}.pdb"
         pdb_path = str((Path(working_dir) / pdb_name).resolve())
         entries.append(
             {
                 "uniprot_id": uid,
+                "pdb_id": None,
                 "protein_name": protein_name,
                 "pdb_path": pdb_path,
                 "pdb_name": pdb_name,
-                "structure_source": (req or {}).get("structure_source", "auto"),
-                "domain_label": (req or {}).get("domain_label"),
-                "start_resid": (req or {}).get("start_resid"),
-                "end_resid": (req or {}).get("end_resid"),
-                "extract_domain": (req or {}).get("extract_domain", False),
+                "structure_source": (req or {}).get("structure_source") or shared_source or "auto",
+                "domain_label": (req or {}).get("domain_label") or shared_domain,
+                "start_resid": (req or {}).get("start_resid") if req else None,
+                "end_resid": (req or {}).get("end_resid") if req else None,
+                "extract_domain": bool(
+                    (req or {}).get("extract_domain")
+                    or (shared_extract and ((req or {}).get("domain_label") or shared_domain))
+                ),
             }
         )
+
+    # PDB-ID-only goals (no UniProt) — download coordinates from RCSB
+    if not entries and pdb_ids:
+        for pid in pdb_ids:
+            pdb_name = f"{pid.lower()}.pdb"
+            pdb_path = str((Path(working_dir) / pdb_name).resolve())
+            entries.append(
+                {
+                    "uniprot_id": None,
+                    "pdb_id": pid,
+                    "protein_name": None,
+                    "pdb_path": pdb_path,
+                    "pdb_name": pdb_name,
+                    "structure_source": "rcsb",
+                    "domain_label": None,
+                    "start_resid": None,
+                    "end_resid": None,
+                    "extract_domain": False,
+                }
+            )
+
+    # LLM gap-fill: only when deterministic parse found nothing, the goal
+    # asks for a download, and an LLM client is available.
+    if not entries and llm is not None and goal_requests_structure_download(goal):
+        print(
+            "\n  Deterministic structure parse found no IDs — "
+            "asking LLM to interpret fuzzy goal (validated before fetch)…",
+            flush=True,
+        )
+        llm_result = interpret_fuzzy_structure_goal(goal, llm)
+        targets = llm_result.get("targets") or []
+        if targets:
+            entries = _entries_from_structure_targets(targets, working_dir)
+            labels = ", ".join(
+                t.get("uniprot_id") or t.get("pdb_id") or "?" for t in targets
+            )
+            print(f"  LLM proposed validated structure target(s): {labels}", flush=True)
+        else:
+            err = llm_result.get("error") or "no validated targets"
+            print(f"  LLM gap-fill did not yield usable IDs ({err})", flush=True)
+
     return entries
 
 
@@ -1629,12 +1727,12 @@ def _prefetch_uniprot_structures(
     Ensure shared structures exist in the base working directory.
 
     Existing (user-provided) files are reused as-is; only missing structures
-    are fetched from the database.
+    are fetched from the database (UniProt→AlphaFold/RCSB, or direct PDB ID).
 
     Returns ``(reused, downloaded)`` lists of PDB paths.
     """
     from src.preprocess.structure_acquisition import acquire_structure_from_request
-    from src.preprocess.structure_downloader import download_structure
+    from src.preprocess.structure_downloader import download_structure, download_pdb_by_id
 
     reused: List[str] = []
     downloaded: List[str] = []
@@ -1646,7 +1744,14 @@ def _prefetch_uniprot_structures(
 
         out_dir = str(Path(pdb_path).parent)
         source = entry.get("structure_source", "auto")
-        uid = entry["uniprot_id"]
+        uid = entry.get("uniprot_id")
+        pdb_id = entry.get("pdb_id")
+
+        if pdb_id and not uid:
+            result = download_pdb_by_id.func(pdb_id=pdb_id, output_file=pdb_path)
+            if result.get("success"):
+                downloaded.append(pdb_path)
+            continue
 
         if entry.get("extract_domain") and entry.get("start_resid") and entry.get("end_resid"):
             result = acquire_structure_from_request(goal, out_dir, source=source)
@@ -1713,6 +1818,7 @@ def _build_structure_request_config(entry: Dict[str, Any], goal: str) -> Dict[st
 
     config = {
         "uniprot_id": uid,
+        "pdb_id": entry.get("pdb_id") or parsed.get("pdb_id"),
         "protein_name": entry.get("protein_name") or parsed.get("protein_name"),
         "structure_source": entry.get("structure_source") or parsed.get("structure_source", "auto"),
         "extract_domain": bool(domain_label and start_resid and end_resid),
@@ -2244,26 +2350,36 @@ def main(argv=None):
             )
         else:
             # No .pdb in goal — try UniProt-based structure acquisition
-            structure_request_entries = _build_pdb_list_from_uniprot_goal(goal, working_dir)
+            # (deterministic parse first; LLM gap-fill only if needed)
+            structure_request_entries = _build_pdb_list_from_uniprot_goal(
+                goal,
+                working_dir,
+                llm=llm_client if use_llm else None,
+            )
             if structure_request_entries:
                 pdb_list = [e["pdb_path"] for e in structure_request_entries]
-                uids = ", ".join(e["uniprot_id"] for e in structure_request_entries)
+                labels = ", ".join(
+                    e.get("uniprot_id") or e.get("pdb_id") or Path(e["pdb_path"]).stem
+                    for e in structure_request_entries
+                )
                 _n_existing = sum(
                     1 for e in structure_request_entries if Path(e["pdb_path"]).exists()
                 )
                 if _n_existing == len(structure_request_entries):
                     print(
-                        f"\n  Using {_n_existing} existing local structure(s) for UniProt: {uids}",
+                        f"\n  Using {_n_existing} existing local structure(s): {labels}",
                         flush=True,
                     )
                 else:
                     print(
-                        f"\n  Resolving structure(s) for UniProt: {uids} "
+                        f"\n  Resolving structure(s): {labels} "
                         f"({_n_existing} present locally, "
                         f"{len(structure_request_entries) - _n_existing} to fetch)",
                         flush=True,
                     )
-                if len(structure_request_entries) == 1:
+                if len(structure_request_entries) == 1 and structure_request_entries[0].get(
+                    "uniprot_id"
+                ):
                     print(
                         "  Note: one UniProt ID may expand into component cases "
                         "(e.g. protein-only vs protein+ATP+MG) if requested.",
@@ -2272,7 +2388,7 @@ def main(argv=None):
 
     if not pdb_list:
         print(
-            "\nERROR: No PDB files or UniProt structures found!",
+            "\nERROR: No PDB files, UniProt accessions, or PDB IDs found!",
             file=sys.stderr, flush=True
         )
         print(
@@ -2294,6 +2410,11 @@ def main(argv=None):
         print(
             "   - Or request download by UniProt ID in --goal "
             "(e.g. 'UniProt P21860, download from AlphaFold')",
+            file=sys.stderr, flush=True
+        )
+        print(
+            "   - Or request download by PDB ID in --goal "
+            "(e.g. 'Download PDB 6VC0 and run MD')",
             file=sys.stderr, flush=True
         )
         return 1

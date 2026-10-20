@@ -2,12 +2,252 @@
 import os
 import logging
 import base64
-from typing import Dict, Any, List, Optional, Union
+import re
+from typing import Dict, Any, List, Optional, Set, Tuple, Union
 from pathlib import Path
 from datetime import datetime
 from langchain.tools import tool
 
 logger = logging.getLogger(__name__)
+
+
+def _figure_caption_label(analysis_type: str, img_type: str, img_path: str) -> str:
+    """Human caption for a plot (without the figN. prefix)."""
+    stem = Path(str(img_path)).stem.replace("_", " ").strip()
+    atype = (analysis_type or "").replace("_", " ").strip()
+    key = (img_type or "").replace("_", " ").strip()
+    low = f"{stem} {key} {atype}".lower()
+    if "rmsd" in low and "rmsf" not in low:
+        return "RMSD"
+    if "rmsf" in low:
+        return "RMSF"
+    if "gyration" in low or re.search(r"\brg\b", low) or "radius of gyration" in low:
+        return "Radius of Gyration"
+    if "combined metrics" in low or "multipanel" in low:
+        return "Combined Metrics"
+    if "sasa" in low:
+        return "SASA"
+    if "pca" in low:
+        return "PCA"
+    if "fel" in low or "free energy" in low:
+        return "Free Energy Landscape"
+    if atype and atype.lower() not in {"unknown", "plot"}:
+        return atype
+    if stem and stem.lower() not in {"plot", "figure", "image"}:
+        return stem.title()
+    if key and key.lower() not in {"plot", "figure", "image"}:
+        return key.title()
+    return "Analysis Plot"
+
+
+def _format_figure_label(n: int, caption: str) -> str:
+    """Canonical in-report figure label: ``fig1. RMSD``."""
+    return f"fig{int(n)}. {caption}"
+
+
+def _sanitize_figure_table_citations(
+    text: str,
+    figure_numbers: Set[int],
+    table_numbers: Set[int],
+) -> str:
+    """Drop in-text Figure/fig/Table citations that do not correspond to report labels."""
+    if not text:
+        return text
+
+    def _fig_repl(m: re.Match) -> str:
+        # Supplementary-style "Figure S1" / "fig S1" is never emitted by this generator
+        if m.group(1):
+            return ""
+        num = int(m.group(2))
+        return m.group(0) if num in figure_numbers else ""
+
+    def _tab_repl(m: re.Match) -> str:
+        # "Table S1" etc. — we only label main-text Table N
+        if m.group(1):
+            return ""
+        num = int(m.group(2))
+        return m.group(0) if num in table_numbers else ""
+
+    # Figure 1 / fig1. / Fig 1 (nbsp / narrow nbsp); optional S for supplementary-style cites
+    _ws = r"[\u00a0\u202f\u2009\s]*"
+    out = re.sub(
+        rf"\(?{_ws}(?:Figures?|figs?\.?){_ws}([Ss]?)(\d+)\.?{_ws}\)?",
+        _fig_repl,
+        text,
+        flags=re.IGNORECASE,
+    )
+    out = re.sub(
+        rf"\(?{_ws}Tables?{_ws}([Ss]?)(\d+){_ws}\)?",
+        _tab_repl,
+        out,
+        flags=re.IGNORECASE,
+    )
+    # Clean leftover empty parens / double spaces from stripped citations
+    out = re.sub(r"\(\s*\)", "", out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r" +([.,;:])", r"\1", out)
+    return out
+
+
+def _parse_gro_system_counts(gro_path: Path) -> Dict[str, Any]:
+    """Extract atom / residue / component counts from a GROMACS .gro file."""
+    try:
+        lines = gro_path.read_text(errors="ignore").splitlines()
+        if len(lines) < 3:
+            return {}
+        n_atoms = int(lines[1].strip())
+        atom_lines = lines[2 : 2 + n_atoms]
+        protein_atoms = 0
+        water_atoms = 0
+        ion_atoms = 0
+        ligand_atoms = 0
+        protein_res: Set[Tuple[str, str]] = set()
+        water_res: Set[Tuple[str, str]] = set()
+        ion_types: Dict[str, int] = {}
+        ligand_names: Set[str] = set()
+        _WATER = {"SOL", "HOH", "WAT", "TIP3", "TIP3P", "TIP4", "OPC", "SPC"}
+        _IONS = {"NA", "CL", "K", "MG", "CA", "ZN", "NA+", "CL-", "MG2", "CA2"}
+        _AA = {
+            "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY",
+            "HIS", "HIE", "HID", "HIP", "ILE", "LEU", "LYS", "MET",
+            "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
+        }
+        _LIGAND = {"ATP", "ADP", "GTP", "GDP", "NAD", "HEM", "LIG", "ANP"}
+        for ln in atom_lines:
+            if len(ln) < 20:
+                continue
+            resid = ln[0:5].strip()
+            resname = ln[5:10].strip().upper()
+            key = (resid, resname)
+            if resname in _WATER:
+                water_atoms += 1
+                water_res.add(key)
+            elif resname in _IONS:
+                ion_atoms += 1
+                ion_types[resname] = ion_types.get(resname, 0) + 1
+            elif resname in _LIGAND or (len(resname) <= 3 and resname not in _AA):
+                ligand_atoms += 1
+                ligand_names.add(resname)
+            else:
+                protein_atoms += 1
+                protein_res.add(key)
+        components: Dict[str, Any] = {
+            "protein": {
+                "present": protein_atoms > 0,
+                "atom_count": protein_atoms,
+                "residue_count": len(protein_res),
+            },
+            "water": {
+                "present": water_atoms > 0,
+                "atom_count": water_atoms,
+                "residue_count": len(water_res),
+            },
+            "ions": {
+                "present": ion_atoms > 0,
+                "atom_count": ion_atoms,
+                "types": ion_types,
+            },
+            "ligand": {
+                "present": ligand_atoms > 0,
+                "atom_count": ligand_atoms,
+                "residue_names": sorted(ligand_names),
+            },
+        }
+        return {
+            "total_atoms": n_atoms,
+            "total_residues": len(protein_res),
+            "components": components,
+            "summary": (
+                f"{n_atoms:,} atoms · {len(protein_res):,} protein residues"
+                + (f" · {len(water_res):,} waters" if water_res else "")
+            ),
+        }
+    except Exception as exc:
+        logger.debug("GRO system parse failed for %s: %s", gro_path, exc)
+        return {}
+
+
+def enrich_system_info_for_report(
+    system_info: Optional[Dict[str, Any]],
+    analysis_data: Optional[Dict[str, Any]] = None,
+    analysis_dir: Optional[str] = None,
+    protein_name: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fill missing system_info fields from analysis stats and nearby .gro files."""
+    info: Dict[str, Any] = dict(system_info) if isinstance(system_info, dict) else {}
+    entries = []
+    if isinstance(analysis_data, dict):
+        entries = list(analysis_data.get("entries") or [])
+
+    # Analysis-derived trajectory / residue counts
+    traj: Dict[str, Any] = dict(info.get("trajectory") or {}) if isinstance(info.get("trajectory"), dict) else {}
+    for entry in entries:
+        atype = str(entry.get("analysis_type") or "")
+        stats = entry.get("statistics") or {}
+        if not isinstance(stats, dict):
+            continue
+        if atype == "RMSD" and stats.get("n_frames") and not traj.get("n_frames"):
+            traj["n_frames"] = stats["n_frames"]
+        if atype == "RMSF" and stats.get("n_residues"):
+            if not info.get("total_residues"):
+                info["total_residues"] = stats["n_residues"]
+        if atype == "PDB_Input_Validation":
+            for key in ("total_atoms", "total_residues"):
+                val = stats.get(key)
+                if val not in (None, "", 0) and not info.get(key):
+                    info[key] = val
+            meta = entry.get("metadata") or {}
+            if isinstance(meta, dict):
+                summary = meta.get("human_readable_summary")
+                if summary and summary != "N/A" and not info.get("summary"):
+                    info["summary"] = summary
+
+    if traj:
+        info["trajectory"] = traj
+
+    # Prefer production / analysis GRO over empty validation zeros
+    search_roots: List[Path] = []
+    if analysis_dir:
+        ad = Path(analysis_dir)
+        search_roots.extend([ad, ad.parent, ad.parent / "hpc", ad.parent / "simsetup"])
+    for root in search_roots:
+        if not root.is_dir():
+            continue
+        for name in ("md.gro", "complex.gro", "boxed.gro", "system.gro"):
+            cand = root / name
+            if cand.is_file():
+                parsed = _parse_gro_system_counts(cand)
+                if parsed.get("total_atoms"):
+                    for k, v in parsed.items():
+                        if k == "components":
+                            if not info.get("components"):
+                                info["components"] = v
+                        elif k == "summary":
+                            if not info.get("summary") or info.get("summary") == "N/A":
+                                info["summary"] = v
+                        elif not info.get(k) or info.get(k) in (0, "0", "N/A"):
+                            info[k] = v
+                    info.setdefault("_source_gro", str(cand))
+                    break
+        if info.get("_source_gro"):
+            break
+
+    if protein_name and not info.get("protein_name"):
+        info["protein_name"] = protein_name
+
+    # Only mark success when we have something useful to show
+    has_counts = any(
+        info.get(k) not in (None, "", 0, "0", "N/A")
+        for k in ("total_atoms", "total_residues")
+    )
+    has_traj = isinstance(info.get("trajectory"), dict) and bool(info.get("trajectory"))
+    has_comps = isinstance(info.get("components"), dict) and bool(info.get("components"))
+    if has_counts or has_traj or has_comps or info.get("summary"):
+        info["success"] = True
+        return info
+    if info.get("success"):
+        return info
+    return system_info if system_info else None
 
 
 @tool
@@ -68,6 +308,13 @@ def generate_html_report(
         pdb_frames = {"0 ns": pdb_data}
     else:
         pdb_frames = _auto_extract_pdbs(working_dir)
+
+    system_info = enrich_system_info_for_report(
+        system_info,
+        analysis_data=analysis_data if isinstance(analysis_data, dict) else None,
+        analysis_dir=analysis_dir,
+        protein_name=protein_name,
+    )
     
     try:
         # Build HTML content
@@ -242,14 +489,24 @@ def build_html_content(
     # Build HTML
     html_parts = []
     
-    # HTML header
+    # Precompute title so <title> and <h1> stay consistent
+    _title_parts = []
+    if protein_name:
+        _title_parts.append(protein_name)
+    if sim_label and sim_label.lower() != (protein_name or "").lower():
+        _title_parts.append(f"({sim_label})")
+    _report_title = " — ".join(_title_parts) if _title_parts else "Molecular Dynamics"
+
+    # HTML header (not an f-string — CSS uses curly braces)
+    import html as _html_esc
+    _safe_title = _html_esc.escape(_report_title)
     html_parts.append("""
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Molecular Dynamics Report</title>
+    <title>__REPORT_TITLE__ MD Report</title>
     <script src="https://3Dmol.org/build/3Dmol-min.js"></script>
     <style>
         body {
@@ -621,15 +878,10 @@ def build_html_content(
 </head>
 <body>
     <div class="container">
-""")
+""".replace("__REPORT_TITLE__", _safe_title))
     
-    # Title and metadata
-    title_parts = []
-    if protein_name:
-        title_parts.append(protein_name)
-    if sim_label and sim_label.lower() != (protein_name or "").lower():
-        title_parts.append(f"({sim_label})")
-    report_title = " — ".join(title_parts) if title_parts else "Molecular Dynamics"
+    # Title and metadata — story arc: Question → System → Results → Interpretation
+    report_title = _report_title
     html_parts.append(f"<h1>🧬 {report_title} MD Report</h1>")
     html_parts.append(f'<div class="metadata">')
     if protein_name:
@@ -640,20 +892,25 @@ def build_html_content(
     html_parts.append(f'<p><strong>📅 Generated:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>')
     html_parts.append(f'<p><strong>🔬 Analyses in Report:</strong> {len(entries)} '
                       f'(of {len(seen_types)} available)</p>')
-    html_parts.append(f'<p><strong>📈 Analysis Types:</strong> {", ".join(analysis_types.keys())}</p>')
+    html_parts.append(
+        f'<p><strong>📈 Selected analyses:</strong> '
+        f'{", ".join(e.get("analysis_type", "?") for e in entries)}</p>'
+    )
     html_parts.append('</div>')
     
-    # Task Description (enriched prompt from supervisor)
-    if enriched_prompt:
+    # Task Description = research question
+    if enriched_prompt or user_goal:
         import html as html_mod
         html_parts.append('<div class="task-description">')
-        html_parts.append('<h3>📝 Task Description</h3>')
-        html_parts.append(f'<p>{html_mod.escape(enriched_prompt)}</p>')
+        html_parts.append('<h2>1. Research Question</h2>')
+        html_parts.append(
+            f'<p>{html_mod.escape(enriched_prompt or user_goal or "")}</p>'
+        )
         html_parts.append('</div>')
     
-    # Section 1: System Information (from input validation)
+    # Section 2: System Information (from input validation)
     if system_info and system_info.get("success"):
-        html_parts.append("<h2>🔬 System Information</h2>")
+        html_parts.append("<h2>2. System Information</h2>")
         html_parts.append('<div class="system-info">')
         
         # Summary line
@@ -662,28 +919,40 @@ def build_html_content(
             html_parts.append(f'<p><strong>{summary}</strong></p>')
         
         # Key metrics grid
+        def _fmt_int(val: Any, default: str = "N/A") -> str:
+            try:
+                if val is None or val == "":
+                    return default
+                return f"{int(val):,}"
+            except (TypeError, ValueError):
+                return str(val) if val not in (None, "") else default
+
         html_parts.append('<div class="system-info-grid">')
-        html_parts.append(f'''
+        atoms_s = _fmt_int(system_info.get("total_atoms"), "")
+        residues_s = _fmt_int(system_info.get("total_residues"), "")
+        if atoms_s:
+            html_parts.append(f'''
             <div class="system-info-card">
                 <div class="info-label">Total Atoms</div>
-                <div class="info-value">{system_info.get("total_atoms", "N/A"):,}</div>
+                <div class="info-value">{atoms_s}</div>
             </div>
         ''')
-        html_parts.append(f'''
+        if residues_s:
+            html_parts.append(f'''
             <div class="system-info-card">
                 <div class="info-label">Total Residues</div>
-                <div class="info-value">{system_info.get("total_residues", "N/A"):,}</div>
+                <div class="info-value">{residues_s}</div>
             </div>
         ''')
         
         # Trajectory info if available
         traj_info = system_info.get("trajectory", {})
-        if traj_info:
+        if isinstance(traj_info, dict) and traj_info:
             if traj_info.get("n_frames"):
                 html_parts.append(f'''
                     <div class="system-info-card">
                         <div class="info-label">Frames</div>
-                        <div class="info-value">{traj_info["n_frames"]:,}</div>
+                        <div class="info-value">{_fmt_int(traj_info.get("n_frames"))}</div>
                     </div>
                 ''')
             if traj_info.get("total_time_ns"):
@@ -712,33 +981,46 @@ def build_html_content(
             html_parts.append('<tbody>')
             
             # Protein
-            prot = components.get("protein", {})
+            prot = components.get("protein", {}) if isinstance(components.get("protein"), dict) else {}
             if prot.get("present"):
                 chains = ", ".join(prot.get("chains", [])) if prot.get("chains") else "—"
-                html_parts.append(f'<tr><td>🧬 Protein</td><td>Yes</td><td>{prot.get("atom_count", 0):,}</td><td>{prot.get("residue_count", 0)} residues, Chains: {chains}</td></tr>')
+                html_parts.append(
+                    f'<tr><td>🧬 Protein</td><td>Yes</td><td>{_fmt_int(prot.get("atom_count"), "0")}</td>'
+                    f'<td>{_fmt_int(prot.get("residue_count"), "0")} residues, Chains: {chains}</td></tr>'
+                )
             else:
                 html_parts.append('<tr><td>🧬 Protein</td><td>No</td><td>—</td><td>—</td></tr>')
             
             # Water
-            wat = components.get("water", {})
+            wat = components.get("water", {}) if isinstance(components.get("water"), dict) else {}
             if wat.get("present"):
-                html_parts.append(f'<tr><td>💧 Water</td><td>Yes</td><td>{wat.get("atom_count", 0):,}</td><td>{wat.get("residue_count", 0)} molecules</td></tr>')
+                html_parts.append(
+                    f'<tr><td>💧 Water</td><td>Yes</td><td>{_fmt_int(wat.get("atom_count"), "0")}</td>'
+                    f'<td>{_fmt_int(wat.get("residue_count"), "0")} molecules</td></tr>'
+                )
             else:
                 html_parts.append('<tr><td>💧 Water</td><td>No</td><td>—</td><td>—</td></tr>')
             
             # Ions
-            ion = components.get("ions", {})
+            ion = components.get("ions", {}) if isinstance(components.get("ions"), dict) else {}
             if ion.get("present"):
-                ion_detail = ", ".join(f"{k}: {v}" for k, v in ion.get("types", {}).items())
-                html_parts.append(f'<tr><td>⚡ Ions</td><td>Yes</td><td>{ion.get("atom_count", 0):,}</td><td>{ion_detail}</td></tr>')
+                ion_types = ion.get("types", {}) if isinstance(ion.get("types"), dict) else {}
+                ion_detail = ", ".join(f"{k}: {v}" for k, v in ion_types.items())
+                html_parts.append(
+                    f'<tr><td>⚡ Ions</td><td>Yes</td><td>{_fmt_int(ion.get("atom_count"), "0")}</td>'
+                    f'<td>{ion_detail}</td></tr>'
+                )
             else:
                 html_parts.append('<tr><td>⚡ Ions</td><td>No</td><td>—</td><td>—</td></tr>')
             
             # Ligand
-            lig = components.get("ligand", {})
+            lig = components.get("ligand", {}) if isinstance(components.get("ligand"), dict) else {}
             if lig.get("present"):
-                lig_names = ", ".join(lig.get("residue_names", []))
-                html_parts.append(f'<tr><td>💊 Ligand</td><td>Yes</td><td>{lig.get("atom_count", 0):,}</td><td>{lig_names}</td></tr>')
+                lig_names = ", ".join(lig.get("residue_names", []) or [])
+                html_parts.append(
+                    f'<tr><td>💊 Ligand</td><td>Yes</td><td>{_fmt_int(lig.get("atom_count"), "0")}</td>'
+                    f'<td>{lig_names}</td></tr>'
+                )
             else:
                 html_parts.append('<tr><td>💊 Ligand</td><td>No</td><td>—</td><td>—</td></tr>')
             
@@ -752,8 +1034,13 @@ def build_html_content(
         html_parts.append(_build_3d_viewer_section(pdb_frames))
         html_parts.append('<div class="section-divider"></div>')
     
-    # Analysis sections
-    html_parts.append("<h2>📊 Analysis Results</h2>")
+    # Analysis sections — key figures + stats
+    html_parts.append("<h2>3. Key Results</h2>")
+    figure_counter = 0
+    table_counter = 0
+    figure_numbers: Set[int] = set()
+    table_numbers: Set[int] = set()
+    figure_catalog: List[str] = []  # e.g. "fig1. RMSD"
     
     for entry in entries:
         atype = entry.get("analysis_type", "Unknown")
@@ -769,7 +1056,7 @@ def build_html_content(
         timestamp = entry.get("timestamp", "")
         
         html_parts.append(f'<div class="analysis-section">')
-        html_parts.append(f'<h3>{atype}</h3>')
+        html_parts.append(f'<h3>{atype.replace("_", " ")}</h3>')
         html_parts.append(f'<p class="timestamp">⏱️ Performed: {timestamp}</p>')
         
         # Find and display images (goal-aware subset)
@@ -786,10 +1073,16 @@ def build_html_content(
             for img_type, img_path in image_files.items():
                 img_data = _encode_image_base64(img_path, search_dirs)
                 if img_data:
+                    figure_counter += 1
+                    figure_numbers.add(figure_counter)
+                    caption = _figure_caption_label(atype, str(img_type), str(img_path))
+                    fig_label = _format_figure_label(figure_counter, caption)
+                    figure_catalog.append(fig_label)
+                    safe_alt = _html_esc.escape(fig_label)
                     html_parts.append(f'''
-                        <div class="image-container">
-                            <img src="{img_data}" alt="{img_type}" class="analysis-image">
-                            <p class="image-caption">{img_type.replace("_", " ").title()}</p>
+                        <div class="image-container" id="figure-{figure_counter}">
+                            <img src="{img_data}" alt="{safe_alt}" class="analysis-image">
+                            <p class="image-caption"><strong>{safe_alt}</strong></p>
                         </div>
                     ''')
                 else:
@@ -807,8 +1100,13 @@ def build_html_content(
 
             # --- Statistics tile (left) ---
             if has_stats:
+                table_counter += 1
+                table_numbers.add(table_counter)
                 html_parts.append('<div class="info-tile tile-stats">')
-                html_parts.append('<div class="tile-header">📊 Statistics</div>')
+                html_parts.append(
+                    f'<div class="tile-header" id="table-{table_counter}">'
+                    f'Table {table_counter}: {atype.replace("_", " ")} Statistics</div>'
+                )
                 for k, v in stats.items():
                     if isinstance(v, float):
                         fv = f"{v:.4f}"
@@ -818,15 +1116,21 @@ def build_html_content(
                     html_parts.append(f'<div class="tile-row"><span class="tile-key">{label}</span><span class="tile-val highlight">{fv}</span></div>')
                 html_parts.append('</div>')
 
-            # --- Files tile (right, beside Statistics) ---
+            # --- Files tile (collapsed; raw paths are secondary to figures/stats) ---
             if has_files:
                 html_parts.append('<div class="info-tile tile-files">')
-                html_parts.append('<div class="tile-header">📁 Files</div>')
+                html_parts.append(
+                    '<details><summary class="tile-header" style="cursor:pointer;">'
+                    f'📁 Data files ({len(non_image_files)})</summary>'
+                )
                 for k, v in non_image_files.items():
                     fname = Path(v).name if isinstance(v, str) else str(v)
                     label = k.replace("_", " ").title()
-                    html_parts.append(f'<div class="tile-row"><span class="tile-key">{label}</span><span class="tile-val">{fname}</span></div>')
-                html_parts.append('</div>')
+                    html_parts.append(
+                        f'<div class="tile-row"><span class="tile-key">{label}</span>'
+                        f'<span class="tile-val">{fname}</span></div>'
+                    )
+                html_parts.append('</details></div>')
 
             # --- Key Observations tile (full-width row below) ---
             if has_meta:
@@ -855,147 +1159,120 @@ def build_html_content(
         html_parts.append('</div>')
         html_parts.append('<div class="section-divider"></div>')
     
-    # Literature review and references
-    if literature_review or literature_refs:
-        import html as _html_mod
-        import re as _re_lit
+    # Literature Review (prose only) → Final Impression → References (end)
+    import html as _html_mod
 
-        html_parts.append("<h2>📚 Literature Review</h2>")
+    # Keep prose citations consistent with figures/tables actually in this report
+    lit_review_text = _sanitize_figure_table_citations(
+        literature_review or "", figure_numbers, table_numbers
+    )
+    impression_text = _sanitize_figure_table_citations(
+        final_impression or "", figure_numbers, table_numbers
+    )
 
-        if literature_review:
-            html_parts.append('<div class="literature-review">')
-            for paragraph in literature_review.split("\n\n"):
-                paragraph = paragraph.strip()
-                if paragraph:
-                    paragraph = _re_lit.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", paragraph)
-                    paragraph = _re_lit.sub(
-                        r"\[(\d+)\]",
-                        r'<sup>[\1]</sup>',
-                        paragraph,
-                    )
-                    html_parts.append(f"<p>{paragraph}</p>")
-            html_parts.append("</div>")
-
-        if literature_refs:
-            display_refs = literature_refs
-            html_parts.append(
-                f"<h3>References</h3>"
-                f"<p>{len(display_refs)} publication"
-                f"{'s' if len(display_refs) != 1 else ''} cited in the "
-                f"Literature Review and Final Impression "
-                f"(numbered by first appearance):</p>"
-            )
-
-            for idx, ref in enumerate(display_refs, 1):
-                title = _html_mod.escape(ref.get("title", "Unknown"))
-                doi = ref.get("doi")
-                pmid = ref.get("pmid")
-
-                html_parts.append('<div class="reference">')
-
-                url = ref.get("url")
-                source_tag = ref.get("source", "")
-                if doi:
-                    html_parts.append(f'<div class="reference-title">[{idx}] <a href="https://doi.org/{_html_mod.escape(doi)}" target="_blank">{title}</a></div>')
-                elif pmid:
-                    html_parts.append(f'<div class="reference-title">[{idx}] <a href="https://pubmed.ncbi.nlm.nih.gov/{_html_mod.escape(pmid)}/" target="_blank">{title}</a></div>')
-                elif url:
-                    html_parts.append(f'<div class="reference-title">[{idx}] <a href="{_html_mod.escape(url)}" target="_blank">{title}</a></div>')
-                else:
-                    html_parts.append(f'<div class="reference-title">[{idx}] {title}</div>')
-
-                authors = ref.get("authors", [])
-                if authors:
-                    author_str = ", ".join(authors[:5])
-                    if len(authors) > 5:
-                        author_str += " et al."
-                    html_parts.append(f'<div class="reference-authors">{_html_mod.escape(author_str)}</div>')
-
-                journal = ref.get("journal", "")
-                year = ref.get("year", "")
-                if journal or year or source_tag:
-                    meta = f'<span class="journal">{_html_mod.escape(journal)}</span>'
-                    if year:
-                        meta += f' ({year})'
-                    if source_tag and source_tag not in ("PubMed", ""):
-                        meta += f' <span style="background:#e0e7ff;color:#3730a3;padding:1px 6px;border-radius:4px;font-size:0.75em;margin-left:4px;">{_html_mod.escape(source_tag)}</span>'
-                    html_parts.append(f'<div class="reference-meta">{meta}</div>')
-
-                id_parts = []
-                if doi:
-                    id_parts.append(f'DOI: <a href="https://doi.org/{_html_mod.escape(doi)}" target="_blank">{_html_mod.escape(doi)}</a>')
-                if pmid:
-                    id_parts.append(f'PMID: <a href="https://pubmed.ncbi.nlm.nih.gov/{_html_mod.escape(pmid)}/" target="_blank">{_html_mod.escape(pmid)}</a>')
-                if id_parts:
-                    html_parts.append(f'<div class="reference-doi">{", ".join(id_parts)}</div>')
-
-                abstract = ref.get("abstract") or ""
-                if abstract:
-                    snippet = abstract[:500] + ("…" if len(abstract) > 500 else "")
-                    html_parts.append(
-                        f'<div class="reference-abstract">{_html_mod.escape(snippet)}</div>'
-                    )
-
-                html_parts.append('</div>')
-    
-    # Final Impression section
-    if final_impression:
-        import re as _re_fi
-        html_parts.append('<div class="section-divider"></div>')
-        html_parts.append("<h2>🎯 Final Impression</h2>")
-        html_parts.append('<div class="final-impression">')
-        # Convert markdown-like paragraphs to HTML, with **bold** support
-        for paragraph in final_impression.split('\n\n'):
+    if lit_review_text:
+        html_parts.append("<h2>4. Literature Context</h2>")
+        html_parts.append('<div class="literature-review">')
+        for paragraph in lit_review_text.split("\n\n"):
             paragraph = paragraph.strip()
             if paragraph:
-                # Convert **text** to <strong>text</strong>
-                paragraph = _re_fi.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', paragraph)
+                paragraph = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", paragraph)
+                paragraph = re.sub(
+                    r"\[(\d+)\]",
+                    r'<sup>[\1]</sup>',
+                    paragraph,
+                )
+                html_parts.append(f"<p>{paragraph}</p>")
+        html_parts.append("</div>")
+
+    if impression_text:
+        html_parts.append('<div class="section-divider"></div>')
+        html_parts.append("<h2>5. Final Impression</h2>")
+        html_parts.append('<div class="final-impression">')
+        for paragraph in impression_text.split('\n\n'):
+            paragraph = paragraph.strip()
+            if paragraph:
+                paragraph = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', paragraph)
                 html_parts.append(f'<p>{paragraph}</p>')
-        
-        # Add cited references at the bottom of final impression
-        if literature_refs:
-            # Find which references are cited in the text (e.g., [1], [2])
-            import re as _re
-            cited_nums = set()
-            for m in _re.finditer(r'\[(\d+)\]', final_impression):
-                cited_nums.add(int(m.group(1)))
-            
-            # Show all refs if none explicitly cited, otherwise show cited ones
-            refs_to_show = []
-            if cited_nums:
-                for num in sorted(cited_nums):
-                    if 1 <= num <= len(literature_refs):
-                        refs_to_show.append((num, literature_refs[num - 1]))
-            else:
-                # No explicit citations — show all literature refs used
-                refs_to_show = [(i, ref) for i, ref in enumerate(literature_refs[:10], 1)]
-            
-            if refs_to_show:
-                html_parts.append('<div class="ref-citations">')
-                html_parts.append('<p><strong>References cited:</strong></p>')
-                for num, ref in refs_to_show:
-                    title = ref.get("title", "Unknown")
-                    authors = ref.get("authors", [])
-                    author_str = ", ".join(authors[:3])
-                    if len(authors) > 3:
-                        author_str += " et al."
-                    year = ref.get("year", "")
-                    journal = ref.get("journal", "")
-                    pmid = ref.get("pmid", "")
-                    cite_parts = [f"[{num}] {author_str}"]
-                    if title:
-                        cite_parts.append(f'"{title}"')
-                    if journal:
-                        cite_parts.append(f"<em>{journal}</em>")
-                    if year:
-                        cite_parts.append(f"({year})")
-                    if pmid:
-                        cite_parts.append(f'PMID: <a href="https://pubmed.ncbi.nlm.nih.gov/{pmid}/">{pmid}</a>')
-                    html_parts.append(f'<p>{" ".join(cite_parts)}</p>')
-                html_parts.append('</div>')
-        
         html_parts.append('</div>')
-    
+
+    if literature_refs:
+        html_parts.append('<div class="section-divider"></div>')
+        html_parts.append("<h2>6. References</h2>")
+        for idx, ref in enumerate(literature_refs, 1):
+            title = _html_mod.escape(ref.get("title", "Unknown"))
+            doi = ref.get("doi")
+            pmid = ref.get("pmid")
+            url = ref.get("url")
+            source_tag = ref.get("source", "")
+
+            html_parts.append('<div class="reference">')
+            if doi:
+                html_parts.append(
+                    f'<div class="reference-title">[{idx}] '
+                    f'<a href="https://doi.org/{_html_mod.escape(doi)}" '
+                    f'target="_blank">{title}</a></div>'
+                )
+            elif pmid:
+                html_parts.append(
+                    f'<div class="reference-title">[{idx}] '
+                    f'<a href="https://pubmed.ncbi.nlm.nih.gov/{_html_mod.escape(pmid)}/" '
+                    f'target="_blank">{title}</a></div>'
+                )
+            elif url:
+                html_parts.append(
+                    f'<div class="reference-title">[{idx}] '
+                    f'<a href="{_html_mod.escape(url)}" target="_blank">{title}</a></div>'
+                )
+            else:
+                html_parts.append(f'<div class="reference-title">[{idx}] {title}</div>')
+
+            authors = ref.get("authors", [])
+            if authors:
+                author_str = ", ".join(authors[:5])
+                if len(authors) > 5:
+                    author_str += " et al."
+                html_parts.append(
+                    f'<div class="reference-authors">{_html_mod.escape(author_str)}</div>'
+                )
+
+            journal = ref.get("journal", "")
+            year = ref.get("year", "")
+            if journal or year or source_tag:
+                meta = f'<span class="journal">{_html_mod.escape(journal)}</span>'
+                if year:
+                    meta += f' ({year})'
+                if source_tag and source_tag not in ("PubMed", ""):
+                    meta += (
+                        f' <span style="background:#e0e7ff;color:#3730a3;'
+                        f'padding:1px 6px;border-radius:4px;font-size:0.75em;'
+                        f'margin-left:4px;">{_html_mod.escape(source_tag)}</span>'
+                    )
+                html_parts.append(f'<div class="reference-meta">{meta}</div>')
+
+            id_parts = []
+            if doi:
+                id_parts.append(
+                    f'DOI: <a href="https://doi.org/{_html_mod.escape(doi)}" '
+                    f'target="_blank">{_html_mod.escape(doi)}</a>'
+                )
+            if pmid:
+                id_parts.append(
+                    f'PMID: <a href="https://pubmed.ncbi.nlm.nih.gov/'
+                    f'{_html_mod.escape(pmid)}/" target="_blank">'
+                    f'{_html_mod.escape(pmid)}</a>'
+                )
+            if id_parts:
+                html_parts.append(f'<div class="reference-doi">{", ".join(id_parts)}</div>')
+
+            abstract = ref.get("abstract") or ""
+            if abstract:
+                snippet = abstract[:500] + ("…" if len(abstract) > 500 else "")
+                html_parts.append(
+                    f'<div class="reference-abstract">{_html_mod.escape(snippet)}</div>'
+                )
+            html_parts.append('</div>')
+
     # Footer
     html_parts.append("""
     </div>
@@ -1438,7 +1715,11 @@ def _collect_image_paths(
     metadata: Dict[str, Any],
     search_dirs: Optional[List[Path]] = None,
 ) -> Dict[str, str]:
-    """Collect all image paths from an analysis entry (files + metadata)."""
+    """Collect all image paths from an analysis entry (files + metadata).
+
+    Also discovers sibling ``stem.png`` next to metric ``.dat``/``.csv`` files
+    when plot tools ran but the summary was not updated with a plot path.
+    """
     image_extensions = {".png", ".jpg", ".jpeg", ".svg", ".gif"}
     image_files: Dict[str, str] = {}
 
@@ -1458,6 +1739,21 @@ def _collect_image_paths(
                     _maybe_add(f"{key}_{i}", item)
             else:
                 _maybe_add(key, val)
+
+    # Sibling PNGs for metric data files (rmsd.dat → rmsd.png)
+    for key, val in (files or {}).items():
+        if not isinstance(val, str):
+            continue
+        stem_path = Path(val)
+        if stem_path.suffix.lower() not in {".dat", ".csv"}:
+            continue
+        sibling_name = f"{stem_path.stem}.png"
+        if any(Path(p).name == sibling_name for p in image_files.values()):
+            continue
+        resolved = _resolve_asset_path(sibling_name, search_dirs)
+        if resolved and resolved.is_file():
+            image_files.setdefault("plot", str(resolved))
+
     return _dedupe_fel_plot_images(image_files)
 
 

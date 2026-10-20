@@ -2,14 +2,18 @@
 RCSB PDB source — resolves UniProt accession to experimental PDB entries.
 
 Uses the RCSB search API to find PDB IDs mapped to a UniProt accession,
-then downloads the first matching coordinate file.
+then downloads the first matching coordinate file. Also supports direct
+download by 4-character PDB ID (e.g. 6VC0).
 """
 import json
+import re
 import urllib.error
 import urllib.request
 from typing import Dict, Any, List, Optional
 
 from .base import StructureSource
+
+_PDB_ID_RE = re.compile(r"^[0-9][A-Za-z0-9]{3}$")
 
 
 class RCSBSource(StructureSource):
@@ -23,6 +27,58 @@ class RCSBSource(StructureSource):
 
     def can_fetch(self, uniprot_id: str) -> bool:
         return bool(uniprot_id and uniprot_id.strip())
+
+    @staticmethod
+    def is_pdb_id(value: str) -> bool:
+        return bool(value and _PDB_ID_RE.match(value.strip()))
+
+    def download_by_pdb_id(self, pdb_id: str, output_path: str) -> Dict[str, Any]:
+        """Download coordinates for an explicit RCSB PDB entry ID."""
+        pid = (pdb_id or "").strip().upper()
+        if not self.is_pdb_id(pid):
+            return {
+                "success": False,
+                "source": self.name,
+                "pdb_id": pid,
+                "error": f"Invalid PDB ID (expected 4 chars like 6VC0): {pdb_id!r}",
+            }
+
+        url = self.DOWNLOAD_URL.format(pdb_id=pid)
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "agenticAI-preprocess/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=60) as response:
+                data = response.read()
+            if not data or len(data) < 100:
+                return {
+                    "success": False,
+                    "source": self.name,
+                    "pdb_id": pid,
+                    "url": url,
+                    "error": f"Empty or too-small response for PDB {pid}",
+                }
+
+            with open(output_path, "wb") as fh:
+                fh.write(data)
+
+            return {
+                "success": True,
+                "source": self.name,
+                "pdb_id": pid,
+                "url": url,
+                "output_file": output_path,
+                "message": f"Downloaded RCSB structure {pid}",
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "source": self.name,
+                "pdb_id": pid,
+                "url": url,
+                "error": f"RCSB download failed for PDB {pid}: {exc}",
+            }
 
     def _find_pdb_ids(self, uniprot_id: str, limit: int = 5) -> List[str]:
         uid = uniprot_id.strip().upper()

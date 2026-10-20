@@ -25,6 +25,7 @@ def _label_ligand_suffix(label: str) -> Optional[str]:
     Examples:
       jak2_atp_2mg_ATP_MG → ATP_MG
       jak2_atp_2mg_ATP    → ATP
+      protein_GTP         → GTP
       jak2_atp_2mg        → None  (bare stem; '2mg' is part of the PDB name)
     """
     name = (label or "").strip()
@@ -33,8 +34,19 @@ def _label_ligand_suffix(label: str) -> Optional[str]:
     upper = name.upper()
     if upper.endswith("_ATP_MG"):
         return "ATP_MG"
-    if upper.endswith("_ATP"):
-        return "ATP"
+    # Common nucleotide / ligand suffixes (explicit trailing token only)
+    for lig in (
+        "ATP",
+        "ADP",
+        "GTP",
+        "GDP",
+        "AMP",
+        "ANP",
+        "CNP",
+        "LIG",
+    ):
+        if upper.endswith(f"_{lig}"):
+            return lig
     return None
 
 
@@ -400,15 +412,24 @@ def parse_sim_case_requirements(
 
     if (
         case_id == "protein_with_ligand"
-        or suffix in ("ATP", "ATP_MG")
+        or suffix in ("ATP", "ATP_MG", "ADP", "GTP", "GDP", "AMP", "ANP", "CNP", "LIG")
         or re.search(r"\bprotein\s*\+\s*atp\b", text)
         or ("atp" in text and "protein" in text and case_id != "protein_only")
     ):
+        lig_name = "ATP"
+        if suffix and suffix != "ATP_MG":
+            lig_name = suffix
+        elif suffix == "ATP_MG":
+            lig_name = "ATP"
         requirements.update(
             {
                 "ligand": True,
-                "ligand_resnames": ["ATP"],
-                "case_type": "holo_atp_mg" if wants_ions else "holo_ligand",
+                "ligand_resnames": [lig_name],
+                "case_type": (
+                    "holo_atp_mg"
+                    if wants_ions and lig_name == "ATP"
+                    else "holo_ligand"
+                ),
             }
         )
         if wants_ions:

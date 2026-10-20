@@ -116,102 +116,233 @@ class MDWorkflow:
         "setup", "hpc", "analysis", "reporter",
     })
 
+    def _tag_llm_agent(self, node_name: str) -> None:
+        agent_for_usage = {
+            "input_validation": "supervisor",
+            "planner": "planner",
+            "preprocess": "preprocess",
+            "setup": "simsetup",
+            "hpc": "hpc",
+            "analysis": "analysis",
+            "reporter": "reporter",
+            "verify": "verify",
+            "human_checkpoint": "hitl",
+        }.get(node_name, node_name)
+        try:
+            if self.llm is not None and hasattr(self.llm, "set_agent"):
+                self.llm.set_agent(agent_for_usage)
+        except Exception:
+            pass
+
+    def _finalize_node(self, node_name: str, result: MDState) -> MDState:
+        """Shared post-node work for graph ``run()`` and HITL loop (no drift)."""
+        try:
+            from agentic.campaign.stage_tick import mark_stage_done
+
+            # Deterministic verify before marking setup/analysis complete
+            if node_name == "setup" and (
+                result.get("coordinates") or result.get("topology")
+            ):
+                from agentic.campaign.verify import apply_verify_to_state
+
+                v = apply_verify_to_state(result, "simsetup")
+                if v.get("ok"):
+                    result["setup_science_ok"] = True
+                    mark_stage_done(result, "simsetup")
+                else:
+                    result["setup_science_ok"] = False
+                    # Force retry path — do not advance as if setup succeeded
+                    if result.get("next_node") in (
+                        "human_setup_check",
+                        "supervisor",
+                        "hpc",
+                    ):
+                        result["next_node"] = "supervisor"
+            elif node_name == "preprocess" and result.get("cleaned_pdb"):
+                mark_stage_done(result, "preprocessing")
+            elif node_name == "hpc" and (
+                result.get("job_id")
+                or result.get("reuse_hpc")
+                or result.get("hpc_output_directory")
+            ):
+                mark_stage_done(result, "hpc")
+            elif node_name == "analysis":
+                from agentic.campaign.verify import apply_verify_to_state
+
+                v = apply_verify_to_state(result, "analysis")
+                if v.get("ok"):
+                    result["analysis_science_ok"] = True
+                    mark_stage_done(result, "analysis")
+                else:
+                    result["analysis_science_ok"] = False
+                    if result.get("next_node") in (
+                        "human_analysis_check",
+                        "supervisor",
+                        "reporter",
+                    ):
+                        result["next_node"] = "supervisor"
+            elif node_name == "reporter" and result.get("reporter_output"):
+                mark_stage_done(result, "reporter")
+            if node_name in {
+                "preprocess", "setup", "hpc", "analysis", "reporter"
+            }:
+                from src.analysis.inventory import write_stage_inventory_for_state
+
+                stage = {
+                    "preprocess": "preprocessing",
+                    "setup": "simsetup",
+                }.get(node_name, node_name)
+                write_stage_inventory_for_state(result, stage)
+        except Exception:
+            logger.debug("stage tick / verify finalize skipped", exc_info=True)
+        if node_name in self._SAVE_AFTER_NODES:
+            try:
+                if result.get("is_multi_simulation"):
+                    from agentic.multi_sim_progress import (
+                        ensure_per_sim_working_directory,
+                        mark_sim_pipeline_stage,
+                        workflow_sim_label_for_hitl,
+                    )
+
+                    if node_name == "input_validation" and result.get("input_validated"):
+                        sim_label = (
+                            workflow_sim_label_for_hitl(result)
+                            or (result.get("multi_sim_progress") or {}).get(
+                                "active_sim_label"
+                            )
+                        )
+                        if sim_label:
+                            mark_sim_pipeline_stage(
+                                result, sim_label, input_validated=True
+                            )
+                    elif node_name == "planner" and result.get("execution_plan"):
+                        sim_label = (
+                            workflow_sim_label_for_hitl(result)
+                            or (result.get("multi_sim_progress") or {}).get(
+                                "active_sim_label"
+                            )
+                        )
+                        if sim_label:
+                            mark_sim_pipeline_stage(
+                                result,
+                                sim_label,
+                                planned=True,
+                                enriched=True,
+                            )
+                    ensure_per_sim_working_directory(result)
+                self._save_progress(result, node_name)
+            except Exception as exc:
+                logger.debug(f"Incremental save after {node_name} failed: {exc}")
+        return result
+
     def _wrap_node(self, node_name: str, node_func: Callable) -> Callable:
         """Wrap a node function to track current_node and save progress."""
         def wrapped_node(state: MDState) -> MDState:
             state["current_node"] = node_name
-            # Tag LLM usage by the active workflow node (shared client).
-            agent_for_usage = {
-                "input_validation": "supervisor",
-                "planner": "planner",
-                "preprocess": "preprocess",
-                "setup": "simsetup",
-                "hpc": "hpc",
-                "analysis": "analysis",
-                "reporter": "reporter",
-                "human_checkpoint": "hitl",
-            }.get(node_name, node_name)
-            try:
-                if self.llm is not None and hasattr(self.llm, "set_agent"):
-                    self.llm.set_agent(agent_for_usage)
-            except Exception:
-                pass
+            self._tag_llm_agent(node_name)
             result = node_func(state)
             if result is None:
                 logger.error(f"Node '{node_name}' returned None – returning input state as fallback")
                 return state
-            try:
-                from agentic.campaign.stage_tick import mark_stage_done
-
-                if node_name == "preprocess" and result.get("cleaned_pdb"):
-                    mark_stage_done(result, "preprocessing")
-                elif node_name == "setup" and (
-                    result.get("coordinates") or result.get("topology")
-                ):
-                    mark_stage_done(result, "simsetup")
-                elif node_name == "hpc" and (
-                    result.get("job_id")
-                    or result.get("reuse_hpc")
-                    or result.get("hpc_output_directory")
-                ):
-                    mark_stage_done(result, "hpc")
-                elif node_name == "analysis" and result.get("analysis_results"):
-                    mark_stage_done(result, "analysis")
-                elif node_name == "reporter" and result.get("reporter_output"):
-                    mark_stage_done(result, "reporter")
-                if node_name in {
-                    "preprocess", "setup", "hpc", "analysis", "reporter"
-                }:
-                    from src.analysis.inventory import write_stage_inventory_for_state
-
-                    stage = {
-                        "preprocess": "preprocessing",
-                        "setup": "simsetup",
-                    }.get(node_name, node_name)
-                    write_stage_inventory_for_state(result, stage)
-            except Exception:
-                logger.debug("stage tick mark skipped", exc_info=True)
-            # Save incremental state after key stages (used by non-HITL run())
-            if node_name in self._SAVE_AFTER_NODES:
-                try:
-                    if result.get("is_multi_simulation"):
-                        from agentic.multi_sim_progress import (
-                            ensure_per_sim_working_directory,
-                            mark_sim_pipeline_stage,
-                            workflow_sim_label_for_hitl,
-                        )
-
-                        if node_name == "input_validation" and result.get("input_validated"):
-                            sim_label = (
-                                workflow_sim_label_for_hitl(result)
-                                or (result.get("multi_sim_progress") or {}).get(
-                                    "active_sim_label"
-                                )
-                            )
-                            if sim_label:
-                                mark_sim_pipeline_stage(
-                                    result, sim_label, input_validated=True
-                                )
-                        elif node_name == "planner" and result.get("execution_plan"):
-                            sim_label = (
-                                workflow_sim_label_for_hitl(result)
-                                or (result.get("multi_sim_progress") or {}).get(
-                                    "active_sim_label"
-                                )
-                            )
-                            if sim_label:
-                                mark_sim_pipeline_stage(
-                                    result,
-                                    sim_label,
-                                    planned=True,
-                                    enriched=True,
-                                )
-                        ensure_per_sim_working_directory(result)
-                    self._save_progress(result, node_name)
-                except Exception as exc:
-                    logger.debug(f"Incremental save after {node_name} failed: {exc}")
-            return result
+            return self._finalize_node(node_name, result)
         return wrapped_node
+
+    def _invoke_node(self, node_name: str, state: MDState) -> MDState:
+        """Invoke a node with the same finalize path as the compiled graph (HITL)."""
+        dispatch = {
+            "supervisor": self.supervisor.supervisor_node,
+            "input_validation": self.supervisor.input_validation_node,
+            "planner": self.planner.planner_node,
+            "preprocess": self.preprocessor.preprocess_node,
+            "setup": self.setup_agent.setup_node,
+            "hpc": self.hpc_agent.hpc_node,
+            "analysis": self.analysis_agent.analysis_node,
+            "reporter": self.reporter_agent.reporter_node,
+            "human_preprocess_check": self.checkpoints.human_preprocess_check,
+            "human_setup_check": self.checkpoints.human_setup_check,
+            "human_hpc_check": self.checkpoints.human_hpc_check,
+            "human_hpc_pool_check": self.checkpoints.human_hpc_pool_check,
+            "human_analysis_check": self.checkpoints.human_analysis_check,
+            "human_reporter_check": self.checkpoints.human_reporter_check,
+            "hpc_pool_wait": self._hpc_pool_wait_node,
+            "parallel_pool_wait": self._parallel_pool_wait_node,
+            "final_report": self._final_report_node,
+            "workflow_incomplete": self._workflow_incomplete_node,
+            "verify": self._verify_node,
+        }
+        fn = dispatch.get(node_name)
+        if fn is None:
+            logger.error("Unknown workflow node for invoke: %s", node_name)
+            state.setdefault("errors", []).append(f"Unknown workflow node: {node_name}")
+            state["next_node"] = "workflow_incomplete"
+            return state
+        state["current_node"] = node_name
+        self._tag_llm_agent(node_name)
+        result = fn(state)
+        if result is None:
+            logger.error("Node '%s' returned None – returning input state", node_name)
+            return state
+        # Human checkpoints already received feedback; still share inventory/save path
+        # for field agents via finalize. Skip double-finalize for terminal nodes.
+        if node_name in {"final_report", "workflow_incomplete"}:
+            return result
+        if node_name.startswith("human_"):
+            # Save only — stage ticks already applied after field agents
+            if node_name in self._SAVE_AFTER_NODES or True:
+                try:
+                    self._save_progress(result, node_name)
+                except Exception:
+                    pass
+            return result
+        if node_name in {"hpc_pool_wait", "parallel_pool_wait", "supervisor", "verify"}:
+            if node_name == "verify":
+                return self._finalize_node(node_name, result)
+            try:
+                if node_name != "supervisor":
+                    self._save_progress(result, node_name)
+            except Exception:
+                pass
+            return result
+        return self._finalize_node(node_name, result)
+
+    def _verify_node(self, state: MDState) -> MDState:
+        """Standalone verify node (optional explicit graph hop)."""
+        stage = state.get("verify_stage") or "analysis"
+        from agentic.campaign.verify import apply_verify_to_state
+
+        result = apply_verify_to_state(state, str(stage))
+        if result.get("ok"):
+            state["next_node"] = state.get("verify_return_node") or "supervisor"
+        else:
+            state["next_node"] = "supervisor"
+        state.pop("verify_stage", None)
+        state.pop("verify_return_node", None)
+        return state
+
+    def _workflow_incomplete_node(self, state: MDState) -> MDState:
+        """Fail-closed terminal when routing is invalid or campaign incomplete."""
+        state["workflow_status"] = "incomplete"
+        state.setdefault("errors", []).append(
+            state.get("routing_error")
+            or "Workflow ended incomplete (fail-closed routing)"
+        )
+        logger.error(
+            "workflow_incomplete: %s",
+            state.get("errors", [])[-1] if state.get("errors") else "incomplete",
+        )
+        try:
+            from agentic.campaign.memory import remember_episode
+
+            remember_episode(
+                state=state,
+                stage="supervisor",
+                error=str(state.get("errors", [])[-1]),
+                tool="routing",
+                fix="Inspect next_node / multi_sim_progress; resume after fix",
+            )
+        except Exception:
+            pass
+        return self._final_report_node(state)
 
     @staticmethod
     def _compute_recursion_limit(state: MDState) -> int:
@@ -328,6 +459,11 @@ class MDWorkflow:
         workflow.add_node("human_analysis_check", self._wrap_node("human_analysis_check", self.checkpoints.human_analysis_check))
         workflow.add_node("human_reporter_check", self._wrap_node("human_reporter_check", self.checkpoints.human_reporter_check))
         workflow.add_node("final_report", self._wrap_node("final_report", self._final_report_node))
+        workflow.add_node(
+            "workflow_incomplete",
+            self._wrap_node("workflow_incomplete", self._workflow_incomplete_node),
+        )
+        workflow.add_node("verify", self._wrap_node("verify", self._verify_node))
         workflow.add_node("hpc_pool_wait", self._wrap_node("hpc_pool_wait", self._hpc_pool_wait_node))
         workflow.add_node("parallel_pool_wait", self._wrap_node("parallel_pool_wait", self._parallel_pool_wait_node))
         
@@ -347,12 +483,14 @@ class MDWorkflow:
                 "hpc": "hpc",
                 "analysis": "analysis",
                 "reporter": "reporter",
+                "verify": "verify",
                 "human_reporter_check": "human_reporter_check",
                 "human_analysis_check": "human_analysis_check",
                 "human_hpc_pool_check": "human_hpc_pool_check",
                 "hpc_pool_wait": "hpc_pool_wait",
                 "parallel_pool_wait": "parallel_pool_wait",
                 "final_report": "final_report",
+                "workflow_incomplete": "workflow_incomplete",
                 END: END
             }
         )
@@ -507,8 +645,16 @@ class MDWorkflow:
             }
         )
         
-        # ========== FINAL REPORT ==========
+        # ========== VERIFY (optional explicit hop) ==========
+        workflow.add_conditional_edges(
+            "verify",
+            lambda state: state.get("next_node", "supervisor"),
+            {"supervisor": "supervisor", "workflow_incomplete": "workflow_incomplete"},
+        )
+
+        # ========== FINAL REPORT / FAIL-CLOSED ==========
         workflow.add_edge("final_report", END)
+        workflow.add_edge("workflow_incomplete", END)
         
         return workflow.compile()
     
@@ -517,22 +663,29 @@ class MDWorkflow:
         Route from supervisor based on next_node field.
         
         Supervisor decides which field agent to invoke or whether to create plan.
+        Invalid routes fail closed to ``workflow_incomplete`` (never silent success).
         """
         next_node = state.get("next_node")
         
         valid_nodes = [
             "input_validation", "planner", "preprocess", "setup", 
-            "hpc", "analysis", "reporter", "human_reporter_check",
+            "hpc", "analysis", "reporter", "verify",
+            "human_reporter_check",
             "human_analysis_check",
-            "human_hpc_pool_check", "hpc_pool_wait", "parallel_pool_wait", "final_report"
+            "human_hpc_pool_check", "hpc_pool_wait", "parallel_pool_wait",
+            "final_report", "workflow_incomplete",
         ]
         
         if next_node in valid_nodes:
             logger.info(f"Supervisor routing to: {next_node}")
             return next_node
         
-        logger.warning(f"Invalid next_node: {next_node}, defaulting to final_report")
-        return "final_report"
+        state["routing_error"] = (
+            f"Invalid next_node={next_node!r} — fail-closed (not final_report)"
+        )
+        state.setdefault("errors", []).append(state["routing_error"])
+        logger.error(state["routing_error"])
+        return "workflow_incomplete"
     
     def _hpc_pool_wait_node(self, state: MDState) -> MDState:
         """Sleep until the next SLURM poll while cross-sim HPC jobs run."""
@@ -1758,7 +1911,11 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
         config: Optional[Dict[str, Any]] = None,
         max_steps: int = 200
     ) -> Dict[str, Any]:
-        """Run workflow with interactive human checkpoints."""
+        """Run workflow with interactive human checkpoints.
+
+        Uses the same ``_invoke_node`` / ``_finalize_node`` path as the compiled
+        graph so stage ticks, inventories, and science verify stay aligned.
+        """
         if feedback_handler is None:
             raise ValueError("feedback_handler is required for human-in-the-loop execution")
 
@@ -1768,116 +1925,46 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
             state["hitl_mode"] = "all"
         current_node = "supervisor"
         steps = 0
+        # Family / pool campaigns need a higher step budget than the old 200 default.
+        try:
+            max_steps = max(int(max_steps), self._compute_recursion_limit(state))
+        except Exception:
+            max_steps = max(int(max_steps), 2000)
+
+        _HUMAN_FEEDBACK_MAP = {
+            "human_preprocess_check": "preprocess",
+            "human_setup_check": "setup",
+            "human_hpc_check": "hpc",
+            "human_hpc_pool_check": "hpc_pool",
+            "human_analysis_check": "analysis",
+            "human_reporter_check": "reporter",
+        }
 
         while steps < max_steps:
             steps += 1
             state["execution_path"].append(current_node)
 
+            if current_node in _HUMAN_FEEDBACK_MAP:
+                ck = _HUMAN_FEEDBACK_MAP[current_node]
+                feedback = self._collect_human_feedback(state, ck, feedback_handler)
+                if self._should_stop(feedback, state, ck):
+                    current_node = "final_report"
+                    continue
+                state["human_feedback"] = feedback
+                state = self._invoke_node(current_node, state)
+                current_node = state.get("next_node", "supervisor")
+                continue
+
             if current_node == "supervisor":
-                state = self.supervisor.supervisor_node(state)
+                state = self._invoke_node("supervisor", state)
                 current_node = self._route_from_supervisor(state)
+                continue
 
-            elif current_node == "input_validation":
-                state = self.supervisor.input_validation_node(state)
-                self._save_progress(state, "input_validation")
-                current_node = state.get("next_node", "supervisor")
+            if current_node in {"final_report", "workflow_incomplete"}:
+                return self._invoke_node(current_node, state)
 
-            elif current_node == "planner":
-                state = self.planner.planner_node(state)
-                self._save_progress(state, "planner")
-                current_node = state.get("next_node", "supervisor")
-
-            elif current_node == "preprocess":
-                state = self.preprocessor.preprocess_node(state)
-                self._save_progress(state, "preprocess")
-                current_node = self._next_after_field_agent(state)
-
-            elif current_node == "setup":
-                state = self.setup_agent.setup_node(state)
-                self._save_progress(state, "setup")
-                current_node = self._next_after_field_agent(state)
-
-            elif current_node == "hpc":
-                state = self.hpc_agent.hpc_node(state)
-                self._save_progress(state, "hpc")
-                current_node = self._next_after_field_agent(state)
-
-            elif current_node == "analysis":
-                state = self.analysis_agent.analysis_node(state)
-                if (
-                    state.get("is_multi_simulation")
-                    and state.get("sim_prompts")
-                    and state.get("next_node") == "human_analysis_check"
-                ):
-                    from agentic.multi_sim_progress import record_agent_finished
-
-                    record_agent_finished(state, "analysis")
-                self._save_progress(state, "analysis")
-                current_node = self._next_after_field_agent(state)
-
-            elif current_node == "reporter":
-                state = self.reporter_agent.reporter_node(state)
-                if (
-                    state.get("is_multi_simulation")
-                    and state.get("sim_prompts")
-                    and state.get("next_node") == "human_reporter_check"
-                ):
-                    from agentic.multi_sim_progress import record_agent_finished
-
-                    record_agent_finished(state, "reporter")
-                self._save_progress(state, "reporter")
-                current_node = self._next_after_field_agent(
-                    state, state.get("next_node", "human_reporter_check")
-                )
-
-            elif current_node == "human_preprocess_check":
-                feedback = self._collect_human_feedback(state, "preprocess", feedback_handler)
-                if self._should_stop(feedback, state, "preprocessing"):
-                    current_node = "final_report"
-                    continue
-                state["human_feedback"] = feedback
-                state = self.checkpoints.human_preprocess_check(state)
-                self._save_progress(state, "human_preprocess_check")
-                current_node = state.get("next_node", "supervisor")
-
-            elif current_node == "human_setup_check":
-                feedback = self._collect_human_feedback(state, "setup", feedback_handler)
-                if self._should_stop(feedback, state, "setup"):
-                    current_node = "final_report"
-                    continue
-                state["human_feedback"] = feedback
-                state = self.checkpoints.human_setup_check(state)
-                self._save_progress(state, "human_setup_check")
-                current_node = state.get("next_node", "supervisor")
-
-            elif current_node == "human_hpc_check":
-                feedback = self._collect_human_feedback(state, "hpc", feedback_handler)
-                if self._should_stop(feedback, state, "hpc"):
-                    current_node = "final_report"
-                    continue
-                state["human_feedback"] = feedback
-                state = self.checkpoints.human_hpc_check(state)
-                self._save_progress(state, "human_hpc_check")
-                current_node = state.get("next_node", "supervisor")
-
-            elif current_node == "human_hpc_pool_check":
-                feedback = self._collect_human_feedback(state, "hpc_pool", feedback_handler)
-                if self._should_stop(feedback, state, "hpc_pool"):
-                    current_node = "final_report"
-                    continue
-                state["human_feedback"] = feedback
-                state = self.checkpoints.human_hpc_pool_check(state)
-                self._save_progress(state, "human_hpc_pool_check")
-                current_node = state.get("next_node", "supervisor")
-
-            elif current_node == "hpc_pool_wait":
-                state = self._hpc_pool_wait_node(state)
-                self._save_progress(state, "hpc_pool_wait")
-                current_node = state.get("next_node", "supervisor")
-
-            elif current_node == "parallel_pool_wait":
-                state = self._parallel_pool_wait_node(state)
-                # Quiet checkpoint only — avoid execution_report spam every poll.
+            if current_node == "parallel_pool_wait":
+                state = self._invoke_node(current_node, state)
                 try:
                     from agentic.multi_sim_parallel_pool import persist_parallel_pool_checkpoint
 
@@ -1885,37 +1972,38 @@ Execution Path: {' → '.join(state.get('execution_path', []))}
                 except Exception:
                     pass
                 current_node = state.get("next_node", "supervisor")
+                continue
 
-            elif current_node == "human_analysis_check":
-                feedback = self._collect_human_feedback(state, "analysis", feedback_handler)
-                if self._should_stop(feedback, state, "analysis"):
-                    current_node = "final_report"
-                    continue
-                state["human_feedback"] = feedback
-                state = self.checkpoints.human_analysis_check(state)
-                self._save_progress(state, "human_analysis_check")
-                current_node = state.get("next_node", "supervisor")
+            # Field agents + planner + validation + waits + verify
+            state = self._invoke_node(current_node, state)
+            if current_node in {"preprocess", "setup", "hpc", "analysis", "reporter"}:
+                hitl_next = state.get("next_node")
+                should_record = (
+                    current_node in {"analysis", "reporter"}
+                    and state.get("is_multi_simulation")
+                    and state.get("sim_prompts")
+                    and hitl_next
+                    in {"human_analysis_check", "human_reporter_check"}
+                )
+                if current_node == "analysis" and not state.get("analysis_science_ok"):
+                    should_record = False
+                if should_record:
+                    try:
+                        from agentic.multi_sim_progress import record_agent_finished
 
-            elif current_node == "human_reporter_check":
-                feedback = self._collect_human_feedback(state, "reporter", feedback_handler)
-                if self._should_stop(feedback, state, "reporter"):
-                    current_node = "final_report"
-                    continue
-                state["human_feedback"] = feedback
-                state = self.checkpoints.human_reporter_check(state)
-                self._save_progress(state, "human_reporter_check")
-                current_node = state.get("next_node", "supervisor")
-
-            elif current_node == "final_report":
-                return self._final_report_node(state)
-
+                        record_agent_finished(state, current_node)
+                    except Exception:
+                        pass
+                default = (
+                    "human_reporter_check" if current_node == "reporter" else "supervisor"
+                )
+                current_node = self._next_after_field_agent(state, default)
             else:
-                logger.error(f"Unknown workflow node encountered: {current_node}")
-                state["errors"].append(f"Unknown workflow node: {current_node}")
-                return self._final_report_node(state)
+                current_node = state.get("next_node", "supervisor")
 
         state["errors"].append("Human-in-the-loop workflow exceeded maximum iterations")
-        return self._final_report_node(state)
+        state["workflow_status"] = "incomplete"
+        return self._invoke_node("workflow_incomplete", state)
 
     def _collect_human_feedback(
         self,

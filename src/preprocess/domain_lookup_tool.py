@@ -11,7 +11,7 @@ from .domain_sources import lookup_domain_range, list_domain_sources
 @tool
 def lookup_domain_range_tool(
     uniprot_id: str,
-    domain_label: str = "kinase_domain",
+    domain_label: str = "",
     source_order: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
@@ -26,15 +26,22 @@ def lookup_domain_range_tool(
 
     Args:
         uniprot_id: UniProt accession (e.g. P21860 for ERBB3)
-        domain_label: Domain name (kinase_domain, activation_loop, sh2_domain, etc.)
+        domain_label: Domain name (kinase_domain, activation_loop, sh2_domain, etc.).
+            Required — no kinase default (avoids wrong-domain fallback).
         source_order: Optional source priority (default: uniprot, offline)
 
     Returns:
         Dict with start_resid, end_resid, source, description, and message
     """
+    label = (domain_label or "").strip()
+    if not label:
+        return {
+            "success": False,
+            "error": "domain_label is required (e.g. kinase_domain, sh2_domain)",
+        }
     result = lookup_domain_range(
         uniprot_id=uniprot_id.strip().upper(),
-        domain_label=domain_label,
+        domain_label=label,
         source_order=source_order,
     )
     if not result:

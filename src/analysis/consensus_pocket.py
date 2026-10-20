@@ -181,7 +181,7 @@ def _consensus_positions_near_ligand(
     consensus_positions: Sequence[Dict[str, Any]],
     reference_label: str,
     *,
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     pocket_cutoff_A: float = 15.0,
     chain_id: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], List[int], Dict[str, Any]]:
@@ -412,7 +412,7 @@ def compute_consensus_pocket_ligand_geometry(
     u,
     *,
     pocket_resids: List[int],
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     protein_selection: str = "protein",
     distance_output: str = "reference_pocket_ligand_distance.csv",
     orientation_output: str = "reference_pocket_ligand_orientation.csv",
@@ -509,7 +509,7 @@ def compute_consensus_pocket_com_distance(
     u,
     *,
     pocket_resids: List[int],
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     protein_selection: str = "protein",
     output_file: str = "reference_pocket_ligand_distance.csv",
     frame_interval: int = 1,
@@ -634,7 +634,7 @@ def build_reference_ligand_rmsd_template(
     consensus_json: Path,
     reference_display: str = "MLKL",
     protein_selection: str = "protein",
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     reference_frame: int = 0,
 ) -> Dict[str, Any]:
     """Capture reference Cα pairs and ATP heavy-atom coordinates from frame 0."""
@@ -683,7 +683,7 @@ def compute_reference_ligand_rmsd(
     mobile_display: str,
     consensus_json: Path,
     protein_selection: str = "protein",
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     frame_interval: int = 1,
     output_file: str = "reference_pocket_ligand_rmsd.csv",
 ) -> Dict[str, Any]:
@@ -920,7 +920,7 @@ def define_reference_consensus_pocket(
     reference_label: str,
     sim_dir: str,
     consensus_json: str = DEFAULT_ALIGNMENT_JSON,
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     pocket_cutoff_A: float = 15.0,
     chain_id: Optional[str] = None,
     output_json: str = DEFAULT_DEFINITION_JSON,
@@ -958,6 +958,11 @@ def define_reference_consensus_pocket(
     """
     if not HAS_MDA:
         return {"success": False, "error": "MDAnalysis is required"}
+    if not (ligand_selection or "").strip():
+        return {
+            "success": False,
+            "error": "ligand_selection is required (no silent ATP default)",
+        }
 
     out_dir = Path(working_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1203,7 +1208,7 @@ def define_pocket_mapped_residues(
     reference_label: str,
     sim_dir: str,
     consensus_json: str = DEFAULT_ALIGNMENT_JSON,
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     pocket_cutoff_A: float = 15.0,
     chain_id: Optional[str] = None,
     output_json: str = DEFAULT_DEFINITION_JSON,
@@ -1367,7 +1372,7 @@ def calculate_consensus_pocket_metrics(
     sim_dir: str,
     pocket_resids: Optional[List[int]] = None,
     label: str = "",
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     protein_selection: str = "protein",
     contact_cutoff: float = 4.0,
     bound_distance_A: float = REFERENCE_POCKET_BOUND_DISTANCE_A,
@@ -1616,7 +1621,7 @@ def run_consensus_pocket_metrics_batch(
     reference_sim_dir: str = "",
     consensus_json: str = DEFAULT_ALIGNMENT_JSON,
     definition_json: str = DEFAULT_DEFINITION_JSON,
-    ligand_selection: str = "resname ATP",
+    ligand_selection: str = "",
     pocket_cutoff_A: float = 15.0,
     min_coverage: float = 0.5,
     frame_interval: int = 1,

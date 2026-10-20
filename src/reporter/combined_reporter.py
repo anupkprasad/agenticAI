@@ -1341,12 +1341,6 @@ def _build_references_section_html(refs: List[Dict[str, Any]]) -> str:
         )
         return "\n".join(parts)
 
-    parts.append(
-        f"<p>{len(refs)} publication{'s' if len(refs) != 1 else ''} cited in the "
-        f"Literature Review and Combined Final Impression "
-        f"(numbered by first appearance):</p>"
-    )
-
     for idx, ref in enumerate(refs, 1):
         title = _html_mod.escape(ref.get("title", "Unknown"))
         doi = (ref.get("doi") or "").strip()
@@ -2295,7 +2289,13 @@ def generate_dssp_comparison_chart(
         logger.warning(f"generate_dssp_comparison_chart: missing dependency {exc}")
         return None
 
-    residue_start, residue_end = _resolve_dssp_residue_range(user_goal)
+    rng = _resolve_dssp_residue_range(user_goal)
+    if not rng:
+        logger.info(
+            "generate_dssp_comparison_chart: no activation-loop residue range in goal; skip"
+        )
+        return None
+    residue_start, residue_end = rng
     helix_vals, sheet_vals, coil_vals, plot_labels = [], [], [], []
 
     for sim_dir, label in zip(sim_dirs, labels):
@@ -2394,8 +2394,12 @@ def run_combined_dssp_analysis(
     }
 
 
-def _resolve_dssp_residue_range(user_goal: Optional[str]) -> Tuple[int, int]:
-    """Return 1-based residue range for activation-loop DSSP heatmaps."""
+def _resolve_dssp_residue_range(user_goal: Optional[str]) -> Optional[Tuple[int, int]]:
+    """Return 1-based residue range for activation-loop DSSP heatmaps.
+
+    No hardcoded 150–200 fallback — that range is kinase-campaign specific.
+    When the goal does not name a segment, callers should skip segment plots.
+    """
     try:
         from src.analysis.combined_analysis import parse_rmsf_segments_from_goal
         segments = parse_rmsf_segments_from_goal(user_goal or "")
@@ -2404,7 +2408,7 @@ def _resolve_dssp_residue_range(user_goal: Optional[str]) -> Tuple[int, int]:
     if segments:
         seg = segments[0]
         return int(seg["residue_start"]), int(seg["residue_end"])
-    return 150, 200
+    return None
 
 
 def _load_dssp_raw_matrix(raw_path: Path) -> Optional["Any"]:
@@ -2588,7 +2592,10 @@ def _collect_activation_loop_dssp_heatmaps(
     cache_dir: Optional[str] = None,
 ) -> List[Dict[str, str]]:
     """Collect activation-loop DSSP heatmaps (apo + holo), stacked-ready."""
-    residue_start, residue_end = _resolve_dssp_residue_range(user_goal)
+    rng = _resolve_dssp_residue_range(user_goal)
+    if not rng:
+        return []
+    residue_start, residue_end = rng
     cache = Path(cache_dir) if cache_dir else Path(".reporter_cache")
 
     entries: List[Dict[str, str]] = []
@@ -3112,7 +3119,7 @@ def _build_comparative_dynamics_section(
     )
 
     # ── Panel G: Secondary structure (DSSP) ───────────────────────────────
-    residue_start, residue_end = _resolve_dssp_residue_range(user_goal)
+    dssp_rng = _resolve_dssp_residue_range(user_goal)
     dssp_comparison = _find_dssp_comparison_plot(overlay_plots)
     if not dssp_comparison and cache_dir:
         candidate = Path(cache_dir) / "dssp_comparison.png"
@@ -3121,7 +3128,8 @@ def _build_comparative_dynamics_section(
     dssp_heatmaps = _collect_activation_loop_dssp_heatmaps(
         sim_dirs, labels, user_goal=user_goal, cache_dir=cache_dir,
     )
-    if dssp_comparison or dssp_heatmaps:
+    if dssp_rng and (dssp_comparison or dssp_heatmaps):
+        residue_start, residue_end = dssp_rng
         dssp_body = ""
         if dssp_comparison:
             dssp_body += (
@@ -3142,15 +3150,23 @@ def _build_comparative_dynamics_section(
                 f'\u2014 apo and holo</p>'
                 + _img_stack([e["heatmap"] for e in dssp_heatmaps], "DSSP activation loop")
             )
-    else:
-        dssp_body = _missing(
-            "No activation-loop DSSP heatmaps found "
+        panel_g_caption = (
+            f"Cross-simulation comparison and activation-loop heatmaps "
             f"(residues {residue_start}\u2013{residue_end})"
         )
+    elif dssp_comparison:
+        dssp_body = _img(dssp_comparison, "DSSP comparison")
+        panel_g_caption = "Cross-simulation DSSP comparison"
+    else:
+        dssp_body = _missing(
+            "No activation-loop DSSP segment range in goal "
+            "(provide resid/segment in the prompt to enable heatmaps)"
+        )
+        panel_g_caption = "Cross-simulation DSSP (segment range not specified)"
 
     panel_g = _panel(
         "G", "Secondary Structure (DSSP)",
-        f"Cross-simulation comparison and activation-loop heatmaps (residues {residue_start}\u2013{residue_end})",
+        panel_g_caption,
         dssp_body,
     )
 

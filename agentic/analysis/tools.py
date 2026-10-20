@@ -1172,6 +1172,86 @@ class AnalysisToolExecutor:
                             base,
                         )
 
+            # compute_comparison_table needs data_files; LLM often only passes
+            # labels + metric / output_csv. Collect per-sim metric files.
+            if tool_name == "compute_comparison_table":
+                data_files = kwargs.get("data_files")
+                labels = kwargs.get("labels") or []
+                sim_dirs = kwargs.get("sim_dirs") or []
+                if (not data_files) and labels and sim_dirs:
+                    metric_hint = (
+                        kwargs.get("metric")
+                        or kwargs.get("metric_filename")
+                        or kwargs.get("metric_name")
+                        or ""
+                    )
+                    if not metric_hint:
+                        out_csv = str(kwargs.get("output_csv") or "")
+                        # rmsd_stats.csv → rmsd
+                        stem = Path(out_csv).stem.lower()
+                        if stem.endswith("_stats"):
+                            metric_hint = stem[: -len("_stats")]
+                        elif stem:
+                            metric_hint = stem
+                    if metric_hint:
+                        try:
+                            from src.analysis.combined_analysis import collect_metric_files
+
+                            collected = collect_metric_files.func(
+                                sim_dirs=[str(d) for d in sim_dirs],
+                                metric_filename=str(metric_hint),
+                            )
+                            found = collected.get("found") or []
+                            # Align data_files to labels order when possible
+                            by_dir = {
+                                str(Path(item.get("sim_dir", "")).resolve()): item.get(
+                                    "file"
+                                )
+                                for item in found
+                                if item.get("file")
+                            }
+                            ordered: list = []
+                            for sd, lab in zip(sim_dirs, labels):
+                                hit = by_dir.get(str(Path(str(sd)).resolve()))
+                                if not hit:
+                                    # Fallback: match by label as directory name
+                                    for k, v in by_dir.items():
+                                        if Path(k).name == str(lab):
+                                            hit = v
+                                            break
+                                if hit:
+                                    ordered.append(hit)
+                            if len(ordered) == len(labels):
+                                kwargs["data_files"] = ordered
+                                logger.info(
+                                    "Synthesized data_files for compute_comparison_table "
+                                    "from metric=%s (%d files)",
+                                    metric_hint,
+                                    len(ordered),
+                                )
+                            elif found:
+                                # Partial: use found order + trim labels
+                                kwargs["data_files"] = [
+                                    item["file"] for item in found if item.get("file")
+                                ]
+                                kwargs["labels"] = [
+                                    Path(item.get("sim_dir", "")).name
+                                    for item in found
+                                    if item.get("file")
+                                ]
+                                logger.info(
+                                    "Synthesized partial data_files for "
+                                    "compute_comparison_table (%d/%d)",
+                                    len(kwargs["data_files"]),
+                                    len(labels),
+                                )
+                        except Exception as synth_exc:
+                            logger.warning(
+                                "data_files synthesis for compute_comparison_table "
+                                "failed: %s",
+                                synth_exc,
+                            )
+
             # Prefer analysis/avg/<metric> when LLM hardcodes flat analysis/<metric>
             # paths that do not exist after multi-rep aggregation.
             def _prefer_avg_path(val: str) -> str:

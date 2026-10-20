@@ -17,13 +17,14 @@ def acquire_protein_structure(
     """
     Download and prepare a protein structure when no PDB file is provided.
 
-    Parses UniProt ID, protein name, domain label, and residue range from the
-    user request, downloads from AlphaFold DB (or RCSB fallback), optionally
-    extracts a domain (e.g. kinase domain resid 503-771), and validates the
-    result for missing residues and broken loops.
+    Parses UniProt ID or RCSB PDB ID, optional protein name / domain / residue
+    range from the user request. UniProt IDs download from AlphaFold (RCSB
+    fallback) with optional domain trim; bare PDB IDs (e.g. 6VC0) download
+    directly from RCSB.
 
     Example request text:
     "Simulate kinase domain of UniProt P21860 (ERBB3), residues 503-771"
+    "Download PDB 6VC0 and prepare for MD"
 
     Args:
         user_request: Natural language description with UniProt / domain info

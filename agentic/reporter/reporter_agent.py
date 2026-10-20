@@ -632,7 +632,11 @@ Output as JSON:
             pass
 
         identity = resolve_protein_identity(state)
-        protein_name: Optional[str] = identity.get("gene_name") or identity.get("display_name")
+        protein_name: Optional[str] = (
+            identity.get("protein_name")
+            or identity.get("display_name")
+            or identity.get("gene_name")
+        )
         if _label_name_map:
             protein_name = ", ".join(display_names_for_sims(raw_labels, _label_name_map))
         elif not protein_name and labels:
@@ -982,7 +986,11 @@ Output as JSON:
         from src.reporter.report_curator import build_combined_report_plan, display_names_for_sims
 
         identity = resolve_protein_identity(state)
-        protein_name: Optional[str] = identity.get("gene_name") or identity.get("display_name")
+        protein_name: Optional[str] = (
+            identity.get("protein_name")
+            or identity.get("display_name")
+            or identity.get("gene_name")
+        )
         if _label_name_map:
             protein_name = ", ".join(display_names_for_sims(raw_labels, _label_name_map))
         elif not protein_name and labels:
@@ -1429,22 +1437,56 @@ No need to specify image paths in tool_params - they're extracted from the analy
 
         return {"entries": entries, "analysis_types": analysis_types}
 
+    def _log_literature_step(self, step: str, action: str, details: Dict[str, Any]) -> None:
+        """Write one literature-survey provenance step into agent_conversation.log."""
+        payload = {"literature_step": step, **(details or {})}
+        try:
+            log_agent_action("reporter", action, payload)
+        except Exception:
+            logger.debug("literature provenance log failed", exc_info=True)
+
     def _ensure_literature_search(
         self,
         analysis_data: Dict[str, Any],
         state: MDState
     ) -> List[Dict[str, Any]]:
-        """Guaranteed literature search across PubMed, bioRxiv,
-        and UniProt. Returns a short ranked candidate list (cited later)."""
+        """Six-step evidence-grounded literature survey.
+
+        1) MD observations → 2) multi-source gather → 3) rank/screen →
+        4) OA evidence passages → 5) compare vs MD → 6) ranked candidates for report.
+        Full provenance is written to ``agent_conversation.log`` (and
+        ``reporter/literature_provenance.json`` when possible).
+        """
         literature_refs: List[Dict[str, Any]] = []
-        # Candidate pool for the LLM; uncited papers are pruned after writing.
-        MAX_REFS = 10
+        # Collect a larger candidate pool, then rank down for the LLM.
+        # Uncited papers are pruned after the review is written.
+        MAX_REFS = 12
+        COLLECT_MAX = 28
+        provenance: Dict[str, Any] = {
+            "pipeline": "evidence_grounded_literature_v1",
+            "steps": {},
+        }
+        self._literature_provenance = provenance
+        self._literature_observations = []
+        self._literature_evidence = []
+        self._literature_comparisons = []
+
         try:
             from src.reporter.literature_search import (
                 generate_literature_queries, search_pubmed,
                 search_biorxiv, search_uniprot,
                 extract_research_context, rank_literature_refs,
                 extract_analysis_stats_from_entries,
+                score_literature_ref_relevance,
+            )
+            from src.reporter.literature_evidence import (
+                extract_md_observations,
+                search_crossref,
+                search_arxiv,
+                fetch_oa_evidence_passages,
+                classify_evidence_vs_observations,
+                compact_ref,
+                write_literature_provenance,
             )
 
             # --- Resolve analysis types ---
@@ -1462,18 +1504,34 @@ No need to specify image paths in tool_params - they're extracted from the analy
 
             from src.reporter.protein_identity import resolve_protein_identity
             identity = resolve_protein_identity(state, user_goal=user_goal)
-            protein_name = identity.get("gene_name") or identity.get("display_name")
-            gene_name = identity.get("gene_name") or protein_name
+            protein_name = (
+                identity.get("protein_name")
+                or identity.get("display_name")
+                or identity.get("gene_name")
+            )
+            gene_name = identity.get("gene_name") or ""
             protein_family = identity.get("protein_family") or ""
             related_terms = identity.get("related_terms") or []
+            aliases = list(identity.get("aliases") or [])
+            uniprot_id = identity.get("uniprot_id") or ""
+            key_references = list(identity.get("key_references") or [])
             logger.info(
-                "Literature search: protein=%r gene=%r family=%r source=%s uniprot=%s",
+                "Literature search: protein=%r gene=%r aliases=%d family=%r source=%s uniprot=%s",
                 protein_name,
                 gene_name,
+                len(aliases),
                 protein_family,
                 identity.get("source"),
-                identity.get("uniprot_id"),
+                uniprot_id,
             )
+            provenance["identity"] = {
+                "protein": protein_name,
+                "gene": gene_name,
+                "aliases": aliases,
+                "family": protein_family,
+                "uniprot_id": uniprot_id,
+                "source": identity.get("source"),
+            }
 
             # ── Collect analysis stats to drive result-specific queries ──
             analysis_stats = extract_analysis_stats_from_entries(analysis_data)
@@ -1499,30 +1557,115 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 analysis_stats=analysis_stats,
                 protein_family=protein_family,
                 related_terms=related_terms,
+                aliases=aliases,
+                gene_name=gene_name or None,
+                uniprot_id=uniprot_id or None,
             )
+            if research_context.get("aliases"):
+                aliases = list(dict.fromkeys(aliases + list(research_context["aliases"])))
+                research_context["aliases"] = aliases
             if research_context.get("protein_names") and (
                 not protein_name or protein_name in research_context["protein_ids"]
             ):
                 protein_name = research_context["protein_names"][0]
+            if not gene_name and research_context.get("primary_gene"):
+                gene_name = research_context["primary_gene"]
 
-            # --- Generate prioritised queries ---
+            # ── Step 1: Analyze simulation results → observations ──
+            observations = extract_md_observations(
+                analysis_data, user_goal=user_goal or "", protein_name=protein_name or ""
+            )
+            self._literature_observations = observations
+            provenance["steps"]["1_observations"] = {
+                "n": len(observations),
+                "observations": observations,
+            }
+            self._log_literature_step(
+                "1_analyze_md_results",
+                "Literature Step 1 — Analyze MD results (observations needing interpretation)",
+                {
+                    "n_observations": len(observations),
+                    "observations": [
+                        {
+                            "id": o.get("id"),
+                            "kind": o.get("kind"),
+                            "statement": o.get("statement"),
+                            "keywords": o.get("keywords"),
+                        }
+                        for o in observations
+                    ],
+                },
+            )
+
+            # --- Generate prioritised queries (alias / family / metric lanes) ---
             query_result = generate_literature_queries.invoke({
                 "analysis_types": analysis_types,
                 "user_goal": user_goal,
                 "protein_name": protein_name or "",
                 "analysis_stats": analysis_stats or None,
+                "protein_family": protein_family or "",
+                "related_terms": related_terms or [],
+                "aliases": aliases or [],
+                "gene_name": gene_name or "",
+                "uniprot_id": uniprot_id or "",
             })
             queries = {}
             resolved_name = ""
             if isinstance(query_result, dict) and query_result.get("success"):
                 queries = query_result.get("queries", {})
                 resolved_name = query_result.get("protein_name", "") or ""
+                for a in query_result.get("aliases") or []:
+                    if a and a not in aliases:
+                        aliases.append(a)
+
+            # Observation-driven query extras (residue hotspots / mechanisms)
+            for obs in observations:
+                if obs.get("kind") == "rmsf_hotspots":
+                    flex = (obs.get("metrics") or {}).get("top_flexible") or []
+                    if flex and (gene_name or protein_name):
+                        queries["obs_rmsf_hotspots"] = (
+                            f"{gene_name or protein_name} "
+                            f"{' '.join(str(x).split()[0] for x in flex[:3])} "
+                            f"flexibility molecular dynamics"
+                        )
+                    queries.setdefault(
+                        "theme_obs_flexibility",
+                        "protein residue flexibility RMSF activation loop molecular dynamics",
+                    )
+                if obs.get("kind") == "correlated_motions":
+                    queries.setdefault(
+                        "theme_obs_allostery",
+                        f"{gene_name or protein_name or 'protein'} allosteric correlated motions molecular dynamics",
+                    )
+
+            provenance["steps"]["2_queries"] = {
+                "n": len(queries),
+                "queries": dict(queries),
+            }
+            self._log_literature_step(
+                "2_retrieve_candidates",
+                f"Literature Step 2 — Retrieve candidates ({len(queries)} queries; "
+                "PubMed, Europe PMC, Crossref, arXiv/bioRxiv, UniProt)",
+                {
+                    "n_queries": len(queries),
+                    "queries": [
+                        {"key": k, "query": v}
+                        for k, v in queries.items()
+                        if v and k != "_fallback_general"
+                    ],
+                    "sources": ["PubMed", "EuropePMC", "Crossref", "arXiv", "bioRxiv", "UniProt"],
+                },
+            )
 
             # Deduplication set (PMIDs + DOIs)
             seen_ids: set = set()
+            source_counts: Dict[str, int] = {}
 
-            def _add_ref(ref: Dict[str, Any]) -> bool:
+            def _add_ref(ref: Dict[str, Any], query_key: str = "") -> bool:
                 """Add ref if not duplicate. Returns True if added."""
+                ref = dict(ref)
+                if query_key and not ref.get("query_key"):
+                    ref["query_key"] = query_key
                 pmid = ref.get("pmid")
                 doi = (ref.get("doi") or "").lower().strip()
                 if pmid and pmid in seen_ids:
@@ -1534,120 +1677,236 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 if doi:
                     seen_ids.add(doi)
                 literature_refs.append(ref)
+                src = str(ref.get("source") or "unknown")
+                source_counts[src] = source_counts.get(src, 0) + 1
                 return True
 
             from src.reporter.literature_search import search_europe_pmc
 
-            # ── 1. PubMed (protein-priority queries) ──────────────
-            for qkey, query_text in queries.items():
-                if len(literature_refs) >= MAX_REFS:
+            def _room() -> int:
+                return max(0, COLLECT_MAX - len(literature_refs))
+
+            # ── Seed UniProt curated PMIDs (titles often omit the gene) ──
+            seeded_curated = 0
+            for ref in key_references:
+                if _room() <= 0:
                     break
-                if not query_text or qkey == "_fallback_general":
-                    continue
-                remaining = MAX_REFS - len(literature_refs)
+                seed = dict(ref)
+                seed.setdefault("source", "uniprot_curated")
+                seed.setdefault("query_key", "uniprot:key_references")
+                if _add_ref(seed, query_key="uniprot:key_references"):
+                    seeded_curated += 1
+            if seeded_curated:
+                logger.info("Seeded %d UniProt curated references", seeded_curated)
+                provenance["steps"]["2b_uniprot_seed"] = {"n": seeded_curated}
+
+            # Split generated queries: protein-named first, then theme/objective.
+            protein_qitems = [
+                (k, v) for k, v in queries.items()
+                if v and k != "_fallback_general" and not str(k).startswith("theme_")
+            ]
+            theme_qitems = [
+                (k, v) for k, v in queries.items()
+                if v and str(k).startswith("theme_")
+            ]
+
+            # ── PubMed protein-priority queries ───────────────────
+            for qkey, query_text in protein_qitems:
+                if _room() <= 0:
+                    break
                 result = search_pubmed.invoke({
                     "query": query_text,
-                    "max_results": min(5, remaining),
+                    "max_results": min(4, _room()),
                     "include_abstracts": True,
                     "max_age_years": 10,
                 })
                 if isinstance(result, dict) and result.get("success"):
                     for ref in result.get("results", []):
-                        if not _add_ref(ref):
+                        if not _add_ref(ref, query_key=f"pubmed:{qkey}"):
                             continue
-                        if len(literature_refs) >= MAX_REFS:
+                        if _room() <= 0:
                             break
 
-            # Protein-specific PubMed themes (gene name first; related family second).
+            # Protein-specific PubMed themes (aliases first; long names quoted via query gen).
             _search_names = list(dict.fromkeys(
-                [n for n in ([gene_name] + research_context.get("protein_names", [])) if n]
-            ))[:4]
+                [
+                    n
+                    for n in (
+                        [gene_name]
+                        + list(aliases or [])
+                        + list(research_context.get("protein_names") or [])
+                        + list(research_context.get("aliases") or [])
+                    )
+                    if n
+                ]
+            ))[:6]
             for pname in _search_names:
-                if len(literature_refs) >= MAX_REFS:
+                if _room() <= 0:
                     break
                 themes = [
                     f"{pname} protein structure function review",
                     f"{pname} molecular dynamics simulation",
+                    f"{pname} functional study",
+                    f"{pname} computational study OR molecular dynamics",
                 ]
                 if protein_family:
                     themes.append(f"{pname} {protein_family} dynamics activation")
+                    themes.append(
+                        f"{protein_family} molecular dynamics conformational gating"
+                    )
                 elif "pseudokinase" in (user_goal or "").lower():
                     themes.append(f"{pname} pseudokinase activation loop")
                 if any(t in (user_goal or "").lower() for t in ("atp", "holo", "apo", "ligand")):
                     themes.append(f"{pname} ATP binding apo holo")
                 for theme in themes:
-                    if len(literature_refs) >= MAX_REFS:
+                    if _room() <= 0:
                         break
-                    remaining = MAX_REFS - len(literature_refs)
                     result = search_pubmed.invoke({
                         "query": theme,
-                        "max_results": min(3, remaining),
+                        "max_results": min(3, _room()),
                         "include_abstracts": True,
                         "max_age_years": 12,
                     })
                     if isinstance(result, dict) and result.get("success"):
                         for ref in result.get("results", []):
-                            if not _add_ref(ref):
+                            if not _add_ref(ref, query_key=f"pubmed_theme:{pname}"):
                                 continue
-                            if len(literature_refs) >= MAX_REFS:
+                            if _room() <= 0:
                                 break
-            logger.info("After PubMed: %d refs", len(literature_refs))
+            logger.info("After PubMed (protein): %d refs", len(literature_refs))
 
-            # ── 1b. Europe PMC open-access (protein-focused) ───────
-            if gene_name and len(literature_refs) < MAX_REFS:
-                for epmc_q in (
+            # ── PubMed theme / objective / method queries ─────────
+            for qkey, query_text in theme_qitems:
+                if _room() <= 0:
+                    break
+                result = search_pubmed.invoke({
+                    "query": query_text,
+                    "max_results": min(4, _room()),
+                    "include_abstracts": True,
+                    "max_age_years": 10,
+                })
+                if isinstance(result, dict) and result.get("success"):
+                    for ref in result.get("results", []):
+                        if not _add_ref(ref, query_key=f"pubmed:{qkey}"):
+                            continue
+                        if _room() <= 0:
+                            break
+            logger.info("After PubMed (theme/objective): %d refs", len(literature_refs))
+
+            # ── Europe PMC (protein + theme) ──────────────────────
+            epmc_queries: List[str] = []
+            if gene_name:
+                epmc_queries.extend([
                     f"{gene_name} protein molecular dynamics",
                     f"{gene_name} structure function",
-                ):
-                    if len(literature_refs) >= MAX_REFS:
-                        break
-                    remaining = MAX_REFS - len(literature_refs)
-                    epmc_result = search_europe_pmc(
-                        epmc_q,
-                        max_results=min(4, remaining),
-                        max_age_years=12,
-                        open_access_only=True,
-                    )
-                    if epmc_result.get("success"):
-                        for ref in epmc_result.get("results", []):
-                            if not _add_ref(ref):
-                                continue
-                            if len(literature_refs) >= MAX_REFS:
-                                break
-                logger.info("After Europe PMC: %d refs", len(literature_refs))
+                ])
+            if protein_family:
+                epmc_queries.append(f"{protein_family} molecular dynamics conformational")
+            epmc_queries.append("protein domain molecular dynamics RMSD RMSF conformational")
+            for epmc_q in epmc_queries:
+                if _room() <= 0:
+                    break
+                epmc_result = search_europe_pmc(
+                    epmc_q,
+                    max_results=min(4, _room()),
+                    max_age_years=12,
+                    open_access_only=True,
+                )
+                if epmc_result.get("success"):
+                    for ref in epmc_result.get("results", []):
+                        if not _add_ref(ref, query_key=f"europepmc:{epmc_q[:60]}"):
+                            continue
+                        if _room() <= 0:
+                            break
+            logger.info("After Europe PMC: %d refs", len(literature_refs))
 
-            # ── 2. bioRxiv preprints (top protein query) ──────────
-            if resolved_name and len(literature_refs) < MAX_REFS:
-                bio_query = queries.get("protein_dynamics") or queries.get("protein_function") or f"{resolved_name} molecular dynamics"
+            # ── Crossref ─────────────────────────────────────────
+            xref_queries = []
+            if gene_name:
+                xref_queries.append(f"{gene_name} molecular dynamics")
+            for k in ("theme_family_dynamics", "theme_result_rmsd", "theme_objective"):
+                if queries.get(k):
+                    xref_queries.append(queries[k])
+            for xq in xref_queries[:3]:
+                if _room() <= 0:
+                    break
+                try:
+                    xr = search_crossref(xq, max_results=min(4, _room()))
+                    if xr.get("success"):
+                        for ref in xr.get("results", []):
+                            if not _add_ref(ref, query_key=f"crossref:{xq[:60]}"):
+                                continue
+                            if _room() <= 0:
+                                break
+                except Exception as e:
+                    logger.warning("Crossref search failed (non-fatal): %s", e)
+            logger.info("After Crossref: %d refs", len(literature_refs))
+
+            # ── arXiv + bioRxiv preprints ─────────────────────────
+            arxiv_queries = []
+            if gene_name:
+                arxiv_queries.append(f"{gene_name} molecular dynamics")
+            if queries.get("theme_family_dynamics"):
+                arxiv_queries.append(queries["theme_family_dynamics"])
+            for aq in arxiv_queries[:2]:
+                if _room() <= 0:
+                    break
+                try:
+                    ar = search_arxiv(aq, max_results=min(3, _room()))
+                    if ar.get("success"):
+                        for ref in ar.get("results", []):
+                            if not _add_ref(ref, query_key=f"arxiv:{aq[:60]}"):
+                                continue
+                            if _room() <= 0:
+                                break
+                except Exception as e:
+                    logger.warning("arXiv search failed (non-fatal): %s", e)
+
+            bio_queries = []
+            if resolved_name:
+                bio_queries.append(
+                    queries.get("protein_dynamics")
+                    or queries.get("protein_function")
+                    or f"{resolved_name} molecular dynamics"
+                )
+            for k in ("theme_family_dynamics", "theme_result_rmsd", "theme_objective"):
+                if queries.get(k):
+                    bio_queries.append(queries[k])
+            for bio_query in bio_queries:
+                if _room() <= 0:
+                    break
                 try:
                     bio_result = search_biorxiv.invoke({
                         "query": bio_query,
-                        "max_results": min(5, MAX_REFS - len(literature_refs)),
+                        "max_results": min(4, _room()),
                         "max_age_years": 5,
                     })
                     if isinstance(bio_result, dict) and bio_result.get("success"):
                         for ref in bio_result.get("results", []):
-                            if not _add_ref(ref):
+                            if not _add_ref(ref, query_key=f"biorxiv:{bio_query[:60]}"):
                                 continue
-                            if len(literature_refs) >= MAX_REFS:
+                            if _room() <= 0:
                                 break
-                    logger.info("After bioRxiv: %d refs", len(literature_refs))
                 except Exception as e:
                     logger.warning("bioRxiv search failed (non-fatal): %s", e)
+            logger.info("After arXiv/bioRxiv: %d refs", len(literature_refs))
 
-            # ── 3. UniProt protein context ────────────────────────
-            if resolved_name and len(literature_refs) < MAX_REFS:
+            # ── UniProt protein context (prefer accession / gene) ──
+            uni_query = uniprot_id or gene_name or resolved_name
+            if uni_query and _room() > 0:
                 try:
                     uni_result = search_uniprot.invoke({
-                        "query": resolved_name,
+                        "query": uni_query,
                         "max_results": 3,
                     })
                     if isinstance(uni_result, dict) and uni_result.get("success"):
                         for entry in uni_result.get("entries", []):
-                            # Add a synthetic reference for the UniProt entry itself
+                            for a in entry.get("aliases") or []:
+                                if a and a not in aliases:
+                                    aliases.append(a)
                             func_text = entry.get("function") or ""
                             _add_ref({
-                                "title": f"{entry.get('protein_name', resolved_name)} — UniProt functional annotation ({entry.get('organism', '')})",
+                                "title": f"{entry.get('protein_name', uni_query)} — UniProt functional annotation ({entry.get('organism', '')})",
                                 "authors": ["UniProt Consortium"],
                                 "journal": "UniProt Knowledgebase",
                                 "year": 2025,
@@ -1656,14 +1915,13 @@ No need to specify image paths in tool_params - they're extracted from the analy
                                 "abstract": func_text[:400] if func_text else None,
                                 "url": entry.get("url"),
                                 "source": "UniProt",
-                            })
-                            # Also pull in key literature refs from the entry
+                            }, query_key="uniprot:entry")
                             for kref in entry.get("key_references", []):
-                                if len(literature_refs) >= MAX_REFS:
+                                if _room() <= 0:
                                     break
-                                if kref.get("title"):
+                                if kref.get("title") or kref.get("pmid"):
                                     _add_ref({
-                                        "title": kref["title"],
+                                        "title": kref.get("title") or f"UniProt curated PMID {kref.get('pmid')}",
                                         "authors": [],
                                         "journal": kref.get("journal", ""),
                                         "year": kref.get("year"),
@@ -1671,11 +1929,14 @@ No need to specify image paths in tool_params - they're extracted from the analy
                                         "doi": kref.get("doi"),
                                         "abstract": None,
                                         "url": f"https://pubmed.ncbi.nlm.nih.gov/{kref['pmid']}/" if kref.get("pmid") else None,
-                                        "source": "UniProt",
-                                    })
-                            if len(literature_refs) >= MAX_REFS:
+                                        "source": "uniprot_curated",
+                                    }, query_key="uniprot:key_ref")
+                            if _room() <= 0:
                                 break
-                    logger.info("After UniProt: %d refs", len(literature_refs))
+                        research_context["aliases"] = list(dict.fromkeys(
+                            list(research_context.get("aliases") or []) + aliases
+                        ))
+                    logger.info("After UniProt: %d refs (aliases=%d)", len(literature_refs), len(aliases))
                 except Exception as e:
                     logger.warning("UniProt search failed (non-fatal): %s", e)
 
@@ -1691,36 +1952,184 @@ No need to specify image paths in tool_params - they're extracted from the analy
                 })
                 if isinstance(result, dict) and result.get("success"):
                     for ref in result.get("results", []):
-                        _add_ref(ref)
+                        _add_ref(ref, query_key="pubmed:fallback")
 
-            logger.info("Literature search complete: %d references from PubMed + bioRxiv + UniProt", len(literature_refs))
+            candidates_before_rank = [compact_ref(r) for r in literature_refs]
+            provenance["steps"]["2_gather"] = {
+                "n_candidates": len(literature_refs),
+                "source_counts": dict(source_counts),
+                "candidates": candidates_before_rank,
+            }
+            self._log_literature_step(
+                "2_retrieve_candidates_complete",
+                f"Literature Step 2 complete — {len(literature_refs)} unique candidates gathered",
+                {
+                    "n_candidates": len(literature_refs),
+                    "source_counts": dict(source_counts),
+                    "candidates": candidates_before_rank,
+                },
+            )
+            logger.info(
+                "Literature search complete: %d candidates before ranking",
+                len(literature_refs),
+            )
 
-            literature_refs = rank_literature_refs(
+            # ── Step 3: Rank and screen (title/abstract) ──────────
+            ranked = rank_literature_refs(
                 literature_refs,
                 research_context,
                 max_refs=MAX_REFS,
-                min_score=12,
+                min_score=10,
+                protein_slot_fraction=0.5,
             )
+            ranked_view = []
+            for ref in ranked:
+                score, note = score_literature_ref_relevance(ref, research_context)
+                item = compact_ref(ref)
+                item["score"] = score
+                item["relevance_note"] = note
+                matched = ref.get("matched_aliases") or ref.get("_matched_aliases") or []
+                if matched:
+                    item["matched_aliases"] = list(matched)
+                ranked_view.append(item)
+            literature_refs = ranked
+            provenance["steps"]["3_rank_screen"] = {
+                "n_ranked": len(ranked_view),
+                "max_refs": MAX_REFS,
+                "aliases_used": aliases,
+                "ranked": ranked_view,
+            }
+            self._log_literature_step(
+                "3_rank_and_screen",
+                f"Literature Step 3 — Rank/screen to {len(ranked_view)} papers for deeper examination",
+                {
+                    "n_input_candidates": len(candidates_before_rank),
+                    "n_ranked": len(ranked_view),
+                    "ranked": ranked_view,
+                },
+            )
+
+            # ── Step 4: Targeted OA evidence passages ─────────────
+            evidence = fetch_oa_evidence_passages(
+                literature_refs, observations, max_refs=min(5, len(literature_refs))
+            )
+            self._literature_evidence = evidence
+            provenance["steps"]["4_evidence_passages"] = {
+                "n_refs_examined": len(evidence),
+                "evidence": evidence,
+            }
+            self._log_literature_step(
+                "4_retrieve_targeted_evidence",
+                f"Literature Step 4 — Retrieve targeted evidence passages ({len(evidence)} papers)",
+                {
+                    "n_refs_examined": len(evidence),
+                    "evidence": [
+                        {
+                            "title": e.get("title"),
+                            "pmid": e.get("pmid"),
+                            "doi": e.get("doi"),
+                            "pmcid": e.get("pmcid"),
+                            "evidence_source": e.get("evidence_source"),
+                            "n_passages": len(e.get("passages") or []),
+                            "passages": e.get("passages") or [],
+                        }
+                        for e in evidence
+                    ],
+                },
+            )
+
+            # ── Step 5: Compare evidence with MD results ──────────
+            comparisons = classify_evidence_vs_observations(observations, evidence)
+            self._literature_comparisons = comparisons
+            provenance["steps"]["5_compare_evidence"] = {
+                "n_observations": len(comparisons),
+                "comparisons": comparisons,
+            }
+            self._log_literature_step(
+                "5_compare_evidence_with_md",
+                "Literature Step 5 — Compare evidence with MD observations",
+                {
+                    "comparisons": comparisons,
+                    "summary": {
+                        cat: sum(1 for c in comparisons if c.get("category") == cat)
+                        for cat in ("supported", "plausible", "conflicting", "not_addressed")
+                    },
+                },
+            )
+
+            # ── Step 6 prep: ranked list handed to report writer ──
+            provenance["steps"]["6_candidates_for_report"] = {
+                "n": len(literature_refs),
+                "note": (
+                    "These ranked candidates are passed to the literature-review LLM; "
+                    "uncited papers are pruned after writing (see Step 6 final selection)."
+                ),
+                "candidates": ranked_view,
+            }
+            self._log_literature_step(
+                "6_generate_evidence_linked_report_prep",
+                f"Literature Step 6 prep — {len(literature_refs)} ranked candidates ready for evidence-linked report",
+                {"n_candidates_for_llm": len(literature_refs), "candidates": ranked_view},
+            )
+
+            # Persist machine-readable provenance next to the report
+            try:
+                from pathlib import Path as _P
+                wd = state.get("working_directory") or ""
+                if wd:
+                    prov_path = _P(wd) / "reporter" / "literature_provenance.json"
+                    write_literature_provenance(str(prov_path), provenance)
+                    self._literature_provenance_path = str(prov_path)
+            except Exception:
+                logger.debug("literature provenance json write skipped", exc_info=True)
+
+            self._literature_provenance = provenance
 
         except Exception as e:
             logger.warning(f"Literature search failed: {e}", exc_info=True)
 
         return literature_refs[:MAX_REFS]
 
-    @staticmethod
     def _sync_literature_citations(
+        self,
         literature_refs: List[Dict[str, Any]],
         literature_review: Optional[str],
         final_impression: Optional[str],
     ) -> tuple:
-        """Prune uncited refs and renumber [n] by first appearance (review → impression)."""
+        """Prune uncited refs and renumber [n]; log final selection provenance."""
         from src.reporter.literature_search import sync_cited_literature
+        from src.reporter.literature_evidence import compact_ref, write_literature_provenance
 
-        return sync_cited_literature(
+        before = list(literature_refs or [])
+        refs, review, impression = sync_cited_literature(
             literature_refs,
             literature_review=literature_review,
             final_impression=final_impression,
         )
+        cited_view = [compact_ref(r, include_score=False) for r in (refs or [])]
+        self._log_literature_step(
+            "6_final_selection",
+            f"Literature Step 6 — Final cited selection ({len(cited_view)}/{len(before)} kept)",
+            {
+                "n_candidates_before_cite_prune": len(before),
+                "n_cited": len(cited_view),
+                "cited": cited_view,
+                "candidates_before_prune": [compact_ref(r, include_score=False) for r in before],
+            },
+        )
+        try:
+            prov = getattr(self, "_literature_provenance", None) or {}
+            prov.setdefault("steps", {})["6_final_cited"] = {
+                "n_cited": len(cited_view),
+                "cited": cited_view,
+            }
+            self._literature_provenance = prov
+            prov_path = getattr(self, "_literature_provenance_path", None)
+            if prov_path:
+                write_literature_provenance(prov_path, prov)
+        except Exception:
+            logger.debug("literature provenance final update skipped", exc_info=True)
+        return refs, review, impression
 
     def _retrieved_context(self, state: MDState, query: str = "") -> str:
         try:
@@ -1749,6 +2158,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
             score_literature_ref_relevance,
         )
         from src.reporter.figure_selector import (
+            build_figure_catalog_for_prompt,
             select_analysis_entries,
             summarize_findings_for_literature,
             ReportFigurePolicy,
@@ -1783,6 +2193,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
         focused_findings = summarize_findings_for_literature(
             analysis_data, selected_entries=selected_entries
         )
+        figure_catalog = build_figure_catalog_for_prompt(selected_entries)
         analysis_stats = extract_analysis_stats_from_entries(analysis_data)
         analysis_types = list({e.get("analysis_type") for e in selected_entries if e.get("analysis_type")})
         if not analysis_types:
@@ -1793,7 +2204,11 @@ No need to specify image paths in tool_params - they're extracted from the analy
         sys_info = state.get("system_info") if isinstance(state.get("system_info"), dict) else {}
         from src.reporter.protein_identity import resolve_protein_identity
         identity = resolve_protein_identity(state, user_goal=user_goal)
-        resolved_protein = identity.get("gene_name") or identity.get("display_name")
+        resolved_protein = (
+            identity.get("gene_name")
+            or identity.get("protein_name")
+            or identity.get("display_name")
+        )
         context = extract_research_context(
             user_goal=user_goal,
             protein_name=resolved_protein or sys_info.get("protein_name"),
@@ -1801,6 +2216,9 @@ No need to specify image paths in tool_params - they're extracted from the analy
             analysis_stats=analysis_stats,
             protein_family=identity.get("protein_family"),
             related_terms=identity.get("related_terms"),
+            aliases=identity.get("aliases") or [],
+            gene_name=identity.get("gene_name") or None,
+            uniprot_id=identity.get("uniprot_id") or None,
         )
         analysis_text = build_analysis_summary_text(analysis_data, analysis_stats)
 
@@ -1815,13 +2233,42 @@ No need to specify image paths in tool_params - they're extracted from the analy
             )
         lit_text = "\n".join(lit_parts)
 
+        observations = getattr(self, "_literature_observations", None) or []
+        evidence = getattr(self, "_literature_evidence", None) or []
+        comparisons = getattr(self, "_literature_comparisons", None) or []
+        obs_text = "\n".join(
+            f"- ({o.get('id')}) {o.get('statement')}" for o in observations
+        ) or "- (none extracted)"
+        evidence_text_parts = []
+        for e in evidence[:5]:
+            passages = e.get("passages") or []
+            if not passages:
+                continue
+            evidence_text_parts.append(
+                f"- {e.get('title')} [{e.get('evidence_source')}; pmid={e.get('pmid')}]\n"
+                + "\n".join(f"    • {p}" for p in passages[:2])
+            )
+        evidence_text = "\n".join(evidence_text_parts) or "- (no OA passages retrieved; use abstracts above)"
+        cmp_text = "\n".join(
+            f"- {c.get('observation')} → {c.get('category')}"
+            f" (supporting={len(c.get('supporting') or [])}, conflicting={len(c.get('conflicting') or [])})"
+            for c in comparisons
+        ) or "- (no comparison records)"
+
         protein_focus = identity.get("gene_name") or ", ".join(context.get("protein_names") or []) or "the simulated protein"
+        alias_list = list(identity.get("aliases") or context.get("aliases") or [])
+        alias_note = ""
+        if alias_list:
+            alias_note = (
+                f"\n**Known aliases / synonyms:** {', '.join(alias_list[:8])} "
+                "(papers may use any of these names — or none, if they discuss the family/mechanism)"
+            )
         family_note = ""
         if identity.get("protein_family"):
             family_note = (
                 f"\n**Protein family / class:** {identity['protein_family']} "
-                f"(related-protein papers are acceptable only when they directly inform "
-                f"{protein_focus} mechanism or dynamics)"
+                f"(prefer {protein_focus}-named papers, but also use closely related "
+                f"family / mechanism papers that explain the observed dynamics)"
             )
         objective = context.get("user_goal") or user_goal or "MD simulation analysis"
         ligand_focus = ", ".join(context.get("ligand_terms") or []) or "ligand binding"
@@ -1845,40 +2292,56 @@ No need to specify image paths in tool_params - they're extracted from the analy
             if is_combined else ""
         )
         retrieved = self._retrieved_context(state, query=objective)
+        figures_block = (
+            "\n".join(figure_catalog)
+            if figure_catalog
+            else "(none numbered yet — do not invent Figure/Table citations)"
+        )
 
-        prompt = f"""You are a computational biophysics expert writing the Literature Review section of an MD simulation report.
+        prompt = f"""You are a computational biophysics expert writing an evidence-linked Literature Review for an MD simulation report.
 
 **User's Research Question / Objective:**
 {objective}
 
-**Protein(s) / System Focus:** {protein_focus}{family_note}
+**Protein(s) / System Focus:** {protein_focus}{alias_note}{family_note}
 **Ligand / state focus:** {ligand_focus} (apo vs holo where applicable)
 **Structural region focus:** {region_focus}
 {combined_note}
 **Key simulation findings to contextualise (report-selected analyses):**
 {findings_focus}
 
+**Figures available in this report (cite only these if you mention figures):**
+{figures_block}
+
+**MD observations requiring interpretation (Step 1):**
+{obs_text}
+
 **Simulation Analysis Results (quantitative summary):**
 {analysis_text}
 
-**Candidate Publications (read each abstract; relevance score provided):**
+**Evidence vs MD comparison (Step 5 categories: supported / plausible / conflicting / not_addressed):**
+{cmp_text}
+
+**Targeted evidence passages (Step 4; prefer these over generic paraphrases):**
+{evidence_text}
+
+**Candidate Publications (titles/abstracts for screening; relevance score provided):**
 {lit_text}
 
 {retrieved}
 
-**Instructions:**
-- Prioritise papers whose primary subject is {protein_focus}; use related-family papers (e.g. other pseudokinases) only when they illuminate the same mechanism observed in this simulation
-- Read the abstracts and ONLY discuss papers genuinely relevant to the user's objective, the simulated system(s), and the analysis outputs above
-- Skip papers unrelated to the target protein(s), ligand/binding context (if applicable), or the performed analysis types ({', '.join(analysis_types[:8]) or 'MD dynamics'}) — do not cite them at all
-- Write 3–4 paragraphs of substantive scientific prose connecting published work to THIS simulation study — dig out mechanistic insights, not generic summaries
-- Explicitly relate simulation findings to literature for the same or related systems — cite metrics that appear in the results above
-- Cite sources using bracket notation [1], [2], etc. matching the candidate numbers above
-- REQUIRED: include at least three in-text citations like [1] or [2] in the prose (the References section only lists cited papers when citations are present)
-- Cite in increasing order of first mention in THIS section (first paper you discuss = lowest number among those you use; introduce new citations sequentially)
-- Every paper you cite must be discussed in the prose; do not pad with unused citations
-- Do NOT simply list paper titles — synthesise and compare with the simulation outcomes
-- If a paper's abstract is missing or clearly irrelevant, do not cite it
-- Do NOT include section headers — output only the review paragraphs"""
+**Instructions (evidence-grounded scientific inference):**
+- Prefer papers that name {protein_focus}, but do NOT limit the review to that gene alone
+- Also cite literature relevant to the objective, methods ({', '.join(analysis_types[:8]) or 'MD dynamics'}), and observed results
+- For each major claim, ground the interpretation in a specific observation above and cite the paper whose evidence supports it
+- Explicitly distinguish: (a) findings supported by prior studies, (b) plausible hypotheses, (c) conflicting evidence, (d) observations not addressed in the retrieved literature
+- Use the targeted evidence passages when available; do not invent experimental details absent from abstracts/passages
+- Write 3–4 paragraphs of substantive scientific prose — mechanistic, not a paper list
+- Cite with bracket notation [1], [2], etc. matching candidate numbers above
+- REQUIRED: at least four in-text citations, mixing protein-specific and objective/results-relevant papers when both exist
+- Cite in increasing order of first mention; every cited paper must be discussed
+- Do NOT invent Figure or Table numbers (no "Figure 1", "Table S1", etc.) — plots are numbered separately in the HTML report
+- Do NOT include a "References" subsection or section headers — output only the review paragraphs"""
 
         try:
             response = self.llm.prompt(prompt)
@@ -2131,6 +2594,8 @@ No need to specify image paths in tool_params - they're extracted from the analy
             score_literature_ref_relevance,
         )
         from src.reporter.figure_selector import (
+            build_figure_catalog_for_prompt,
+            grounded_numeric_claims,
             select_analysis_entries,
             summarize_findings_for_literature,
             ReportFigurePolicy,
@@ -2144,7 +2609,12 @@ No need to specify image paths in tool_params - they're extracted from the analy
             or state.get("user_goal", "MD simulation analysis")
         )
         identity = resolve_protein_identity(state, user_goal=user_goal)
-        protein_label = identity.get("gene_name") or identity.get("display_name") or "the protein"
+        protein_label = (
+            identity.get("gene_name")
+            or identity.get("protein_name")
+            or identity.get("display_name")
+            or "the protein"
+        )
 
         policy = ReportFigurePolicy.from_config(
             getattr(self, "config", None),
@@ -2160,6 +2630,8 @@ No need to specify image paths in tool_params - they're extracted from the analy
         focused_findings = summarize_findings_for_literature(
             analysis_data, selected_entries=selected_entries
         )
+        figure_catalog = build_figure_catalog_for_prompt(selected_entries)
+        grounded_vals = grounded_numeric_claims(selected_entries)
         analysis_stats = extract_analysis_stats_from_entries(analysis_data)
         context = extract_research_context(
             user_goal=user_goal,
@@ -2192,6 +2664,16 @@ No need to specify image paths in tool_params - they're extracted from the analy
         )
         findings_block = focused_findings or "; ".join(context.get("finding_phrases") or [])
         retrieved = self._retrieved_context(state, query=user_goal_display)
+        grounded_block = (
+            "\n".join(f"- {v}" for v in grounded_vals)
+            if grounded_vals
+            else "(none extracted)"
+        )
+        figures_block = (
+            "\n".join(figure_catalog)
+            if figure_catalog
+            else "(none — do not invent Figure citations)"
+        )
         
         prompt = f"""You are a computational biophysics expert. Based on the analysis results and literature below, write a concise Final Impression section for a scientific MD simulation report.
 
@@ -2206,6 +2688,12 @@ No need to specify image paths in tool_params - they're extracted from the analy
 **Analysis Results (quantitative):**
 {analysis_text}
 
+**Grounded numeric values you MAY quote (do not invent others):**
+{grounded_block}
+
+**Figures available in this report (cite only these if you mention figures):**
+{figures_block}
+
 **Literature References:**
 {lit_text}
 
@@ -2213,7 +2701,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
 
 **Instructions:**
 - Write specifically about {protein_label}. Use related-system commentary only when the results or retrieved notes support it
-- Quote numbers from the analysis results and the retrieved study notes when they are present
+- Quote numbers ONLY from the grounded numeric values / analysis results above — do not invent residues, means, or maxima
 - Correlate the analysis results with findings from the literature on {protein_label} or closely related systems
 - Highlight the most important observations: stability, flexible regions, ligand effects, FEL basins, activation-loop behaviour, interface H-bond occupancy, salt bridges, and named residue–residue interaction partners — whichever appear in the results
 - Draw a clear conclusion that answers the user's research question
@@ -2221,6 +2709,7 @@ No need to specify image paths in tool_params - they're extracted from the analy
 - Keep it concise: 3–4 paragraphs, no bullet points
 - Write in scientific prose, suitable for a report
 - Cite relevant literature using bracket notation like [1], [2], [3] corresponding to the reference numbers above
+- Do NOT invent Figure or Table numbers — cite only figures listed above
 - Do NOT include section headers or titles — just the text content"""
 
         try:
@@ -2457,11 +2946,24 @@ No need to specify image paths in tool_params - they're extracted from the analy
             logger.warning("Pre-load of analysis summary failed: %s", e)
 
         # --- Hardcoded: always run literature search before report generation ---
-        logger.info("  [exec] Running literature search (PubMed + bioRxiv + UniProt)...")
+        logger.info(
+            "  [exec] Running evidence-grounded literature survey "
+            "(PubMed + Europe PMC + Crossref + arXiv/bioRxiv + UniProt)..."
+        )
         literature_refs = self._ensure_literature_search(analysis_data, state)
-        logger.info("  [exec] Literature search done: %d references collected", len(literature_refs))
+        logger.info("  [exec] Literature search done: %d ranked references", len(literature_refs))
         literature_review = self._generate_literature_review(analysis_data, literature_refs, state)
-        log_agent_action("reporter", f"Literature search completed: {len(literature_refs)} references found", {})
+        log_agent_action(
+            "reporter",
+            f"Literature survey completed: {len(literature_refs)} ranked candidates "
+            f"(see Literature Step 1–6 provenance in this log)",
+            {
+                "n_ranked": len(literature_refs),
+                "n_observations": len(getattr(self, "_literature_observations", []) or []),
+                "n_evidence_records": len(getattr(self, "_literature_evidence", []) or []),
+                "provenance_json": getattr(self, "_literature_provenance_path", None),
+            },
+        )
         
         total_steps = len(plan.steps)
         for i, step in enumerate(plan.steps):

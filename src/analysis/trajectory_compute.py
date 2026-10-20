@@ -204,9 +204,12 @@ def compute_metric_from_session(
     if tool_name == "calculate_ligand_pocket_distance":
         from .com_distance_calculator import compute_ligand_pocket_distance_from_universe
 
+        lig_sel = (params.get("ligand_selection") or "").strip()
+        if not lig_sel:
+            return {"success": False, "error": "ligand_selection is required (no silent ATP default)"}
         return compute_ligand_pocket_distance_from_universe(
             universe,
-            ligand_selection=params.get("ligand_selection", "resname LIG"),
+            ligand_selection=lig_sel,
             protein_selection=params.get("protein_selection", "protein"),
             cutoff=float(params.get("cutoff", 5.0)),
             output_file=params.get("output_file"),
@@ -217,9 +220,12 @@ def compute_metric_from_session(
     if tool_name == "calculate_pocket_rmsf":
         from .binding_site_analyzer import compute_pocket_rmsf_from_universe
 
+        lig_sel = (params.get("ligand_selection") or "").strip()
+        if not lig_sel:
+            return {"success": False, "error": "ligand_selection is required (no silent ATP default)"}
         return compute_pocket_rmsf_from_universe(
             universe,
-            ligand_selection=params.get("ligand_selection", "resname ATP"),
+            ligand_selection=lig_sel,
             protein_selection=params.get("protein_selection", "protein"),
             pocket_cutoff=float(params.get("pocket_cutoff", 5.0)),
             output_file=params.get("output_file"),
@@ -231,9 +237,12 @@ def compute_metric_from_session(
     if tool_name == "calculate_ligand_rmsf":
         from .binding_site_analyzer import compute_ligand_rmsf_from_universe
 
+        lig_sel = (params.get("ligand_selection") or "").strip()
+        if not lig_sel:
+            return {"success": False, "error": "ligand_selection is required (no silent ATP default)"}
         return compute_ligand_rmsf_from_universe(
             universe,
-            ligand_selection=params.get("ligand_selection", "resname ATP"),
+            ligand_selection=lig_sel,
             protein_selection=params.get("protein_selection", "protein"),
             output_file=params.get("output_file"),
             output_json=params.get("output_json"),
@@ -246,9 +255,12 @@ def compute_metric_from_session(
     if tool_name == "calculate_protein_ligand_contacts":
         from .binding_site_analyzer import compute_protein_ligand_contacts_from_universe
 
+        lig_sel = (params.get("ligand_selection") or "").strip()
+        if not lig_sel:
+            return {"success": False, "error": "ligand_selection is required (no silent ATP default)"}
         return compute_protein_ligand_contacts_from_universe(
             universe,
-            ligand_selection=params.get("ligand_selection", "resname ATP"),
+            ligand_selection=lig_sel,
             protein_selection=params.get("protein_selection", "protein"),
             contact_cutoff=float(params.get("contact_cutoff", 4.0)),
             hbond_distance=float(params.get("hbond_distance", 3.0)),
@@ -261,9 +273,12 @@ def compute_metric_from_session(
     if tool_name == "analyze_ligand_residence":
         from .binding_site_analyzer import compute_ligand_residence_from_universe
 
+        lig_sel = (params.get("ligand_selection") or "").strip()
+        if not lig_sel:
+            return {"success": False, "error": "ligand_selection is required (no silent ATP default)"}
         return compute_ligand_residence_from_universe(
             universe,
-            ligand_selection=params.get("ligand_selection", "resname ATP"),
+            ligand_selection=lig_sel,
             protein_selection=params.get("protein_selection", "protein"),
             pocket_cutoff=float(params.get("pocket_cutoff", 5.0)),
             bound_distance_A=float(params.get("bound_distance_A", 5.0)),

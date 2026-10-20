@@ -72,14 +72,23 @@ def pre_combined_tool_allowed(tool_name: str) -> bool:
     return True
 
 
+_LIGAND_UNSET = object()
+
+
 def family_pre_combined_pin_steps(
     *,
     labels: Optional[Sequence[str]] = None,
     sim_dirs: Optional[Sequence[str]] = None,
     reference_label: str = "",
     settings: Optional[Any] = None,
+    ligand_selection: Any = _LIGAND_UNSET,
 ) -> List[Dict[str, Any]]:
-    """Required shared setup: MSA → pocket definition → residue map → MSA plots."""
+    """Required shared setup: MSA → pocket definition → residue map → MSA plots.
+
+    When *ligand_selection* is omitted (UNSET), infer from holo-style labels
+    (``*_ATP``, ``holo``) only — never invent ATP for apo / unlabeled campaigns.
+    Pass ``ligand_selection=None`` explicitly for apo / no-pocket.
+    """
     labels = list(labels or [])
     sim_dirs = list(sim_dirs or [])
     ref = reference_label or (labels[0] if labels else "reference")
@@ -90,6 +99,14 @@ def family_pre_combined_pin_steps(
     min_cons = 0.5
     min_cov = 0.25
     cutoff = 15.0
+    if ligand_selection is _LIGAND_UNSET:
+        joined = " ".join(str(x) for x in labels).lower()
+        if any(tok in joined for tok in ("_atp", "atp_mg", "_gtp", "holo")):
+            lig_sel = "resname GTP" if "gtp" in joined and "atp" not in joined else "resname ATP"
+        else:
+            lig_sel = None
+    else:
+        lig_sel = (str(ligand_selection).strip() if ligand_selection else "") or None
     if settings is not None:
         metric = getattr(settings, "conservation_metric", None) or (
             settings.get("conservation_metric") if isinstance(settings, dict) else metric
@@ -109,7 +126,7 @@ def family_pre_combined_pin_steps(
             or (settings.get("pocket_cutoff_A") if isinstance(settings, dict) else cutoff)
             or cutoff
         )
-    return [
+    steps: List[Dict[str, Any]] = [
         {
             "name": "Build global consensus MSA",
             "description": (
@@ -134,59 +151,86 @@ def family_pre_combined_pin_steps(
                 f"(occupancy ≥ {min_cov})"
             ),
         },
-        {
-            "name": "Define pocket mapped residues",
-            "description": (
-                f"{cutoff:g} Å ligand shell ∩ global_consensus_msa, "
-                "transferred to every system"
-            ),
-            "tool_name": "define_pocket_mapped_residues",
-            "tool_params": {
-                "working_dir": ".",
-                "reference_label": ref,
-                "sim_dir": ref_sim,
-                "consensus_json": "global_consensus_msa.json",
-                "ligand_selection": "resname ATP",
-                "pocket_cutoff_A": cutoff,
-                "pocket_filter": "global_consensus_msa",
-                "labels": labels,
-                "sim_dirs": sim_dirs,
-            },
-            "reason": (
-                f"pocket_mapped = (ATP {cutoff:g} Å) ∩ global consensus, "
-                "mapped onto all proteins"
-            ),
-        },
-        {
-            "name": "Export pocket mapped residue lists",
-            "description": "Per-label pocket residue lists / pocket_mapped.json",
-            "tool_name": "map_pocket_mapped_residues",
-            "tool_params": {
-                "working_dir": ".",
-                "definition_json": "pocket_mapped_definition.json",
-                "labels": labels,
-            },
-            "reason": "Harvested into cross_sim/ for per-sim pocket tools",
-        },
-        {
-            "name": "Plot global and pocket MSA",
-            "description": "global_consensus_msa + pocket_mapped MSA panels",
-            "tool_name": "plot_global_mapped_alignment",
-            "tool_params": {
-                "working_dir": ".",
-                "alignment_fasta": "global_msa.fasta",
-                "consensus_json": "global_consensus_msa.json",
-                "pocket_definition_json": "pocket_mapped_definition.json",
-                "full_plot_file": "global_consensus_msa.png",
-                "focused_plot_file": "pocket_mapped_msa.png",
-            },
-            "reason": "Plot calculated consensus and pocket columns (not unfiltered MSA)",
-        },
     ]
+    if lig_sel:
+        steps.extend(
+            [
+                {
+                    "name": "Define pocket mapped residues",
+                    "description": (
+                        f"{cutoff:g} Å ligand shell ∩ global_consensus_msa, "
+                        "transferred to every system"
+                    ),
+                    "tool_name": "define_pocket_mapped_residues",
+                    "tool_params": {
+                        "working_dir": ".",
+                        "reference_label": ref,
+                        "sim_dir": ref_sim,
+                        "consensus_json": "global_consensus_msa.json",
+                        "ligand_selection": lig_sel,
+                        "pocket_cutoff_A": cutoff,
+                        "pocket_filter": "global_consensus_msa",
+                        "labels": labels,
+                        "sim_dirs": sim_dirs,
+                    },
+                    "reason": (
+                        f"pocket_mapped = ({lig_sel} {cutoff:g} Å) ∩ global consensus, "
+                        "mapped onto all proteins"
+                    ),
+                },
+                {
+                    "name": "Export pocket mapped residue lists",
+                    "description": "Per-label pocket residue lists / pocket_mapped.json",
+                    "tool_name": "map_pocket_mapped_residues",
+                    "tool_params": {
+                        "working_dir": ".",
+                        "definition_json": "pocket_mapped_definition.json",
+                        "labels": labels,
+                    },
+                    "reason": "Harvested into cross_sim/ for per-sim pocket tools",
+                },
+                {
+                    "name": "Plot global and pocket MSA",
+                    "description": "global_consensus_msa + pocket_mapped MSA panels",
+                    "tool_name": "plot_global_mapped_alignment",
+                    "tool_params": {
+                        "working_dir": ".",
+                        "alignment_fasta": "global_msa.fasta",
+                        "consensus_json": "global_consensus_msa.json",
+                        "pocket_definition_json": "pocket_mapped_definition.json",
+                        "full_plot_file": "global_consensus_msa.png",
+                        "focused_plot_file": "pocket_mapped_msa.png",
+                    },
+                    "reason": "Plot calculated consensus and pocket columns (not unfiltered MSA)",
+                },
+            ]
+        )
+    else:
+        steps.append(
+            {
+                "name": "Plot global MSA",
+                "description": "global_consensus_msa panel (no ligand pocket)",
+                "tool_name": "plot_global_mapped_alignment",
+                "tool_params": {
+                    "working_dir": ".",
+                    "alignment_fasta": "global_msa.fasta",
+                    "consensus_json": "global_consensus_msa.json",
+                    "full_plot_file": "global_consensus_msa.png",
+                },
+                "reason": "Apo / no-ligand campaign — skip pocket mapped definition",
+            }
+        )
+    return steps
 
 
-def build_shared_setup_protocol(settings: Optional[Any] = None) -> AnalysisRecipe:
+def build_shared_setup_protocol(
+    settings: Optional[Any] = None,
+    ligand_selection: Any = _LIGAND_UNSET,
+) -> AnalysisRecipe:
     """Required shared setup compiled once: MSA, pocket definition, residue map, plots."""
+    kwargs: Dict[str, Any] = {"settings": settings}
+    if ligand_selection is not _LIGAND_UNSET:
+        kwargs["ligand_selection"] = ligand_selection
     steps = [
         RecipeStep(
             name=str(s["name"]),
@@ -195,7 +239,7 @@ def build_shared_setup_protocol(settings: Optional[Any] = None) -> AnalysisRecip
             tool_params=dict(s.get("tool_params") or {}),
             reason=str(s.get("reason") or ""),
         )
-        for s in family_pre_combined_pin_steps(settings=settings)
+        for s in family_pre_combined_pin_steps(**kwargs)
     ]
     return AnalysisRecipe(steps=steps)
 

@@ -286,11 +286,30 @@ class PreprocessingAgent:
         end_resid = parsed.get("end_resid")
         domain_label = parsed.get("domain_label")
 
+        domain_lookup: Dict[str, Any] = {}
         if domain_label and parsed.get("uniprot_id") and not (start_resid and end_resid):
-            lookup = resolve_domain_residue_range(parsed["uniprot_id"], domain_label)
-            if lookup.get("domain_lookup_success"):
-                start_resid = lookup.get("start_resid")
-                end_resid = lookup.get("end_resid")
+            domain_lookup = resolve_domain_residue_range(
+                parsed["uniprot_id"], domain_label
+            )
+            state["domain_lookup"] = domain_lookup
+            log_agent_action(
+                "preprocessing",
+                "Domain residue-range lookup",
+                {
+                    "uniprot_id": parsed["uniprot_id"],
+                    "domain_label": domain_label,
+                    "success": bool(domain_lookup.get("domain_lookup_success")),
+                    "source": domain_lookup.get("domain_lookup_source"),
+                    "range": domain_lookup.get("residue_range"),
+                    "description": domain_lookup.get("domain_lookup_description"),
+                    "message": domain_lookup.get("domain_lookup_message")
+                    or domain_lookup.get("domain_lookup_error"),
+                },
+            )
+            if domain_lookup.get("domain_lookup_success"):
+                start_resid = domain_lookup.get("start_resid")
+                end_resid = domain_lookup.get("end_resid")
+                parsed = {**parsed, **domain_lookup}
 
         req = StructureRequest(
             uniprot_id=parsed["uniprot_id"],

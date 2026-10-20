@@ -32,7 +32,15 @@ def _offline_lookup(uniprot_id: str, domain_label: str) -> Optional[Dict[str, An
     key = domain_label.lower().replace(" ", "_")
     ranges = OFFLINE_DOMAIN_RANGES.get(uid, {})
 
-    for candidate in (key, "kinase_domain", "kinase"):
+    # Only exact / synonym matches — never fall back to kinase_domain for
+    # unrelated labels (e.g. sh2_domain, extracellular).
+    candidates = [key]
+    if key in ("kinase", "kinase_domain", "protein_kinase", "pk_domain"):
+        for alias in ("kinase_domain", "kinase"):
+            if alias not in candidates:
+                candidates.append(alias)
+
+    for candidate in candidates:
         if candidate in ranges:
             start, end = ranges[candidate]
             return {

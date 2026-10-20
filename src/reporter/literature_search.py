@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 _DYNAMICS_TERMS = (
     "molecular dynamics", "md simulation", "conformational", "flexibility",
     "rmsd", "rmsf", "alloster", "cross-correlation", "dccm", "dynamics",
-    "trajectory", "activation loop", "pseudokinase", "kinase",
+    "trajectory", "activation loop",
 )
 
 _LIGAND_TERMS = ("atp", "ligand", "binding", "holo", "apo", "nucleotide")
@@ -35,6 +35,9 @@ def extract_research_context(
     analysis_stats: Optional[Dict[str, Any]] = None,
     protein_family: Optional[str] = None,
     related_terms: Optional[List[str]] = None,
+    aliases: Optional[List[str]] = None,
+    gene_name: Optional[str] = None,
+    uniprot_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Extract structured research context from the user goal and analysis outputs."""
     goal = (user_goal or "").strip()
@@ -43,6 +46,7 @@ def extract_research_context(
         "user_goal": goal,
         "protein_names": [],
         "protein_ids": [],
+        "aliases": [],
         "ligand_terms": [],
         "region_terms": [],
         "hypothesis_terms": [],
@@ -53,24 +57,97 @@ def extract_research_context(
         "primary_gene": "",
     }
 
-    if protein_name:
-        for part in re.split(r"[,;/\s]+", protein_name):
-            part = part.strip()
-            if len(part) >= 2:
-                context["protein_names"].append(part)
+    _BAD_PROTEIN_TOKENS = {
+        "domain", "kinase", "pseudokinase", "protein", "system", "apo", "holo",
+        "preprocess", "preprocessing", "setup", "simsetup", "analysis",
+        "reporter", "planner", "supervisor", "gyration", "structure",
+    }
 
-    if context["protein_names"]:
-        context["primary_gene"] = context["protein_names"][0]
+    def _ok_protein_token(part: str) -> bool:
+        p = (part or "").strip()
+        if len(p) < 2:
+            return False
+        if p.lower() in _BAD_PROTEIN_TOKENS:
+            return False
+        return True
+
+    def _add_name(part: str, *, as_id: bool = False) -> None:
+        p = (part or "").strip()
+        if not p or not _ok_protein_token(p):
+            return
+        if as_id:
+            if p not in context["protein_ids"]:
+                context["protein_ids"].append(p)
+            return
+        if p not in context["protein_names"]:
+            context["protein_names"].append(p)
+        if p not in context["aliases"]:
+            context["aliases"].append(p)
+
+    if gene_name:
+        _add_name(gene_name)
+        context["primary_gene"] = gene_name.strip()
+
+    if protein_name:
+        # Keep full descriptive names intact (chemical commas like 1,3 stay).
+        # Only split on semicolon / slash list separators — never on commas.
+        _add_name(protein_name.strip())
+        for part in re.split(r"[;/]+", protein_name):
+            part = part.strip()
+            if part != protein_name.strip() and _ok_protein_token(part):
+                _add_name(part)
+
+    for alias in aliases or []:
+        _add_name(str(alias))
+
+    if uniprot_id:
+        _add_name(str(uniprot_id), as_id=True)
+
+    # Rescue gene from goal text when caller passed a placeholder name
+    if not context["protein_names"]:
+        m = re.search(
+            r"\b(?:uniprot\s+)?([A-Za-z][0-9][A-Za-z0-9]{3,9})\s*\(\s*([A-Z][A-Za-z0-9]{2,20})\b",
+            goal,
+            re.IGNORECASE,
+        )
+        if m and _ok_protein_token(m.group(2)):
+            context["protein_ids"].append(m.group(1))
+            _add_name(m.group(2).upper() if m.group(2).isupper() else m.group(2))
+        else:
+            m2 = re.search(
+                r"\b([A-Z][A-Za-z0-9]{2,20})\s+(?:kinase|pseudokinase)\s+domain\b",
+                goal,
+            )
+            if m2 and _ok_protein_token(m2.group(1)):
+                _add_name(m2.group(1))
+
+    if not context["primary_gene"] and context["protein_names"]:
+        # Prefer a compact gene-like token over a long descriptive name
+        for cand in context["protein_names"]:
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9]{1,14}", cand or ""):
+                context["primary_gene"] = cand
+                break
+        if not context["primary_gene"]:
+            context["primary_gene"] = context["protein_names"][0]
 
     for match in _PROTEIN_MAP_RE.finditer(goal):
         pid, pname = match.group(1).strip(), match.group(2).strip()
-        if len(pid) >= 3 and pname[0].isalpha():
-            context["protein_ids"].append(pid)
-            if pname not in context["protein_names"]:
-                context["protein_names"].append(pname)
+        if len(pid) >= 3 and pname[0].isalpha() and _ok_protein_token(pname):
+            if pid not in context["protein_ids"]:
+                context["protein_ids"].append(pid)
+            _add_name(pname)
 
+    apo_only = bool(
+        re.search(
+            r"\b(?:no|without)\s+ligand\b|\bprotein[- ]only\b"
+            r"|\bapo\b(?![^.\n]{0,60}\bholo\b)",
+            goal_lower,
+        )
+    )
     for term in _LIGAND_TERMS:
         if term in goal_lower:
+            if apo_only and term in {"apo", "ligand", "atp", "holo", "binding"}:
+                continue
             context["ligand_terms"].append(term)
 
     for match in _REGION_RE.finditer(goal):
@@ -193,9 +270,21 @@ def score_literature_ref_relevance(
     ref: Dict[str, Any],
     context: Dict[str, Any],
 ) -> Tuple[int, str]:
-    """Score one reference against research context; return (score, short note)."""
-    protein_names = context.get("protein_names") or []
-    protein_ids = context.get("protein_ids") or []
+    """Score one reference against research context; return (score, short note).
+
+    Two-tier model:
+      * Identity — any alias / gene / UniProt id in title or abstract
+      * Theme — family + dynamics + analysis metrics + finding phrases
+
+    Absence of the gene is **not** a hard penalty when theme evidence is strong.
+    UniProt-seeded curated refs get a baseline boost.
+    """
+    protein_names = list(context.get("protein_names") or [])
+    protein_ids = list(context.get("protein_ids") or [])
+    aliases = list(context.get("aliases") or [])
+    identity_terms = list(dict.fromkeys(
+        [t for t in (aliases + protein_names + protein_ids) if t]
+    ))
     primary_gene = context.get("primary_gene") or (protein_names[0] if protein_names else "")
     protein_family = (context.get("protein_family") or "").lower()
     hypothesis_terms = context.get("hypothesis_terms") or []
@@ -216,74 +305,182 @@ def score_literature_ref_relevance(
 
     score = 0
     matched: List[str] = []
+    matched_aliases: List[str] = []
 
-    if primary_gene and primary_gene.lower() in title_lower:
-        score += 15
-        matched.append(primary_gene)
-    elif primary_gene and primary_gene.lower() in haystack:
-        score += 8
-        matched.append(primary_gene)
+    _GENERIC = {
+        "domain", "kinase", "pseudokinase", "protein", "system", "apo", "holo",
+        "catalytic", "region", "loop", "structure",
+        "preprocess", "preprocessing", "setup", "simsetup", "analysis",
+        "reporter", "planner", "supervisor", "gyration",
+    }
+    # Prefer a real gene symbol; ignore placeholders for scoring boosts
+    effective_gene = ""
+    if primary_gene and primary_gene.lower() not in _GENERIC:
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9]{1,14}", primary_gene):
+            effective_gene = primary_gene
+    if not effective_gene:
+        for n in identity_terms:
+            if n and n.lower() not in _GENERIC and re.fullmatch(r"[A-Za-z][A-Za-z0-9]{1,14}", n):
+                effective_gene = n
+                break
 
-    for name in protein_names + protein_ids:
-        if not name:
+    mentions_protein = False
+    identity_hit = False
+
+    # UniProt curated seed — always keep above the ranking floor
+    if str(ref.get("source") or "").lower() in {"uniprot_curated", "uniprot"}:
+        score += 14
+        matched.append("uniprot_curated")
+        identity_hit = True
+
+    for name in identity_terms:
+        if not name or name.lower() in _GENERIC:
             continue
         nl = name.lower()
+        if len(nl) < 3:
+            continue
         if nl in title_lower:
-            score += 12
+            bump = 30 if name == effective_gene else 14
+            score += bump
             matched.append(name)
+            matched_aliases.append(name)
+            mentions_protein = True
+            identity_hit = True
         elif nl in haystack:
-            score += 10
+            bump = 18 if name == effective_gene else 10
+            score += bump
             matched.append(name)
+            matched_aliases.append(name)
+            mentions_protein = True
+            identity_hit = True
 
-    if primary_gene:
-        score += _confusable_gene_penalty(haystack, [primary_gene])
+    if effective_gene:
+        score += _confusable_gene_penalty(haystack, [effective_gene])
 
-    if protein_family and protein_family in haystack:
-        score += 5
+    _GENERIC_FAMILY = {
+        "kinase", "transferase", "receptor", "phosphatase", "enzyme", "protein",
+    }
 
+    def _family_term_hit(term: str, text: str) -> bool:
+        tl = (term or "").lower().strip()
+        if len(tl) < 4:
+            return False
+        # Broad parents must be whole words (avoid succinyl*transferase* false hits)
+        if tl in _GENERIC_FAMILY:
+            return bool(re.search(rf"\b{re.escape(tl)}\b", text))
+        return tl in text
+
+    family_hit = False
+    if protein_family and _family_term_hit(protein_family, haystack):
+        # Specific families (galactosyltransferase) outweigh bare transferase
+        bump = 12 if protein_family.lower() not in _GENERIC_FAMILY else 5
+        score += bump
+        matched.append(protein_family)
+        family_hit = True
+    for term in context.get("related_terms") or []:
+        tl = str(term).lower()
+        if len(tl) > 4 and _family_term_hit(tl, haystack):
+            score += 4 if tl not in _GENERIC_FAMILY else 2
+            matched.append(str(term))
+            if tl == (protein_family or "").lower() or tl not in _GENERIC_FAMILY:
+                if "transferase" in tl or "kinase" in tl or tl == (protein_family or "").lower():
+                    family_hit = True
+
+    theme_hits = 0
     for term in hypothesis_terms + ligand_terms:
         if term.lower() in haystack:
-            score += 4
+            score += 5
+            theme_hits += 1
 
     for term in _DYNAMICS_TERMS:
         if term in haystack:
             score += 3
+            theme_hits += 1
 
     for atype in analysis_types:
-        if atype and atype in haystack:
-            score += 2
+        al = (atype or "").lower().strip()
+        if al and al not in {"pdb_input_validation", "trajectorybatch", "unknown"} and al in haystack:
+            score += 4
+            theme_hits += 1
 
     for region in region_terms:
         if region.lower() in haystack:
-            score += 3
+            score += 4
+            theme_hits += 1
 
+    _FINDING_THEMES = (
+        "conformational stability", "structural stability",
+        "conformational instability", "backbone flexibility",
+        "flexible loop", "activation loop", "correlated residue",
+        "allosteric",
+    )
     for finding in finding_phrases:
-        for word in finding.lower().split():
-            if len(word) > 5 and word in haystack:
-                score += 2
+        fl = finding.lower()
+        theme_matched = False
+        for phrase in _FINDING_THEMES:
+            if phrase in fl and phrase in haystack:
+                score += 5
+                theme_hits += 1
+                theme_matched = True
+                break
+        if theme_matched:
+            continue
+        for word in fl.replace("(", " ").replace(")", " ").split():
+            if len(word) > 5 and word not in {"angstrom", "mean"} and word in haystack:
+                score += 3
+                theme_hits += 1
                 break
 
     if abstract:
         score += 2
-        # Abstract-level checks carry more weight than title-only matches.
         abstract_lower = abstract.lower()
-        if primary_gene and primary_gene.lower() in abstract_lower:
-            score += 10
-        for name in protein_names + protein_ids:
-            if name and name.lower() in abstract_lower:
-                score += 6
         for term in _DYNAMICS_TERMS:
             if term in abstract_lower:
                 score += 2
+                theme_hits += 1
         for term in ligand_terms:
             if term in abstract_lower:
                 score += 3
+                theme_hits += 1
+
+    # Strong theme needs dynamics + specific family (or many theme hits).
+    # Bare "protein dynamics" reviews without family/identity stay weak.
+    specific_family = bool(
+        protein_family and protein_family.lower() not in _GENERIC_FAMILY and family_hit
+    )
+    strong_theme = (
+        (specific_family and theme_hits >= 2)
+        or (family_hit and theme_hits >= 3)
+        or theme_hits >= 4
+    )
+
+    # Soft demotion only when identity is known AND theme evidence is weak
+    if effective_gene and not identity_hit and not strong_theme:
+        score -= 10
+    elif not identity_hit and strong_theme:
+        # Theme / family papers without gene name stay rankable
+        score += 6
+    elif not identity_hit and not strong_theme:
+        score -= 4
+
+    # Soft floor — papers with neither identity nor strong theme stay low
+    if not identity_hit and not strong_theme and str(ref.get("source") or "") != "uniprot_curated":
+        score = min(score, 8)
+
+    if matched_aliases:
+        ref["_matched_aliases"] = list(dict.fromkeys(matched_aliases))
 
     note = ""
-    if matched:
-        note = f"Mentions: {', '.join(dict.fromkeys(matched))}"
-    elif score >= 8:
-        note = "Matches dynamics / ligand / analysis themes"
+    if matched_aliases and mentions_protein:
+        note = f"Mentions: {', '.join(dict.fromkeys(matched_aliases))}"
+    elif identity_hit and matched:
+        note = f"Identity: {', '.join(dict.fromkeys(matched))}"
+    elif strong_theme:
+        note = "Matches family / dynamics / analysis themes"
+    elif theme_hits >= 2 or score >= 10:
+        note = "Matches objective / dynamics / analysis themes"
+    elif matched:
+        note = f"Related terms: {', '.join(dict.fromkeys(matched))}"
     else:
         note = "Low contextual overlap with study"
 
@@ -294,9 +491,16 @@ def _ref_mentions_study_proteins(
     ref: Dict[str, Any],
     protein_names: List[str],
     protein_ids: Optional[List[str]] = None,
+    aliases: Optional[List[str]] = None,
 ) -> bool:
-    """True when title/abstract mentions a named study protein / UniProt id."""
-    names = [n for n in list(protein_names or []) + list(protein_ids or []) if n]
+    """True when title/abstract mentions a named study protein / alias / UniProt id."""
+    names = [
+        n
+        for n in list(protein_names or [])
+        + list(protein_ids or [])
+        + list(aliases or [])
+        if n
+    ]
     if not names:
         return False
     haystack = " ".join(
@@ -320,15 +524,18 @@ def rank_literature_refs(
     refs: List[Dict[str, Any]],
     context: Dict[str, Any],
     max_refs: int = 10,
-    min_score: int = 12,
+    min_score: int = 10,
+    protein_slot_fraction: float = 0.5,
 ) -> List[Dict[str, Any]]:
     """Re-rank literature by relevance to protein, user goal, and simulation findings.
 
-    Prefer papers that name a study protein. Generic MD/theme hits without a
-    protein match are demoted so the reporter is not flooded with off-topic refs.
+    Prefer papers that name a study protein, but always reserve slots for
+    high-scoring papers that match the research objective, methods, or
+    observed results (even when they do not mention the simulated gene).
     """
     protein_names = list(context.get("protein_names") or [])
     protein_ids = list(context.get("protein_ids") or [])
+    aliases = list(context.get("aliases") or [])
     primary = context.get("primary_gene")
     if primary and primary not in protein_names:
         protein_names = [primary] + protein_names
@@ -339,6 +546,8 @@ def rank_literature_refs(
         ref_copy = dict(ref)
         ref_copy["_relevance_score"] = score
         ref_copy["relevance_note"] = note
+        if ref.get("_matched_aliases"):
+            ref_copy["matched_aliases"] = list(ref.get("_matched_aliases") or [])
         scored.append((score, ref_copy))
 
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -347,23 +556,52 @@ def rank_literature_refs(
         r
         for s, r in scored
         if s >= min_score
-        and _ref_mentions_study_proteins(r, protein_names, protein_ids)
+        and _ref_mentions_study_proteins(r, protein_names, protein_ids, aliases)
     ]
-    theme_hits = [r for s, r in scored if s >= min_score]
-    if len(protein_hits) >= 2:
-        filtered = protein_hits[:max_refs]
-    elif protein_hits:
-        # Fill remaining slots with high-scoring theme papers only if needed.
-        rest = [r for r in theme_hits if r not in protein_hits]
-        filtered = (protein_hits + rest)[:max_refs]
-    elif len(theme_hits) >= 2:
-        filtered = theme_hits[:max_refs]
+    # Theme / objective / results papers: stricter when a primary gene is known
+    # so unrelated "protein dynamics" or broad transferase hits do not dominate.
+    has_primary = bool(primary or protein_names)
+    theme_min = max(12, min_score) if has_primary else max(8, min_score - 2)
+    theme_hits = [
+        r
+        for s, r in scored
+        if s >= theme_min
+        and not _ref_mentions_study_proteins(r, protein_names, protein_ids, aliases)
+    ]
+
+    max_refs = max(1, int(max_refs))
+    # Prefer protein-named papers (~70%) when identity is known.
+    frac = 0.7 if has_primary else protein_slot_fraction
+    n_protein_slots = max(1, int(round(max_refs * frac)))
+    if protein_hits:
+        n_protein_slots = min(len(protein_hits), max(n_protein_slots, min(3, max_refs)))
     else:
+        n_protein_slots = 0
+    n_theme_slots = max_refs - n_protein_slots
+
+    filtered: List[Dict[str, Any]] = []
+    filtered.extend(protein_hits[:n_protein_slots])
+    filtered.extend(theme_hits[:n_theme_slots])
+
+    # If either bucket under-filled, top up from remaining high scores.
+    if len(filtered) < max_refs:
+        seen = {id(r) for r in filtered}
+        for _, r in scored:
+            if id(r) in seen:
+                continue
+            if r.get("_relevance_score", 0) < theme_min and filtered:
+                continue
+            filtered.append(r)
+            seen.add(id(r))
+            if len(filtered) >= max_refs:
+                break
+
+    if not filtered:
         filtered = [r for _, r in scored[:max_refs]]
 
     for r in filtered:
         r.pop("_relevance_score", None)
-    return filtered
+    return filtered[:max_refs]
 
 
 _CITE_BRACKET_RE = re.compile(r"\[(\d+)\]")
@@ -741,13 +979,16 @@ def search_europe_pmc(
         for item in data.get("resultList", {}).get("result", []):
             doi = item.get("doi")
             pmid = item.get("pmid")
+            pmcid = item.get("pmcid")
             articles.append({
                 "title": item.get("title", "Unknown"),
                 "authors": [a.strip() for a in (item.get("authorString") or "").split(",")][:10],
                 "journal": item.get("journalTitle") or item.get("bookOrReportDetails", {}).get("publisher", ""),
                 "year": int(item["pubYear"]) if item.get("pubYear") else None,
                 "pmid": str(pmid) if pmid else None,
+                "pmcid": str(pmcid) if pmcid else None,
                 "doi": doi,
+                "is_open_access": str(item.get("isOpenAccess", "")).upper() == "Y",
                 "abstract": item.get("abstractText"),
                 "url": (
                     f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
@@ -776,6 +1017,82 @@ def search_europe_pmc(
 # UniProt protein entry search
 # ---------------------------------------------------------------------------
 
+def _uniprot_name_value(node: Any) -> str:
+    if isinstance(node, dict):
+        return str(node.get("value") or "").strip()
+    return str(node or "").strip()
+
+
+def _parse_uniprot_aliases(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract gene, protein names, synonyms, and alias list from a UniProt entry."""
+    accession = item.get("primaryAccession", "") or ""
+    prot_desc = item.get("proteinDescription", {}) or {}
+    rec_name = prot_desc.get("recommendedName", {}) or {}
+    pname = _uniprot_name_value(rec_name.get("fullName")) or accession
+    short_names: List[str] = []
+    for sn in rec_name.get("shortNames") or []:
+        val = _uniprot_name_value(sn)
+        if val:
+            short_names.append(val)
+
+    alt_names: List[str] = []
+    for alt in prot_desc.get("alternativeNames") or []:
+        if not isinstance(alt, dict):
+            continue
+        full = _uniprot_name_value(alt.get("fullName"))
+        if full:
+            alt_names.append(full)
+        for sn in alt.get("shortNames") or []:
+            val = _uniprot_name_value(sn)
+            if val:
+                alt_names.append(val)
+
+    gene_name = ""
+    gene_synonyms: List[str] = []
+    for gene_block in item.get("genes") or []:
+        if not isinstance(gene_block, dict):
+            continue
+        primary = _uniprot_name_value(gene_block.get("geneName"))
+        if primary and not gene_name:
+            gene_name = primary
+        for syn in gene_block.get("synonyms") or []:
+            val = _uniprot_name_value(syn)
+            if val:
+                gene_synonyms.append(val)
+
+    aliases: List[str] = []
+    seen_alias: set = set()
+
+    def _add_alias(val: str) -> None:
+        v = (val or "").strip()
+        if not v:
+            return
+        key = v.lower()
+        if key in seen_alias:
+            return
+        seen_alias.add(key)
+        aliases.append(v)
+
+    _add_alias(gene_name)
+    for g in gene_synonyms:
+        _add_alias(g)
+    _add_alias(pname)
+    for n in short_names + alt_names:
+        _add_alias(n)
+    if accession:
+        _add_alias(accession)
+
+    return {
+        "accession": accession,
+        "gene_name": gene_name,
+        "gene_synonyms": gene_synonyms,
+        "protein_name": pname,
+        "short_names": short_names,
+        "alternative_names": alt_names,
+        "aliases": aliases,
+    }
+
+
 @tool
 def search_uniprot(
     query: str,
@@ -783,22 +1100,25 @@ def search_uniprot(
 ) -> Dict[str, Any]:
     """
     Search UniProt for reviewed protein entries matching a query.
-    Returns functional annotations and key literature references
-    associated with each protein entry.
+    Returns functional annotations, gene/protein aliases, and key literature
+    references associated with each protein entry.
 
     Args:
         query: Protein name or keyword to search (e.g. "pseudokinase")
         max_results: Maximum number of UniProt entries to return
 
     Returns:
-        Dict with protein entries containing function, references, and links
+        Dict with protein entries containing function, aliases, references, and links
     """
     try:
         params = urlencode({
             "query": f"({query}) AND reviewed:true",
             "format": "json",
             "size": min(max_results, 10),
-            "fields": "accession,protein_name,organism_name,cc_function,lit_pubmed_id",
+            "fields": (
+                "accession,id,gene_names,protein_name,organism_name,"
+                "cc_function,lit_pubmed_id"
+            ),
         })
         url = f"https://rest.uniprot.org/uniprotkb/search?{params}"
         logger.info("Searching UniProt: %s", query[:100])
@@ -809,16 +1129,12 @@ def search_uniprot(
 
         entries = []
         for item in data.get("results", []):
-            accession = item.get("primaryAccession", "")
-            # Protein name
-            prot_desc = item.get("proteinDescription", {})
-            rec_name = prot_desc.get("recommendedName", {})
-            pname = (rec_name.get("fullName") or {}).get("value", accession)
+            parsed = _parse_uniprot_aliases(item)
+            accession = parsed["accession"]
+            pname = parsed["protein_name"]
 
-            # Organism
             organism = (item.get("organism") or {}).get("scientificName", "")
 
-            # Function text
             func_text = ""
             for comment in item.get("comments", []):
                 if comment.get("commentType") == "FUNCTION":
@@ -826,7 +1142,6 @@ def search_uniprot(
                         func_text += txt.get("value", "") + " "
             func_text = func_text.strip()
 
-            # Collect PubMed IDs and DOIs from references
             ref_pmids = []
             ref_details = []
             for ref in item.get("references", []):
@@ -846,16 +1161,22 @@ def search_uniprot(
                         "title": cit.get("title", ""),
                         "journal": cit.get("journal", ""),
                         "year": int(cit["publicationDate"][:4]) if cit.get("publicationDate") else None,
+                        "source": "uniprot_curated",
                     })
 
             entries.append({
                 "accession": accession,
+                "gene_name": parsed["gene_name"],
+                "gene_synonyms": parsed["gene_synonyms"],
                 "protein_name": pname,
+                "short_names": parsed["short_names"],
+                "alternative_names": parsed["alternative_names"],
+                "aliases": parsed["aliases"],
                 "organism": organism,
                 "function": func_text[:500] if func_text else None,
                 "url": f"https://www.uniprot.org/uniprot/{accession}",
                 "reference_count": len(ref_pmids),
-                "key_references": ref_details[:5],  # top 5 refs per entry
+                "key_references": ref_details[:8],
             })
 
         return {
@@ -878,25 +1199,29 @@ def generate_literature_queries(
     user_goal: Optional[str] = None,
     protein_name: Optional[str] = None,
     analysis_stats: Optional[Dict[str, Any]] = None,
+    protein_family: Optional[str] = None,
+    related_terms: Optional[List[str]] = None,
+    aliases: Optional[List[str]] = None,
+    gene_name: Optional[str] = None,
+    uniprot_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Generate PubMed search queries prioritising the protein and its
-    functional context, then the analysis methods, then the user hypothesis.
+    Generate PubMed search queries across alias, family, and metric lanes.
 
     Query priority order:
-      1. Protein name + MD simulation / structure-function
-      2. Protein name + specific analysis method
-      3. Protein name + analysis results (e.g. "high RMSD", "flexible loop")
-      4. Protein name + user hypothesis / objective extracted from user_goal
-      5. Generic analysis method queries (last resort fallback)
+      1. Alias × dynamics / structure-function (gene + synonyms + full name)
+      2. Family / mechanism (papers that never name this gene)
+      3. Metric / finding themes linked to observed results
+      4. Generic analysis method queries (last resort fallback)
 
     Args:
         analysis_types: List of analysis types performed (e.g., ["RMSD", "RMSF"])
         user_goal: User's original goal/question (hypothesis extraction)
         protein_name: Explicit protein / system name (e.g. "CDK2", "TP53").
-                      Must be the actual protein name, NOT a UniProt accession.
-        analysis_stats: Optional dict mapping analysis_type → {"mean": ..., "max": ...}
-                        Used to build context-aware result queries.
+        aliases: Optional UniProt / synonym alias pack for multi-name search.
+        gene_name: Optional primary gene symbol.
+        uniprot_id: Optional accession for identity context.
+        analysis_stats: Optional dict mapping analysis_type → stats.
 
     Returns:
         Dict with generated queries keyed by priority label
@@ -906,12 +1231,41 @@ def generate_literature_queries(
         protein_name=protein_name,
         analysis_types=analysis_types,
         analysis_stats=analysis_stats,
+        protein_family=protein_family,
+        related_terms=related_terms,
+        aliases=aliases,
+        gene_name=gene_name,
+        uniprot_id=uniprot_id,
     )
 
-    # ── 1. Resolve protein name ───────────────────────────────────────────
-    _raw_name = (protein_name or "").strip()
-    if not _raw_name and context["protein_names"]:
-        _raw_name = context["protein_names"][0]
+    # ── 1. Resolve protein / gene name (reject placeholders like "domain") ─
+    _PLACEHOLDER = {
+        "domain", "kinase", "pseudokinase", "protein", "system", "apo", "holo",
+        "catalytic", "region", "loop", "structure", "model", "complex", "unknown",
+        "target", "query", "residue", "residues",
+        "preprocess", "preprocessing", "setup", "simsetup", "analysis",
+        "reporter", "planner", "supervisor", "gyration",
+    }
+
+    def _usable_name(name: Optional[str]) -> str:
+        n = (name or "").strip()
+        if not n:
+            return ""
+        if n.lower() in _PLACEHOLDER:
+            return ""
+        parts = [p for p in re.split(r"[_\s]+", n.lower()) if p]
+        if parts and all(p in _PLACEHOLDER for p in parts):
+            return ""
+        return n
+
+    _raw_name = _usable_name(protein_name)
+    if not _raw_name:
+        for cand in context.get("protein_names") or []:
+            _raw_name = _usable_name(cand)
+            if _raw_name:
+                break
+    if not _raw_name:
+        _raw_name = _usable_name(context.get("primary_gene"))
 
     # Known functional-context keywords that add biological specificity
     _FUNC_KEYWORDS = [
@@ -919,22 +1273,34 @@ def generate_literature_queries(
         "transporter", "enzyme", "inhibitor", "ligand", "antibody",
         "chaperone", "transferase", "synthase", "reductase", "oxidase",
         "dehydrogenase", "hydrolase", "lyase", "isomerase", "polymerase",
+        "neurodegeneration", "autoregulation", "allosteric", "doublecortin",
     ]
 
     # Collect functional context words from both protein_name and goal
     goal_lower = (user_goal or "").lower()
     name_lower = _raw_name.lower()
+    apo_only_goal = bool(
+        re.search(
+            r"\b(?:no|without)\s+ligand\b|\bprotein[- ]only\b"
+            r"|\bapo\b(?![^.\n]{0,60}\bholo\b)",
+            goal_lower,
+        )
+    )
     func_context = []
     for kw in _FUNC_KEYWORDS:
+        if apo_only_goal and kw in {"ligand", "inhibitor", "antibody"}:
+            continue
         if kw in name_lower or kw in goal_lower:
             func_context.append(kw)
+    for term in context.get("related_terms") or []:
+        t = str(term).strip().lower()
+        if t and t not in func_context:
+            func_context.append(t)
     func_context = list(dict.fromkeys(func_context))
 
-    # Decide the primary search name: prefer the given protein_name.
+    # Decide the primary search name: never fall back to bare "kinase"/"domain"
     if _raw_name:
         _name = _raw_name
-    elif func_context:
-        _name = max(func_context, key=len)
     elif user_goal:
         _STOP = {
             "analysis", "please", "could", "would", "should", "compute",
@@ -944,42 +1310,114 @@ def generate_literature_queries(
             "additional", "preprocessing", "given", "initial", "structure",
             "already", "finished", "trajectory", "finised", "reporter",
             "agent", "scientific", "based", "comments", "result",
-            "those", "data", "secondary", "calculate", "only",
-        }
-        goal_words = [
-            w for w in goal_lower.replace(",", " ").replace(".", " ").split()
-            if len(w) > 3 and w not in _STOP
-        ]
-        _name = goal_words[0] if goal_words else ""
+            "those", "data", "secondary", "calculate", "only", "download",
+            "alphafold", "uniprot", "human", "extract",
+        } | _PLACEHOLDER
+        # Prefer gene-like tokens (letters + optional digits, e.g. DCLK3)
+        gene_hits = re.findall(r"\b([A-Z][A-Za-z0-9]{2,20})\b", user_goal or "")
+        _name = ""
+        for g in gene_hits:
+            if g.lower() not in _STOP and not re.match(
+                r"^[A-Za-z][0-9][A-Za-z0-9]{3,9}$", g
+            ):
+                _name = g
+                break
+        if not _name:
+            goal_words = [
+                w for w in goal_lower.replace(",", " ").replace(".", " ").split()
+                if len(w) > 3 and w not in _STOP
+            ]
+            _name = goal_words[0] if goal_words else ""
     else:
         _name = ""
 
     # ── 2. Build queries in priority order ───────────────────────────────
     queries = {}  # Ordered dict (Python 3.7+)
 
-    # Multi-protein names from user goal (e.g. ERBB3, VRK3)
-    for idx, pname in enumerate(context["protein_names"][:4]):
+    # Alias pack: gene + synonyms + full names (prefer gene-like first)
+    alias_candidates: List[str] = []
+    for cand in (
+        [gene_name or "", _name]
+        + list(aliases or [])
+        + list(context.get("aliases") or [])
+        + list(context.get("protein_names") or [])
+    ):
+        u = _usable_name(cand)
+        if u and u not in alias_candidates:
+            alias_candidates.append(u)
+    # Prefer compact gene symbols first; demote UniProt accessions and long names
+    def _alias_rank(n: str) -> tuple:
+        is_acc = bool(re.fullmatch(r"[OPQABCD][0-9][A-Z0-9]{3}[0-9]", n, re.I))
+        is_gene = bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9]{1,14}", n)) and not is_acc
+        return (0 if is_gene else 1 if not is_acc else 2, len(n))
+
+    alias_candidates.sort(key=_alias_rank)
+    usable_names = alias_candidates[:6]
+    if _name and _name not in usable_names:
+        usable_names.insert(0, _name)
+
+    # Lane A — Alias × dynamics / functional / computational study
+    for idx, pname in enumerate(usable_names[:5]):
+        quoted = f'"{pname}"' if (" " in pname or "-" in pname) else pname
+        queries[f"alias_{idx}_dynamics"] = f"{quoted} molecular dynamics"
+        queries[f"alias_{idx}_flexibility"] = f"{quoted} conformational flexibility"
+        queries[f"alias_{idx}_functional"] = f"{quoted} functional study"
+        queries[f"alias_{idx}_computational"] = (
+            f"{quoted} (computational OR \"molecular dynamics\" OR simulation)"
+        )
         queries[f"protein_{idx}_dynamics"] = f"{pname} protein dynamics molecular dynamics"
+        queries[f"protein_{idx}_mechanism"] = (
+            f"{pname} mechanism structure function molecular dynamics"
+        )
         if func_context:
             queries[f"protein_{idx}_function"] = (
                 f"{pname} {' '.join(func_context[:2])} structure dynamics"
             )
 
     if _name:
-        # Priority 1a: protein name + MD simulation
-        queries["protein_dynamics"] = f"{_name} molecular dynamics simulation"
-        # Priority 1b: protein name + structure/function
-        queries["protein_function"] = f"{_name} structure function"
-        # Priority 1c: protein name + functional context (if available)
+        quoted_name = f'"{_name}"' if (" " in _name or "-" in _name) else _name
+        queries["protein_dynamics"] = f"{quoted_name} molecular dynamics simulation"
+        queries["protein_function"] = f"{quoted_name} structure function"
+        queries["protein_functional_study"] = (
+            f"{quoted_name} functional study OR deficiency OR knockout"
+        )
+        queries["protein_computational_study"] = (
+            f"{quoted_name} computational study OR molecular dynamics OR simulation"
+        )
         if func_context:
             fc = " ".join(func_context[:2])
-            queries["protein_context"] = f"{_name} {fc} molecular dynamics"
+            queries["protein_context"] = f"{quoted_name} {fc} molecular dynamics"
+        hyp = [
+            t for t in (context.get("hypothesis_terms") or [])
+            if t and len(str(t)) > 3
+        ][:3]
+        if hyp:
+            queries["protein_goal_context"] = f"{_name} {' '.join(hyp)}"
+        bio = [
+            t for t in func_context
+            if t not in {"kinase", "pseudokinase", "enzyme", "protein", "ligand"}
+        ][:2]
+        if bio:
+            queries["protein_biology"] = f"{_name} {' '.join(bio)}"
 
     family = (context.get("protein_family") or "").strip()
     if _name and family:
         queries["protein_family_review"] = f"{_name} {family} structure function review"
-        if family == "pseudokinase":
-            queries["related_pseudokinase"] = f"{_name} pseudokinase activation loop dynamics"
+
+    # Lane B — Family / mechanism (no gene required)
+    if family:
+        queries["theme_family_dynamics"] = (
+            f"{family} conformational dynamics molecular dynamics"
+        )
+        queries["theme_family_flexibility"] = (
+            f"{family} apo flexibility residue dynamics"
+        )
+    for term in (context.get("related_terms") or [])[:3]:
+        t = str(term).strip()
+        if t and t.lower() not in {family.lower()} and len(t) > 4:
+            queries[f"theme_related_{t[:24].replace(' ', '_')}"] = (
+                f"{t} molecular dynamics conformational"
+            )
 
     # Ligand / ATP effect queries from user goal
     if context["ligand_terms"] and _name:
@@ -999,7 +1437,7 @@ def generate_literature_queries(
                 f"{_name} allosteric communication correlated motion molecular dynamics"
             )
 
-    # ── 3. Protein + analysis method queries ─────────────────────────────
+    # ── 3. Analysis method queries (protein-preferred + theme fallback) ──
     _METHOD_TEMPLATES = {
         "RMSD": "RMSD stability molecular dynamics",
         "RMSF": "RMSF residue flexibility dynamics",
@@ -1010,72 +1448,108 @@ def generate_literature_queries(
         "COM_Analysis": "center of mass trajectory",
     }
 
+    _SKIP_ANALYSIS_TYPES = {
+        "pdb_input_validation", "trajectorybatch", "trajectory_batch",
+        "unknown", "n/a", "none",
+    }
     for atype in analysis_types:
+        if not atype or str(atype).lower().replace(" ", "_") in _SKIP_ANALYSIS_TYPES:
+            continue
         method_terms = None
         for tkey, tval in _METHOD_TEMPLATES.items():
             if tkey.lower() in atype.lower() or atype.lower() in tkey.lower():
                 method_terms = tval
                 break
         if method_terms is None:
+            # Skip opaque internal labels (CamelCase batch markers, etc.)
+            if not any(c.islower() for c in atype) and "_" not in atype and " " not in atype:
+                continue
             method_terms = f"{atype} molecular dynamics"
 
         if _name:
-            # Protein-specific method query (most relevant)
             queries[f"method_{atype}"] = f"{_name} {method_terms}"
-        else:
-            queries[f"method_{atype}"] = f"protein {method_terms}"
+        # Lane C — metric / finding themes (optionally scoped by family)
+        fam_prefix = f"{family} " if family else ""
+        queries[f"theme_method_{atype}"] = f"{fam_prefix}{method_terms}".strip()
 
     # ── 4. Analysis-result–driven queries ────────────────────────────────
     stats = analysis_stats or {}
-    if stats and _name:
-
-        # RMSD: high values → instability; low → stable
+    fam_bit = family or (func_context[0] if func_context else "protein")
+    if stats:
         for key in stats:
             if "rmsd" in key.lower():
                 mean_rmsd = stats[key].get("mean_rmsd_angstrom") or stats[key].get("mean", 0)
                 if mean_rmsd and float(mean_rmsd) > 3.0:
-                    queries["result_rmsd_instability"] = (
-                        f"{_name} conformational instability RMSD molecular dynamics"
-                    )
+                    theme = f"{fam_bit} conformational instability RMSD molecular dynamics"
                 else:
-                    queries["result_rmsd_stability"] = (
-                        f"{_name} conformational stability RMSD molecular dynamics"
-                    )
+                    theme = f"{fam_bit} conformational stability RMSD molecular dynamics"
+                if _name:
+                    queries["result_rmsd"] = f"{_name} {theme}"
+                queries["theme_result_rmsd"] = theme
                 break
 
-        # RMSF: high values → flexible regions / loops
         for key in stats:
             if "rmsf" in key.lower():
                 mean_rmsf = stats[key].get("mean_rmsf_angstrom") or stats[key].get("mean", 0)
                 if mean_rmsf and float(mean_rmsf) > 2.0:
-                    queries["result_rmsf_flexibility"] = (
-                        f"{_name} flexible loop region dynamics"
-                    )
+                    theme = f"{fam_bit} flexible loop region RMSF molecular dynamics"
+                else:
+                    theme = f"{fam_bit} residue flexibility RMSF domain molecular dynamics"
+                if _name:
+                    queries["result_rmsf"] = f"{_name} {theme}"
+                queries["theme_result_rmsf"] = theme
                 break
 
-        # Rg: high → expanded; low → compact
         for key in stats:
             if "rg" in key.lower() or "gyration" in key.lower():
                 mean_rg = stats[key].get("mean_rg_angstrom") or stats[key].get("mean", 0)
                 if mean_rg and float(mean_rg) > 25.0:
-                    queries["result_rg_expanded"] = (
-                        f"{_name} expanded conformation unfolding molecular dynamics"
-                    )
+                    theme = f"{fam_bit} expanded conformation radius of gyration molecular dynamics"
                 elif mean_rg and float(mean_rg) < 15.0:
-                    queries["result_rg_compact"] = (
-                        f"{_name} compact folded structure dynamics"
-                    )
+                    theme = f"{fam_bit} compact folded structure radius of gyration dynamics"
+                else:
+                    theme = f"{fam_bit} radius of gyration domain stability molecular dynamics"
+                if theme:
+                    if _name:
+                        queries["result_rg"] = f"{_name} {theme}"
+                    queries["theme_result_rg"] = theme
                 break
 
-    # ── 5. Hypothesis / objective queries from user goal ─────────────────
-    if user_goal and _name:
-        hyp_terms = context.get("hypothesis_terms") or []
-        if hyp_terms:
-            hyp_str = " ".join(hyp_terms[:3])
+    # ── 5. Objective / family / class queries (not gene-limited) ─────────
+    hyp_terms = [
+        t for t in (context.get("hypothesis_terms") or [])
+        if t and len(str(t)) > 3
+    ][:4]
+    if hyp_terms:
+        hyp_str = " ".join(hyp_terms[:3])
+        if _name:
             queries["hypothesis_objective"] = f"{_name} {hyp_str} molecular dynamics"
+        queries["theme_objective"] = f"{hyp_str} molecular dynamics protein structure"
+
+    # Family / functional-class literature (kinase domain MD, etc.)
+    class_bits = []
+    if family:
+        class_bits.append(family)
+    for kw in func_context[:3]:
+        if kw not in class_bits:
+            class_bits.append(kw)
+    if class_bits:
+        queries["theme_family_dynamics"] = (
+            f"{' '.join(class_bits[:2])} domain molecular dynamics simulation"
+        )
+        queries["theme_family_structure"] = (
+            f"{' '.join(class_bits[:2])} structure function conformational dynamics"
+        )
+
+    if context.get("ligand_terms"):
+        lig = context["ligand_terms"][0]
+        queries["theme_ligand"] = f"{lig} binding protein molecular dynamics simulation"
+    if context.get("region_terms"):
+        region = context["region_terms"][0]
+        queries["theme_region"] = f"protein {region} flexibility molecular dynamics"
 
     # ── 6. Generic fallback ───────────────────────────────────────────────
-    queries["_fallback_general"] = "molecular dynamics protein stability review"
+    queries["_fallback_general"] = "molecular dynamics protein conformational stability review"
 
     logger.info(
         "Generated %d literature queries (protein=%r, func_context=%s)",
@@ -1087,5 +1561,6 @@ def generate_literature_queries(
         "queries": queries,
         "total": len(queries),
         "protein_name": _name or None,
+        "aliases": usable_names,
         "research_context": context,
     }

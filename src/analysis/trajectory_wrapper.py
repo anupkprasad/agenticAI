@@ -198,7 +198,7 @@ def _wrap_trajectory_impl(
     tpr_file: str,
     trajectory_file: str,
     output_file: Optional[str] = None,
-    ligand: Optional[str] = "ATP",
+    ligand: Optional[str] = "auto",
     dt: int = 100,
     working_dir: Optional[str] = None,
     skip: bool = False,
@@ -207,7 +207,7 @@ def _wrap_trajectory_impl(
     """
     Wrap a GROMACS trajectory to fix periodic boundary conditions (PBC).
 
-    Centers the **protein+ligand complex** (Protein | ATP by default) with
+    Centers the **protein+ligand complex** (auto-detected ligand by default) with
     ``gmx trjconv -pbc mol -center``, matching ``tmp/conv_sim.sh``.  Protein-only
     centering is used only when no ligand group can be found.
 
@@ -218,8 +218,8 @@ def _wrap_trajectory_impl(
         tpr_file:         GROMACS run-input file (.tpr).
         trajectory_file:  Input trajectory (.xtc / .trr), typically ``md.xtc``.
         output_file:      Output name (default ``mdWrap.xtc``) inside *working_dir*.
-        ligand:           Ligand index-group / residue name (default ``\"ATP\"``).
-                          Pass ``\"auto\"`` to scan common ligands, or ``None`` /
+        ligand:           Ligand index-group / residue name (default ``\"auto\"``).
+                          Pass a residue name explicitly, or ``None`` /
                           ``\"\"`` for protein-only centering.
         dt:               Output frame interval in ps (default 100).
         working_dir:      Where index + wrapped traj are written (default: traj dir).
@@ -420,14 +420,14 @@ def wrap_trajectory(
     tpr_file: str,
     trajectory_file: str,
     output_file: Optional[str] = None,
-    ligand: Optional[str] = "ATP",
+    ligand: Optional[str] = "auto",
     dt: int = 100,
     working_dir: Optional[str] = None,
     skip: bool = False,
     force: bool = False,
 ) -> Dict[str, Any]:
     """
-    PBC-wrap a trajectory by centering the protein+ligand complex (Protein|ATP).
+    PBC-wrap a trajectory by centering the protein+ligand complex.
 
     Use before RMSD/RMSF/PCA/FEL so the ligand is not split across box edges.
     If ``mdWrap.xtc`` already exists, recreation is skipped unless ``force=True``.
@@ -436,7 +436,7 @@ def wrap_trajectory(
         tpr_file: Topology / run-input (.tpr).
         trajectory_file: Raw trajectory (usually ``hpc/md.xtc``).
         output_file: Wrapped name (default ``mdWrap.xtc``).
-        ligand: Ligand index name (default ``ATP``). Use ``auto`` to detect.
+        ligand: Ligand index name (default ``auto`` — detect common ligands).
         dt: Output spacing in ps (default 100).
         working_dir: Output directory (default: trajectory directory / ``hpc/``).
         skip: Skip wrapping entirely.
