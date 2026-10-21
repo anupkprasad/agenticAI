@@ -89,9 +89,11 @@ class CampaignSpec:
     family_modular: bool = False
     analysis_recipe: AnalysisRecipe = field(default_factory=AnalysisRecipe)
     pre_combined_recipe: AnalysisRecipe = field(default_factory=AnalysisRecipe)
+    post_combined_recipe: AnalysisRecipe = field(default_factory=AnalysisRecipe)
     contract: ArtifactContract = field(default_factory=ArtifactContract)
     pin_tools: List[str] = field(default_factory=list)  # required calculations (every protein)
     pin_pre_tools: List[str] = field(default_factory=list)  # required shared setup (MSA/pocket)
+    pin_post_tools: List[str] = field(default_factory=list)  # required combined-stage tools
     pre_combined_compiled: bool = False
     allow_partial_combined: bool = False
     original_goal: str = ""
@@ -105,11 +107,14 @@ class CampaignSpec:
             "family_modular": self.family_modular,
             "analysis_recipe": self.analysis_recipe.to_dict(),
             "pre_combined_recipe": self.pre_combined_recipe.to_dict(),
+            "post_combined_recipe": self.post_combined_recipe.to_dict(),
             "contract": self.contract.to_dict(),
             "pin_tools": list(self.pin_tools),
             "required_calculations": list(self.pin_tools),
             "pin_pre_tools": list(self.pin_pre_tools),
             "required_shared_setup": list(self.pin_pre_tools),
+            "pin_post_tools": list(self.pin_post_tools),
+            "required_post": list(self.pin_post_tools),
             "pre_combined_compiled": self.pre_combined_compiled,
             "allow_partial_combined": self.allow_partial_combined,
             "original_goal": self.original_goal,
@@ -130,9 +135,13 @@ class CampaignSpec:
             pre_combined_recipe=AnalysisRecipe.from_dict(
                 data.get("pre_combined_recipe") or data.get("shared_setup_protocol")
             ),
+            post_combined_recipe=AnalysisRecipe.from_dict(
+                data.get("post_combined_recipe")
+            ),
             contract=ArtifactContract.from_dict(data.get("contract")),
             pin_tools=list(data.get("pin_tools") or data.get("required_calculations") or []),
             pin_pre_tools=list(data.get("pin_pre_tools") or data.get("required_shared_setup") or []),
+            pin_post_tools=list(data.get("pin_post_tools") or data.get("required_post") or []),
             pre_combined_compiled=bool(data.get("pre_combined_compiled")),
             allow_partial_combined=bool(data.get("allow_partial_combined")),
             original_goal=str(data.get("original_goal") or ""),
@@ -148,6 +157,11 @@ class CampaignSpec:
     def required_shared_setup(self) -> List[str]:
         """Structure-only calculations every simulation will consume (MSA, pocket, maps)."""
         return list(self.pin_pre_tools)
+
+    @property
+    def required_post(self) -> List[str]:
+        """Combined-stage calculations (shared-ref dynamics, paired overlays)."""
+        return list(self.pin_post_tools)
 
     @property
     def shared_analysis_protocol(self) -> AnalysisRecipe:

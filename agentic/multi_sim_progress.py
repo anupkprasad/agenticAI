@@ -354,19 +354,24 @@ def per_sim_post_hpc_artifacts_ready(working_dir: str) -> bool:
 def per_sim_family_modular_done_on_disk(working_dir: str) -> bool:
     """True when modular consensus_* dynamics outputs exist for a sim.
 
-    Collector expects ``consensus_dihedrals/``, ``consensus_rmsf/``,
-    ``consensus_DCCM/``, and ``consensus_PCA/`` under ``analysis/`` (or
-    ``analysis/avg/`` / ``analysis/repXX/`` for multi-rep fan-out).
+    Collector expects ``consensus_dihedrals/``, ``consensus_rmsf/``, and
+    ``consensus_DCCM/`` under ``analysis/`` (or ``analysis/avg/`` /
+    ``analysis/repXX/``). ``consensus_PCA/`` is optional (legacy independent
+    FEL); shared-ref dyn is a combined-stage artifact.
     """
     analysis_dir = Path(working_dir) / "analysis"
     if not analysis_dir.is_dir():
         return False
-    needed = (
-        "consensus_dihedrals",
-        "consensus_rmsf",
-        "consensus_DCCM",
-        "consensus_PCA",
-    )
+    try:
+        from agentic.campaign.family_recipe import FAMILY_MODULAR_DIRS
+
+        needed = tuple(FAMILY_MODULAR_DIRS)
+    except Exception:
+        needed = (
+            "consensus_dihedrals",
+            "consensus_rmsf",
+            "consensus_DCCM",
+        )
     # Accept either on-disk name (canonical consensus_PCA or legacy _ref).
     aliases = {
         "consensus_PCA": ("consensus_PCA", "consensus_PCA_ref"),
@@ -409,8 +414,43 @@ def per_sim_paper_ward4_modular_done_on_disk(working_dir: str) -> bool:
     return per_sim_family_modular_done_on_disk(working_dir)
 
 
+def _load_campaign_spec_near(working_dir: str):
+    """Load CampaignSpec from state is not available; read planner JSON on disk."""
+    wd = Path(working_dir)
+    candidates = [
+        wd / "planner" / "campaign_spec.json",
+        wd.parent / "planner" / "campaign_spec.json",
+        wd.parent.parent / "planner" / "campaign_spec.json",
+    ]
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            import json as _json
+
+            from agentic.campaign.spec import CampaignSpec
+
+            data = _json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data:
+                return CampaignSpec.from_dict(data)
+        except Exception:
+            continue
+    return None
+
+
 def _working_dir_requests_family_modular(working_dir: str) -> bool:
-    """Best-effort: nearby ``goal.txt`` asks for family modular dynamics."""
+    """Family mode from on-disk campaign_spec, then nearby goal.txt.
+
+    Resume must not flip family gates off when the compiled spec says
+    family_modular even if goal.txt is missing or truncated.
+    """
+    spec = _load_campaign_spec_near(working_dir)
+    if spec is not None:
+        if spec.family_modular or spec.mode == "family_modular":
+            return True
+        # Explicit non-family spec wins over goal.txt regex.
+        if spec.mode in {"generic", "single_md", "multi_protocol", "apo_holo"}:
+            return False
     try:
         from agentic.planner.planning_guidelines import (
             detect_family_modular_dynamics_requested,
@@ -1278,14 +1318,32 @@ def _stats_csv_labels(path: Path) -> set:
     return labels
 
 
+def family_post_features_ok(analysis_dir: str | Path) -> bool:
+    """True when a family campaign wrote a classification feature table."""
+    adir = Path(analysis_dir)
+    for name in (
+        "classification_features.csv",
+        "classification_features_selected.csv",
+    ):
+        path = adir / name
+        if path.is_file() and path.stat().st_size > 0:
+            return True
+    return False
+
+
 def post_combined_artifacts_ok(
     analysis_dir: str | Path,
     expected_labels: Optional[List[str]] = None,
+    *,
+    family_modular: bool = False,
 ) -> bool:
     """True when base/analysis has usable multi-sim overlay / stats artifacts.
 
     Used for post-combined success (artifact-based) so optional LLM step
     failures (comparison tables, multipanel) do not block the reporter.
+
+    Family campaigns also need a classification feature table when that is
+    how the pack is judged complete — overlays alone are not enough.
     """
     adir = Path(analysis_dir)
     if not adir.is_dir():
@@ -1323,7 +1381,9 @@ def post_combined_artifacts_ok(
         if need.issubset(have):
             return True
 
-    # Overlay-only fallback: at least one overlay + marker labels elsewhere
+    # Overlay-only fallback is enough for generic multi-sim, not family packs.
+    if family_modular:
+        return family_post_features_ok(adir)
     return len(overlays) >= 1
 
 
@@ -1382,6 +1442,14 @@ def _combined_analysis_done_on_disk(
             for sp in (state.get("sim_prompts") or [])
             if sp.get("label")
         ]
+    family = False
+    try:
+        from agentic.campaign.spec import spec_from_state
+
+        spec = spec_from_state(state)
+        family = bool(spec and (spec.family_modular or spec.mode == "family_modular"))
+    except Exception:
+        family = False
 
     # Authoritative: completion marker must list every expected (healthy) label.
     # If the marker says success=false but overlays/stats on disk cover the
@@ -1402,23 +1470,27 @@ def _combined_analysis_done_on_disk(
             if labels_ok and bool(data.get("success", True)):
                 return True
             if labels_ok and post_combined_artifacts_ok(
-                analysis_dir, expected_labels=expected_labels
+                analysis_dir, expected_labels=expected_labels, family_modular=family
             ):
                 return True
         elif len(labels) >= 2 and (
             bool(data.get("success", True))
-            or post_combined_artifacts_ok(analysis_dir, expected_labels=labels)
+            or post_combined_artifacts_ok(
+                analysis_dir, expected_labels=labels, family_modular=family
+            )
         ):
             return True
 
     # Known multi-sim set: allow artifact-based done without a success marker
     if expected_labels and len(expected_labels) >= 2:
         return post_combined_artifacts_ok(
-            analysis_dir, expected_labels=expected_labels
+            analysis_dir, expected_labels=expected_labels, family_modular=family
         )
 
     # Legacy / unknown label set: keep artifact heuristics.
-    return post_combined_artifacts_ok(analysis_dir, expected_labels=None)
+    return post_combined_artifacts_ok(
+        analysis_dir, expected_labels=None, family_modular=family
+    )
 
 
 def _combined_reporter_done_on_disk(

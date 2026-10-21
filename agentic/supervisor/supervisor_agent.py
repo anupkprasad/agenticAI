@@ -587,8 +587,18 @@ class MDSupervisor:
                     for sp in (state.get("sim_prompts") or [])
                     if sp.get("label")
                 ]
+                _fam = False
+                try:
+                    from agentic.campaign.spec import spec_from_state as _sfs
+
+                    _sp = _sfs(state)
+                    _fam = bool(_sp and _sp.family_modular)
+                except Exception:
+                    _fam = False
                 if post_combined_artifacts_ok(
-                    Path(base) / "analysis", expected_labels=labels or None
+                    Path(base) / "analysis",
+                    expected_labels=labels or None,
+                    family_modular=_fam,
                 ):
                     marker = Path(base) / "analysis" / "combined_analysis_complete.json"
                     try:

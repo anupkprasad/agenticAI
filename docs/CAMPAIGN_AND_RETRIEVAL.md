@@ -53,7 +53,8 @@ science excerpt) is used instead.
 A system is science-complete only when:
 
 1. The modular directories from the shared analysis protocol exist
-   (`consensus_dihedrals`, `consensus_rmsf`, `consensus_DCCM`, `consensus_PCA`)
+   (`consensus_dihedrals`, `consensus_rmsf`, `consensus_DCCM`;
+   `consensus_PCA` is optional / legacy — shared-ref dyn is a post pin)
 2. Every **required calculation** has left its artifact contract (including
    pocket metrics: `reference_pocket_metrics.json` /
    `ligand_pocket_distance.csv`, typically under `analysis/repXX/` or

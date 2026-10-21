@@ -23,6 +23,23 @@ repository [README](../README.md) and [docs/](../docs/).
 
 ---
 
+## Study profiles
+
+SimAgent compiles one `CampaignSpec` for every run (including a single system).
+
+| Profile | When | What is pinned |
+| ------- | ---- | -------------- |
+| `single_md` | One system, not a family study | Soft metric recipe when the goal names RMSD/RMSF/Rg/…; otherwise the analysis LLM chooses |
+| `multi_protocol` | Several systems, same non-family protocol | Same soft recipe on every system; combined overlays when requested |
+| `family_modular` | Comparative / family goal, or `family_modular: force` in `campaign.yaml` | Shared MSA/pocket setup, consensus feature pack, Ward features at post-combined |
+| `apo_holo` | Labels or goal contain both apo and holo | Soft metrics plus paired overlay pins |
+
+Family feature packs live in `agentic/campaign/campaign.yaml` (`feature_pack`):
+`paper_sharedpcdyn` (default 10 columns, shared-reference dynamics at post),
+`pocket_chi_rmsf_dccm`, and `rmsf_dccm_only`. Per-sim done does **not** require
+`consensus_PCA/`; that directory is optional. Set `reference_label` for the
+shared-dynamics reference system.
+
 ## 1. What this example does
 
 | Item               | Detail                                                                                                            |

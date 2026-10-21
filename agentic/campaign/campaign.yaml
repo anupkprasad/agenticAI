@@ -36,7 +36,22 @@ agent_retrieval:
       - reporter
       - final_report
 
+# Family mode: force | auto | off
+# auto = detector score; force always family_modular; off never.
+family_modular: auto
+
+# Feature pack for family campaigns (ignored when family_modular is off).
+# paper_sharedpcdyn | pocket_chi_rmsf_dccm | rmsf_dccm_only
+feature_pack: paper_sharedpcdyn
+
+# Shared-reference dynamics label (directory name under the campaign base).
+# Empty = first system that has consensus dihedrals, then p17612* if present.
+reference_label: ""
+
 # Family Ward columns — paper fig3 sharedpcdyn (10 features)
+# Overridden by feature_pack gold columns unless you set feature_pack and
+# also want a custom column list (custom list wins when non-empty and
+# feature_pack is paper_sharedpcdyn).
 gold_columns:
   - reference_pocket_ligand_distance_mean_A
   - reference_pocket_ligand_distance_std_A

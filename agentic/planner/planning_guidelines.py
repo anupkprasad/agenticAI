@@ -885,54 +885,103 @@ _FAMILY_MODULAR_TOOL_PATTERNS: tuple[str, ...] = (
 )
 
 
+def score_family_modular_dynamics(*goal_texts: str) -> Dict[str, Any]:
+    """Explainable family-modular detector.
+
+    Returns ``family`` (bool), ``score`` (0–6 scientific signals), ``signals``,
+    and ``reason``. Explicit modular tool names force ``family=True``.
+    Auto threshold is ≥2 signals, or a comparative/family phrase plus ≥1 signal.
+    """
+    text = _normalize_goal_text(*goal_texts)
+    empty = {
+        "family": False,
+        "score": 0,
+        "signals": [],
+        "tool_hit": False,
+        "comparative": False,
+        "reason": "empty goal",
+    }
+    if not text:
+        return empty
+    tool_hit = any(re.search(p, text) for p in _FAMILY_MODULAR_TOOL_PATTERNS)
+    flags = {
+        "pocket": bool(
+            re.search(
+                r"pocket.{0,40}(?:distance|\bcom\b)|how far .*(atp|ligand)|"
+                r"(?:atp|ligand).*(?:center\s+of\s+mass|\bcom\b).*pocket|"
+                r"distance of the (?:atp|ligand)",
+                text,
+            )
+        ),
+        "angle": bool(
+            re.search(
+                r"axis\s+orientation|ligand.*angle|pocket.*angle|orientation of the atp",
+                text,
+            )
+        ),
+        "rmsf": bool(
+            re.search(
+                r"consensus\s+(?:c[αa]|rmsf)|flexibility\s+across\s+the\s+domain|"
+                r"flexibility of consensus",
+                text,
+            )
+        ),
+        "chi": bool(re.search(r"χ\s*₁|chi\s*1|side[-\s]?chain", text)),
+        "dccm": bool(
+            re.search(
+                r"\bdccm\b|correlated\s+motion|"
+                r"n[-\s]?lobe.{0,40}c[-\s]?lobe.{0,40}(?:dccm|correlat)",
+                text,
+            )
+        ),
+        "entropy": bool(
+            re.search(
+                r"landscape\s+entropy|grid\s+entropy|free[-\s]?energy\s+landscape|"
+                r"dihedral\s+pca|conformational[-\s]?landscape\s+entropy",
+                text,
+            )
+        ),
+    }
+    signals = [k for k, v in flags.items() if v]
+    score = len(signals)
+    comparative = bool(
+        re.search(
+            r"\bfamily\b|comparative|across (?:the )?family|kinase family|"
+            r"ward|classification feature|shared protocol",
+            text,
+        )
+    )
+    if tool_hit:
+        family = True
+        reason = "explicit modular tool"
+    elif score >= 2:
+        family = True
+        reason = f"{score} modular signals"
+    elif comparative and score >= 1:
+        family = True
+        reason = "comparative phrasing plus one modular signal"
+    else:
+        family = False
+        reason = f"score {score} below threshold"
+    return {
+        "family": family,
+        "score": score,
+        "signals": signals,
+        "tool_hit": tool_hit,
+        "comparative": comparative,
+        "reason": reason,
+    }
+
+
 def detect_family_modular_dynamics_requested(*goal_texts: str) -> bool:
     """True when the goal asks for comparative modular dynamics features.
 
     Matches scientific descriptions (pocket–ligand COM/orientation, consensus
     flexibility, pocket χ₁, N↔C correlation, dihedral landscape entropy) or
-    explicit modular tool names. Does **not** encode a fixed cluster count.
+    explicit modular tool names. Threshold is ≥2 signals (or a comparative
+    phrase plus one signal). Does **not** encode a fixed cluster count.
     """
-    text = _normalize_goal_text(*goal_texts)
-    if not text:
-        return False
-    if any(re.search(p, text) for p in _FAMILY_MODULAR_TOOL_PATTERNS):
-        return True
-    has_pocket = bool(
-        re.search(
-            r"pocket.{0,40}(?:distance|\bcom\b)|how far .*(atp|ligand)|"
-            r"(?:atp|ligand).*(?:center\s+of\s+mass|\bcom\b).*pocket|"
-            r"distance of the (?:atp|ligand)",
-            text,
-        )
-    )
-    has_angle = bool(
-        re.search(r"axis\s+orientation|ligand.*angle|pocket.*angle|orientation of the atp", text)
-    )
-    has_rmsf = bool(
-        re.search(
-            r"consensus\s+(?:c[αa]|rmsf)|flexibility\s+across\s+the\s+domain|"
-            r"flexibility of consensus",
-            text,
-        )
-    )
-    has_chi = bool(re.search(r"χ\s*₁|chi\s*1|side[-\s]?chain", text))
-    has_dccm = bool(
-        re.search(
-            r"\bdccm\b|correlated\s+motion|"
-            r"n[-\s]?lobe.{0,40}c[-\s]?lobe.{0,40}(?:dccm|correlat)",
-            text,
-        )
-    )
-    has_entropy = bool(
-        re.search(
-            r"landscape\s+entropy|grid\s+entropy|free[-\s]?energy\s+landscape|"
-            r"dihedral\s+pca|conformational[-\s]?landscape\s+entropy",
-            text,
-        )
-    )
-    return sum(
-        [has_pocket, has_angle, has_rmsf, has_chi, has_dccm, has_entropy]
-    ) >= 4
+    return bool(score_family_modular_dynamics(*goal_texts).get("family"))
 
 
 def detect_paper_ward4_requested(*goal_texts: str) -> bool:

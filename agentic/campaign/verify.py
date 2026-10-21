@@ -109,8 +109,18 @@ def verify_combined_analysis(state: Dict[str, Any]) -> Dict[str, Any]:
         analysis_dir = base / "analysis"
         expected = _expected_combined_labels(state)
         done = _combined_analysis_done_on_disk(base, state=state)
+        family = False
+        try:
+            from agentic.campaign.spec import spec_from_state
+
+            spec = spec_from_state(state)
+            family = bool(spec and spec.family_modular)
+        except Exception:
+            family = False
         artifacts = post_combined_artifacts_ok(
-            analysis_dir, expected_labels=expected or None
+            analysis_dir,
+            expected_labels=expected or None,
+            family_modular=family,
         )
         gate = {
             "ok": bool(done or artifacts),

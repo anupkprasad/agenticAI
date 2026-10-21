@@ -81,6 +81,9 @@ class CampaignSettings:
     )
     gold_columns: List[str] = field(default_factory=lambda: list(_DEFAULT_GOLD))
     hitl: Optional[str] = None
+    feature_pack: str = "paper_sharedpcdyn"
+    family_modular: str = "auto"  # force | auto | off
+    reference_label: str = ""
     source_path: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -110,6 +113,9 @@ class CampaignSettings:
             agent_retrieval=_merge_agent_retrieval(data.get("agent_retrieval")),
             gold_columns=[str(c) for c in gold if c],
             hitl=hitl,
+            feature_pack=str(data.get("feature_pack") or "paper_sharedpcdyn"),
+            family_modular=str(data.get("family_modular") or "auto").strip().lower(),
+            reference_label=str(data.get("reference_label") or ""),
             source_path=str(data.get("source_path") or ""),
         )
 

@@ -1713,8 +1713,16 @@ Output as JSON:
             try:
                 from agentic.multi_sim_progress import post_combined_artifacts_ok
 
+                _fam = False
+                try:
+                    from agentic.campaign.spec import spec_from_state as _sfs
+
+                    _sp = _sfs(state)
+                    _fam = bool(_sp and _sp.family_modular)
+                except Exception:
+                    _fam = False
                 artifact_ok = post_combined_artifacts_ok(
-                    analysis_dir, expected_labels=labels
+                    analysis_dir, expected_labels=labels, family_modular=_fam
                 )
             except Exception:
                 artifact_ok = False
@@ -2079,8 +2087,16 @@ Output as JSON:
                 try:
                     from agentic.multi_sim_progress import post_combined_artifacts_ok
 
+                    _fam = False
+                    try:
+                        from agentic.campaign.spec import spec_from_state as _sfs
+
+                        _sp = _sfs(state)
+                        _fam = bool(_sp and _sp.family_modular)
+                    except Exception:
+                        _fam = False
                     success = success or post_combined_artifacts_ok(
-                        analysis_dir, expected_labels=labels
+                        analysis_dir, expected_labels=labels, family_modular=_fam
                     )
                 except Exception:
                     pass
@@ -3361,12 +3377,29 @@ Return ONLY JSON:
                         Path(d).name for d in sim_dirs
                     ]
                     ref_lab = ""
-                    for cand in fs_labels:
-                        if str(cand).lower().startswith("p17612"):
-                            ref_lab = str(cand)
-                            break
+                    configured = ""
+                    try:
+                        configured = str(
+                            (_fam_shared.settings or {}).get("reference_label") or ""
+                        ).strip()
+                    except Exception:
+                        configured = ""
+                    if configured:
+                        for cand in fs_labels:
+                            if str(cand).lower() == configured.lower() or str(
+                                cand
+                            ).lower().startswith(configured.lower()):
+                                ref_lab = str(cand)
+                                break
+                        if not ref_lab:
+                            ref_lab = configured
                     if not ref_lab:
-                        ref_lab = str(fs_labels[0]) if fs_labels else "p17612_ATP"
+                        for cand in fs_labels:
+                            if str(cand).lower().startswith("p17612"):
+                                ref_lab = str(cand)
+                                break
+                    if not ref_lab:
+                        ref_lab = str(fs_labels[0]) if fs_labels else ""
                     align = ""
                     for cand in (
                         Path(analysis_dir) / "global_consensus_msa.json",
@@ -5368,7 +5401,16 @@ Return ONLY JSON:
         )
 
         texts = collect_goal_texts_for_intent(state, agent_input)
-        if not detect_family_modular_dynamics_requested(*texts):
+        family_on = bool(detect_family_modular_dynamics_requested(*texts))
+        try:
+            from agentic.campaign.spec import spec_from_state as _spec_fam
+
+            _spec = _spec_fam(state)
+            if _spec and (_spec.family_modular or _spec.mode == "family_modular"):
+                family_on = True
+        except Exception:
+            pass
+        if not family_on:
             return plan_dict
 
         # Per-sim plans only. Combined / pre-combined stages already expose a
@@ -5454,7 +5496,6 @@ Return ONLY JSON:
             "calculate_dccm",
             "calculate_ligand_pocket_distance",
             "calculate_pocket_rmsf",
-            "run_independent_dynamics_fel",
         }
         steps: List[Dict[str, Any]] = []
         seen: Set[str] = set()
@@ -5492,10 +5533,10 @@ Return ONLY JSON:
             seen.add(tool)
 
         order = {
-            "calculate_consensus_torsions": 0,
-            "calculate_consensus_rmsf_features": 1,
-            "calculate_consensus_dccm_features": 2,
-            "run_independent_dynamics_fel": 3,
+            "calculate_consensus_pocket_metrics": 0,
+            "calculate_consensus_torsions": 1,
+            "calculate_consensus_rmsf_features": 2,
+            "calculate_consensus_dccm_features": 3,
         }
         # Keep non-modular steps in original relative order; append modular block
         # with torsions → RMSF → DCCM → dihedral PCA dependency order.
@@ -7724,7 +7765,13 @@ Return JSON with: reasoning, overview, steps (name, description, tool_name, tool
                         if lab:
                             labels.append(str(lab))
                     artifact_ok = post_combined_artifacts_ok(
-                        adir, expected_labels=labels or None
+                        adir,
+                        expected_labels=labels or None,
+                        family_modular=bool(
+                            self._is_combined_analysis_phase(state)
+                            and spec
+                            and spec.family_modular
+                        ),
                     )
                 except Exception:
                     artifact_ok = False
